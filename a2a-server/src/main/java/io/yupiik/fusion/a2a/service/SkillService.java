@@ -26,18 +26,28 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 import static java.util.stream.Collectors.toCollection;
 
 /**
  * Turns the JSON-RPC methods flagged with {@link A2ASkill} into {@link AgentSkill} descriptors.
  * <p>
- * Everything is computed once at startup: the flag comes from the bean metadata the Fusion annotation processor
- * generates ({@code a2a.type}) and the description from the generated OpenRPC document, so a skill is described from
- * its signature only. The {@link A2ASkills} beans then complete what a signature cannot carry - the tags the
- * specification requires, the examples and the media types - and may add skills of their own.
+ * Everything is computed once at startup, and nothing is read reflectively. A descriptor is built in three passes, each
+ * one able to override the previous:
+ * <ol>
+ *     <li>the generated OpenRPC document gives the identifier, the name and the description - so they cannot drift from
+ *     the method signature,</li>
+ *     <li>the bean metadata the annotation processor stored gives what a signature cannot carry: the flag
+ *     ({@code a2a.type}) plus the {@code @A2ATags}, {@code @A2AExamples}, {@code @A2AInputModes},
+ *     {@code @A2AOutputModes} and {@code @A2ASkillName} values,</li>
+ *     <li>the {@link A2ASkills} beans have the last word, for a descriptor which has to be computed, and may add skills
+ *     of their own - a skill an {@link io.yupiik.fusion.a2a.api.A2AExecutor} answers has no method to annotate.</li>
+ * </ol>
  */
 @ApplicationScoped
 public class SkillService {
@@ -50,6 +60,20 @@ public class SkillService {
      * Value of {@link #TYPE_METADATA} for a skill.
      */
     public static final String SKILL = "skill";
+
+    /**
+     * Bean metadata keys the descriptive annotations set.
+     */
+    public static final String NAME_METADATA = "a2a.name";
+    public static final String TAGS_METADATA = "a2a.tags";
+    public static final String EXAMPLES_METADATA = "a2a.examples";
+    public static final String INPUT_MODES_METADATA = "a2a.inputModes";
+    public static final String OUTPUT_MODES_METADATA = "a2a.outputModes";
+
+    /**
+     * What separates the examples, see {@code @A2AExamples}: a comma would not do, an example is a sentence.
+     */
+    public static final char EXAMPLES_SEPARATOR = '|';
 
     private final List<AgentSkill> skills;
     private final Set<String> methodBackedIds;
@@ -77,6 +101,7 @@ public class SkillService {
                 .filter(it -> methodBackedIds.contains(it.name()))
                 .sorted(Comparator.comparing(OpenRpc.JsonRpcMethod::name))
                 .map(SkillService::toSkill)
+                .map(skill -> describedByMetadata(skill, registry.methods().get(skill.id()).metadata()))
                 .map(skill -> enrich(enrichers, skill))
                 .forEach(all::add);
         enrichers.stream()
@@ -121,6 +146,80 @@ public class SkillService {
 
     private static AgentSkill toSkill(final OpenRpc.JsonRpcMethod method) {
         return AgentSkill.of(method.name(), method.name(), method.description(), List.of());
+    }
+
+    /**
+     * Applies what the descriptive annotations stored in the bean metadata of the method.
+     *
+     * @param skill    the descriptor derived from the OpenRPC document.
+     * @param metadata the metadata of the JSON-RPC method backing it.
+     * @return the completed descriptor.
+     */
+    // visible for testing
+    static AgentSkill describedByMetadata(final AgentSkill skill, final Map<String, String> metadata) {
+        if (metadata == null || metadata.isEmpty()) {
+            return skill;
+        }
+        final var described = skill.describedBy(
+                values(metadata, TAGS_METADATA, ',', skill.tags()),
+                values(metadata, EXAMPLES_METADATA, EXAMPLES_SEPARATOR, skill.examples()),
+                values(metadata, INPUT_MODES_METADATA, ',', skill.inputModes()),
+                values(metadata, OUTPUT_MODES_METADATA, ',', skill.outputModes()));
+        final var name = value(metadata, NAME_METADATA);
+        return name == null ? described : described.named(name);
+    }
+
+    /**
+     * @param metadata the bean metadata.
+     * @param key      the key to read.
+     * @param separator what separates the values.
+     * @param fallback what to answer when the key is absent, i.e. when no annotation was set.
+     * @return the parsed values.
+     */
+    private static List<String> values(final Map<String, String> metadata, final String key, final char separator,
+                                       final List<String> fallback) {
+        final var raw = metadata.get(key);
+        if (raw == null) {
+            return fallback;
+        }
+        // the whole value is unwrapped first - an array rendering has to lose its braces before being split, else the
+        // quotes of its elements end up inside them
+        return Stream.of(unwrapList(raw).split(Pattern.quote(String.valueOf(separator))))
+                .map(SkillService::unquote)
+                .filter(it -> !it.isEmpty())
+                .toList();
+    }
+
+    private static String value(final Map<String, String> metadata, final String key) {
+        final var raw = metadata.get(key);
+        return raw == null ? null : unquote(raw);
+    }
+
+    /**
+     * Prepares a list value for splitting: an array rendering loses its braces and keeps its per element quotes, a plain
+     * string loses its own.
+     */
+    private static String unwrapList(final String value) {
+        final var current = value.strip();
+        if (current.length() > 1 && current.startsWith("{") && current.endsWith("}")) {
+            return current.substring(1, current.length() - 1);
+        }
+        return unquote(current);
+    }
+
+    /**
+     * Undoes what the annotation processor did to one value.
+     * <p>
+     * A metadata value coming from an annotation member is stored as {@code AnnotationValue#toString()}, which renders a
+     * string <em>with</em> its quotes, while a plain {@code @BeanMetadata} value arrives bare. Both spellings must read
+     * the same, so the decoration is stripped rather than assumed away.
+     */
+    private static String unquote(final String value) {
+        var current = value.strip();
+        if (current.length() > 1 && current.charAt(0) == '"' && current.charAt(current.length() - 1) == '"') {
+            current = current.substring(1, current.length() - 1);
+        }
+        return current.replace("\\\"", "\"").replace("\\\\", "\\").strip();
     }
 
     private static AgentSkill enrich(final List<A2ASkills> enrichers, final AgentSkill skill) {

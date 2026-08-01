@@ -15,11 +15,14 @@ mvn package -pl demo exec:exec
 [options="header",cols="1,3"]
 |===
 | Class | What it demonstrates
-| `DemoSkills` | three xref:../a2a/skills.adoc[skills], one per return type: an `Artifact`, a `@JsonModel` and a `Message`
+| `DemoSkills` | three xref:../a2a/skills.adoc[skills], one per return type - an `Artifact`, a `@JsonModel` and a `Message` - each described in place with `@A2ATags`, `@A2AExamples` and `@A2AOutputModes`
 | `DemoCountdownExecutor` | an xref:../a2a/executors.adoc[executor] reporting progress, streaming an artifact chunk by chunk, and cancelling cooperatively
-| `DemoSkillDescriptors` | `A2ASkills`: the tags, examples and media types a signature cannot carry, plus a skill declared for the executor
+| `DemoSkillDescriptors` | `A2ASkills#skills()`, for the one skill with no method to annotate: the executor backed `demo/countdown`
 | `DemoAgentCard` | `A2AAgentCard`: an optional protocol extension in the card
 |===
+
+The two ways of describing a skill therefore sit side by side: annotations on the three methods, and a contributed
+descriptor for the executor.
 
 == The skills
 

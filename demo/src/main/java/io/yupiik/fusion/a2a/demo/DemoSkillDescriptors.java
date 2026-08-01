@@ -22,10 +22,11 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.List;
 
 /**
- * Completes the skill descriptors: a method signature gives the identifier, the name and the description, this adds
- * the tags the specification requires plus the examples and the media types.
+ * Declares {@code demo/countdown}, which {@link DemoCountdownExecutor} answers.
  * <p>
- * It also declares {@code demo/countdown}, which is not backed by a method but by {@link DemoCountdownExecutor}.
+ * The three skills of {@link DemoSkills} need nothing here: they are methods, so their descriptors are declared right on
+ * them with {@code @A2ATags} and friends, at build time. This one has no method to annotate, which is exactly what
+ * {@link A2ASkills#skills()} is for - and {@link A2ASkills#describe} would be for a descriptor which has to be computed.
  */
 @ApplicationScoped
 public class DemoSkillDescriptors implements A2ASkills {
@@ -40,27 +41,5 @@ public class DemoSkillDescriptors implements A2ASkills {
                 null,
                 List.of("text/plain"),
                 null));
-    }
-
-    @Override
-    public AgentSkill describe(final AgentSkill derived) {
-        return switch (derived.id()) {
-            case "demo/greet" -> derived.describedBy(
-                    List.of("demo", "greeting"),
-                    List.of("Greet Fusion."),
-                    null,
-                    List.of("text/plain"));
-            case "demo/report" -> derived.describedBy(
-                    List.of("demo", "weather", "report"),
-                    List.of("What is the weather in Paris?"),
-                    null,
-                    List.of("application/json"));
-            case "demo/chat" -> derived.describedBy(
-                    List.of("demo", "chat"),
-                    List.of("Hello there!"),
-                    null,
-                    List.of("text/plain"));
-            default -> derived; // not ours, let the next implementation - or the default - handle it
-        };
     }
 }

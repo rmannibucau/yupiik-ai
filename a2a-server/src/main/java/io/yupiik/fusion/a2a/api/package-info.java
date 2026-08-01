@@ -18,11 +18,15 @@
  * <ul>
  *     <li>{@link io.yupiik.fusion.a2a.api.A2ASkill} flags a {@code @JsonRpc} method as a skill - a build time only
  *     marker - and the built-in router invokes it,</li>
+ *     <li>{@link io.yupiik.fusion.a2a.api.A2ATags}, {@link io.yupiik.fusion.a2a.api.A2AExamples},
+ *     {@link io.yupiik.fusion.a2a.api.A2AInputModes}, {@link io.yupiik.fusion.a2a.api.A2AOutputModes} and
+ *     {@link io.yupiik.fusion.a2a.api.A2ASkillName} declare, on the method, what its signature cannot carry - also
+ *     build time only markers,</li>
  *     <li>{@link io.yupiik.fusion.a2a.api.A2AExecutor} takes full control of a message and of the task lifecycle,
  *     with {@link io.yupiik.fusion.a2a.api.AgentRequest} as input and
  *     {@link io.yupiik.fusion.a2a.api.TaskUpdater} as output,</li>
- *     <li>{@link io.yupiik.fusion.a2a.api.A2ASkills} completes the skill descriptors a method signature cannot
- *     carry,</li>
+ *     <li>{@link io.yupiik.fusion.a2a.api.A2ASkills} contributes the descriptors the annotations cannot express: a
+ *     skill with no method to annotate, or one which has to be computed,</li>
  *     <li>{@link io.yupiik.fusion.a2a.api.A2AAgentCard} customizes the published agent card.</li>
  * </ul>
  * To push updates on a task from outside an executor - a scheduler, an incoming webhook - get its updater with

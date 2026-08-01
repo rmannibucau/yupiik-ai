@@ -56,11 +56,19 @@ public record AgentSkill(
      * @param examples    the example prompts to expose, it can be {@code null}.
      * @param inputModes  the accepted media types, it can be {@code null}.
      * @param outputModes the produced media types, it can be {@code null}.
-     * @return a copy of this skill with the given descriptive attributes, which is how
-     * {@link io.yupiik.fusion.a2a.api.A2ASkills} enriches a skill derived from a method signature.
+     * @return a copy of this skill with the given descriptive attributes, which is how the {@code @A2ATags} family of
+     * annotations and {@link io.yupiik.fusion.a2a.api.A2ASkills} complete a skill derived from a method signature.
      */
     public AgentSkill describedBy(final List<String> tags, final List<String> examples,
                                  final List<String> inputModes, final List<String> outputModes) {
+        return new AgentSkill(id, name, description, tags, examples, inputModes, outputModes, securityRequirements);
+    }
+
+    /**
+     * @param name the human readable name to display.
+     * @return a copy of this skill named {@code name}, its identifier is unchanged.
+     */
+    public AgentSkill named(final String name) {
         return new AgentSkill(id, name, description, tags, examples, inputModes, outputModes, securityRequirements);
     }
 }

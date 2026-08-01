@@ -20,28 +20,28 @@ import io.yupiik.fusion.a2a.model.AgentSkill;
 import java.util.List;
 
 /**
- * Completes what the {@link A2ASkill} methods say about themselves.
+ * Contributes skill descriptors the annotations cannot express.
  * <p>
- * A method signature carries the skill {@code id}, {@code name} and {@code description} but not its {@code tags} -
- * which the specification requires - nor its {@code examples} and media types, so any bean implementing this
- * interface is asked to enrich the derived descriptors and may declare skills of its own:
+ * Most of the time there is nothing to implement here: what a method signature does not carry - the tags, the examples,
+ * the media types - is declared on the method itself with {@link A2ATags}, {@link A2AExamples}, {@link A2AInputModes},
+ * {@link A2AOutputModes} and {@link A2ASkillName}, at build time. This interface covers the two cases they cannot:
+ * <ul>
+ *     <li>{@link #skills()} declares a skill with <b>no method to annotate</b>, i.e. one an {@link A2AExecutor}
+ *     answers,</li>
+ *     <li>{@link #describe(AgentSkill)} <b>computes</b> a descriptor - tags read from configuration, examples pulled from
+ *     a catalog - and runs after the annotations, so it has the last word.</li>
+ * </ul>
  * <pre>{@code
  * @ApplicationScoped
  * public class MyAgentSkills implements A2ASkills {
  *     @Override
- *     public AgentSkill describe(final AgentSkill derived) {
- *         if (!"report/build".equals(derived.id())) {
- *             return derived; // not for us
- *         }
- *         return derived.describedBy(
- *                 List.of("report", "city"),
- *                 List.of("Build a report about Paris."),
- *                 null, List.of("text/plain"));
+ *     public List<AgentSkill> skills() { // answered by an A2AExecutor, so there is no method to annotate
+ *         return List.of(AgentSkill.of("report/watch", "Watch", "Watches a city.", List.of("report")));
  *     }
  * }
  * }</pre>
- * All the implementations are used in bean priority order ({@code @Order}): {@link #skills()} results are
- * concatenated and {@link #describe(AgentSkill)} is chained, each one seeing what the previous returned.
+ * All the implementations are used in bean priority order ({@code @Order}): {@link #skills()} results are concatenated
+ * and {@link #describe(AgentSkill)} is chained, each one seeing what the previous returned.
  * <p>
  * The card is built once at startup, so both methods must be cheap and stable.
  */
@@ -55,8 +55,10 @@ public interface A2ASkills {
     }
 
     /**
-     * @param derived the descriptor built from a {@link A2ASkill} method signature, or the result of the previous
-     *                implementation in the chain.
+     * Refines a descriptor after the OpenRPC document and the annotations were applied.
+     *
+     * @param derived the descriptor so far: the method signature, completed by the {@link A2ATags} family, or an entry of
+     *                {@link #skills()}. It is the result of the previous implementation in the chain.
      * @return the descriptor to advertise, return {@code derived} as is when the skill is not yours.
      */
     default AgentSkill describe(final AgentSkill derived) {

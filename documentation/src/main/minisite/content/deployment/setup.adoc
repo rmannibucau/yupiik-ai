@@ -49,6 +49,9 @@ documentation recommends anyway.
 @ApplicationScoped
 public class WeatherSkills {
     @A2ASkill
+    @A2ATags("weather,forecast")
+    @A2AExamples("What is the weather in Paris for the next 3 days?")
+    @A2AOutputModes("application/json")
     @JsonRpc(value = "weather/forecast", documentation = "Gives the forecast of a city for the next days.")
     public Forecast forecast(
             @JsonRpcParam(required = true, documentation = "The city to forecast.") final String city,
@@ -58,21 +61,8 @@ public class WeatherSkills {
 }
 ----
 
-[source,java]
-----
-@ApplicationScoped
-public class WeatherSkillDescriptors implements A2ASkills {
-    @Override
-    public AgentSkill describe(final AgentSkill derived) {
-        return "weather/forecast".equals(derived.id()) ?
-                derived.describedBy(
-                        List.of("weather", "forecast"),
-                        List.of("What is the weather in Paris for the next 3 days?"),
-                        null, List.of("application/json")) :
-                derived;
-    }
-}
-----
+That is the whole agent: the identifier, name and description come from the method, the rest of the card from the
+annotations - see xref:../a2a/skills.adoc[Skills].
 
 [source,properties]
 ----
