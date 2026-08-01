@@ -1,0 +1,474 @@
+= Fusion A2A server
+
+image:https://github.com/yupiik/fusion-a2a-server/actions/workflows/maven.yml/badge.svg?branch=main[Github CI,float="right"]
+image:https://img.shields.io/github/license/yupiik/fusion-a2a-server.svg[License]
+
+**Agent2Agent** (A2A) server using Yupiik Fusion JSON-RPC API.
+
+An A2A skill is a plain Fusion `@JsonRpc` method flagged with `@A2ASkill`: the skill identifier and the description
+other agents read are derived from the method signature at build time, so there is nothing to declare twice and no
+reflection at runtime - it is GraalVM friendly out of the box. When a set of skills is not the right shape, implement
+`A2AExecutor` and drive the task yourself.
+
+The implementation targets the https://a2a-protocol.org/v1.0.1/specification/[A2A specification v1.0] and serves both
+of its JSON bindings - JSON-RPC and HTTP+JSON - on top of the same service layer.
+
+== 🔧 Getting Started
+
+Run the demo agent:
+
+[source,bash]
+----
+mvn package -pl demo exec:exec
+----
+
+Then fetch its card - this is how another agent discovers it:
+
+[source,bash]
+----
+curl http://localhost:8080/.well-known/agent-card.json
+----
+
+and send it a message:
+
+[source,bash]
+----
+curl -X POST http://localhost:8080/a2a \
+  -H 'content-type: application/json' \
+  -H 'a2a-version: 1.0' \
+  -d '{
+        "jsonrpc": "2.0", "id": 1, "method": "SendMessage",
+        "params": {"message": {
+          "messageId": "m-1", "role": "ROLE_USER",
+          "parts": [{"text": "hello"}],
+          "metadata": {"skillId": "demo/greet", "arguments": {"name": "fusion"}}
+        }}
+      }'
+----
+
+To turn your own Fusion application into an agent, add the dependency and expose a skill:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.fusion.a2a</groupId>
+  <artifactId>fusion-a2a-server-impl</artifactId>
+  <version>${fusion-a2a-server.version}</version>
+</dependency>
+----
+
+[source,java]
+----
+@ApplicationScoped
+public class MySkills {
+    @A2ASkill
+    @JsonRpc(value = "report/build", documentation = "Builds a report about a city.")
+    public Artifact build(@JsonRpcParam(required = true, documentation = "The city to report on.") final String city) {
+        return Artifact.text("report", "all good in " + city);
+    }
+}
+----
+
+NOTE: the module only needs the Fusion annotation processor - which your application already uses for
+`@JsonRpc`/`@JsonModel` - nothing else has to be registered, both bindings and the agent card come with the dependency.
+
+== 📖 Documentation
+
+The full documentation - end user guide and design notes - is at https://yupiik.github.io/fusion-a2a-server/[
+yupiik.github.io/fusion-a2a-server]. Build it locally with `mvn clean package -Prender-site`, or write it with a live
+preview with `mvn -pl documentation yupiik-tools:serve-minisite`.
+
+The repository provides three modules:
+
+* `a2a-server`: the A2A implementation on top of the Fusion JSON-RPC stack - the two JSON bindings, the agent card, the
+task store, the streams, the push notifications, the wire model and a reactive client,
+* `demo`: a sample agent exposing skills, a streaming executor and a customized agent card,
+* `documentation`: the minisite.
+
+=== Design
+
+The whole point of this implementation is that **the A2A JSON-RPC binding is JSON-RPC**, so the Fusion JSON-RPC stack
+does the heavy lifting and nothing is reinvented:
+
+[options="header",cols="1,3"]
+|===
+| Concern | How it is handled
+| A2A operations (`SendMessage`, `GetTask`, ...) | plain `@JsonRpc` methods in `A2AJSONRPCProtocol`, registered like any other method
+| Parameter binding and validation | the Fusion JSON-RPC generated codecs, no reflection
+| Skill discovery | the `META-INF/fusion/jsonrpc/openrpc.json` documents the processor generates plus the `a2a.type` bean metadata `@A2ASkill` sets
+| Skill invocation | `JsonRpcHandler#execute`, i.e. the exact same path as a direct JSON-RPC call
+| Operation logic | `A2AService`, binding agnostic, so both bindings behave the same by construction
+| Transport specifics (headers, streams) | `A2AEndpoint` (`POST /a2a`) and `A2ARestProtocol` (`/a2a/v1`)
+|===
+
+`A2AEndpoint` is registered with `@Order(900)`, i.e. before the Fusion JSON-RPC endpoint, so it takes precedence on the
+shared path - it then delegates to the very same `JsonRpcHandler`.
+
+=== Exposing a skill
+
+[source,java]
+----
+@ApplicationScoped
+public class MySkills {
+    @A2ASkill
+    @JsonRpc(value = "report/build", documentation = "Builds a report about a city.")
+    public Artifact build(@JsonRpcParam(required = true, documentation = "The city to report on.") final String city) {
+        return Artifact.text("report", "all good in " + city);
+    }
+}
+----
+
+The JSON-RPC method name becomes the skill `id` and `agent-card.json` reuses the OpenRPC metadata Fusion generates:
+`documentation` becomes the skill `description` - this is what another agent reads to decide to delegate to you.
+
+A skill is **not** called by name the way a MCP tool is: A2A clients send a `Message` and the agent decides what to do
+with it. The built-in router picks the skill from the `skillId` message metadata, or the only declared skill when there
+is exactly one. Its arguments are assembled from the message, most specific last:
+
+[options="header",cols="1,3"]
+|===
+| Argument | Where it comes from
+| `message` | the incoming `Message` itself
+| `text` | its text parts, joined with a new line
+| anything else | the first `data` part of the message, then its `arguments` metadata
+|===
+
+What the method returns decides what happens to the task:
+
+[options="header",cols="1,3"]
+|===
+| Return type | Outcome
+| `Artifact`, `List<Artifact>` | the task completes with those outputs
+| `Message` | the caller gets a direct answer and **no task is created at all** - what a clarification question should cost
+| `Task` | its status and artifacts are adopted, for full control
+| `void` | the task completes with no output
+| any `@JsonModel` | it is wrapped in a structured `application/json` artifact
+| `CompletionStage<T>` of any of the above | same, asynchronously
+|===
+
+A skill can also take a `io.yupiik.fusion.http.server.api.Request` parameter to reach the HTTP layer, and any exception
+it throws fails the task with its message so the caller can read it and react. Only invalid calls - unknown skill,
+missing or invalid argument - are reported as protocol errors.
+
+=== Describing a skill
+
+A method signature carries the identifier, the name and the description but not the `tags` the specification requires,
+nor the examples and the media types. Implement `A2ASkills` to complete them - and to declare skills backed by an
+executor rather than by a method:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyAgentSkills implements A2ASkills {
+    @Override
+    public AgentSkill describe(final AgentSkill derived) {
+        if (!"report/build".equals(derived.id())) {
+            return derived; // not for us
+        }
+        return derived.describedBy(List.of("report", "city"), List.of("Build a report about Paris."), null, List.of("text/plain"));
+    }
+}
+----
+
+=== Taking control: `A2AExecutor`
+
+When the agent is not a set of skills - because it reports progress, streams its output or asks a question mid-way -
+implement `A2AExecutor`:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyAgent implements A2AExecutor {
+    @Override
+    public CompletionStage<Void> execute(final AgentRequest request, final TaskUpdater updater) {
+        if (request.text().isBlank()) {
+            updater.inputRequired(Message.agent("What should I look at?"));
+            return completedFuture(null);
+        }
+        updater.working(Message.agent("looking at '" + request.text() + "'"));
+        updater.complete(Artifact.text("answer", compute(request.text())));
+        return completedFuture(null);
+    }
+}
+----
+
+All the implementations are used, in bean priority order (`@Order`), and the first one whose `accept(AgentRequest)`
+returns `true` handles the message - so an application executor always wins over the built-in skill router, which is
+registered last.
+
+Nothing in the server blocks, and `execute` is asynchronous for that reason. Reporting to the `TaskUpdater` never blocks
+either, so a fast executor works inline as above; when the work *does* block - an LLM call, a query - hand it off to a
+virtual thread with `A2AThreads`, the shared executor of the module:
+
+[source,java]
+----
+@Override
+public CompletionStage<Void> execute(final AgentRequest request, final TaskUpdater updater) {
+    return threads.async(() -> updater.complete(Artifact.text("answer", callTheModel(request.text()))));
+}
+----
+
+`TaskUpdater` is the only way a task changes, and every call publishes the matching event to the open streams **and** to
+the registered webhooks, so a caller sees the progress whatever mechanism it chose:
+
+[options="header",cols="1,2"]
+|===
+| Method | Effect
+| `working(Message)` | `TASK_STATE_WORKING`, with an optional progress message
+| `artifact(Artifact)` | publishes an output, without ending the task
+| `artifact(Artifact, append, lastChunk)` | publishes a chunk of a streamed output, reusing its `artifactId`
+| `complete(Artifact...)` | `TASK_STATE_COMPLETED`
+| `fail(String)` / `reject(String)` / `cancel()` | the other terminal states
+| `inputRequired(Message)` / `authRequired(Message)` | pauses the task until the caller sends another message referencing it
+| `respond(Message)` | answers without producing any output, and without leaving a task behind
+| `adopt(Task)` | applies a whole state at once
+|===
+
+To push updates from outside an executor - a scheduler, an incoming webhook - get the updater of a task from
+`A2ATasks#updater(String)`.
+
+TIP: `CancelTask` calls `A2AExecutor#cancel`, on the caller thread; the executor thread is never interrupted from under
+it. Signal your loop from there - see `DemoCountdownExecutor` - and return quickly.
+
+=== Customizing the agent card
+
+`fusion.a2a.*` covers the plain attributes; implement `A2AAgentCard` for everything structured - the security schemes,
+the extensions, the signatures:
+
+[source,java]
+----
+@ApplicationScoped
+public class MyCard implements A2AAgentCard {
+    @Override
+    public AgentCard customize(final AgentCard card) {
+        return new AgentCard(
+                card.name(), card.description(), card.supportedInterfaces(), card.provider(), card.version(),
+                card.documentationUrl(), card.capabilities(),
+                Map.of("bearer", SecurityScheme.bearer("JWT")), List.of(SecurityRequirement.of("bearer")),
+                card.defaultInputModes(), card.defaultOutputModes(), card.skills(), card.signatures(), card.iconUrl());
+    }
+}
+----
+
+Return `true` from `extended()` to contribute to the authenticated card instead - which is what
+`GetExtendedAgentCard` answers once `fusion.a2a.extendedAgentCard=true`.
+
+=== Signing the agent card
+
+Signing is optional in the specification, but a caller is expected to verify a signature before trusting a card and an
+unsigned one gives it nothing to check. Point the server at a key and it signs, following section 8.4 - default value
+removal, RFC 8785 canonicalization, `signatures` excluded from what is covered:
+
+[source,bash]
+----
+openssl ecparam -name prime256v1 -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out agent-key.pem
+
+java -Dfusion.a2a.signatureKey=agent-key.pem -Dfusion.a2a.publicUrl=https://agent.example.com \
+     ... io.yupiik.fusion.framework.api.main.Launcher
+----
+
+IMPORTANT: signing requires `fusion.a2a.publicUrl`. Without it the interface URLs come from each request, so the signed
+bytes would not be the bytes served - the server refuses to start rather than publish a card nobody can verify.
+
+On the other side, `A2AClient` verifies when you give it a verifier and a way to resolve a `kid` to a key:
+
+[source,java]
+----
+client.verifier(CardVerifier.of(jsons), Map.of("2026-08", publicKey)::get);
+----
+
+=== Getting task updates
+
+The three mechanisms of the specification are implemented and carry the exact same `StreamResponse` events, so a client
+can consume any of them with one code path:
+
+[options="header",cols="1,3"]
+|===
+| Mechanism | How
+| Polling | `GetTask`, and `ListTasks` to find them again
+| Streaming | `SendStreamingMessage` and `SubscribeToTask`, as Server-Sent Events. Several streams may watch the same task and all get the same events in the same order
+| Push notifications | `CreateTaskPushNotificationConfig`, or the `taskPushNotificationConfig` of the message itself so nothing is missed. The event is POSTed as `application/a2a+json` with the configured `Authorization` and the `X-A2A-Notification-Token` header
+|===
+
+A task stream starts with the `Task` itself, then carries `statusUpdate` and `artifactUpdate` deltas, and closes when
+the task can no longer progress on its own - a terminal state, or an interrupted one waiting for the caller. A direct
+message answer is a stream of exactly one `message` event.
+
+=== Transport
+
+[options="header",cols="1,3"]
+|===
+| Route | Behavior
+| `GET /.well-known/agent-card.json` | the agent card, with `Cache-Control` and an `ETag` derived from the agent version so `If-None-Match` answers `304`
+| `POST /a2a` | the JSON-RPC binding: PascalCase methods, batches, and a `text/event-stream` answer for the two streaming methods
+| `/a2a/v1/...` | the HTTP+JSON binding, see below
+|===
+
+The HTTP+JSON binding maps the operations on the paths of section 11.3:
+
+[options="header",cols="2,2"]
+|===
+| Route | Operation
+| `POST /a2a/v1/message:send` | `SendMessage`
+| `POST /a2a/v1/message:stream` | `SendStreamingMessage`
+| `GET /a2a/v1/tasks` | `ListTasks`
+| `GET /a2a/v1/tasks/{id}` | `GetTask`
+| `POST /a2a/v1/tasks/{id}:cancel` | `CancelTask`
+| `POST /a2a/v1/tasks/{id}:subscribe` | `SubscribeToTask`
+| `POST /a2a/v1/tasks/{id}/pushNotificationConfigs` | `CreateTaskPushNotificationConfig`
+| `GET /a2a/v1/tasks/{id}/pushNotificationConfigs` | `ListTaskPushNotificationConfigs`
+| `GET /a2a/v1/tasks/{id}/pushNotificationConfigs/{configId}` | `GetTaskPushNotificationConfig`
+| `DELETE /a2a/v1/tasks/{id}/pushNotificationConfigs/{configId}` | `DeleteTaskPushNotificationConfig`
+| `GET /a2a/v1/extendedAgentCard` | `GetExtendedAgentCard`
+|===
+
+Its errors are `google.rpc.Status` payloads - the HTTP status plus a `google.rpc.ErrorInfo` detail naming the A2A error -
+while the JSON-RPC binding uses the JSON-RPC error object with the codes of section 5.4. Both come from the same
+`A2AErrors` catalog.
+
+Service parameters travel as HTTP headers, or as a request parameter of the same name - `?A2A-Version=1.0` - which
+section 3.6.1 allows and a `GET` often prefers. The header wins when both are set.
+
+[options="header",cols="1,3"]
+|===
+| Header | Behavior
+| `A2A-Version` | the protocol version the caller speaks, an unsupported value answers `VersionNotSupportedError` listing the supported ones
+| `A2A-Extensions` | the comma separated extension URIs the client activates, readable from `AgentRequest#isExtensionActivated`
+|===
+
+IMPORTANT: sending the version is mandatory. Section 3.6.2 says an agent "MUST interpret empty value as 0.3 version", and
+this server does not serve `0.3` - a different wire format, `message/send` instead of `SendMessage` - so a request
+carrying no version is answered with `VersionNotSupportedError` naming `1.0`. A real `0.3` caller learns what is wrong
+instead of getting a puzzling `MethodNotFound`. `A2AClient` sends it on every request.
+
+=== Configuration
+
+All the keys can be set with a system property, an environment variable (`FUSION_A2A_...`) or any Fusion
+`ConfigurationSource`.
+
+[options="header",cols="2,1,3"]
+|===
+| Key | Default | Description
+| `fusion.a2a.name` | `fusion-a2a-server` | Agent name published in the card.
+| `fusion.a2a.description` | `An agent built with Yupiik Fusion.` | What the agent does, this is what other agents read.
+| `fusion.a2a.version` | `1.0.0` | Agent version, also used as the card `ETag`.
+| `fusion.a2a.documentationUrl` | - | URL of the agent documentation.
+| `fusion.a2a.iconUrl` | - | URL of the agent icon.
+| `fusion.a2a.providerOrganization` | - | Organization running the agent, no `provider` is published when unset.
+| `fusion.a2a.providerUrl` | - | Website of that organization.
+| `fusion.a2a.defaultInputModes` | `text/plain,application/json` | Media types the agent accepts.
+| `fusion.a2a.defaultOutputModes` | `text/plain,application/json` | Media types the agent produces, an `acceptedOutputModes` is validated against them.
+| `fusion.a2a.publicUrl` | - | Base URL advertised in the card interfaces. Derived from the request when unset, which is wrong behind a proxy.
+| `fusion.a2a.tenant` | - | Routing identifier clients must echo, for a server hosting several agents.
+| `fusion.a2a.streaming` | `true` | Are `SendStreamingMessage` and `SubscribeToTask` supported.
+| `fusion.a2a.pushNotifications` | `true` | Are webhooks supported.
+| `fusion.a2a.extendedAgentCard` | `false` | Is `GetExtendedAgentCard` supported.
+| `fusion.a2a.restBinding` | `true` | Is the HTTP+JSON binding exposed next to the JSON-RPC one.
+| `fusion.a2a.taskTimeout` | `300` | How long, in seconds, a blocking `SendMessage` waits for the task to settle.
+| `fusion.a2a.taskRetention` | `1800` | How long, in seconds, a task is kept so it can still be fetched, `0` to keep them forever.
+| `fusion.a2a.pushTimeout` | `30` | Timeout, in seconds, of a webhook call.
+| `fusion.a2a.agentCardMaxAge` | `300` | `Cache-Control: max-age` of the agent card.
+| `fusion.a2a.signatureKey` | - | PKCS#8 PEM private key to sign the agent card with, unset publishes an unsigned card. It requires `publicUrl`.
+| `fusion.a2a.signatureAlgorithm` | `ES256` | Algorithm of `signatureKey`, `ES256` or `RS256`.
+| `fusion.a2a.signatureKid` | the version | `kid` of the JWS protected header, so a caller knows which key to use.
+| `fusion.a2a.signatureJku` | - | JWKS url advertised in the JWS protected header.
+| `fusion.jsonrpc.binding` | `/a2a` | Where the plain Fusion JSON-RPC endpoint is bound. Set it to `/jsonrpc` to *also* expose the skills as a plain JSON-RPC API.
+|===
+
+=== Calling another agent
+
+`A2AClient` is shipped in the main artifact - it only needs a `java.net.http.HttpClient` and a Fusion `JsonMapper` - and
+is fully asynchronous: every call answers a `CompletionStage` and the streams are dispatched event by event as the bytes
+arrive.
+
+[source,java]
+----
+final var client = new A2AClient(URI.create("https://agent.example.com"), http, jsons);
+
+client.agentCard()
+        .thenApply(card -> A2AClient.of(card, http, jsons)) // selects the preferred interface and its tenant
+        .thenCompose(agent -> agent.sendMessage("what is the weather in Paris?"))
+        .thenAccept(response -> System.out.println(response.task().status().state()));
+
+client.sendStreamingMessage(
+        SendMessageRequest.of(Message.user("count down from 3")),
+        event -> System.out.println(event));
+----
+
+An agent answering an error fails the stage with an `A2AClientException` carrying the A2A code, so `TaskNotFoundError`
+and friends can be told apart. `rest(...)` and `restStreaming(...)` reach the HTTP+JSON binding, and `raw(...)` sends a
+payload as is - which is what a test asserting on an error envelope needs:
+
+[source,java]
+----
+@FusionSupport
+class MyAgentTest {
+    @Test
+    void greet(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) throws Exception {
+        final var response = new A2AClient(agent, http, jsons)
+                .sendMessage("hello")
+                .toCompletableFuture()
+                .get(30, SECONDS);
+        assertEquals(TaskState.TASK_STATE_COMPLETED, response.task().status().state());
+    }
+}
+----
+
+=== Implemented specification surface
+
+[options="header",cols="1,1,3"]
+|===
+| Feature | Status | Notes
+| Agent card, well-known URI, caching | ✅ | From configuration, `@A2ASkill` methods, `A2ASkills` and `A2AAgentCard`.
+| `SendMessage` | ✅ | Blocking by default, `returnImmediately` supported, answers a `Task` or a `Message`.
+| `SendStreamingMessage`, `SubscribeToTask` | ✅ | Server-Sent Events, several streams per task.
+| `GetTask`, `ListTasks` | ✅ | Filters, cursor pagination, `historyLength` and `includeArtifacts` semantics.
+| `CancelTask` | ✅ | Cooperative, `TaskNotCancelableError` on a terminal task.
+| `CreateTaskPushNotificationConfig` and friends | ✅ | Webhooks carrying `StreamResponse` payloads.
+| `GetExtendedAgentCard` | ✅ | Through `A2AAgentCard#extended`.
+| Multi-turn: `contextId`, `taskId`, `input-required` | ✅ | Including the mismatching context and terminal task rejections.
+| JSON-RPC binding | ✅ | Section 9, batches included.
+| HTTP+JSON binding | ✅ | Section 11, `google.rpc.Status` errors.
+| A2A error codes and details | ✅ | Section 5.4, with `google.rpc.ErrorInfo`/`BadRequest` details.
+| Agent card signatures | ✅ | JWS signing with an RFC 8785 canonicalizer, and verification in the client.
+| Extensions | ⚠️ | Declared, negotiated with `A2A-Extensions` and enforced when `required`; the extension semantics themselves are up to the application.
+| Protocol version `0.3` | ❌ | A superseded revision with a different wire format; nothing in the specification asks an agent to serve it, and a caller asking for it gets a clear `VersionNotSupportedError`.
+| gRPC binding | ❌ | Section 10 needs a gRPC stack, which is out of the scope of the Fusion HTTP server. Only the two JSON bindings are implemented.
+|===
+
+Known limitations:
+
+* tasks live in memory, so a clustered deployment needs a task aware load balancer - `A2ATasks` is the only place to
+change to plug an external store,
+* a push notification is attempted once, failures are logged and forgotten: add a retry strategy in `PushNotifier` if the
+deployment needs one,
+* `ListTasks` cursors are opaque offsets, which is enough for an in-memory store but would need revisiting on top of a
+database.
+
+== 🖥️ Contributing
+
+We warmly welcome contributions!
+
+- Fork the repository
+- Submit your enhancements via pull requests
+- Create https://github.com/yupiik/fusion-a2a-server/issues[issues]
+- Open https://github.com/yupiik/fusion-a2a-server/discussions[discussions]
+
+=== Build
+
+Pre-requisite: Apache Maven >= 4.0.0-rc1 and Java >= 25.
+
+[source,bash]
+----
+mvn clean install
+----
+
+TIP: it can be native-compiled with GraalVM if desired - `mvn arthur:native-image` in the `demo` module, and
+`mvn arthur:native-image arthur:docker` to also build the image.
+
+== 📜 License
+
+Yupiik Fusion is released under the Apache License, Version 2.0. See the LICENSE file for more details.
+
+== ©️ Copyright
+Copyright © 2026 Yupiik.

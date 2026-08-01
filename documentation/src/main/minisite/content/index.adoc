@@ -1,0 +1,98 @@
+= Fusion A2A Server
+:minisite-index: 100
+:minisite-index-title: Overview
+:minisite-index-description: What it is and why it exists.
+:minisite-index-icon: play
+:minisite-nav-next-label: A2A
+:minisite-nav-next-link: a2a/index.html
+
+[abstract]
+Fusion A2A Server turns a https://yupiik.github.io/fusion/[Yupiik Fusion] application into an
+https://a2a-protocol.org[Agent2Agent] agent - discoverable, callable and streamable by any other agent - by reusing the
+Fusion JSON-RPC stack: a skill is a plain `@JsonRpc` method.
+
+It implements the https://a2a-protocol.org/v{a2aSpecVersion}/specification/[A2A specification v{a2aVersion}] and serves
+both of its JSON bindings, JSON-RPC and HTTP+JSON, on top of one service layer.
+
+== In one snippet
+
+[source,java]
+----
+@ApplicationScoped
+public class MySkills {
+    @A2ASkill <1>
+    @JsonRpc(value = "report/build", documentation = "Builds a report about a city.") <2>
+    public Artifact build(@JsonRpcParam(required = true, documentation = "The city.") final String city) { <3>
+        return Artifact.text("report", "all good in " + city);
+    }
+}
+----
+<1> Flags the JSON-RPC method as an A2A skill - the flag is stored in the bean metadata at build time.
+<2> The method name is the skill identifier and the documentation is what other agents read to decide to delegate to you.
+<3> The return type decides the outcome of the task: here it completes with one text artifact.
+
+That is the whole integration: start the application and the agent publishes its card on
+`/.well-known/agent-card.json`, answers `SendMessage`, streams its progress and can be polled - see
+xref:a2a/skills.adoc[Skills].
+
+== Why it is designed this way
+
+The A2A JSON-RPC binding *is* JSON-RPC 2.0, and Fusion already generates a complete, reflectionless JSON-RPC stack at
+build time. So nothing is reinvented:
+
+[options="header",cols="1,3"]
+|===
+| Concern | Where it comes from
+| A2A operations (`SendMessage`, `GetTask`, ...) | plain `@JsonRpc` methods, registered like the ones of the application
+| Parameter binding, validation, batching | the Fusion JSON-RPC stack, no reflection at runtime
+| Skill discovery | the OpenRPC document the Fusion annotation processor generates plus the `a2a.type` bean metadata
+| Skill invocation | `JsonRpcHandler`, i.e. the very same code path as a direct JSON-RPC call
+| Operation logic | one binding agnostic service, so the two bindings cannot diverge
+| Transport (headers, streams, card) | this project, see xref:deployment/bindings.adoc[Bindings]
+|===
+
+Consequences you get for free: no reflection, GraalVM native friendly, a card which cannot drift from the code, and the
+ability to expose the exact same methods as a plain JSON-RPC API.
+
+Two properties are load bearing in the implementation itself:
+
+* **nothing blocks**: the protocol, the streams and the webhook calls are asynchronous end to end, and the one place
+where an application usually has to block - its own agent logic - is handed off to a virtual thread on purpose, see
+xref:internals/design.adoc[Design],
+* **one service, two bindings**: `A2AService` holds every rule the specification states and both bindings are thin
+adapters on it, which is how section 5.1 - functional equivalence - is satisfied by construction.
+
+== What is covered
+
+[options="header",cols="2,1,3"]
+|===
+| Feature | Status | Notes
+| Agent card and discovery | ✅ | xref:a2a/agent-card.adoc[From configuration, skills and `A2AAgentCard`], with HTTP caching.
+| Send a message | ✅ | xref:a2a/skills.adoc[Blocking or not], answering a task or a direct message.
+| Task lifecycle | ✅ | xref:a2a/tasks.adoc[Multi-turn, `input-required`, cancellation, listing].
+| Streaming | ✅ | xref:a2a/updates.adoc[`SendStreamingMessage` and `SubscribeToTask`] as Server-Sent Events.
+| Push notifications | ✅ | xref:a2a/updates.adoc[Webhooks] carrying the same events, in order.
+| JSON-RPC binding | ✅ | xref:deployment/bindings.adoc[Section 9], batches included.
+| HTTP+JSON binding | ✅ | xref:deployment/bindings.adoc[Section 11], `google.rpc.Status` errors.
+| Client | ✅ | xref:a2a/client.adoc[A reactive `A2AClient`] to call another agent, and to test yours.
+| Card signatures | ✅ | xref:a2a/agent-card.adoc[JWS signing] with an RFC 8785 canonicalizer, and verification in the client.
+| Extensions | ⚠️ | Declared, negotiated and enforced when `required`; the semantics are up to the application.
+| gRPC binding, protocol `0.3` | ❌ | Only the two JSON bindings and `{a2aVersion}` are served - neither is required by the specification.
+|===
+
+== Where to go next
+
+* xref:deployment/setup.adoc[Setup]: add it to your application and run it,
+* xref:a2a/skills.adoc[Skills] and xref:a2a/executors.adoc[Executors]: make your agent answer,
+* xref:a2a/client.adoc[Client]: call another agent from yours,
+* xref:internals/design.adoc[Design]: how the pieces fit, for contributors and for the curious.
+
+== Modules
+
+[options="header",cols="1,3"]
+|===
+| Module | Description
+| `fusion-a2a-server-impl` | The A2A implementation: bindings, agent card, tasks, streams, webhooks, wire model and the `A2AClient`.
+| `fusion-a2a-server-demo` | A runnable sample agent - see xref:internals/demo.adoc[Demo].
+| `fusion-a2a-server-documentation` | This site.
+|===
