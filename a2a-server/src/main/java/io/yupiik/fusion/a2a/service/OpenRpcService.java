@@ -15,18 +15,17 @@
  */
 package io.yupiik.fusion.a2a.service;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.Objects.requireNonNull;
+import static java.util.Optional.ofNullable;
+
 import io.yupiik.fusion.a2a.model.fusion.OpenRpc;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.HashMap;
 import java.util.Map;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.Objects.requireNonNull;
-import static java.util.Optional.ofNullable;
 
 /**
  * Reads the OpenRPC documents the Fusion annotation processor generates, which is where the description of a
@@ -63,8 +62,10 @@ public class OpenRpcService {
         try {
             final var documents = loader.getResources(OPENRPC_LOCATION);
             while (documents.hasMoreElements()) {
-                try (final var in = new InputStreamReader(documents.nextElement().openStream(), UTF_8)) {
-                    final var document = requireNonNull(jsons.read(OpenRpc.class, in), () -> "Empty " + OPENRPC_LOCATION);
+                try (final var in =
+                        new InputStreamReader(documents.nextElement().openStream(), UTF_8)) {
+                    final var document =
+                            requireNonNull(jsons.read(OpenRpc.class, in), () -> "Empty " + OPENRPC_LOCATION);
                     if (document.schemas() != null) {
                         schemas.putAll(document.schemas());
                     }

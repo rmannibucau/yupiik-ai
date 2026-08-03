@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -34,8 +33,14 @@ import java.util.List;
  */
 @JsonModel
 public record AgentCapabilities(
-        @Property(documentation = "Whether SendStreamingMessage and SubscribeToTask can be used.") Boolean streaming,
-        @Property(documentation = "Whether webhooks can be registered on a task.") Boolean pushNotifications,
-        @Property(documentation = "The protocol extensions the agent understands.") List<AgentExtension> extensions,
-        @Property(documentation = "Whether GetExtendedAgentCard returns a richer card once authenticated.") Boolean extendedAgentCard) {
-}
+        @Property(documentation = "Whether SendStreamingMessage and SubscribeToTask can be used.")
+        Boolean streaming,
+
+        @Property(documentation = "Whether webhooks can be registered on a task.")
+        Boolean pushNotifications,
+
+        @Property(documentation = "The protocol extensions the agent understands.")
+        List<AgentExtension> extensions,
+
+        @Property(documentation = "Whether GetExtendedAgentCard returns a richer card once authenticated.")
+        Boolean extendedAgentCard) {}

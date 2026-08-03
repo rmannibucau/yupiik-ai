@@ -27,9 +27,14 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record APIKeySecurityScheme(
-        @Property(documentation = "An optional description.") String description,
-        @Property(documentation = "Where the key is read from: query, header or cookie.") String location,
-        @Property(documentation = "The name of the header, query parameter or cookie.") String name) {
+        @Property(documentation = "An optional description.")
+        String description,
+
+        @Property(documentation = "Where the key is read from: query, header or cookie.")
+        String location,
+
+        @Property(documentation = "The name of the header, query parameter or cookie.")
+        String name) {
     public static APIKeySecurityScheme header(final String name) {
         return new APIKeySecurityScheme(null, "header", name);
     }

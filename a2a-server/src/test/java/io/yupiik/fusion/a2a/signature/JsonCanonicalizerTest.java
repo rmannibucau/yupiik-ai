@@ -15,7 +15,9 @@
  */
 package io.yupiik.fusion.a2a.signature;
 
-import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -23,10 +25,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
 
 /**
  * RFC 8785 and the field presence rules of section 8.4.1 of the specification.
@@ -44,19 +43,20 @@ class JsonCanonicalizerTest {
         final var card = new LinkedHashMap<String, Object>();
         card.put("name", "Example Agent");
         card.put("description", "");
-        card.put("capabilities", new LinkedHashMap<>(Map.of(
-                "streaming", false,
-                "pushNotifications", false,
-                "extensions", List.of())));
+        card.put(
+                "capabilities",
+                new LinkedHashMap<>(Map.of(
+                        "streaming", false,
+                        "pushNotifications", false,
+                        "extensions", List.of())));
         card.put("skills", List.of());
 
         // description is REQUIRED so the empty string stays, streaming and pushNotifications are optional and were
-        // explicitly set so the false stays, extensions is a plain repeated field so the empty array goes, and skills is
+        // explicitly set so the false stays, extensions is a plain repeated field so the empty array goes, and skills
+        // is
         // REQUIRED so the empty array stays
-        assertEquals(
-                """
-                        {"capabilities":{"pushNotifications":false,"streaming":false},"description":"","name":"Example Agent","skills":[]}""",
-                canonicalizer.canonicalize(payloads.prepare(card)));
+        assertEquals("""
+                        {"capabilities":{"pushNotifications":false,"streaming":false},"description":"","name":"Example Agent","skills":[]}""", canonicalizer.canonicalize(payloads.prepare(card)));
     }
 
     @Test
@@ -72,18 +72,19 @@ class JsonCanonicalizerTest {
     @Test
     void extensionDefaultsAreStrippedButCapabilityOnesAreNot() {
         final var card = new LinkedHashMap<String, Object>();
-        card.put("capabilities", new LinkedHashMap<>(Map.of(
-                "streaming", false,
-                "extensions", List.of(new LinkedHashMap<>(Map.of(
-                        "uri", "https://example.com/x",
-                        "required", false))))));
+        card.put(
+                "capabilities",
+                new LinkedHashMap<>(Map.of(
+                        "streaming",
+                        false,
+                        "extensions",
+                        List.of(new LinkedHashMap<>(Map.of("uri", "https://example.com/x", "required", false))))));
 
-        // AgentExtension.required is a plain proto bool, so false is its default and must go; streaming is optional so a
+        // AgentExtension.required is a plain proto bool, so false is its default and must go; streaming is optional so
+        // a
         // deliberate false is content
-        assertEquals(
-                """
-                        {"capabilities":{"extensions":[{"uri":"https://example.com/x"}],"streaming":false}}""",
-                canonicalizer.canonicalize(payloads.prepare(card)));
+        assertEquals("""
+                        {"capabilities":{"extensions":[{"uri":"https://example.com/x"}],"streaming":false}}""", canonicalizer.canonicalize(payloads.prepare(card)));
     }
 
     @Test
@@ -91,7 +92,7 @@ class JsonCanonicalizerTest {
         final var value = new LinkedHashMap<String, Object>();
         value.put("z", 1);
         value.put("é", 2); // e acute, above z
-        value.put("A", 3);      // uppercase sorts before lowercase
+        value.put("A", 3); // uppercase sorts before lowercase
         value.put("a", 4);
 
         assertEquals("{\"A\":3,\"a\":4,\"z\":1,\"é\":2}", canonicalizer.canonicalize(value));
@@ -103,9 +104,7 @@ class JsonCanonicalizerTest {
         value.put("k", "a\"b\\c\nd\tefég");
 
         // the short forms where they exist, lowercase hexadecimal otherwise, and the accent stays literal
-        assertEquals(
-                "{\"k\":\"a\\\"b\\\\c\\nd\\te\\u0001fég\"}",
-                canonicalizer.canonicalize(value));
+        assertEquals("{\"k\":\"a\\\"b\\\\c\\nd\\te\\u0001fég\"}", canonicalizer.canonicalize(value));
     }
 
     @Test
@@ -127,11 +126,56 @@ class JsonCanonicalizerTest {
         // emitting 0.1 without the ECMAScript Number::toString algorithm risks bytes nobody else reproduces, so this
         // fails loudly instead of producing a signature which cannot be verified elsewhere
         final var error = assertThrows(
-                IllegalStateException.class,
-                () -> canonicalizer.canonicalize(Map.of("params", Map.of("ratio", 0.1d))));
+                IllegalStateException.class, () -> canonicalizer.canonicalize(Map.of("params", Map.of("ratio", 0.1d))));
 
         assertTrue(error.getMessage().contains("$.params.ratio"), error::getMessage);
         assertTrue(error.getMessage().contains("RFC 8785"), error::getMessage);
+    }
+
+    @Test
+    void everyControlCharacterHasItsForm() {
+        final var value = new LinkedHashMap<String, Object>();
+        value.put("k", "a\bb\fc\rde");
+
+        // section 3.2.2.2: the short forms where they exist, lowercase hexadecimal otherwise
+        assertEquals("{\"k\":\"a\\bb\\fc\\rd\\u001fe\"}", canonicalizer.canonicalize(value));
+    }
+
+    @Test
+    void everyIntegralWidth() {
+        final var value = new LinkedHashMap<String, Object>();
+        value.put("a", (short) 7);
+        value.put("b", (byte) 8);
+        value.put("c", 9f);
+
+        assertEquals("{\"a\":7,\"b\":8,\"c\":9}", canonicalizer.canonicalize(value));
+    }
+
+    @Test
+    void anArrayIsAnArray() {
+        // a structure coming from somewhere else than a mapper can hold a plain Object[]
+        assertEquals("{\"a\":[1,\"b\",true]}", canonicalizer.canonicalize(Map.of("a", new Object[] {1, "b", true})));
+    }
+
+    @Test
+    void aValueTheSchemeCannotRepresentIsRefused() {
+        // an unknown type would be serialized differently by every implementation, so it cannot be guessed at
+        final var error = assertThrows(
+                IllegalStateException.class,
+                () -> canonicalizer.canonicalize(Map.of("params", Map.of("when", java.time.Instant.EPOCH))));
+
+        assertTrue(error.getMessage().contains("$.params.when"), error::getMessage);
+        assertTrue(error.getMessage().contains("Instant"), error::getMessage);
+    }
+
+    @Test
+    void anEmptyStructureIsStillCanonical() {
+        assertEquals("{}", canonicalizer.canonicalize(Map.of()));
+        assertEquals("[]", canonicalizer.canonicalize(List.of()));
+        assertEquals("null", canonicalizer.canonicalize(null));
+        assertEquals("\"\"", canonicalizer.canonicalize(""));
+        assertEquals("true", canonicalizer.canonicalize(true));
+        assertEquals("0", canonicalizer.canonicalize(0));
     }
 
     @Test
@@ -139,8 +183,6 @@ class JsonCanonicalizerTest {
         // asList and not List.of: a null is a legitimate JSON value here
         final var items = Arrays.asList(true, false, null, List.of(1, Map.of("b", "c")));
 
-        assertEquals(
-                "{\"a\":[true,false,null,[1,{\"b\":\"c\"}]]}",
-                canonicalizer.canonicalize(Map.of("a", items)));
+        assertEquals("{\"a\":[true,false,null,[1,{\"b\":\"c\"}]]}", canonicalizer.canonicalize(Map.of("a", items)));
     }
 }

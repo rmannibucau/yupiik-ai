@@ -20,7 +20,6 @@ import io.yupiik.fusion.a2a.model.AgentCapabilities;
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.model.AgentExtension;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.util.List;
 
 /**
@@ -43,7 +42,11 @@ public class DemoAgentCard implements A2AAgentCard {
     public AgentCard customize(final AgentCard card) {
         final var capabilities = card.capabilities();
         return new AgentCard(
-                card.name(), card.description(), card.supportedInterfaces(), card.provider(), card.version(),
+                card.name(),
+                card.description(),
+                card.supportedInterfaces(),
+                card.provider(),
+                card.version(),
                 card.documentationUrl(),
                 new AgentCapabilities(
                         capabilities.streaming(),
@@ -51,7 +54,12 @@ public class DemoAgentCard implements A2AAgentCard {
                         List.of(AgentExtension.of(
                                 TRACE_EXTENSION, "Echoes the activated extensions in the task metadata.", false)),
                         capabilities.extendedAgentCard()),
-                card.securitySchemes(), card.securityRequirements(),
-                card.defaultInputModes(), card.defaultOutputModes(), card.skills(), card.signatures(), card.iconUrl());
+                card.securitySchemes(),
+                card.securityRequirements(),
+                card.defaultInputModes(),
+                card.defaultOutputModes(),
+                card.skills(),
+                card.signatures(),
+                card.iconUrl());
     }
 }

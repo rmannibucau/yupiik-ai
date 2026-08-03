@@ -31,11 +31,20 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record OAuthFlows(
-        @Property(documentation = "The Authorization Code flow, the one to use for a user facing client.") AuthorizationCodeOAuthFlow authorizationCode,
-        @Property(documentation = "The Client Credentials flow, the one to use for an agent to agent call.") ClientCredentialsOAuthFlow clientCredentials,
-        @Property(documentation = "Deprecated, use Authorization Code with PKCE instead.") ImplicitOAuthFlow implicit,
-        @Property(documentation = "Deprecated, use Authorization Code with PKCE or Device Code instead.") PasswordOAuthFlow password,
-        @Property(documentation = "The Device Code flow (RFC 8628), for input constrained devices.") DeviceCodeOAuthFlow deviceCode) {
+        @Property(documentation = "The Authorization Code flow, the one to use for a user facing client.")
+        AuthorizationCodeOAuthFlow authorizationCode,
+
+        @Property(documentation = "The Client Credentials flow, the one to use for an agent to agent call.")
+        ClientCredentialsOAuthFlow clientCredentials,
+
+        @Property(documentation = "Deprecated, use Authorization Code with PKCE instead.")
+        ImplicitOAuthFlow implicit,
+
+        @Property(documentation = "Deprecated, use Authorization Code with PKCE or Device Code instead.")
+        PasswordOAuthFlow password,
+
+        @Property(documentation = "The Device Code flow (RFC 8628), for input constrained devices.")
+        DeviceCodeOAuthFlow deviceCode) {
     public static OAuthFlows authorizationCode(final AuthorizationCodeOAuthFlow flow) {
         return new OAuthFlows(flow, null, null, null, null);
     }

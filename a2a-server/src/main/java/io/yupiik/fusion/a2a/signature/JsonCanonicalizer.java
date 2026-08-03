@@ -16,7 +16,6 @@
 package io.yupiik.fusion.a2a.signature;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
@@ -59,9 +58,10 @@ public class JsonCanonicalizer {
             case Map<?, ?> map -> object(map, out, path);
             case Iterable<?> list -> array(list, out, path);
             case Object[] array -> array(List.of(array), out, path);
-            default -> throw new IllegalStateException(
-                    "Can't canonicalize " + value.getClass().getName() + " at " + path +
-                            ", the structure must only hold maps, lists, strings, numbers and booleans");
+            default ->
+                throw new IllegalStateException(
+                        "Can't canonicalize " + value.getClass().getName() + " at " + path
+                                + ", the structure must only hold maps, lists, strings, numbers and booleans");
         }
     }
 
@@ -147,10 +147,9 @@ public class JsonCanonicalizer {
         try {
             return value.toBigIntegerExact().toString();
         } catch (final ArithmeticException ae) {
-            throw new IllegalStateException(
-                    "Can't canonicalize the non integral number " + number + " at " + path +
-                            ": RFC 8785 requires the ECMAScript Number::toString form, which this implementation does " +
-                            "not compute. Keep fractional numbers out of the signed content, or send them as strings.");
+            throw new IllegalStateException("Can't canonicalize the non integral number " + number + " at " + path
+                    + ": RFC 8785 requires the ECMAScript Number::toString form, which this implementation does "
+                    + "not compute. Keep fractional numbers out of the signed content, or send them as strings.");
         }
     }
 }

@@ -15,13 +15,13 @@
  */
 package io.yupiik.fusion.a2a.test;
 
+import static org.junit.jupiter.api.Assertions.fail;
+
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * The client is asynchronous, the assertions are not: this unwraps a stage the way a caller would, rethrowing the

@@ -32,7 +32,12 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public record JsonRpcStreamMessage(
         @Property(documentation = "Always 2.0.") String jsonrpc,
-        @Property(documentation = "The identifier of the SendStreamingMessage/SubscribeToTask request, a string or a number.") Object id,
+
+        @Property(
+                documentation =
+                        "The identifier of the SendStreamingMessage/SubscribeToTask request, a string or a number.")
+        Object id,
+
         @Property(documentation = "The event.") StreamResponse result) {
     public static JsonRpcStreamMessage of(final Object id, final StreamResponse result) {
         return new JsonRpcStreamMessage("2.0", id, result);

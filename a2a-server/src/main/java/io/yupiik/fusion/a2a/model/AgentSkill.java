@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -39,14 +38,28 @@ import java.util.List;
  */
 @JsonModel
 public record AgentSkill(
-        @Property(documentation = "The skill identifier, it is the JSON-RPC method name for a @A2ASkill method.") String id,
+        @Property(documentation = "The skill identifier, it is the JSON-RPC method name for a @A2ASkill method.")
+        String id,
+
         @Property(documentation = "A human readable name.") String name,
-        @Property(documentation = "A detailed description, it comes from the @JsonRpc documentation.") String description,
-        @Property(documentation = "Keywords describing the skill, the specification requires at least one.") List<String> tags,
-        @Property(documentation = "Example prompts the skill handles.") List<String> examples,
-        @Property(documentation = "The media types this skill accepts, it overrides AgentCard#defaultInputModes().") List<String> inputModes,
-        @Property(documentation = "The media types this skill produces, it overrides AgentCard#defaultOutputModes().") List<String> outputModes,
-        @Property(documentation = "The schemes needed for this specific skill.") List<SecurityRequirement> securityRequirements) {
+
+        @Property(documentation = "A detailed description, it comes from the @JsonRpc documentation.")
+        String description,
+
+        @Property(documentation = "Keywords describing the skill, the specification requires at least one.")
+        List<String> tags,
+
+        @Property(documentation = "Example prompts the skill handles.")
+        List<String> examples,
+
+        @Property(documentation = "The media types this skill accepts, it overrides AgentCard#defaultInputModes().")
+        List<String> inputModes,
+
+        @Property(documentation = "The media types this skill produces, it overrides AgentCard#defaultOutputModes().")
+        List<String> outputModes,
+
+        @Property(documentation = "The schemes needed for this specific skill.")
+        List<SecurityRequirement> securityRequirements) {
     public static AgentSkill of(final String id, final String name, final String description, final List<String> tags) {
         return new AgentSkill(id, name, description, tags, null, null, null, null);
     }
@@ -59,8 +72,11 @@ public record AgentSkill(
      * @return a copy of this skill with the given descriptive attributes, which is how the {@code @A2ATags} family of
      * annotations and {@link io.yupiik.fusion.a2a.api.A2ASkills} complete a skill derived from a method signature.
      */
-    public AgentSkill describedBy(final List<String> tags, final List<String> examples,
-                                 final List<String> inputModes, final List<String> outputModes) {
+    public AgentSkill describedBy(
+            final List<String> tags,
+            final List<String> examples,
+            final List<String> inputModes,
+            final List<String> outputModes) {
         return new AgentSkill(id, name, description, tags, examples, inputModes, outputModes, securityRequirements);
     }
 

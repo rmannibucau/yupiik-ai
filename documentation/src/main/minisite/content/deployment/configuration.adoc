@@ -76,6 +76,10 @@ They answer two different questions:
 A caller which polls or subscribes is unaffected by `taskTimeout` - only the blocking call is. Raise `taskRetention` when
 callers come back late; `0` keeps tasks forever, which leaks memory unless something else drops them.
 
+Both - and `pushTimeout` - are durations written the way `java.time.Duration` spells them: `PT0.5S`, `PT30S`, `PT5M`,
+`PT1H`. A bare number is read as seconds, so the `taskRetention=3600` above means an hour, and a value which is neither
+fails the startup rather than being silently ignored.
+
 === The signature keys
 
 `fusion.a2a.signatureKey` turns on xref:../a2a/agent-card.adoc[card signing], which is optional in the specification and

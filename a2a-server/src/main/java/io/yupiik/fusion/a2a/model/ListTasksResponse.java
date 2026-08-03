@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -31,8 +30,16 @@ import java.util.List;
  */
 @JsonModel
 public record ListTasksResponse(
-        @Property(documentation = "The matching tasks, sorted by status timestamp descending.") List<Task> tasks,
-        @Property(documentation = "The cursor of the next page, an <b>empty string</b> - and not null - on the last page as the specification requires.") String nextPageToken,
-        @Property(documentation = "The page size which was actually applied.") int pageSize,
-        @Property(documentation = "How many tasks match the filter, before pagination.") int totalSize) {
-}
+        @Property(documentation = "The matching tasks, sorted by status timestamp descending.")
+        List<Task> tasks,
+
+        @Property(
+                documentation =
+                        "The cursor of the next page, an <b>empty string</b> - and not null - on the last page as the specification requires.")
+        String nextPageToken,
+
+        @Property(documentation = "The page size which was actually applied.")
+        int pageSize,
+
+        @Property(documentation = "How many tasks match the filter, before pagination.")
+        int totalSize) {}

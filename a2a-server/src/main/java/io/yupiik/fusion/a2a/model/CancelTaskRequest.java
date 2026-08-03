@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -32,7 +31,10 @@ import java.util.Map;
  */
 @JsonModel
 public record CancelTaskRequest(
-        @Property(documentation = "The opaque routing identifier of the AgentInterface the client selected.") String tenant,
-        @Property(documentation = "The task to cancel, it is also carried by the path.") String id,
-        @Property(documentation = "Free form metadata.") Map<String, Object> metadata) {
-}
+        @Property(documentation = "The opaque routing identifier of the AgentInterface the client selected.")
+        String tenant,
+
+        @Property(documentation = "The task to cancel, it is also carried by the path.")
+        String id,
+
+        @Property(documentation = "Free form metadata.") Map<String, Object> metadata) {}

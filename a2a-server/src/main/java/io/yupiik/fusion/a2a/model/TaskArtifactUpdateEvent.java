@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -35,10 +34,20 @@ import java.util.Map;
  */
 @JsonModel
 public record TaskArtifactUpdateEvent(
-        @Property(documentation = "The task which produced the artifact.") String taskId,
-        @Property(documentation = "The conversation the task belongs to.") String contextId,
-        @Property(documentation = "The artifact, or the chunk to append to the one with the same identifier.") Artifact artifact,
-        @Property(documentation = "When true the parts must be appended to the previously sent artifact.") boolean append,
-        @Property(documentation = "When true this is the final chunk of the artifact.") boolean lastChunk,
-        @Property(documentation = "Free form metadata about the update itself.") Map<String, Object> metadata) {
-}
+        @Property(documentation = "The task which produced the artifact.")
+        String taskId,
+
+        @Property(documentation = "The conversation the task belongs to.")
+        String contextId,
+
+        @Property(documentation = "The artifact, or the chunk to append to the one with the same identifier.")
+        Artifact artifact,
+
+        @Property(documentation = "When true the parts must be appended to the previously sent artifact.")
+        boolean append,
+
+        @Property(documentation = "When true this is the final chunk of the artifact.")
+        boolean lastChunk,
+
+        @Property(documentation = "Free form metadata about the update itself.")
+        Map<String, Object> metadata) {}

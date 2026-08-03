@@ -15,9 +15,13 @@
  */
 package io.yupiik.fusion.a2a.service;
 
+import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.WARNING;
+
 import io.yupiik.fusion.a2a.api.A2AExecutor;
 import io.yupiik.fusion.a2a.api.AgentRequest;
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
+import io.yupiik.fusion.a2a.configuration.A2ADurations;
 import io.yupiik.fusion.a2a.model.A2ATimestamps;
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.model.ListTaskPushNotificationConfigsResponse;
@@ -35,7 +39,6 @@ import io.yupiik.fusion.a2a.protocol.SseBus;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
-
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -49,9 +52,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.logging.Logger;
-
-import static java.util.logging.Level.FINE;
-import static java.util.logging.Level.WARNING;
 
 /**
  * The A2A operations, independent of any binding.
@@ -72,6 +72,12 @@ public class A2AService {
      */
     public static final int MAX_PAGE_SIZE = 100;
 
+    /**
+     * What {@code fusion.a2a.taskTimeout} means when it is unset - or set to something which is not a positive
+     * duration.
+     */
+    private static final Duration DEFAULT_TASK_TIMEOUT = Duration.ofSeconds(300);
+
     private final Logger logger = Logger.getLogger(A2AService.class.getName());
 
     private final A2ATasks tasks;
@@ -85,14 +91,20 @@ public class A2AService {
         this(null, null, null, null);
     }
 
-    public A2AService(final A2ATasks tasks, final AgentCardService cards, final A2AConfiguration configuration,
-                      final List<A2AExecutor> executors) {
+    public A2AService(
+            final A2ATasks tasks,
+            final AgentCardService cards,
+            final A2AConfiguration configuration,
+            final List<A2AExecutor> executors) {
         this.tasks = tasks;
         this.cards = cards;
         this.executors = executors == null ? List.of() : executors;
         this.streamingEnabled = configuration == null || configuration.streaming();
         this.pushEnabled = configuration == null || configuration.pushNotifications();
-        this.taskTimeout = Duration.ofSeconds(configuration == null ? 300 : Math.max(1, configuration.taskTimeout()));
+        // a timeout of zero would answer before the executor even ran, and orTimeout refuses one outright
+        this.taskTimeout = configuration == null
+                ? DEFAULT_TASK_TIMEOUT
+                : A2ADurations.positive(configuration.taskTimeout(), DEFAULT_TASK_TIMEOUT);
     }
 
     /**
@@ -107,26 +119,29 @@ public class A2AService {
     public CompletionStage<SendMessageResponse> sendMessage(final SendMessageRequest request, final Request http) {
         final var exchange = start(request, http);
         final var turn = exchange.turn();
-        final var immediate = request.configuration() != null && request.configuration().returnImmediately();
+        final var immediate =
+                request.configuration() != null && request.configuration().returnImmediately();
         final var promise = immediate ? turn.firstAction() : turn.settled();
         final var historyLength = historyLength(request.configuration());
 
         run(exchange, true);
 
-        return promise
-                .copy() // so the timeout below never pollutes the state of the task itself
+        return promise.copy() // so the timeout below never pollutes the state of the task itself
                 .orTimeout(taskTimeout.toMillis(), TimeUnit.MILLISECONDS)
                 .handle((response, error) -> {
                     if (response != null) {
                         return truncate(response, historyLength);
                     }
-                    final var cause = unwrap(error);
+                    final var cause = A2AProtocol.unwrap(error);
                     if (cause instanceof JsonRpcException jre) {
                         throw jre;
                     }
                     // the executor is still working: answer the current state, the client can poll or subscribe
-                    logger.log(WARNING, cause, () -> "Task '" + exchange.task().id() + "' did not settle within " +
-                            taskTimeout + ", answering its current state");
+                    logger.log(
+                            WARNING,
+                            cause,
+                            () -> "Task '" + exchange.task().id() + "' did not settle within " + taskTimeout
+                                    + ", answering its current state");
                     return SendMessageResponse.of(exchange.task().snapshot(historyLength, true));
                 });
     }
@@ -139,8 +154,8 @@ public class A2AService {
      * @param framing how to frame the events, it depends on the binding.
      * @return the stream to answer with, it is already registered on the task so nothing is lost.
      */
-    public A2AStream sendStreamingMessage(final SendMessageRequest request, final Request http,
-                                          final Function<SseBus, A2AStream> framing) {
+    public A2AStream sendStreamingMessage(
+            final SendMessageRequest request, final Request http, final Function<SseBus, A2AStream> framing) {
         requireStreaming();
         final var exchange = start(request, http);
         final var stream = tasks.newStream(exchange.task(), framing);
@@ -220,9 +235,15 @@ public class A2AService {
      * @param statusTimestampAfter only the tasks updated at or after that ISO-8601 instant.
      * @param includeArtifacts     whether to include the outputs, they are omitted by default.
      */
-    public ListTasksResponse listTasks(final String tenant, final String contextId, final TaskState status,
-                                       final Integer pageSize, final String pageToken, final Integer historyLength,
-                                       final String statusTimestampAfter, final Boolean includeArtifacts) {
+    public ListTasksResponse listTasks(
+            final String tenant,
+            final String contextId,
+            final TaskState status,
+            final Integer pageSize,
+            final String pageToken,
+            final Integer historyLength,
+            final String statusTimestampAfter,
+            final Boolean includeArtifacts) {
         validateTenant(tenant);
         final Instant after;
         try {
@@ -233,7 +254,9 @@ public class A2AService {
 
         final var matching = tasks.tasks().stream()
                 .filter(it -> contextId == null || contextId.isBlank() || contextId.equals(it.contextId()))
-                .filter(it -> status == null || status == TaskState.TASK_STATE_UNSPECIFIED || status == it.status().state())
+                .filter(it -> status == null
+                        || status == TaskState.TASK_STATE_UNSPECIFIED
+                        || status == it.status().state())
                 .filter(it -> after == null || !it.statusInstant().isBefore(after))
                 // the specification requires the most recently updated first
                 .sorted(Comparator.comparing(A2ATask::statusInstant).reversed().thenComparing(A2ATask::id))
@@ -274,8 +297,7 @@ public class A2AService {
         final var target = taskId != null && !taskId.isBlank() ? taskId : config.taskId();
         final var task = tasks.require(target);
         final var stored = config.boundTo(
-                config.id() == null || config.id().isBlank() ? UUID.randomUUID().toString() : config.id(),
-                task.id());
+                config.id() == null || config.id().isBlank() ? UUID.randomUUID().toString() : config.id(), task.id());
         task.pushConfigsById().put(stored.id(), stored);
         return stored;
     }
@@ -298,8 +320,8 @@ public class A2AService {
     /**
      * {@code ListTaskPushNotificationConfigs}.
      */
-    public ListTaskPushNotificationConfigsResponse listPushConfigs(final String tenant, final String taskId,
-                                                                   final Integer pageSize, final String pageToken) {
+    public ListTaskPushNotificationConfigsResponse listPushConfigs(
+            final String tenant, final String taskId, final Integer pageSize, final String pageToken) {
         requirePushNotifications();
         validateTenant(tenant);
         final var all = List.copyOf(tasks.require(taskId).pushConfigs());
@@ -307,8 +329,7 @@ public class A2AService {
         final var from = Math.min(decodeCursor(pageToken), all.size());
         final var to = Math.min(from + size, all.size());
         return new ListTaskPushNotificationConfigsResponse(
-                all.subList(from, to),
-                to < all.size() ? encodeCursor(to) : "");
+                all.subList(from, to), to < all.size() ? encodeCursor(to) : "");
     }
 
     /**
@@ -348,22 +369,27 @@ public class A2AService {
         final A2ATask task;
         if (message.taskId() != null && !message.taskId().isBlank()) {
             task = tasks.require(message.taskId());
-            if (message.contextId() != null && !message.contextId().isBlank() &&
-                    !Objects.equals(message.contextId(), task.contextId())) {
+            if (message.contextId() != null
+                    && !message.contextId().isBlank()
+                    && !Objects.equals(message.contextId(), task.contextId())) {
                 throw A2AErrors.invalidParams(
-                        "message.contextId",
-                        "It does not match the context of task '" + task.id() + "'");
+                        "message.contextId", "It does not match the context of task '" + task.id() + "'");
             }
             if (task.status().state().isTerminal()) {
                 throw A2AErrors.unsupportedOperation(
                         "Task '" + task.id() + "' already ended and cannot accept further messages",
-                        Map.of("taskId", task.id(), "state", String.valueOf(task.status().state())));
+                        Map.of(
+                                "taskId",
+                                task.id(),
+                                "state",
+                                String.valueOf(task.status().state())));
             }
             continuation = true;
         } else {
-            final var contextId = message.contextId() == null || message.contextId().isBlank() ?
-                    UUID.randomUUID().toString() :
-                    message.contextId();
+            final var contextId =
+                    message.contextId() == null || message.contextId().isBlank()
+                            ? UUID.randomUUID().toString()
+                            : message.contextId();
             task = tasks.create(contextId, request.metadata());
             continuation = false;
         }
@@ -372,8 +398,15 @@ public class A2AService {
         task.addMessage(bound);
 
         final var agentRequest = new AgentRequest(
-                bound, request.configuration(), request.metadata(), request.tenant(),
-                task.contextId(), task.id(), continuation, activatedExtensions, http);
+                bound,
+                request.configuration(),
+                request.metadata(),
+                request.tenant(),
+                task.contextId(),
+                task.id(),
+                continuation,
+                activatedExtensions,
+                http);
 
         final var executor = executors.stream()
                 .filter(it -> accepts(it, agentRequest))
@@ -414,8 +447,10 @@ public class A2AService {
         }
         if (execution == null) {
             onExecutorError(
-                    exchange, updater,
-                    new IllegalStateException("Executor " + exchange.executor().getClass().getName() + " answered null"),
+                    exchange,
+                    updater,
+                    new IllegalStateException(
+                            "Executor " + exchange.executor().getClass().getName() + " answered null"),
                     protocolErrors);
             return;
         }
@@ -424,7 +459,8 @@ public class A2AService {
                 onExecutorError(exchange, updater, error, protocolErrors);
             } else if (!updater.hasTransitioned()) {
                 onExecutorError(
-                        exchange, updater,
+                        exchange,
+                        updater,
                         new IllegalStateException(
                                 "Executor " + exchange.executor().getClass().getName() + " did not report anything"),
                         protocolErrors);
@@ -432,9 +468,12 @@ public class A2AService {
         });
     }
 
-    private void onExecutorError(final Exchange exchange, final DefaultTaskUpdater updater, final Throwable error,
-                                 final boolean protocolErrors) {
-        final var cause = unwrap(error);
+    private void onExecutorError(
+            final Exchange exchange,
+            final DefaultTaskUpdater updater,
+            final Throwable error,
+            final boolean protocolErrors) {
+        final var cause = A2AProtocol.unwrap(error);
         if (protocolErrors && cause instanceof JsonRpcException jre && !updater.hasTransitioned()) {
             // the call itself was invalid, so this is not a task failure: no task is left behind
             logger.log(FINE, jre, () -> "Rejecting the message: " + jre.getMessage());
@@ -453,7 +492,10 @@ public class A2AService {
         try {
             return executor.accept(request);
         } catch (final RuntimeException re) {
-            logger.log(WARNING, re, () -> "Executor " + executor.getClass().getName() + " failed to accept: " + re.getMessage());
+            logger.log(
+                    WARNING,
+                    re,
+                    () -> "Executor " + executor.getClass().getName() + " failed to accept: " + re.getMessage());
             return false;
         }
     }
@@ -469,15 +511,19 @@ public class A2AService {
         final var task = response.task();
         final var history = task.history();
         if (historyLength <= 0) {
-            return SendMessageResponse.of(new Task(
-                    task.id(), task.contextId(), task.status(), task.artifacts(), null, task.metadata()));
+            return SendMessageResponse.of(
+                    new Task(task.id(), task.contextId(), task.status(), task.artifacts(), null, task.metadata()));
         }
-        if (history == null || history.size() <= historyLength) {
+        if (history.size() <= historyLength) {
             return response;
         }
         return SendMessageResponse.of(new Task(
-                task.id(), task.contextId(), task.status(), task.artifacts(),
-                history.subList(history.size() - historyLength, history.size()), task.metadata()));
+                task.id(),
+                task.contextId(),
+                task.status(),
+                task.artifacts(),
+                history.subList(history.size() - historyLength, history.size()),
+                task.metadata()));
     }
 
     private void requireStreaming() {
@@ -499,14 +545,13 @@ public class A2AService {
             return; // nothing to route, any tenant - including none - is fine
         }
         if (!expected.equals(tenant)) {
-            throw A2AErrors.invalidParams(
-                    "tenant", "This interface expects the tenant declared in its agent card");
+            throw A2AErrors.invalidParams("tenant", "This interface expects the tenant declared in its agent card");
         }
     }
 
     private void validateExtensions(final List<String> activated) {
         final var missing = cards.requiredExtensions().stream()
-                .filter(it -> activated == null || !activated.contains(it))
+                .filter(it -> !activated.contains(it))
                 .toList();
         if (!missing.isEmpty()) {
             throw A2AErrors.extensionSupportRequired(missing);
@@ -514,8 +559,9 @@ public class A2AService {
     }
 
     private void validateOutputModes(final SendMessageConfiguration configuration) {
-        if (configuration == null || configuration.acceptedOutputModes() == null ||
-                configuration.acceptedOutputModes().isEmpty()) {
+        if (configuration == null
+                || configuration.acceptedOutputModes() == null
+                || configuration.acceptedOutputModes().isEmpty()) {
             return;
         }
         final var supported = cards.outputModes();
@@ -542,8 +588,7 @@ public class A2AService {
             return true;
         }
         final var star = pattern.indexOf("/*");
-        return star > 0 && star == pattern.length() - 2 &&
-                supported.regionMatches(true, 0, pattern, 0, star + 1);
+        return star > 0 && star == pattern.length() - 2 && supported.regionMatches(true, 0, pattern, 0, star + 1);
     }
 
     @SuppressWarnings("unchecked")
@@ -559,14 +604,6 @@ public class A2AService {
         return configuration == null ? null : configuration.historyLength();
     }
 
-    private static Throwable unwrap(final Throwable error) {
-        return error != null && error.getCause() != null &&
-                (error instanceof java.util.concurrent.CompletionException ||
-                        error instanceof java.util.concurrent.ExecutionException) ?
-                error.getCause() :
-                error;
-    }
-
     private static int decodeCursor(final String pageToken) {
         if (pageToken == null || pageToken.isBlank()) {
             return 0;
@@ -580,14 +617,14 @@ public class A2AService {
     }
 
     private static String encodeCursor(final int offset) {
-        return Base64.getUrlEncoder().withoutPadding()
+        return Base64.getUrlEncoder()
+                .withoutPadding()
                 .encodeToString(String.valueOf(offset).getBytes(StandardCharsets.UTF_8));
     }
 
     /**
      * A message being processed: the task it targets, the request the executor sees and the promises to complete.
      */
-    private record Exchange(A2ATask task, AgentRequest request, A2AExecutor executor, A2ATask.Turn turn,
-                            boolean continuation) {
-    }
+    private record Exchange(
+            A2ATask task, AgentRequest request, A2AExecutor executor, A2ATask.Turn turn, boolean continuation) {}
 }

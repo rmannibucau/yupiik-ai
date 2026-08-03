@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -34,7 +33,11 @@ import java.util.Map;
 @JsonModel
 public record TaskStatusUpdateEvent(
         @Property(documentation = "The task which changed.") String taskId,
-        @Property(documentation = "The conversation the task belongs to.") String contextId,
+
+        @Property(documentation = "The conversation the task belongs to.")
+        String contextId,
+
         @Property(documentation = "The new status.") TaskStatus status,
-        @Property(documentation = "Free form metadata about the update itself.") Map<String, Object> metadata) {
-}
+
+        @Property(documentation = "Free form metadata about the update itself.")
+        Map<String, Object> metadata) {}

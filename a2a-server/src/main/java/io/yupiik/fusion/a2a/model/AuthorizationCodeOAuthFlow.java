@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -31,9 +30,16 @@ import java.util.Map;
  */
 @JsonModel
 public record AuthorizationCodeOAuthFlow(
-        @Property(documentation = "The authorization endpoint.") String authorizationUrl,
+        @Property(documentation = "The authorization endpoint.")
+        String authorizationUrl,
+
         @Property(documentation = "The token endpoint.") String tokenUrl,
-        @Property(documentation = "Where to refresh a token.") String refreshUrl,
-        @Property(documentation = "The available scopes and their description.") Map<String, String> scopes,
-        @Property(documentation = "Whether PKCE (RFC 7636) is mandatory - it should be, always.") boolean pkceRequired) {
-}
+
+        @Property(documentation = "Where to refresh a token.")
+        String refreshUrl,
+
+        @Property(documentation = "The available scopes and their description.")
+        Map<String, String> scopes,
+
+        @Property(documentation = "Whether PKCE (RFC 7636) is mandatory - it should be, always.")
+        boolean pkceRequired) {}

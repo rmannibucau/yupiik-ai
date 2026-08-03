@@ -28,7 +28,6 @@ import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
 import io.yupiik.fusion.jsonrpc.JsonRpcHandler;
 import io.yupiik.fusion.jsonrpc.Response;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,8 +85,7 @@ public class SkillExecutor implements A2AExecutor {
         final var skill = resolve(request);
         // the JSON-RPC stack is asynchronous, so a skill returning a CompletionStage is awaited without holding a
         // thread - the outcome is mapped when it completes
-        return handler
-                .execute(jsonRpc(skill, arguments(request)), request.httpRequest())
+        return handler.execute(jsonRpc(skill, arguments(request)), request.httpRequest())
                 .thenAccept(result -> onResult(skill, result, updater));
     }
 
@@ -147,8 +145,9 @@ public class SkillExecutor implements A2AExecutor {
             case Message message -> updater.respond(message);
             case Task task -> updater.adopt(task);
             case Artifact artifact -> updater.complete(artifact);
-            case List<?> list when !list.isEmpty() && list.stream().allMatch(it -> it instanceof Artifact) ->
-                    updater.complete(list.stream().map(Artifact.class::cast).toArray(Artifact[]::new));
+            case List<?> list
+            when !list.isEmpty() && list.stream().allMatch(it -> it instanceof Artifact) ->
+                updater.complete(list.stream().map(Artifact.class::cast).toArray(Artifact[]::new));
             case String text -> updater.complete(Artifact.text(skill, text));
             case Object value -> updater.complete(Artifact.data(skill, value));
         }
@@ -169,12 +168,11 @@ public class SkillExecutor implements A2AExecutor {
         return code == -32700 || (code <= -32600 && code >= -32603);
     }
 
-    private static Map<String, Object> jsonRpc(final String method, final Object params) {
+    private static Map<String, Object> jsonRpc(final String method, final Map<String, Object> params) {
         // no id: this is a nested invocation, the enclosing A2A request carries the client one
         return Map.of(
                 "jsonrpc", "2.0",
                 "method", method,
-                "params", params == null ? Map.of() : params);
+                "params", params);
     }
-
 }

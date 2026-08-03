@@ -25,5 +25,6 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  * @param description an optional description.
  */
 @JsonModel
-public record MutualTlsSecurityScheme(@Property(documentation = "An optional description.") String description) {
-}
+public record MutualTlsSecurityScheme(
+        @Property(documentation = "An optional description.")
+        String description) {}

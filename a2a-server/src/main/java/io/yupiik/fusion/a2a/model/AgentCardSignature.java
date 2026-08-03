@@ -18,7 +18,6 @@ package io.yupiik.fusion.a2a.model;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
-
 import java.util.Map;
 
 /**
@@ -35,7 +34,14 @@ import java.util.Map;
  */
 @JsonModel
 public record AgentCardSignature(
-        @JsonProperty("protected") @Property(documentation = "The JWS Protected Header, base64url encoded. It is serialized as protected, which is a Java keyword hence the different component name.") String protectedHeader,
-        @Property(documentation = "The signature, base64url encoded.") String signature,
-        @Property(documentation = "The JWS Unprotected Header, as a plain object.") Map<String, Object> header) {
-}
+        @JsonProperty("protected")
+        @Property(
+                documentation =
+                        "The JWS Protected Header, base64url encoded. It is serialized as protected, which is a Java keyword hence the different component name.")
+        String protectedHeader,
+
+        @Property(documentation = "The signature, base64url encoded.")
+        String signature,
+
+        @Property(documentation = "The JWS Unprotected Header, as a plain object.")
+        Map<String, Object> header) {}

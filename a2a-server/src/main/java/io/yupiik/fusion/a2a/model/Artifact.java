@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -38,12 +37,23 @@ import java.util.UUID;
  */
 @JsonModel
 public record Artifact(
-        @Property(documentation = "The identifier of the artifact, it must be unique within the task. It is also the key used to append chunks to a streamed artifact.") String artifactId,
+        @Property(
+                documentation =
+                        "The identifier of the artifact, it must be unique within the task. It is also the key used to append chunks to a streamed artifact.")
+        String artifactId,
+
         @Property(documentation = "A human readable name.") String name,
-        @Property(documentation = "A human readable description.") String description,
-        @Property(documentation = "The content, there must be at least one part.") List<Part> parts,
+
+        @Property(documentation = "A human readable description.")
+        String description,
+
+        @Property(documentation = "The content, there must be at least one part.")
+        List<Part> parts,
+
         @Property(documentation = "Free form metadata.") Map<String, Object> metadata,
-        @Property(documentation = "The URIs of the extensions which contributed to this artifact.") List<String> extensions) {
+
+        @Property(documentation = "The URIs of the extensions which contributed to this artifact.")
+        List<String> extensions) {
     /**
      * @param name the artifact name.
      * @param text the textual content.

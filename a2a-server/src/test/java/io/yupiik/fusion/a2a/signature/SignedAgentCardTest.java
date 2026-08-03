@@ -15,6 +15,11 @@
  */
 package io.yupiik.fusion.a2a.signature;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.service.AgentCardService;
 import io.yupiik.fusion.a2a.service.SkillService;
@@ -22,17 +27,10 @@ import io.yupiik.fusion.a2a.test.Keys;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
+import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-
-import java.nio.file.Path;
-import java.security.KeyPair;
-import java.util.List;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The card the server publishes when signing is configured: {@link AgentCardService} must sign what it serves, and refuse
@@ -43,13 +41,13 @@ class SignedAgentCardTest {
     @Test
     void theServedCardIsSignedAndVerifies(@Fusion final JsonMapper jsons, @TempDir final Path work) throws Exception {
         final var keys = Keys.ec();
-        final var card = cards(jsons, Keys.configurationOf(work, keys, Jws.ES256)).card(null);
+        final var card =
+                cards(jsons, Keys.configurationOf(work, keys, Jws.ES256)).card(null);
 
         assertEquals(1, card.signatures().size());
         // and it verifies against the exact JSON a caller receives, which is what makes the signature useful
-        assertTrue(CardVerifier.of(jsons).verify(
-                jsons.fromString(AgentCard.class, jsons.toString(card)),
-                kid -> keys.getPublic()));
+        assertTrue(CardVerifier.of(jsons)
+                .verify(jsons.fromString(AgentCard.class, jsons.toString(card)), kid -> keys.getPublic()));
     }
 
     @Test
@@ -67,10 +65,11 @@ class SignedAgentCardTest {
         assertTrue(error.getMessage().contains("fusion.a2a.publicUrl"), error::getMessage);
     }
 
-    private AgentCardService cards(final JsonMapper jsons, final io.yupiik.fusion.a2a.configuration.A2AConfiguration configuration) {
-        final var signer = new CardSigner(new AgentCardPayload(jsons, new JsonCanonicalizer()), new Jws(), configuration);
+    private AgentCardService cards(
+            final JsonMapper jsons, final io.yupiik.fusion.a2a.configuration.A2AConfiguration configuration) {
+        final var signer =
+                new CardSigner(new AgentCardPayload(jsons, new JsonCanonicalizer()), new Jws(), configuration);
         // an anonymous subclass reaches the protected no-skill constructor, the card content is not what this asserts
-        return new AgentCardService(configuration, new SkillService() {
-        }, List.of(), signer);
+        return new AgentCardService(configuration, new SkillService() {}, List.of(), signer);
     }
 }

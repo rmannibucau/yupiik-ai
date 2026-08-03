@@ -15,6 +15,9 @@
  */
 package io.yupiik.fusion.a2a.protocol;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.logging.Level.SEVERE;
+
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.http.HttpMatcher;
 import io.yupiik.fusion.framework.build.api.order.Order;
@@ -24,15 +27,11 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
 import io.yupiik.fusion.jsonrpc.JsonRpcHandler;
 import jakarta.servlet.http.HttpServletRequest;
-
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
-
-import static java.util.concurrent.CompletableFuture.completedFuture;
-import static java.util.logging.Level.SEVERE;
 
 /**
  * The {@code POST /a2a} transport of the JSON-RPC binding.
@@ -56,6 +55,7 @@ public class A2AEndpoint {
      * {@code PartialResponse}, they are copied to the HTTP response.
      */
     private static final String JSONRPC_RESPONSE_HEADERS = "yupiik.jsonrpc.response.headers";
+
     private static final String JSON_CONTENT_TYPE = "application/json;charset=utf-8";
 
     private final Logger logger = Logger.getLogger(A2AEndpoint.class.getName());
@@ -80,6 +80,10 @@ public class A2AEndpoint {
             return completedFuture(error(A2AErrors.versionNotSupported(A2AProtocol.resolve(version))));
         }
         request.setAttribute(A2AProtocol.EXTENSIONS_ATTRIBUTE, extensions(request));
+        if (!A2AProtocol.hasBody(request)) {
+            // reading a body which is not there never completes, so the request would hang until the container gives up
+            return completedFuture(parseError());
+        }
 
         try {
             return handler.readRequest(request.fullBody())
@@ -91,28 +95,29 @@ public class A2AEndpoint {
     }
 
     private CompletionStage<Response> onPayload(final Object payload, final Request request) {
-        if (payload == null) { // an empty - or "null" - body
-            return completedFuture(jsonRpc(200, handler.createResponse(null, A2AErrors.PARSE_ERROR, "Invalid JSON payload")));
+        if (payload == null) { // a "null" body
+            return completedFuture(parseError());
         }
         if (payload instanceof List<?> batch) {
             final var streaming = batch.stream()
-                    .filter(it -> it instanceof Map<?, ?> map && A2AProtocol.STREAMING_METHODS.contains(map.get("method")))
+                    .filter(it -> it instanceof Map<?, ?> map && A2AProtocol.isStreaming(map.get("method")))
                     .findFirst();
             if (streaming.isPresent()) {
                 // one response body cannot carry two streams, so a batch must not mix them in
-                return completedFuture(jsonRpc(400, handler.createResponse(
-                        null, A2AErrors.INVALID_REQUEST, "A streaming method cannot be part of a batch")));
+                return completedFuture(jsonRpc(
+                        400,
+                        handler.createResponse(
+                                null, A2AErrors.INVALID_REQUEST, "A streaming method cannot be part of a batch")));
             }
         }
         var streaming = false;
         if (payload instanceof Map<?, ?> map) {
             request.setAttribute(A2AProtocol.REQUEST_ID_ATTRIBUTE, map.get("id"));
-            streaming = A2AProtocol.STREAMING_METHODS.contains(map.get("method"));
+            streaming = A2AProtocol.isStreaming(map.get("method"));
         }
 
         final var isStreaming = streaming;
-        return handler
-                .execute(payload, request)
+        return handler.execute(payload, request)
                 .thenApply(result -> response(result, request, isStreaming))
                 .exceptionally(err -> onError(A2AErrors.INTERNAL_ERROR, err));
     }
@@ -131,7 +136,8 @@ public class A2AEndpoint {
         final var builder = Response.of().header("content-type", JSON_CONTENT_TYPE);
         final var extraHeaders = request.attribute(JSONRPC_RESPONSE_HEADERS, Map.class);
         if (extraHeaders != null) {
-            @SuppressWarnings("unchecked") final var headers = (Map<String, String>) extraHeaders;
+            @SuppressWarnings("unchecked")
+            final var headers = (Map<String, String>) extraHeaders;
             headers.forEach(builder::header);
         }
         if (payload == null) { // a notification, there is nothing to answer
@@ -180,11 +186,23 @@ public class A2AEndpoint {
         return jsonRpc(200, handler.createResponse(null, code, error.getMessage()));
     }
 
+    /**
+     * @return the JSON-RPC error a body which is not a request deserves. The status is a {@code 200}: the failure is
+     * carried by the envelope, which is where a JSON-RPC client reads it.
+     */
+    private Response parseError() {
+        return jsonRpc(200, handler.createResponse(null, A2AErrors.PARSE_ERROR, "Invalid JSON payload"));
+    }
+
     private Response error(final JsonRpcException error) {
         return jsonRpc(
                 A2AErrors.httpStatus(error.code()),
-                new io.yupiik.fusion.jsonrpc.Response("2.0", null, null,
-                        new io.yupiik.fusion.jsonrpc.Response.ErrorResponse(error.code(), error.getMessage(), error.data())));
+                new io.yupiik.fusion.jsonrpc.Response(
+                        "2.0",
+                        null,
+                        null,
+                        new io.yupiik.fusion.jsonrpc.Response.ErrorResponse(
+                                error.code(), error.getMessage(), error.data())));
     }
 
     private Response jsonRpc(final int status, final Object payload) {

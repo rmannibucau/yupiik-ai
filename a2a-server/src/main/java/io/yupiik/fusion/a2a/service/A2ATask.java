@@ -29,7 +29,6 @@ import io.yupiik.fusion.a2a.model.TaskState;
 import io.yupiik.fusion.a2a.model.TaskStatus;
 import io.yupiik.fusion.a2a.protocol.A2AStream;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
-
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -174,13 +173,15 @@ public class A2ATask {
             if (artifact.parts() != null) {
                 parts.addAll(artifact.parts());
             }
-            artifacts.put(artifact.artifactId(), new Artifact(
-                    existing.artifactId(),
-                    artifact.name() == null ? existing.name() : artifact.name(),
-                    artifact.description() == null ? existing.description() : artifact.description(),
-                    parts,
-                    artifact.metadata() == null ? existing.metadata() : artifact.metadata(),
-                    artifact.extensions() == null ? existing.extensions() : artifact.extensions()));
+            artifacts.put(
+                    artifact.artifactId(),
+                    new Artifact(
+                            existing.artifactId(),
+                            artifact.name() == null ? existing.name() : artifact.name(),
+                            artifact.description() == null ? existing.description() : artifact.description(),
+                            parts,
+                            artifact.metadata() == null ? existing.metadata() : artifact.metadata(),
+                            artifact.extensions() == null ? existing.extensions() : artifact.extensions()));
         } finally {
             artifactsLock.unlock();
             touch();
@@ -299,8 +300,7 @@ public class A2ATask {
      * @return {@code true} when the task was not touched for more than {@code retention}.
      */
     public boolean isExpired(final Duration retention) {
-        return !retention.isZero() && !retention.isNegative() &&
-                System.nanoTime() - lastUpdate > retention.toNanos();
+        return !retention.isZero() && !retention.isNegative() && System.nanoTime() - lastUpdate > retention.toNanos();
     }
 
     /**

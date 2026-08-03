@@ -18,7 +18,6 @@ package io.yupiik.fusion.a2a.demo;
 import io.yupiik.fusion.a2a.api.A2ASkills;
 import io.yupiik.fusion.a2a.model.AgentSkill;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.util.List;
 
 /**

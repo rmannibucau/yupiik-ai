@@ -15,6 +15,12 @@
  */
 package io.yupiik.fusion.a2a;
 
+import static io.yupiik.fusion.a2a.test.Awaits.await;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import io.yupiik.fusion.a2a.client.A2AClient;
 import io.yupiik.fusion.a2a.client.A2AClientException;
 import io.yupiik.fusion.a2a.model.Message;
@@ -25,8 +31,6 @@ import io.yupiik.fusion.a2a.model.TaskState;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
-import org.junit.jupiter.api.Test;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.util.List;
@@ -34,12 +38,7 @@ import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
-
-import static io.yupiik.fusion.a2a.test.Awaits.await;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
 
 /**
  * The streaming operations: the event sequence, the artifact chunks, the resubscription and the terminal task refusal.
@@ -55,7 +54,9 @@ class A2AStreamingTest {
         // a task stream begins with the task itself, then the deltas, and closes on the terminal status
         assertNotNull(events.get(0).task(), () -> "First event should be the task: " + events);
         assertEquals(TaskState.TASK_STATE_WORKING, states(events).get(0));
-        assertEquals(TaskState.TASK_STATE_COMPLETED, states(events).get(states(events).size() - 1));
+        assertEquals(
+                TaskState.TASK_STATE_COMPLETED,
+                states(events).get(states(events).size() - 1));
 
         final var chunks = events.stream()
                 .map(StreamResponse::artifactUpdate)
@@ -67,12 +68,14 @@ class A2AStreamingTest {
         assertEquals(true, chunks.get(1).append());
         assertEquals(true, chunks.get(2).lastChunk(), "the last chunk must be flagged");
         // every chunk shares the artifact identifier so the client can reassemble them
-        assertEquals(1, chunks.stream().map(it -> it.artifact().artifactId()).distinct().count());
+        assertEquals(
+                1,
+                chunks.stream().map(it -> it.artifact().artifactId()).distinct().count());
     }
 
     @Test
-    void streamedChunksAreMergedForPollingClients(@Fusion final URI agent, @Fusion final HttpClient http,
-                                                  @Fusion final JsonMapper jsons) {
+    void streamedChunksAreMergedForPollingClients(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var events = new CopyOnWriteArrayList<StreamResponse>();
         await(client.sendStreamingMessage(SendMessageRequest.of(Message.user("chunks:3")), events::add));
@@ -88,7 +91,8 @@ class A2AStreamingTest {
     }
 
     @Test
-    void streamingAMessageOnlyAnswer(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void streamingAMessageOnlyAnswer(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var events = new CopyOnWriteArrayList<StreamResponse>();
         await(new A2AClient(agent, http, jsons)
                 .sendStreamingMessage(SendMessageRequest.of(Message.user("message:hi there")), events::add));
@@ -99,20 +103,24 @@ class A2AStreamingTest {
     }
 
     @Test
-    void streamClosesOnAnInterruptedTask(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void streamClosesOnAnInterruptedTask(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var events = new CopyOnWriteArrayList<StreamResponse>();
         await(new A2AClient(agent, http, jsons)
                 .sendStreamingMessage(SendMessageRequest.of(Message.user("input:which city?")), events::add));
 
         // an interrupted task cannot progress without a new request, so the stream must not stay open
-        assertEquals(TaskState.TASK_STATE_INPUT_REQUIRED, states(events).get(states(events).size() - 1));
+        assertEquals(
+                TaskState.TASK_STATE_INPUT_REQUIRED,
+                states(events).get(states(events).size() - 1));
     }
 
     @Test
     void subscribeToTask(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var task = await(client.sendMessage(new SendMessageRequest(
-                null, Message.user("slow"), new SendMessageConfiguration(null, null, null, true), null))).task();
+                        null, Message.user("slow"), new SendMessageConfiguration(null, null, null, true), null)))
+                .task();
 
         final var events = new CopyOnWriteArrayList<StreamResponse>();
         final var subscribed = new CountDownLatch(1);
@@ -120,7 +128,8 @@ class A2AStreamingTest {
             events.add(event);
             subscribed.countDown();
         });
-        // cancel only once the stream is live, else the task would be terminal before the subscription reaches the agent
+        // cancel only once the stream is live, else the task would be terminal before the subscription reaches the
+        // agent
         assertTrue(awaitLatch(subscribed), "the subscription did not start");
         await(client.cancelTask(task.id()));
         await(subscription);
@@ -128,17 +137,18 @@ class A2AStreamingTest {
         // the first event is the current state, so nothing is lost between GetTask and SubscribeToTask
         assertNotNull(events.get(0).task());
         assertEquals(task.id(), events.get(0).task().id());
-        assertEquals(TaskState.TASK_STATE_CANCELED, states(events).get(states(events).size() - 1));
+        assertEquals(
+                TaskState.TASK_STATE_CANCELED, states(events).get(states(events).size() - 1));
     }
 
     @Test
-    void subscribeToATerminalTask(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void subscribeToATerminalTask(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var task = await(client.sendMessage("hello")).task();
 
-        final var error = assertThrows(
-                A2AClientException.class, () -> await(client.subscribeToTask(task.id(), event -> {
-                })));
+        final var error =
+                assertThrows(A2AClientException.class, () -> await(client.subscribeToTask(task.id(), event -> {})));
         // the agent answers the error payload with the mapped status, so the client reports the A2A error itself
         assertEquals(io.yupiik.fusion.a2a.protocol.A2AErrors.UNSUPPORTED_OPERATION, error.code());
         assertTrue(error.getMessage().contains("terminal state"), error::getMessage);

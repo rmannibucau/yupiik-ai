@@ -15,13 +15,12 @@
  */
 package io.yupiik.fusion.a2a.api;
 
-import io.yupiik.fusion.framework.build.api.metadata.BeanMetadataAlias;
-
-import java.lang.annotation.Retention;
-import java.lang.annotation.Target;
-
 import static java.lang.annotation.ElementType.METHOD;
 import static java.lang.annotation.RetentionPolicy.SOURCE;
+
+import io.yupiik.fusion.framework.build.api.metadata.BeanMetadataAlias;
+import java.lang.annotation.Retention;
+import java.lang.annotation.Target;
 
 /**
  * Exposes a JSON-RPC method as an A2A skill, i.e. as one of the abilities the agent advertises in its
@@ -66,5 +65,4 @@ import static java.lang.annotation.RetentionPolicy.SOURCE;
 @Target(METHOD)
 @Retention(SOURCE)
 @BeanMetadataAlias(name = "a2a.type", value = "skill")
-public @interface A2ASkill {
-}
+public @interface A2ASkill {}

@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -28,6 +27,8 @@ import java.util.List;
  */
 @JsonModel
 public record ListTaskPushNotificationConfigsResponse(
-        @Property(documentation = "The webhooks registered on the task.") List<TaskPushNotificationConfig> configs,
-        @Property(documentation = "The cursor of the next page, empty on the last one.") String nextPageToken) {
-}
+        @Property(documentation = "The webhooks registered on the task.")
+        List<TaskPushNotificationConfig> configs,
+
+        @Property(documentation = "The cursor of the next page, empty on the last one.")
+        String nextPageToken) {}

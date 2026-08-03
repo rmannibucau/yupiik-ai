@@ -16,7 +16,6 @@
 package io.yupiik.fusion.a2a.signature;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.math.BigInteger;
 import java.util.Base64;
 
@@ -47,8 +46,9 @@ public class Jws {
         return switch (algorithm) {
             case ES256 -> "SHA256withECDSA";
             case RS256 -> "SHA256withRSA";
-            default -> throw new IllegalArgumentException(
-                    "Unsupported signature algorithm '" + algorithm + "', use " + ES256 + " or " + RS256);
+            default ->
+                throw new IllegalArgumentException(
+                        "Unsupported signature algorithm '" + algorithm + "', use " + ES256 + " or " + RS256);
         };
     }
 
@@ -83,8 +83,9 @@ public class Jws {
         if (der.length < 8 || der[offset++] != 0x30) {
             throw new IllegalArgumentException("Not a DER sequence");
         }
-        if ((der[offset] & 0xff) > 0x80) { // a long form length, one length byte is enough for a P-256 signature
-            offset += der[offset] - 0x80 + 1;
+        if ((der[offset] & 0xff) > 0x80) { // a long form length: that byte says how many length bytes follow
+            // the value is unsigned, and 0x81 read as a signed byte would send the offset backwards
+            offset += (der[offset] & 0xff) - 0x80 + 1;
         } else {
             offset++;
         }

@@ -26,6 +26,8 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record OpenIdConnectSecurityScheme(
-        @Property(documentation = "An optional description.") String description,
-        @Property(documentation = "The OIDC discovery URL of the provider.") String openIdConnectUrl) {
-}
+        @Property(documentation = "An optional description.")
+        String description,
+
+        @Property(documentation = "The OIDC discovery URL of the provider.")
+        String openIdConnectUrl) {}

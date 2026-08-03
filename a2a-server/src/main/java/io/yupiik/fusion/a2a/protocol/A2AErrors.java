@@ -18,7 +18,6 @@ package io.yupiik.fusion.a2a.protocol;
 import io.yupiik.fusion.a2a.model.A2ATimestamps;
 import io.yupiik.fusion.a2a.model.TaskState;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,9 +67,16 @@ public final class A2AErrors {
     public static int httpStatus(final int code) {
         return switch (code) {
             case TASK_NOT_FOUND -> 404;
-            case TASK_NOT_CANCELABLE, PUSH_NOTIFICATION_NOT_SUPPORTED, UNSUPPORTED_OPERATION,
-                 CONTENT_TYPE_NOT_SUPPORTED, EXTENDED_AGENT_CARD_NOT_CONFIGURED, EXTENSION_SUPPORT_REQUIRED,
-                 VERSION_NOT_SUPPORTED, PARSE_ERROR, INVALID_REQUEST, INVALID_PARAMS -> 400;
+            case TASK_NOT_CANCELABLE,
+                    PUSH_NOTIFICATION_NOT_SUPPORTED,
+                    UNSUPPORTED_OPERATION,
+                    CONTENT_TYPE_NOT_SUPPORTED,
+                    EXTENDED_AGENT_CARD_NOT_CONFIGURED,
+                    EXTENSION_SUPPORT_REQUIRED,
+                    VERSION_NOT_SUPPORTED,
+                    PARSE_ERROR,
+                    INVALID_REQUEST,
+                    INVALID_PARAMS -> 400;
             case METHOD_NOT_FOUND -> 404;
             default -> 500;
         };
@@ -84,9 +90,12 @@ public final class A2AErrors {
     public static String status(final int code) {
         return switch (code) {
             case TASK_NOT_FOUND, METHOD_NOT_FOUND -> "NOT_FOUND";
-            case TASK_NOT_CANCELABLE, PUSH_NOTIFICATION_NOT_SUPPORTED, UNSUPPORTED_OPERATION,
-                 EXTENDED_AGENT_CARD_NOT_CONFIGURED, EXTENSION_SUPPORT_REQUIRED, VERSION_NOT_SUPPORTED ->
-                    "FAILED_PRECONDITION";
+            case TASK_NOT_CANCELABLE,
+                    PUSH_NOTIFICATION_NOT_SUPPORTED,
+                    UNSUPPORTED_OPERATION,
+                    EXTENDED_AGENT_CARD_NOT_CONFIGURED,
+                    EXTENSION_SUPPORT_REQUIRED,
+                    VERSION_NOT_SUPPORTED -> "FAILED_PRECONDITION";
             case CONTENT_TYPE_NOT_SUPPORTED, PARSE_ERROR, INVALID_REQUEST, INVALID_PARAMS -> "INVALID_ARGUMENT";
             default -> "INTERNAL";
         };
@@ -98,14 +107,18 @@ public final class A2AErrors {
 
     public static JsonRpcException taskNotCancelable(final String taskId, final TaskState state) {
         return error(
-                TASK_NOT_CANCELABLE, "Task is not in a cancelable state", "TASK_NOT_CANCELABLE",
+                TASK_NOT_CANCELABLE,
+                "Task is not in a cancelable state",
+                "TASK_NOT_CANCELABLE",
                 Map.of("taskId", String.valueOf(taskId), "state", String.valueOf(state)));
     }
 
     public static JsonRpcException pushNotificationNotSupported() {
         return error(
-                PUSH_NOTIFICATION_NOT_SUPPORTED, "Push notifications are not supported by this agent",
-                "PUSH_NOTIFICATION_NOT_SUPPORTED", Map.of("capability", "pushNotifications"));
+                PUSH_NOTIFICATION_NOT_SUPPORTED,
+                "Push notifications are not supported by this agent",
+                "PUSH_NOTIFICATION_NOT_SUPPORTED",
+                Map.of("capability", "pushNotifications"));
     }
 
     public static JsonRpcException unsupportedOperation(final String message) {
@@ -118,7 +131,8 @@ public final class A2AErrors {
 
     public static JsonRpcException contentTypeNotSupported(final List<String> requested, final List<String> supported) {
         return error(
-                CONTENT_TYPE_NOT_SUPPORTED, "None of the accepted output modes is supported",
+                CONTENT_TYPE_NOT_SUPPORTED,
+                "None of the accepted output modes is supported",
                 "CONTENT_TYPE_NOT_SUPPORTED",
                 Map.of("requested", String.join(",", requested), "supported", String.join(",", supported)));
     }
@@ -129,14 +143,18 @@ public final class A2AErrors {
 
     public static JsonRpcException extendedAgentCardNotConfigured() {
         return error(
-                EXTENDED_AGENT_CARD_NOT_CONFIGURED, "No extended agent card is configured",
-                "EXTENDED_AGENT_CARD_NOT_CONFIGURED", Map.of());
+                EXTENDED_AGENT_CARD_NOT_CONFIGURED,
+                "No extended agent card is configured",
+                "EXTENDED_AGENT_CARD_NOT_CONFIGURED",
+                Map.of());
     }
 
     public static JsonRpcException extensionSupportRequired(final List<String> uris) {
         return error(
-                EXTENSION_SUPPORT_REQUIRED, "The client must declare the required extensions",
-                "EXTENSION_SUPPORT_REQUIRED", Map.of("extensions", String.join(",", uris)));
+                EXTENSION_SUPPORT_REQUIRED,
+                "The client must declare the required extensions",
+                "EXTENSION_SUPPORT_REQUIRED",
+                Map.of("extensions", String.join(",", uris)));
     }
 
     /**
@@ -145,9 +163,14 @@ public final class A2AErrors {
      */
     public static JsonRpcException versionNotSupported(final String requested) {
         return error(
-                VERSION_NOT_SUPPORTED, "The requested A2A protocol version " + requested + " is not supported by this agent",
+                VERSION_NOT_SUPPORTED,
+                "The requested A2A protocol version " + requested + " is not supported by this agent",
                 "VERSION_NOT_SUPPORTED",
-                Map.of("requested", String.valueOf(requested), "supportedVersions", String.join(",", A2AProtocol.SUPPORTED_VERSIONS)));
+                Map.of(
+                        "requested",
+                        String.valueOf(requested),
+                        "supportedVersions",
+                        String.join(",", A2AProtocol.SUPPORTED_VERSIONS)));
     }
 
     /**
@@ -157,10 +180,13 @@ public final class A2AErrors {
      */
     public static JsonRpcException invalidParams(final String field, final String description) {
         return new JsonRpcException(
-                INVALID_PARAMS, "Invalid parameters",
+                INVALID_PARAMS,
+                "Invalid parameters",
                 List.of(Map.of(
-                        "@type", BAD_REQUEST,
-                        "fieldViolations", List.of(Map.of("field", field, "description", description)))),
+                        "@type",
+                        BAD_REQUEST,
+                        "fieldViolations",
+                        List.of(Map.of("field", field, "description", description)))),
                 null);
     }
 
@@ -171,12 +197,13 @@ public final class A2AErrors {
      * @param metadata the contextual attributes to attach.
      * @return the exception to throw, its {@code data} is the array of details the specification asks for.
      */
-    public static JsonRpcException error(final int code, final String message, final String reason,
-                                        final Map<String, String> metadata) {
+    public static JsonRpcException error(
+            final int code, final String message, final String reason, final Map<String, String> metadata) {
         final var withTimestamp = new LinkedHashMap<String, String>(metadata);
         withTimestamp.put("timestamp", A2ATimestamps.now());
         return new JsonRpcException(
-                code, message,
+                code,
+                message,
                 List.of(Map.of("@type", ERROR_INFO, "reason", reason, "domain", DOMAIN, "metadata", withTimestamp)),
                 null);
     }

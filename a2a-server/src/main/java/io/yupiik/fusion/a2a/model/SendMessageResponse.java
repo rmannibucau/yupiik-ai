@@ -28,8 +28,11 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record SendMessageResponse(
-        @Property(documentation = "The task the message created or continued.") Task task,
-        @Property(documentation = "The direct answer, when the interaction needed no task tracking.") Message message) {
+        @Property(documentation = "The task the message created or continued.")
+        Task task,
+
+        @Property(documentation = "The direct answer, when the interaction needed no task tracking.")
+        Message message) {
     public static SendMessageResponse of(final Task task) {
         return new SendMessageResponse(task, null);
     }

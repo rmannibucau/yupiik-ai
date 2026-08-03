@@ -15,6 +15,10 @@
  */
 package io.yupiik.fusion.a2a.client;
 
+import static java.net.http.HttpResponse.BodyHandlers.fromLineSubscriber;
+import static java.net.http.HttpResponse.BodyHandlers.ofString;
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.model.AgentInterface;
 import io.yupiik.fusion.a2a.model.ListTaskPushNotificationConfigsResponse;
@@ -30,7 +34,6 @@ import io.yupiik.fusion.a2a.protocol.A2AErrors;
 import io.yupiik.fusion.a2a.protocol.A2AProtocol;
 import io.yupiik.fusion.a2a.signature.CardVerifier;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -43,10 +46,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Function;
-
-import static java.net.http.HttpResponse.BodyHandlers.fromLineSubscriber;
-import static java.net.http.HttpResponse.BodyHandlers.ofString;
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * An A2A client: what an agent uses to delegate to another agent, and what a test uses to drive this server.
@@ -106,9 +105,9 @@ public class A2AClient {
      * @throws IllegalArgumentException when the card declares no JSON-RPC interface.
      */
     public static A2AClient of(final AgentCard card, final HttpClient http, final JsonMapper jsons) {
-        final var selected = card.supportedInterfaces() == null ?
-                null :
-                card.supportedInterfaces().stream()
+        final var selected = card.supportedInterfaces() == null
+                ? null
+                : card.supportedInterfaces().stream()
                         .filter(it -> AgentInterface.JSONRPC.equals(it.protocolBinding()))
                         .findFirst()
                         .orElse(null);
@@ -116,9 +115,9 @@ public class A2AClient {
             throw new IllegalArgumentException("Agent '" + card.name() + "' does not expose a JSONRPC interface");
         }
         final var url = selected.url();
-        final var root = url.endsWith(A2AProtocol.JSONRPC_PATH) ?
-                url.substring(0, url.length() - A2AProtocol.JSONRPC_PATH.length()) :
-                url;
+        final var root = url.endsWith(A2AProtocol.JSONRPC_PATH)
+                ? url.substring(0, url.length() - A2AProtocol.JSONRPC_PATH.length())
+                : url;
         final var client = new A2AClient(URI.create(root.isEmpty() ? "/" : root), http, jsons);
         client.tenant = selected.tenant();
         if (selected.protocolVersion() != null) {
@@ -186,9 +185,9 @@ public class A2AClient {
      * Fetches the public agent card, i.e. {@code GET /.well-known/agent-card.json}. This is how discovery starts.
      */
     public CompletionStage<AgentCard> agentCard() {
-        return http
-                .sendAsync(
-                        withServiceParameters(HttpRequest.newBuilder(base.resolve(A2AProtocol.AGENT_CARD_PATH)).GET())
+        return http.sendAsync(
+                        withServiceParameters(HttpRequest.newBuilder(base.resolve(A2AProtocol.AGENT_CARD_PATH))
+                                        .GET())
                                 .header("accept", "application/json")
                                 .build(),
                         ofString())
@@ -196,7 +195,8 @@ public class A2AClient {
                     if (response.statusCode() != 200) {
                         throw new A2AClientException(
                                 A2AErrors.INTERNAL_ERROR,
-                                "Can't fetch the agent card: HTTP " + response.statusCode(), List.of());
+                                "Can't fetch the agent card: HTTP " + response.statusCode(),
+                                List.of());
                     }
                     return verified(jsons.fromString(AgentCard.class, response.body()));
                 });
@@ -206,7 +206,8 @@ public class A2AClient {
      * {@code GetExtendedAgentCard}: the card an authenticated caller is entitled to.
      */
     public CompletionStage<AgentCard> extendedAgentCard() {
-        return call(A2AProtocol.GET_EXTENDED_AGENT_CARD, params(), AgentCard.class).thenApply(this::verified);
+        return call(A2AProtocol.GET_EXTENDED_AGENT_CARD, params(), AgentCard.class)
+                .thenApply(this::verified);
     }
 
     /**
@@ -221,7 +222,8 @@ public class A2AClient {
         if (!verifier.verify(card, keys)) {
             throw new A2AClientException(
                     A2AErrors.INTERNAL_ERROR,
-                    "The agent card of '" + card.name() + "' carries no signature this client trusts", List.of());
+                    "The agent card of '" + card.name() + "' carries no signature this client trusts",
+                    List.of());
         }
         return card;
     }
@@ -248,11 +250,9 @@ public class A2AClient {
      * @param onEvent called for every event, on the HTTP client threads, in the order the agent produced them.
      * @return a stage completing when the agent closes the stream, i.e. when the task settled.
      */
-    public CompletionStage<Void> sendStreamingMessage(final SendMessageRequest request,
-                                                      final Consumer<StreamResponse> onEvent) {
-        return stream(
-                jsonRpcRequest(A2AProtocol.SEND_STREAMING_MESSAGE, sendMessageParams(request)),
-                onEvent);
+    public CompletionStage<Void> sendStreamingMessage(
+            final SendMessageRequest request, final Consumer<StreamResponse> onEvent) {
+        return stream(jsonRpcRequest(A2AProtocol.SEND_STREAMING_MESSAGE, sendMessageParams(request)), onEvent);
     }
 
     /**
@@ -292,12 +292,19 @@ public class A2AClient {
      * @param pageSize  how many to get, {@code null} for the agent default.
      * @param pageToken the cursor of a previous call, {@code null} for the first page.
      */
-    public CompletionStage<ListTasksResponse> listTasks(final String contextId, final TaskState status,
-                                                       final Integer pageSize, final String pageToken) {
+    public CompletionStage<ListTasksResponse> listTasks(
+            final String contextId, final TaskState status, final Integer pageSize, final String pageToken) {
         return call(
                 A2AProtocol.LIST_TASKS,
-                params("contextId", contextId, "status", status == null ? null : status.name(),
-                        "pageSize", pageSize, "pageToken", pageToken),
+                params(
+                        "contextId",
+                        contextId,
+                        "status",
+                        status == null ? null : status.name(),
+                        "pageSize",
+                        pageSize,
+                        "pageToken",
+                        pageToken),
                 ListTasksResponse.class);
     }
 
@@ -306,8 +313,8 @@ public class A2AClient {
      */
     public CompletionStage<TaskPushNotificationConfig> createTaskPushNotificationConfig(
             final TaskPushNotificationConfig config) {
-        final var params = params(
-                "id", config.id(), "taskId", config.taskId(), "url", config.url(), "token", config.token());
+        final var params =
+                params("id", config.id(), "taskId", config.taskId(), "url", config.url(), "token", config.token());
         if (config.authentication() != null) {
             params.put("authentication", config.authentication());
         }
@@ -317,17 +324,18 @@ public class A2AClient {
     /**
      * {@code GetTaskPushNotificationConfig}.
      */
-    public CompletionStage<TaskPushNotificationConfig> getTaskPushNotificationConfig(final String taskId, final String id) {
+    public CompletionStage<TaskPushNotificationConfig> getTaskPushNotificationConfig(
+            final String taskId, final String id) {
         return call(A2AProtocol.GET_PUSH_CONFIG, params("taskId", taskId, "id", id), TaskPushNotificationConfig.class);
     }
 
     /**
      * {@code ListTaskPushNotificationConfigs}.
      */
-    public CompletionStage<ListTaskPushNotificationConfigsResponse> listTaskPushNotificationConfigs(final String taskId) {
+    public CompletionStage<ListTaskPushNotificationConfigsResponse> listTaskPushNotificationConfigs(
+            final String taskId) {
         return call(
-                A2AProtocol.LIST_PUSH_CONFIGS, params("taskId", taskId),
-                ListTaskPushNotificationConfigsResponse.class);
+                A2AProtocol.LIST_PUSH_CONFIGS, params("taskId", taskId), ListTaskPushNotificationConfigsResponse.class);
     }
 
     /**
@@ -350,9 +358,9 @@ public class A2AClient {
         final var builder = HttpRequest.newBuilder(base.resolve(A2AProtocol.REST_PATH + path))
                 .method(
                         method,
-                        body == null ?
-                                HttpRequest.BodyPublishers.noBody() :
-                                HttpRequest.BodyPublishers.ofString(jsons.toString(body), UTF_8))
+                        body == null
+                                ? HttpRequest.BodyPublishers.noBody()
+                                : HttpRequest.BodyPublishers.ofString(jsons.toString(body), UTF_8))
                 .header("accept", A2AProtocol.MEDIA_TYPE + ", application/json");
         if (body != null) {
             builder.header("content-type", A2AProtocol.MEDIA_TYPE);
@@ -369,12 +377,13 @@ public class A2AClient {
      * @param onEvent called for every event.
      * @return a stage completing when the agent closes the stream.
      */
-    public CompletionStage<Void> restStreaming(final String path, final Object body,
-                                               final Consumer<StreamResponse> onEvent) {
+    public CompletionStage<Void> restStreaming(
+            final String path, final Object body, final Consumer<StreamResponse> onEvent) {
         final var builder = HttpRequest.newBuilder(base.resolve(A2AProtocol.REST_PATH + path))
-                .POST(body == null ?
-                        HttpRequest.BodyPublishers.noBody() :
-                        HttpRequest.BodyPublishers.ofString(jsons.toString(body), UTF_8))
+                .POST(
+                        body == null
+                                ? HttpRequest.BodyPublishers.noBody()
+                                : HttpRequest.BodyPublishers.ofString(jsons.toString(body), UTF_8))
                 .header("accept", "text/event-stream");
         if (body != null) {
             builder.header("content-type", A2AProtocol.MEDIA_TYPE);
@@ -403,41 +412,39 @@ public class A2AClient {
     public CompletionStage<HttpResponse<String>> rawBody(final String body) {
         return http.sendAsync(
                 withServiceParameters(HttpRequest.newBuilder(base.resolve(A2AProtocol.JSONRPC_PATH))
-                        .POST(HttpRequest.BodyPublishers.ofString(body, UTF_8))
-                        .header("content-type", "application/json")
-                        .header("accept", "application/json, text/event-stream"))
+                                .POST(HttpRequest.BodyPublishers.ofString(body, UTF_8))
+                                .header("content-type", "application/json")
+                                .header("accept", "application/json, text/event-stream"))
                         .build(),
                 ofString());
     }
 
-    private <T> CompletionStage<T> call(final String method, final Map<String, Object> params, final Class<T> resultType) {
-        return http
-                .sendAsync(jsonRpcRequest(method, jsons.toString(params)), ofString())
+    private <T> CompletionStage<T> call(
+            final String method, final Map<String, Object> params, final Class<T> resultType) {
+        return http.sendAsync(jsonRpcRequest(method, jsons.toString(params)), ofString())
                 .thenApply(response -> result(response.body(), resultType));
     }
 
     private CompletionStage<Void> stream(final HttpRequest request, final Consumer<StreamResponse> onEvent) {
         final var subscriber = new StreamSubscriber(jsons, onEvent);
-        return http
-                .sendAsync(request, fromLineSubscriber(subscriber))
-                .thenAccept(response -> {
-                    if (response.statusCode() == 200) {
-                        return;
-                    }
-                    // the agent refused to open the stream and answered an error payload instead
-                    final var body = subscriber.prelude();
-                    if (!body.isBlank()) {
-                        try {
-                            result(body, Object.class);
-                        } catch (final A2AClientException ace) {
-                            throw ace;
-                        } catch (final RuntimeException re) {
-                            // not a payload we can read, fall through to the generic message below
-                        }
-                    }
-                    throw new A2AClientException(
-                            A2AErrors.INTERNAL_ERROR, "Can't open the stream: HTTP " + response.statusCode(), List.of());
-                });
+        return http.sendAsync(request, fromLineSubscriber(subscriber)).thenAccept(response -> {
+            if (response.statusCode() == 200) {
+                return;
+            }
+            // the agent refused to open the stream and answered an error payload instead
+            final var body = subscriber.prelude();
+            if (!body.isBlank()) {
+                try {
+                    result(body, Object.class);
+                } catch (final A2AClientException ace) {
+                    throw ace;
+                } catch (final RuntimeException re) {
+                    // not a payload we can read, fall through to the generic message below
+                }
+            }
+            throw new A2AClientException(
+                    A2AErrors.INTERNAL_ERROR, "Can't open the stream: HTTP " + response.statusCode(), List.of());
+        });
     }
 
     private HttpRequest jsonRpcRequest(final String method, final Map<String, Object> params) {
@@ -446,16 +453,15 @@ public class A2AClient {
 
     private HttpRequest jsonRpcRequest(final String method, final String params) {
         return withServiceParameters(HttpRequest.newBuilder(base.resolve(A2AProtocol.JSONRPC_PATH))
-                .POST(HttpRequest.BodyPublishers.ofString(envelope(method, params), UTF_8))
-                .header("content-type", "application/json")
-                .header("accept", "application/json, text/event-stream"))
+                        .POST(HttpRequest.BodyPublishers.ofString(envelope(method, params), UTF_8))
+                        .header("content-type", "application/json")
+                        .header("accept", "application/json, text/event-stream"))
                 .build();
     }
 
     private String envelope(final String method, final String params) {
         return """
-                {"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}"""
-                .formatted(ids.incrementAndGet(), method, params == null || params.isBlank() ? "{}" : params);
+                {"jsonrpc":"2.0","id":%d,"method":"%s","params":%s}""".formatted(ids.incrementAndGet(), method, params == null || params.isBlank() ? "{}" : params);
     }
 
     /**

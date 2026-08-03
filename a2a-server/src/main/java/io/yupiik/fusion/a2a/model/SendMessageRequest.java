@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -35,7 +34,9 @@ import java.util.Map;
  */
 @JsonModel
 public record SendMessageRequest(
-        @Property(documentation = "The opaque routing identifier of the AgentInterface the client selected.") String tenant,
+        @Property(documentation = "The opaque routing identifier of the AgentInterface the client selected.")
+        String tenant,
+
         @Property(documentation = "The message to process.") Message message,
         @Property(documentation = "How to answer.") SendMessageConfiguration configuration,
         @Property(documentation = "Free form metadata.") Map<String, Object> metadata) {

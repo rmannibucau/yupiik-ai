@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -32,7 +31,11 @@ import java.util.Map;
 @Deprecated
 @JsonModel
 public record ImplicitOAuthFlow(
-        @Property(documentation = "The authorization endpoint.") String authorizationUrl,
-        @Property(documentation = "Where to refresh a token.") String refreshUrl,
-        @Property(documentation = "The available scopes and their description.") Map<String, String> scopes) {
-}
+        @Property(documentation = "The authorization endpoint.")
+        String authorizationUrl,
+
+        @Property(documentation = "Where to refresh a token.")
+        String refreshUrl,
+
+        @Property(documentation = "The available scopes and their description.")
+        Map<String, String> scopes) {}

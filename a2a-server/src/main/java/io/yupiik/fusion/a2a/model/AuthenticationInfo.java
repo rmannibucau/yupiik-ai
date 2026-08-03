@@ -26,8 +26,11 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record AuthenticationInfo(
-        @Property(documentation = "An HTTP authentication scheme from the IANA registry: Bearer, Basic, .") String scheme,
-        @Property(documentation = "The credentials, their format depends on scheme - a token for Bearer.") String credentials) {
+        @Property(documentation = "An HTTP authentication scheme from the IANA registry: Bearer, Basic, .")
+        String scheme,
+
+        @Property(documentation = "The credentials, their format depends on scheme - a token for Bearer.")
+        String credentials) {
     /**
      * @return the value to put in the {@code Authorization} header, {@code null} when there is nothing to send.
      */

@@ -32,8 +32,12 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record SecurityScheme(
-        @Property(documentation = "An API key in a header, a query parameter or a cookie.") APIKeySecurityScheme apiKeySecurityScheme,
-        @Property(documentation = "Plain HTTP authentication: Basic, Bearer, .") HTTPAuthSecurityScheme httpAuthSecurityScheme,
+        @Property(documentation = "An API key in a header, a query parameter or a cookie.")
+        APIKeySecurityScheme apiKeySecurityScheme,
+
+        @Property(documentation = "Plain HTTP authentication: Basic, Bearer, .")
+        HTTPAuthSecurityScheme httpAuthSecurityScheme,
+
         @Property(documentation = "OAuth 2.0.") OAuth2SecurityScheme oauth2SecurityScheme,
         @Property(documentation = "OpenID Connect.") OpenIdConnectSecurityScheme openIdConnectSecurityScheme,
         @Property(documentation = "Mutual TLS.") MutualTlsSecurityScheme mtlsSecurityScheme) {

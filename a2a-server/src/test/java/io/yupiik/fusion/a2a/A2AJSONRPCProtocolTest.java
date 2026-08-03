@@ -15,6 +15,14 @@
  */
 package io.yupiik.fusion.a2a;
 
+import static io.yupiik.fusion.a2a.test.Awaits.await;
+import static io.yupiik.fusion.a2a.test.Bodies.contains;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import io.yupiik.fusion.a2a.client.A2AClient;
 import io.yupiik.fusion.a2a.client.A2AClientException;
 import io.yupiik.fusion.a2a.model.Message;
@@ -27,22 +35,13 @@ import io.yupiik.fusion.a2a.protocol.A2AErrors;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
-import org.junit.jupiter.api.Test;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.List;
 import java.util.UUID;
-
-import static io.yupiik.fusion.a2a.test.Awaits.await;
-import static io.yupiik.fusion.a2a.test.Bodies.contains;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
 
 /**
  * The JSON-RPC binding: the eleven operations, their results and the errors the specification mandates.
@@ -69,7 +68,8 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void sendMessageAnsweringAMessage(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void sendMessageAnsweringAMessage(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var response = await(client.sendMessage("message:no task needed"));
 
@@ -82,14 +82,19 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void returnImmediatelyDoesNotWait(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void returnImmediatelyDoesNotWait(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var response = await(client.sendMessage(new SendMessageRequest(
                 null, Message.user("slow"), new SendMessageConfiguration(null, null, null, true), null)));
 
         final var task = response.task();
-        assertTrue(!task.status().state().isSettled(), () -> "Unexpected state " + task.status().state());
-        assertEquals(TaskState.TASK_STATE_CANCELED, await(client.cancelTask(task.id())).status().state());
+        assertTrue(
+                !task.status().state().isSettled(),
+                () -> "Unexpected state " + task.status().state());
+        assertEquals(
+                TaskState.TASK_STATE_CANCELED,
+                await(client.cancelTask(task.id())).status().state());
     }
 
     @Test
@@ -117,7 +122,8 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void inputRequiredThenContinue(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void inputRequiredThenContinue(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var first = await(client.sendMessage("input:which city?")).task();
 
@@ -126,8 +132,15 @@ class A2AJSONRPCProtocolTest {
 
         // the client answers on the same task, which continues it instead of creating a new one
         final var second = await(client.sendMessage(SendMessageRequest.of(new Message(
-                UUID.randomUUID().toString(), first.contextId(), first.id(), Role.ROLE_USER,
-                List.of(io.yupiik.fusion.a2a.model.Part.text("Paris")), null, null, null)))).task();
+                        UUID.randomUUID().toString(),
+                        first.contextId(),
+                        first.id(),
+                        Role.ROLE_USER,
+                        List.of(io.yupiik.fusion.a2a.model.Part.text("Paris")),
+                        null,
+                        null,
+                        null))))
+                .task();
 
         assertEquals(first.id(), second.id());
         assertEquals(TaskState.TASK_STATE_COMPLETED, second.status().state());
@@ -135,34 +148,50 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void mismatchingContextIsRejected(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void mismatchingContextIsRejected(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var task = await(client.sendMessage("input:more")).task();
 
         final var error = assertThrows(
                 A2AClientException.class,
                 () -> await(client.sendMessage(SendMessageRequest.of(new Message(
-                        UUID.randomUUID().toString(), "another-context", task.id(), Role.ROLE_USER,
-                        List.of(io.yupiik.fusion.a2a.model.Part.text("hi")), null, null, null)))));
+                        UUID.randomUUID().toString(),
+                        "another-context",
+                        task.id(),
+                        Role.ROLE_USER,
+                        List.of(io.yupiik.fusion.a2a.model.Part.text("hi")),
+                        null,
+                        null,
+                        null)))));
         assertEquals(A2AErrors.INVALID_PARAMS, error.code());
     }
 
     @Test
-    void terminalTaskRefusesMoreMessages(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void terminalTaskRefusesMoreMessages(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var task = await(client.sendMessage("hello")).task();
 
         final var error = assertThrows(
                 A2AClientException.class,
                 () -> await(client.sendMessage(SendMessageRequest.of(new Message(
-                        UUID.randomUUID().toString(), task.contextId(), task.id(), Role.ROLE_USER,
-                        List.of(io.yupiik.fusion.a2a.model.Part.text("more")), null, null, null)))));
+                        UUID.randomUUID().toString(),
+                        task.contextId(),
+                        task.id(),
+                        Role.ROLE_USER,
+                        List.of(io.yupiik.fusion.a2a.model.Part.text("more")),
+                        null,
+                        null,
+                        null)))));
         assertEquals(A2AErrors.UNSUPPORTED_OPERATION, error.code());
     }
 
     @Test
-    void failingExecutorFailsTheTask(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
-        final var task = await(new A2AClient(agent, http, jsons).sendMessage("fail:the backend is down")).task();
+    void failingExecutorFailsTheTask(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+        final var task = await(new A2AClient(agent, http, jsons).sendMessage("fail:the backend is down"))
+                .task();
 
         // an exception is not a protocol error: the caller gets a task it can read the reason from
         assertEquals(TaskState.TASK_STATE_FAILED, task.status().state());
@@ -170,7 +199,8 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void messageWithoutPartIsInvalid(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void messageWithoutPartIsInvalid(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var response = await(new A2AClient(agent, http, jsons).raw("SendMessage", """
                 {"message": {"messageId": "m-1", "role": "ROLE_USER", "parts": []}}"""));
 
@@ -183,8 +213,14 @@ class A2AJSONRPCProtocolTest {
         final var context = "list-" + UUID.randomUUID();
         for (int i = 0; i < 3; i++) {
             await(client.sendMessage(SendMessageRequest.of(new Message(
-                    UUID.randomUUID().toString(), context, null, Role.ROLE_USER,
-                    List.of(io.yupiik.fusion.a2a.model.Part.text("task-" + i)), null, null, null))));
+                    UUID.randomUUID().toString(),
+                    context,
+                    null,
+                    Role.ROLE_USER,
+                    List.of(io.yupiik.fusion.a2a.model.Part.text("task-" + i)),
+                    null,
+                    null,
+                    null))));
         }
 
         final var all = await(client.listTasks(context, null, null, null));
@@ -202,8 +238,30 @@ class A2AJSONRPCProtocolTest {
         assertEquals(1, secondPage.tasks().size());
         assertEquals("", secondPage.nextPageToken());
 
-        assertEquals(3, await(client.listTasks(context, TaskState.TASK_STATE_COMPLETED, null, null)).totalSize());
-        assertEquals(0, await(client.listTasks(context, TaskState.TASK_STATE_WORKING, null, null)).totalSize());
+        assertEquals(
+                3,
+                await(client.listTasks(context, TaskState.TASK_STATE_COMPLETED, null, null))
+                        .totalSize());
+        assertEquals(
+                0,
+                await(client.listTasks(context, TaskState.TASK_STATE_WORKING, null, null))
+                        .totalSize());
+    }
+
+    @Test
+    void listTasksRejectsAStatusWhichIsNotATaskState(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+        final var client = new A2AClient(agent, http, jsons);
+
+        final var response = await(client.raw("ListTasks", "{\"status\": \"RUNNING\"}"));
+        contains(response.body(), "\"code\":-32602", "\"field\":\"status\"", "TASK_STATE_*");
+
+        // a blank one is not a filter, so it is not a failure either
+        contains(await(client.raw("ListTasks", "{\"status\": \"  \"}")).body(), "\"result\"");
+        contains(
+                await(client.raw("ListTasks", "{\"status\": \"TASK_STATE_WORKING\"}"))
+                        .body(),
+                "\"result\"");
     }
 
     @Test
@@ -216,7 +274,8 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void pushNotificationConfigs(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void pushNotificationConfigs(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
         final var task = await(client.sendMessage("input:waiting")).task();
 
@@ -226,10 +285,14 @@ class A2AJSONRPCProtocolTest {
         assertEquals(task.id(), created.taskId());
 
         assertEquals(created, await(client.getTaskPushNotificationConfig(task.id(), created.id())));
-        assertEquals(List.of(created), await(client.listTaskPushNotificationConfigs(task.id())).configs());
+        assertEquals(
+                List.of(created),
+                await(client.listTaskPushNotificationConfigs(task.id())).configs());
 
         await(client.deleteTaskPushNotificationConfig(task.id(), created.id()));
-        assertEquals(List.of(), await(client.listTaskPushNotificationConfigs(task.id())).configs());
+        assertEquals(
+                List.of(),
+                await(client.listTaskPushNotificationConfigs(task.id())).configs());
 
         // deleting twice is fine, the operation is idempotent
         await(client.deleteTaskPushNotificationConfig(task.id(), created.id()));
@@ -245,7 +308,8 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void missingVersionMeansZeroThree(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void missingVersionMeansZeroThree(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         // section 3.6.2: "Agents MUST interpret empty value as 0.3 version", which this agent does not serve
         final var client = new A2AClient(agent, http, jsons).version(null);
 
@@ -268,7 +332,8 @@ class A2AJSONRPCProtocolTest {
     }
 
     @Test
-    void streamingCannotBeBatched(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void streamingCannotBeBatched(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var response = await(new A2AClient(agent, http, jsons).rawBody("""
                 [
                   {"jsonrpc": "2.0", "id": 1, "method": "GetTask", "params": {"id": "x"}},
@@ -293,16 +358,22 @@ class A2AJSONRPCProtocolTest {
         final var error = assertThrows(
                 A2AClientException.class,
                 () -> await(client.sendMessage(new SendMessageRequest(
-                        null, Message.user("hello"),
-                        new SendMessageConfiguration(List.of("image/png"), null, null, false), null))));
+                        null,
+                        Message.user("hello"),
+                        new SendMessageConfiguration(List.of("image/png"), null, null, false),
+                        null))));
         assertEquals(A2AErrors.CONTENT_TYPE_NOT_SUPPORTED, error.code());
     }
 
     @Test
-    void wildcardOutputModeIsAccepted(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
-        final var response = await(new A2AClient(agent, http, jsons).sendMessage(new SendMessageRequest(
-                null, Message.user("hello"),
-                new SendMessageConfiguration(List.of("text/*"), null, null, false), null)));
+    void wildcardOutputModeIsAccepted(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+        final var response = await(new A2AClient(agent, http, jsons)
+                .sendMessage(new SendMessageRequest(
+                        null,
+                        Message.user("hello"),
+                        new SendMessageConfiguration(List.of("text/*"), null, null, false),
+                        null)));
 
         assertEquals(TaskState.TASK_STATE_COMPLETED, response.task().status().state());
     }
@@ -310,8 +381,8 @@ class A2AJSONRPCProtocolTest {
     /**
      * The client always sends the header, so the version service parameter is exercised with a hand built request.
      */
-    private static HttpResponse<String> jsonRpc(final HttpClient http, final URI agent, final String query,
-                                                final String versionHeader) throws Exception {
+    private static HttpResponse<String> jsonRpc(
+            final HttpClient http, final URI agent, final String query, final String versionHeader) throws Exception {
         final var builder = HttpRequest.newBuilder(agent.resolve("/a2a" + query))
                 .POST(HttpRequest.BodyPublishers.ofString("""
                         {"jsonrpc": "2.0", "id": 1, "method": "ListTasks", "params": {}}"""))

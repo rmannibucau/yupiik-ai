@@ -15,10 +15,10 @@
  */
 package io.yupiik.fusion.a2a.configuration;
 
+import static io.yupiik.fusion.a2a.protocol.A2AProtocol.JSONRPC_PATH;
+
 import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
-
-import static io.yupiik.fusion.a2a.protocol.A2AProtocol.JSONRPC_PATH;
 
 /**
  * Binds the Fusion JSON-RPC endpoint on {@code /a2a}, i.e. makes the A2A endpoint the default JSON-RPC one instead of

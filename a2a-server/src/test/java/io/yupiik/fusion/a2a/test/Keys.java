@@ -16,7 +16,6 @@
 package io.yupiik.fusion.a2a.test;
 
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -64,9 +63,11 @@ public final class Keys {
      * @return the path of the PKCS#8 PEM file, i.e. what {@code fusion.a2a.signatureKey} points at.
      */
     public static String writePem(final Path work, final KeyPair keys) throws IOException {
-        final var pem = "-----BEGIN " + PEM_LABEL + "-----\n" +
-                Base64.getMimeEncoder(64, new byte[]{'\n'}).encodeToString(keys.getPrivate().getEncoded()) +
-                "\n-----END " + PEM_LABEL + "-----\n";
+        final var pem = "-----BEGIN " + PEM_LABEL + "-----\n"
+                + Base64.getMimeEncoder(64, new byte[] {'\n'})
+                        .encodeToString(keys.getPrivate().getEncoded())
+                + "\n-----END "
+                + PEM_LABEL + "-----\n";
         final var file = work.resolve("signing-key.pem");
         Files.writeString(file, pem);
         return file.toString();
@@ -95,15 +96,31 @@ public final class Keys {
     /**
      * @param publicUrl the base url to advertise, {@code null} to assert what happens without one.
      */
-    public static A2AConfiguration configuration(final String signatureKey, final String signatureAlgorithm,
-                                                 final String publicUrl) {
+    public static A2AConfiguration configuration(
+            final String signatureKey, final String signatureAlgorithm, final String publicUrl) {
         return new A2AConfiguration(
-                "signed-agent", "An agent whose card is signed.", "1.0.0",
-                null, null, null, null,
-                "text/plain", "text/plain",
-                publicUrl, null,
-                true, true, false, true,
-                300, 1800, 30, 300,
-                signatureKey, signatureAlgorithm, null, null);
+                "signed-agent",
+                "An agent whose card is signed.",
+                "1.0.0",
+                null,
+                null,
+                null,
+                null,
+                "text/plain",
+                "text/plain",
+                publicUrl,
+                null,
+                true,
+                true,
+                false,
+                true,
+                "PT5M",
+                "PT30M",
+                "PT30S",
+                300,
+                signatureKey,
+                signatureAlgorithm,
+                null,
+                null);
     }
 }

@@ -124,8 +124,8 @@ the executor does not. It is idempotent on a running task and answers `TaskNotCa
 
 == Retention
 
-Tasks live in memory and are dropped once they have not been touched for `fusion.a2a.taskRetention` seconds - 30 minutes
-by default, `0` keeps them forever. The eviction runs when a task is created, so no background thread is needed, which
+Tasks live in memory and are dropped once they have not been touched for `fusion.a2a.taskRetention` - `PT30M` by
+default, `0` keeps them forever. The eviction runs when a task is created, so no background thread is needed, which
 keeps a native image simple.
 
 A dropped task answers `TaskNotFoundError`, which the specification explicitly allows: "it might be invalid, expired, or

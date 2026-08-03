@@ -15,13 +15,14 @@
  */
 package io.yupiik.fusion.a2a.protocol;
 
-import io.yupiik.fusion.http.server.api.Request;
+import static java.nio.charset.StandardCharsets.UTF_8;
 
+import io.yupiik.fusion.http.server.api.Request;
 import java.net.URLDecoder;
 import java.util.List;
 import java.util.Set;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutionException;
 
 /**
  * The A2A protocol constants: version, paths, service parameters and method names.
@@ -134,6 +135,57 @@ public final class A2AProtocol {
      */
     public static boolean isSupported(final String version) {
         return SUPPORTED_VERSIONS.contains(resolve(version));
+    }
+
+    /**
+     * Unwraps a failure carried by a {@code CompletionStage}.
+     * <p>
+     * What a stage hands to a callback is the envelope, not the failure: reporting it as is would tell a caller a
+     * {@code CompletionException} occurred and nothing about why.
+     *
+     * @param error the failure a stage reported.
+     * @return what actually failed: the cause when {@code error} is only an envelope around it, else {@code error}
+     * itself - a wrapper with no cause says nothing, and an exception which merely <em>has</em> a cause is the failure.
+     */
+    public static Throwable unwrap(final Throwable error) {
+        return (error instanceof CompletionException || error instanceof ExecutionException) && error.getCause() != null
+                ? error.getCause()
+                : error;
+    }
+
+    /**
+     * @param method the {@code method} member of a JSON-RPC request, it can be {@code null} - a request is not
+     *               guaranteed to carry one, and {@link #STREAMING_METHODS} is an immutable set which refuses a
+     *               {@code null} lookup.
+     * @return {@code true} when {@code method} answers a {@code text/event-stream} instead of a JSON body.
+     */
+    public static boolean isStreaming(final Object method) {
+        return method != null && STREAMING_METHODS.contains(method);
+    }
+
+    /**
+     * Whether a request carries a payload at all.
+     * <p>
+     * Reading the body of a request which has none never completes, so this is what the bindings have to decide on before
+     * asking for it - the headers, and not the body itself.
+     *
+     * @param request the current request.
+     * @return {@code true} when there is a body to read.
+     */
+    public static boolean hasBody(final Request request) {
+        final var transferEncoding = request.header("transfer-encoding");
+        if (transferEncoding != null && !transferEncoding.isBlank()) {
+            return true;
+        }
+        final var length = request.header("content-length");
+        if (length == null || length.isBlank()) {
+            return false;
+        }
+        try {
+            return Long.parseLong(length.strip()) > 0;
+        } catch (final NumberFormatException nfe) {
+            return false;
+        }
     }
 
     /**

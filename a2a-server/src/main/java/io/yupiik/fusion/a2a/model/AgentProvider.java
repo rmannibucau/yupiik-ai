@@ -26,6 +26,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record AgentProvider(
-        @Property(documentation = "The provider website or documentation.") String url,
-        @Property(documentation = "The provider name.") String organization) {
-}
+        @Property(documentation = "The provider website or documentation.")
+        String url,
+
+        @Property(documentation = "The provider name.") String organization) {}

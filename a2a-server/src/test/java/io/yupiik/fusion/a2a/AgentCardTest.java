@@ -15,6 +15,12 @@
  */
 package io.yupiik.fusion.a2a;
 
+import static io.yupiik.fusion.a2a.test.Awaits.await;
+import static io.yupiik.fusion.testing.assertion.JsonAsserts.assertJsonEquals;
+import static java.net.http.HttpResponse.BodyHandlers.ofString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import io.yupiik.fusion.a2a.client.A2AClient;
 import io.yupiik.fusion.a2a.client.A2AClientException;
 import io.yupiik.fusion.a2a.model.AgentInterface;
@@ -23,18 +29,11 @@ import io.yupiik.fusion.a2a.protocol.A2AProtocol;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
-import org.junit.jupiter.api.Test;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.util.List;
-
-import static io.yupiik.fusion.a2a.test.Awaits.await;
-import static io.yupiik.fusion.testing.assertion.JsonAsserts.assertJsonEquals;
-import static java.net.http.HttpResponse.BodyHandlers.ofString;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
 
 /**
  * Agent discovery: the card published on the well-known path, its caching headers and the extended one.
@@ -64,7 +63,10 @@ class AgentCardTest {
     @Test
     void cardIsSpecCompliantJson(@Fusion final URI agent, @Fusion final HttpClient http) throws Exception {
         final var response = http.send(
-                HttpRequest.newBuilder(agent.resolve(A2AProtocol.AGENT_CARD_PATH)).GET().build(), ofString());
+                HttpRequest.newBuilder(agent.resolve(A2AProtocol.AGENT_CARD_PATH))
+                        .GET()
+                        .build(),
+                ofString());
 
         assertEquals(200, response.statusCode());
         assertJsonEquals("""
@@ -92,18 +94,21 @@ class AgentCardTest {
                             }
                           ],
                           "version": "1.0.0"
-                        }""",
-                response.body());
+                        }""", response.body());
     }
 
     @Test
     void caching(@Fusion final URI agent, @Fusion final HttpClient http) throws Exception {
         final var first = http.send(
-                HttpRequest.newBuilder(agent.resolve(A2AProtocol.AGENT_CARD_PATH)).GET().build(), ofString());
+                HttpRequest.newBuilder(agent.resolve(A2AProtocol.AGENT_CARD_PATH))
+                        .GET()
+                        .build(),
+                ofString());
         final var etag = first.headers().firstValue("etag").orElseThrow();
 
         assertEquals("\"1.0.0\"", etag);
-        assertTrue(first.headers().firstValue("cache-control").orElseThrow().contains("max-age="),
+        assertTrue(
+                first.headers().firstValue("cache-control").orElseThrow().contains("max-age="),
                 first.headers().map().toString());
 
         final var revalidated = http.send(
@@ -116,7 +121,8 @@ class AgentCardTest {
     }
 
     @Test
-    void clientCanBeBuiltFromTheCard(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void clientCanBeBuiltFromTheCard(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var discovered = A2AClient.of(await(new A2AClient(agent, http, jsons).agentCard()), http, jsons);
 
         // the interface declares no tenant so nothing has to be echoed
@@ -124,7 +130,8 @@ class AgentCardTest {
     }
 
     @Test
-    void extendedCardIsNotSupported(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void extendedCardIsNotSupported(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
 
         // the capability is disabled, so it is UnsupportedOperationError and not a missing configuration

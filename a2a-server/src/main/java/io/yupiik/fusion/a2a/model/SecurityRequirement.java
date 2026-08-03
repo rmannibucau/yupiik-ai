@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -28,7 +27,9 @@ import java.util.Map;
  * @param schemes the required {@link AgentCard#securitySchemes()} names and, for each, the required scopes.
  */
 @JsonModel
-public record SecurityRequirement(@Property(documentation = "The required AgentCard#securitySchemes() names and, for each, the required scopes.") Map<String, StringList> schemes) {
+public record SecurityRequirement(
+        @Property(documentation = "The required AgentCard#securitySchemes() names and, for each, the required scopes.")
+        Map<String, StringList> schemes) {
     public static SecurityRequirement of(final String scheme, final String... scopes) {
         return new SecurityRequirement(Map.of(scheme, StringList.of(scopes)));
     }

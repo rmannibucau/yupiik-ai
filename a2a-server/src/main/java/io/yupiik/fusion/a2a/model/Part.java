@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Base64;
 import java.util.Map;
 
@@ -38,12 +37,24 @@ import java.util.Map;
 @JsonModel
 public record Part(
         @Property(documentation = "The textual content.") String text,
-        @Property(documentation = "The inline file content, base64 encoded.") String raw,
-        @Property(documentation = "Where the file content can be fetched.") String url,
-        @Property(documentation = "An arbitrary JSON value: an object (Map), an array (List) or a scalar.") Object data,
-        @Property(documentation = "Free form metadata about this part.") Map<String, Object> metadata,
-        @Property(documentation = "The file name when the part carries a file, report.pdf for example.") String filename,
-        @Property(documentation = "The media type of the content, it is meaningful for all the branches.") String mediaType) {
+
+        @Property(documentation = "The inline file content, base64 encoded.")
+        String raw,
+
+        @Property(documentation = "Where the file content can be fetched.")
+        String url,
+
+        @Property(documentation = "An arbitrary JSON value: an object (Map), an array (List) or a scalar.")
+        Object data,
+
+        @Property(documentation = "Free form metadata about this part.")
+        Map<String, Object> metadata,
+
+        @Property(documentation = "The file name when the part carries a file, report.pdf for example.")
+        String filename,
+
+        @Property(documentation = "The media type of the content, it is meaningful for all the branches.")
+        String mediaType) {
     /**
      * @param text the content.
      * @return a {@code text/plain} text part.

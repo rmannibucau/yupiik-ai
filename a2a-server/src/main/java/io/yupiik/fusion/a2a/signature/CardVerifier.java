@@ -15,18 +15,17 @@
  */
 package io.yupiik.fusion.a2a.signature;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.model.AgentCardSignature;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.security.GeneralSecurityException;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.util.Map;
 import java.util.function.Function;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Verifies the JWS signatures of an {@link AgentCard}, i.e. the client side of section 8.4.
@@ -85,8 +84,8 @@ public class CardVerifier {
         return true;
     }
 
-    protected boolean verify(final AgentCardSignature signature, final String payload,
-                             final Function<String, PublicKey> keys) {
+    protected boolean verify(
+            final AgentCardSignature signature, final String payload, final Function<String, PublicKey> keys) {
         if (signature.protectedHeader() == null || signature.signature() == null) {
             return false;
         }
@@ -110,7 +109,8 @@ public class CardVerifier {
     protected Map<String, Object> header(final AgentCardSignature signature) {
         final var json = new String(jws.fromBase64Url(signature.protectedHeader()), UTF_8);
         if (jsons.fromString(Object.class, json) instanceof Map<?, ?> map) {
-            @SuppressWarnings("unchecked") final var header = (Map<String, Object>) map;
+            @SuppressWarnings("unchecked")
+            final var header = (Map<String, Object>) map;
             return header;
         }
         throw new IllegalArgumentException("The JWS protected header must be a JSON object, got " + json);

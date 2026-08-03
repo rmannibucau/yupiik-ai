@@ -18,7 +18,6 @@ package io.yupiik.fusion.a2a.api;
 import io.yupiik.fusion.a2a.model.Message;
 import io.yupiik.fusion.a2a.model.SendMessageConfiguration;
 import io.yupiik.fusion.http.server.api.Request;
-
 import java.util.List;
 import java.util.Map;
 
@@ -46,8 +45,7 @@ public record AgentRequest(
         String taskId,
         boolean continuation,
         List<String> activatedExtensions,
-        Request httpRequest
-) {
+        Request httpRequest) {
     /**
      * Metadata key the built-in router reads to know which {@link A2ASkill} to invoke.
      */
@@ -85,9 +83,9 @@ public record AgentRequest(
      * @return the media types the client can handle, an empty list when it did not restrict them.
      */
     public List<String> acceptedOutputModes() {
-        return configuration == null || configuration.acceptedOutputModes() == null ?
-                List.of() :
-                configuration.acceptedOutputModes();
+        return configuration == null || configuration.acceptedOutputModes() == null
+                ? List.of()
+                : configuration.acceptedOutputModes();
     }
 
     /**

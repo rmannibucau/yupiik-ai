@@ -19,7 +19,6 @@ import io.yupiik.fusion.a2a.model.JsonRpcStreamMessage;
 import io.yupiik.fusion.a2a.model.StreamResponse;
 import io.yupiik.fusion.a2a.model.Task;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**

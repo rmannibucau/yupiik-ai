@@ -77,8 +77,10 @@ public enum TaskState {
      * @return {@code true} when the task reached its end: it accepts no more message and any stream must be closed.
      */
     public boolean isTerminal() {
-        return this == TASK_STATE_COMPLETED || this == TASK_STATE_FAILED ||
-                this == TASK_STATE_CANCELED || this == TASK_STATE_REJECTED;
+        return this == TASK_STATE_COMPLETED
+                || this == TASK_STATE_FAILED
+                || this == TASK_STATE_CANCELED
+                || this == TASK_STATE_REJECTED;
     }
 
     /**

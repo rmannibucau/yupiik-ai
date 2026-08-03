@@ -15,6 +15,8 @@
  */
 package io.yupiik.fusion.a2a.service;
 
+import static java.util.logging.Level.FINE;
+
 import io.yupiik.fusion.a2a.api.TaskUpdater;
 import io.yupiik.fusion.a2a.model.A2ATimestamps;
 import io.yupiik.fusion.a2a.model.Artifact;
@@ -28,13 +30,10 @@ import io.yupiik.fusion.a2a.model.TaskState;
 import io.yupiik.fusion.a2a.model.TaskStatus;
 import io.yupiik.fusion.a2a.model.TaskStatusUpdateEvent;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
-
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
-
-import static java.util.logging.Level.FINE;
 
 /**
  * The {@link TaskUpdater} implementation: it mutates a {@link A2ATask}, publishes the matching event to the open
@@ -61,8 +60,12 @@ public class DefaultTaskUpdater implements TaskUpdater {
      * @param continuation {@code false} when the task was created for this very turn, i.e. when it can still be
      *                     discarded in favor of a direct message answer.
      */
-    public DefaultTaskUpdater(final A2ATask task, final A2ATasks tasks, final PushNotifier push,
-                              final A2ATask.Turn turn, final boolean continuation) {
+    public DefaultTaskUpdater(
+            final A2ATask task,
+            final A2ATasks tasks,
+            final PushNotifier push,
+            final A2ATask.Turn turn,
+            final boolean continuation) {
         this.task = task;
         this.tasks = tasks;
         this.push = push;
@@ -100,13 +103,13 @@ public class DefaultTaskUpdater implements TaskUpdater {
     @Override
     public void respond(final Message message) {
         if (!transitioned.compareAndSet(false, true)) {
-            throw new IllegalStateException(
-                    "respond(Message) is only valid before any other transition, task '" + task.id() + "' already moved to " +
-                            task.status().state());
+            throw new IllegalStateException("respond(Message) is only valid before any other transition, task '"
+                    + task.id() + "' already moved to " + task.status().state());
         }
         // a task created for this turn only never surfaced, so the client gets a plain message - not even bound to a
         // task id - and nothing is left behind
-        final var answer = continuation ? asAgentMessage(message) : asAgentMessage(message).boundTo(task.contextId(), null);
+        final var answer =
+                continuation ? asAgentMessage(message) : asAgentMessage(message).boundTo(task.contextId(), null);
         if (continuation) {
             task.addMessage(answer);
         } else {
@@ -138,11 +141,13 @@ public class DefaultTaskUpdater implements TaskUpdater {
         if (artifact == null) {
             return;
         }
-        final var identified = artifact.artifactId() == null ? artifact.withId(UUID.randomUUID().toString()) : artifact;
+        final var identified = artifact.artifactId() == null
+                ? artifact.withId(UUID.randomUUID().toString())
+                : artifact;
         transitioned.set(true);
         task.putArtifact(identified, append);
-        publish(StreamResponse.of(new TaskArtifactUpdateEvent(
-                task.id(), task.contextId(), identified, append, lastChunk, null)));
+        publish(StreamResponse.of(
+                new TaskArtifactUpdateEvent(task.id(), task.contextId(), identified, append, lastChunk, null)));
     }
 
     @Override
@@ -196,8 +201,10 @@ public class DefaultTaskUpdater implements TaskUpdater {
         if (isDone()) {
             // a task which reached a terminal state must not move again, else a client would see events after the
             // stream closed - an interrupted one is resumable, it is what a new turn does
-            logger.log(FINE, () -> "Ignoring the transition of task '" + task.id() + "' to " + state +
-                    ", it is already " + task.status().state());
+            logger.log(
+                    FINE,
+                    () -> "Ignoring the transition of task '" + task.id() + "' to " + state + ", it is already "
+                            + task.status().state());
             return;
         }
         transitioned.set(true);
@@ -238,12 +245,17 @@ public class DefaultTaskUpdater implements TaskUpdater {
     }
 
     private Message asAgentMessage(final Message message) {
-        final var withRole = message.role() == Role.ROLE_AGENT ?
-                message :
-                new Message(
-                        message.messageId(), message.contextId(), message.taskId(), Role.ROLE_AGENT,
+        final var withRole = message.role() == Role.ROLE_AGENT
+                ? message
+                : new Message(
+                        message.messageId(),
+                        message.contextId(),
+                        message.taskId(),
+                        Role.ROLE_AGENT,
                         message.parts() == null ? List.of() : message.parts(),
-                        message.metadata(), message.extensions(), message.referenceTaskIds());
+                        message.metadata(),
+                        message.extensions(),
+                        message.referenceTaskIds());
         return withRole.boundTo(task.contextId(), task.id());
     }
 }

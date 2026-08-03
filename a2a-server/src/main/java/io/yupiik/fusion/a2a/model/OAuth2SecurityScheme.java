@@ -27,7 +27,10 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record OAuth2SecurityScheme(
-        @Property(documentation = "An optional description.") String description,
+        @Property(documentation = "An optional description.")
+        String description,
+
         @Property(documentation = "The supported flows.") OAuthFlows flows,
-        @Property(documentation = "The RFC 8414 authorization server metadata URL.") String oauth2MetadataUrl) {
-}
+
+        @Property(documentation = "The RFC 8414 authorization server metadata URL.")
+        String oauth2MetadataUrl) {}

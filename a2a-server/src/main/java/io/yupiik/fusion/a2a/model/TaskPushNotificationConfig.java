@@ -36,12 +36,27 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record TaskPushNotificationConfig(
-        @Property(documentation = "The opaque routing identifier of the AgentInterface the client selected.") String tenant,
-        @Property(documentation = "The configuration identifier, the server generates one when it is not provided.") String id,
-        @Property(documentation = "The task to watch, it is unset when the configuration is passed in SendMessageConfiguration#taskPushNotificationConfig().") String taskId,
-        @Property(documentation = "Where to POST the events.") String url,
-        @Property(documentation = "An opaque token echoed in the X-A2A-Notification-Token header so the receiver can check the notification is the one it asked for.") String token,
-        @Property(documentation = "How to authenticate the call.") AuthenticationInfo authentication) {
+        @Property(documentation = "The opaque routing identifier of the AgentInterface the client selected.")
+        String tenant,
+
+        @Property(documentation = "The configuration identifier, the server generates one when it is not provided.")
+        String id,
+
+        @Property(
+                documentation =
+                        "The task to watch, it is unset when the configuration is passed in SendMessageConfiguration#taskPushNotificationConfig().")
+        String taskId,
+
+        @Property(documentation = "Where to POST the events.")
+        String url,
+
+        @Property(
+                documentation =
+                        "An opaque token echoed in the X-A2A-Notification-Token header so the receiver can check the notification is the one it asked for.")
+        String token,
+
+        @Property(documentation = "How to authenticate the call.")
+        AuthenticationInfo authentication) {
     public static TaskPushNotificationConfig of(final String url) {
         return new TaskPushNotificationConfig(null, null, null, url, null, null);
     }

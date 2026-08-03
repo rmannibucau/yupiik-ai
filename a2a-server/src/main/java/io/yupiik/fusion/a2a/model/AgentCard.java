@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 import java.util.Map;
 
@@ -47,19 +46,44 @@ import java.util.Map;
  */
 @JsonModel
 public record AgentCard(
-        @Property(documentation = "A human readable agent name.") String name,
-        @Property(documentation = "What the agent does, this is what another agent reads to decide to delegate to it.") String description,
-        @Property(documentation = "The endpoints the agent answers on, ordered by preference - the first one is preferred.") List<AgentInterface> supportedInterfaces,
+        @Property(documentation = "A human readable agent name.")
+        String name,
+
+        @Property(documentation = "What the agent does, this is what another agent reads to decide to delegate to it.")
+        String description,
+
+        @Property(
+                documentation =
+                        "The endpoints the agent answers on, ordered by preference - the first one is preferred.")
+        List<AgentInterface> supportedInterfaces,
+
         @Property(documentation = "Who runs the agent.") AgentProvider provider,
-        @Property(documentation = "The agent version, it is also used as the ETag of the card.") String version,
+
+        @Property(documentation = "The agent version, it is also used as the ETag of the card.")
+        String version,
+
         @Property(documentation = "Where to read more.") String documentationUrl,
-        @Property(documentation = "The optional features the agent supports.") AgentCapabilities capabilities,
-        @Property(documentation = "The authentication schemes by name.") Map<String, SecurityScheme> securitySchemes,
-        @Property(documentation = "Which schemes - and scopes - are needed to contact the agent.") List<SecurityRequirement> securityRequirements,
-        @Property(documentation = "The media types the agent accepts, they can be overridden per skill.") List<String> defaultInputModes,
-        @Property(documentation = "The media types the agent produces, they can be overridden per skill.") List<String> defaultOutputModes,
+
+        @Property(documentation = "The optional features the agent supports.")
+        AgentCapabilities capabilities,
+
+        @Property(documentation = "The authentication schemes by name.")
+        Map<String, SecurityScheme> securitySchemes,
+
+        @Property(documentation = "Which schemes - and scopes - are needed to contact the agent.")
+        List<SecurityRequirement> securityRequirements,
+
+        @Property(documentation = "The media types the agent accepts, they can be overridden per skill.")
+        List<String> defaultInputModes,
+
+        @Property(documentation = "The media types the agent produces, they can be overridden per skill.")
+        List<String> defaultOutputModes,
+
         @Property(documentation = "What the agent can do.") List<AgentSkill> skills,
-        @Property(documentation = "The JWS signatures of this card, if any.") List<AgentCardSignature> signatures,
+
+        @Property(documentation = "The JWS signatures of this card, if any.")
+        List<AgentCardSignature> signatures,
+
         @Property(documentation = "An icon for the agent.") String iconUrl) {
     /**
      * @param supportedInterfaces the interfaces to advertise.
@@ -68,8 +92,20 @@ public record AgentCard(
      */
     public AgentCard withInterfaces(final List<AgentInterface> supportedInterfaces) {
         return new AgentCard(
-                name, description, supportedInterfaces, provider, version, documentationUrl, capabilities,
-                securitySchemes, securityRequirements, defaultInputModes, defaultOutputModes, skills, signatures, iconUrl);
+                name,
+                description,
+                supportedInterfaces,
+                provider,
+                version,
+                documentationUrl,
+                capabilities,
+                securitySchemes,
+                securityRequirements,
+                defaultInputModes,
+                defaultOutputModes,
+                skills,
+                signatures,
+                iconUrl);
     }
 
     /**
@@ -78,7 +114,19 @@ public record AgentCard(
      */
     public AgentCard withSkills(final List<AgentSkill> skills) {
         return new AgentCard(
-                name, description, supportedInterfaces, provider, version, documentationUrl, capabilities,
-                securitySchemes, securityRequirements, defaultInputModes, defaultOutputModes, skills, signatures, iconUrl);
+                name,
+                description,
+                supportedInterfaces,
+                provider,
+                version,
+                documentationUrl,
+                capabilities,
+                securitySchemes,
+                securityRequirements,
+                defaultInputModes,
+                defaultOutputModes,
+                skills,
+                signatures,
+                iconUrl);
     }
 }

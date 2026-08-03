@@ -15,14 +15,17 @@
  */
 package io.yupiik.fusion.a2a.service;
 
+import static java.util.Optional.ofNullable;
+import static java.util.logging.Level.FINE;
+
 import io.yupiik.fusion.a2a.api.TaskUpdater;
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
+import io.yupiik.fusion.a2a.configuration.A2ADurations;
 import io.yupiik.fusion.a2a.protocol.A2AErrors;
 import io.yupiik.fusion.a2a.protocol.A2AStream;
 import io.yupiik.fusion.a2a.protocol.SseBus;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
-
 import java.time.Duration;
 import java.util.Collection;
 import java.util.Map;
@@ -31,9 +34,6 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.logging.Logger;
-
-import static java.util.Optional.ofNullable;
-import static java.util.logging.Level.FINE;
 
 /**
  * Holds the live {@link A2ATask}s.
@@ -48,6 +48,11 @@ import static java.util.logging.Level.FINE;
  */
 @ApplicationScoped
 public class A2ATasks {
+    /**
+     * What {@code fusion.a2a.taskRetention} means when it is unset.
+     */
+    private static final Duration DEFAULT_RETENTION = Duration.ofSeconds(1800);
+
     private final Logger logger = Logger.getLogger(A2ATasks.class.getName());
 
     private final Map<String, A2ATask> tasks = new ConcurrentHashMap<>();
@@ -60,7 +65,10 @@ public class A2ATasks {
 
     public A2ATasks(final PushNotifier push, final A2AConfiguration configuration) {
         this.push = push;
-        this.retention = Duration.ofSeconds(configuration == null ? 1800 : configuration.taskRetention());
+        // not floored to anything: zero - and a negative - means "keep them forever", see evictExpired
+        this.retention = configuration == null
+                ? DEFAULT_RETENTION
+                : A2ADurations.parse(configuration.taskRetention(), DEFAULT_RETENTION);
     }
 
     /**

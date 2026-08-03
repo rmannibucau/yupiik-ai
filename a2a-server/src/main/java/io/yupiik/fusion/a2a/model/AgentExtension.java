@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.Map;
 
 /**
@@ -33,10 +32,16 @@ import java.util.Map;
  */
 @JsonModel
 public record AgentExtension(
-        @Property(documentation = "The extension identifier.") String uri,
+        @Property(documentation = "The extension identifier.")
+        String uri,
+
         @Property(documentation = "How this agent uses it.") String description,
-        @Property(documentation = "When true a client must declare it to be served.") boolean required,
-        @Property(documentation = "Extension specific configuration.") Map<String, Object> params) {
+
+        @Property(documentation = "When true a client must declare it to be served.")
+        boolean required,
+
+        @Property(documentation = "Extension specific configuration.")
+        Map<String, Object> params) {
     public static AgentExtension of(final String uri, final String description, final boolean required) {
         return new AgentExtension(uri, description, required, null);
     }

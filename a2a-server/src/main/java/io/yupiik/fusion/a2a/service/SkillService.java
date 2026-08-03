@@ -15,13 +15,14 @@
  */
 package io.yupiik.fusion.a2a.service;
 
+import static java.util.stream.Collectors.toCollection;
+
 import io.yupiik.fusion.a2a.api.A2ASkill;
 import io.yupiik.fusion.a2a.api.A2ASkills;
 import io.yupiik.fusion.a2a.model.AgentSkill;
 import io.yupiik.fusion.a2a.model.fusion.OpenRpc;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.jsonrpc.JsonRpcRegistry;
-
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -31,8 +32,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
-
-import static java.util.stream.Collectors.toCollection;
 
 /**
  * Turns the JSON-RPC methods flagged with {@link A2ASkill} into {@link AgentSkill} descriptors.
@@ -65,6 +64,7 @@ public class SkillService {
      * Bean metadata keys the descriptive annotations set.
      */
     public static final String NAME_METADATA = "a2a.name";
+
     public static final String TAGS_METADATA = "a2a.tags";
     public static final String EXAMPLES_METADATA = "a2a.examples";
     public static final String INPUT_MODES_METADATA = "a2a.inputModes";
@@ -83,8 +83,8 @@ public class SkillService {
         this.methodBackedIds = Set.of();
     }
 
-    public SkillService(final OpenRpcService openRpcService, final JsonRpcRegistry registry,
-                        final List<A2ASkills> contributors) {
+    public SkillService(
+            final OpenRpcService openRpcService, final JsonRpcRegistry registry, final List<A2ASkills> contributors) {
         final var enrichers = contributors == null ? List.<A2ASkills>of() : contributors;
         final var openrpc = openRpcService.load();
 
@@ -92,7 +92,8 @@ public class SkillService {
                 // a document can describe a method which is not deployed - a module on the classpath but not used -
                 // so ignore the ones the registry does not know
                 .filter(it -> registry.methods().containsKey(it.name()))
-                .filter(it -> SKILL.equals(registry.methods().get(it.name()).metadata().getOrDefault(TYPE_METADATA, "")))
+                .filter(it -> SKILL.equals(
+                        registry.methods().get(it.name()).metadata().getOrDefault(TYPE_METADATA, "")))
                 .map(OpenRpc.JsonRpcMethod::name)
                 .collect(toCollection(LinkedHashSet::new));
 
@@ -101,7 +102,8 @@ public class SkillService {
                 .filter(it -> methodBackedIds.contains(it.name()))
                 .sorted(Comparator.comparing(OpenRpc.JsonRpcMethod::name))
                 .map(SkillService::toSkill)
-                .map(skill -> describedByMetadata(skill, registry.methods().get(skill.id()).metadata()))
+                .map(skill -> describedByMetadata(
+                        skill, registry.methods().get(skill.id()).metadata()))
                 .map(skill -> enrich(enrichers, skill))
                 .forEach(all::add);
         enrichers.stream()
@@ -176,8 +178,8 @@ public class SkillService {
      * @param fallback what to answer when the key is absent, i.e. when no annotation was set.
      * @return the parsed values.
      */
-    private static List<String> values(final Map<String, String> metadata, final String key, final char separator,
-                                       final List<String> fallback) {
+    private static List<String> values(
+            final Map<String, String> metadata, final String key, final char separator, final List<String> fallback) {
         final var raw = metadata.get(key);
         if (raw == null) {
             return fallback;

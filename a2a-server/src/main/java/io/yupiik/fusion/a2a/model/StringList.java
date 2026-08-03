@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -29,7 +28,8 @@ import java.util.List;
  * @param list the values.
  */
 @JsonModel
-public record StringList(@Property(documentation = "The values.") List<String> list) {
+public record StringList(
+        @Property(documentation = "The values.") List<String> list) {
     public static StringList of(final String... values) {
         return new StringList(List.of(values));
     }

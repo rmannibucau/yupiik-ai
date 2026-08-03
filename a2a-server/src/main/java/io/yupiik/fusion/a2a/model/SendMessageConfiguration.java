@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -33,8 +32,20 @@ import java.util.List;
  */
 @JsonModel
 public record SendMessageConfiguration(
-        @Property(documentation = "The media types the client can handle, the agent should tailor its output to them - an unsupported one is answered with ContentTypeNotSupportedError.") List<String> acceptedOutputModes,
-        @Property(documentation = "A webhook to register on the task being created, its taskId must be unset.") TaskPushNotificationConfig taskPushNotificationConfig,
-        @Property(documentation = "How many of the most recent messages to include in the returned task: unset means no limit, 0 means none.") Integer historyLength,
-        @Property(documentation = "When true the call returns as soon as the task exists instead of waiting for it to be settled. It has no effect on the streaming variant.") boolean returnImmediately) {
-}
+        @Property(
+                documentation =
+                        "The media types the client can handle, the agent should tailor its output to them - an unsupported one is answered with ContentTypeNotSupportedError.")
+        List<String> acceptedOutputModes,
+
+        @Property(documentation = "A webhook to register on the task being created, its taskId must be unset.")
+        TaskPushNotificationConfig taskPushNotificationConfig,
+
+        @Property(
+                documentation =
+                        "How many of the most recent messages to include in the returned task: unset means no limit, 0 means none.")
+        Integer historyLength,
+
+        @Property(
+                documentation =
+                        "When true the call returns as soon as the task exists instead of waiting for it to be settled. It has no effect on the streaming variant.")
+        boolean returnImmediately) {}

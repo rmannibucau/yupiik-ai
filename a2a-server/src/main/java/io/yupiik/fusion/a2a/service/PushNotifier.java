@@ -15,14 +15,17 @@
  */
 package io.yupiik.fusion.a2a.service;
 
+import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.WARNING;
+
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
+import io.yupiik.fusion.a2a.configuration.A2ADurations;
 import io.yupiik.fusion.a2a.model.StreamResponse;
 import io.yupiik.fusion.a2a.model.TaskPushNotificationConfig;
 import io.yupiik.fusion.a2a.protocol.A2AProtocol;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -32,9 +35,6 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.logging.Logger;
-
-import static java.util.logging.Level.FINE;
-import static java.util.logging.Level.WARNING;
 
 /**
  * Delivers the task events to the webhooks registered with {@code CreateTaskPushNotificationConfig}.
@@ -48,6 +48,12 @@ import static java.util.logging.Level.WARNING;
  */
 @ApplicationScoped
 public class PushNotifier {
+    /**
+     * What {@code fusion.a2a.pushTimeout} means when it is unset - or set to something which is not a positive
+     * duration.
+     */
+    private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
+
     private final Logger logger = Logger.getLogger(PushNotifier.class.getName());
 
     private final JsonMapper jsons;
@@ -60,11 +66,14 @@ public class PushNotifier {
 
     public PushNotifier(final JsonMapper jsons, final A2AConfiguration configuration, final A2AThreads threads) {
         this.jsons = jsons;
-        this.timeout = Duration.ofSeconds(configuration == null ? 30 : Math.max(1, configuration.pushTimeout()));
+        // the HTTP client refuses a timeout of zero, so anything which is not positive falls back to the default
+        this.timeout = configuration == null
+                ? DEFAULT_TIMEOUT
+                : A2ADurations.positive(configuration.pushTimeout(), DEFAULT_TIMEOUT);
         // one client for the whole application, on the shared virtual thread executor
-        this.http = jsons == null ?
-                null :
-                HttpClient.newBuilder()
+        this.http = jsons == null
+                ? null
+                : HttpClient.newBuilder()
                         .connectTimeout(timeout)
                         .executor(threads.executor())
                         .build();
@@ -83,10 +92,9 @@ public class PushNotifier {
         }
         final var payload = jsons.toString(event);
         // chained on the task so the webhook sees the events in the order the agent produced them
-        task.serializePush(() -> CompletableFuture.allOf(
-                configs.stream()
-                        .map(config -> send(config, payload).toCompletableFuture())
-                        .toArray(CompletableFuture[]::new)));
+        task.serializePush(() -> CompletableFuture.allOf(configs.stream()
+                .map(config -> send(config, payload).toCompletableFuture())
+                .toArray(CompletableFuture[]::new)));
     }
 
     private CompletionStage<Void> send(final TaskPushNotificationConfig config, final String payload) {
@@ -107,22 +115,29 @@ public class PushNotifier {
             }
             request = builder.build();
         } catch (final RuntimeException re) { // an invalid url, do not let it break the task
-            logger.log(WARNING, re, () -> "Can't build the push notification for '" + config.url() + "': " + re.getMessage());
+            logger.log(
+                    WARNING,
+                    re,
+                    () -> "Can't build the push notification for '" + config.url() + "': " + re.getMessage());
             return CompletableFuture.completedFuture(null);
         }
 
         // a delivery failure is logged and forgotten: it must never fail the task
-        return http.sendAsync(request, HttpResponse.BodyHandlers.discarding())
-                .handle((response, error) -> {
-                    if (error != null) {
-                        logger.log(WARNING, error, () -> "Push notification to '" + config.url() + "' failed: " + error.getMessage());
-                    } else if (response.statusCode() < 200 || response.statusCode() >= 300) {
-                        logger.log(WARNING, () -> "Push notification to '" + config.url() + "' answered HTTP " + response.statusCode());
-                    } else {
-                        logger.log(FINE, () -> "Push notification to '" + config.url() + "' delivered");
-                    }
-                    return null;
-                });
+        return http.sendAsync(request, HttpResponse.BodyHandlers.discarding()).handle((response, error) -> {
+            if (error != null) {
+                logger.log(
+                        WARNING,
+                        error,
+                        () -> "Push notification to '" + config.url() + "' failed: " + error.getMessage());
+            } else if (response.statusCode() < 200 || response.statusCode() >= 300) {
+                logger.log(
+                        WARNING,
+                        () -> "Push notification to '" + config.url() + "' answered HTTP " + response.statusCode());
+            } else {
+                logger.log(FINE, () -> "Push notification to '" + config.url() + "' delivered");
+            }
+            return null;
+        });
     }
 
     @Destroy

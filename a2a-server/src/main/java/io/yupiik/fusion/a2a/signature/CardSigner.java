@@ -15,11 +15,12 @@
  */
 package io.yupiik.fusion.a2a.signature;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.model.AgentCardSignature;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -32,8 +33,6 @@ import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Signs an {@link AgentCard} with a JSON Web Signature, as section 8.4 of the specification describes.
@@ -62,9 +61,9 @@ public class CardSigner {
         this.payloads = payloads;
         this.jws = jws;
         this.keyLocation = configuration == null ? null : blankToNull(configuration.signatureKey());
-        this.algorithm = configuration == null || blankToNull(configuration.signatureAlgorithm()) == null ?
-                Jws.ES256 :
-                configuration.signatureAlgorithm().strip();
+        this.algorithm = configuration == null || blankToNull(configuration.signatureAlgorithm()) == null
+                ? Jws.ES256
+                : configuration.signatureAlgorithm().strip();
         this.kid = configuration == null ? null : blankToNull(configuration.signatureKid());
         this.jku = configuration == null ? null : blankToNull(configuration.signatureJku());
     }
@@ -130,24 +129,34 @@ public class CardSigner {
         } catch (final IOException ioe) {
             throw new UncheckedIOException("Can't read the signature key '" + keyLocation + "'", ioe);
         }
-        final var base64 = pem
-                .replaceAll("-----(BEGIN|END)[^-]+-----", "")
-                .replaceAll("\\s", "");
+        final var base64 = pem.replaceAll("-----(BEGIN|END)[^-]+-----", "").replaceAll("\\s", "");
         try {
             final var spec = new PKCS8EncodedKeySpec(Base64.getDecoder().decode(base64));
-            return KeyFactory.getInstance(Jws.ES256.equals(algorithm) ? "EC" : "RSA").generatePrivate(spec);
+            return KeyFactory.getInstance(Jws.ES256.equals(algorithm) ? "EC" : "RSA")
+                    .generatePrivate(spec);
         } catch (final GeneralSecurityException | IllegalArgumentException e) {
             throw new IllegalStateException(
-                    "Can't load the signature key '" + keyLocation + "', it must be a PKCS#8 PEM matching " + algorithm +
-                            ": " + e.getMessage(), e);
+                    "Can't load the signature key '" + keyLocation + "', it must be a PKCS#8 PEM matching " + algorithm
+                            + ": " + e.getMessage(),
+                    e);
         }
     }
 
     private static AgentCard withSignatures(final AgentCard card, final List<AgentCardSignature> signatures) {
         return new AgentCard(
-                card.name(), card.description(), card.supportedInterfaces(), card.provider(), card.version(),
-                card.documentationUrl(), card.capabilities(), card.securitySchemes(), card.securityRequirements(),
-                card.defaultInputModes(), card.defaultOutputModes(), card.skills(), List.copyOf(signatures),
+                card.name(),
+                card.description(),
+                card.supportedInterfaces(),
+                card.provider(),
+                card.version(),
+                card.documentationUrl(),
+                card.capabilities(),
+                card.securitySchemes(),
+                card.securityRequirements(),
+                card.defaultInputModes(),
+                card.defaultOutputModes(),
+                card.skills(),
+                List.copyOf(signatures),
                 card.iconUrl());
     }
 

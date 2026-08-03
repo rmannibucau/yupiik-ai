@@ -15,16 +15,15 @@
  */
 package io.yupiik.fusion.a2a.signature;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
 
 /**
  * Builds the exact bytes an {@link AgentCard} signature covers, following the three rules of section 8.4.1 of the
@@ -51,18 +50,33 @@ public class AgentCardPayload {
      */
     protected static final Set<String> KEEP_DEFAULTS = Set.of(
             // AgentCard, REQUIRED
-            "name", "description", "supportedInterfaces", "version", "capabilities",
-            "defaultInputModes", "defaultOutputModes", "skills",
+            "name",
+            "description",
+            "supportedInterfaces",
+            "version",
+            "capabilities",
+            "defaultInputModes",
+            "defaultOutputModes",
+            "skills",
             // AgentCard, optional
-            "documentationUrl", "iconUrl",
+            "documentationUrl",
+            "iconUrl",
             // AgentCapabilities, optional
-            "capabilities.streaming", "capabilities.pushNotifications", "capabilities.extendedAgentCard",
+            "capabilities.streaming",
+            "capabilities.pushNotifications",
+            "capabilities.extendedAgentCard",
             // AgentInterface, REQUIRED
-            "supportedInterfaces[].url", "supportedInterfaces[].protocolBinding", "supportedInterfaces[].protocolVersion",
+            "supportedInterfaces[].url",
+            "supportedInterfaces[].protocolBinding",
+            "supportedInterfaces[].protocolVersion",
             // AgentProvider, REQUIRED
-            "provider.url", "provider.organization",
+            "provider.url",
+            "provider.organization",
             // AgentSkill, REQUIRED
-            "skills[].id", "skills[].name", "skills[].description", "skills[].tags");
+            "skills[].id",
+            "skills[].name",
+            "skills[].description",
+            "skills[].tags");
 
     private static final String SIGNATURES = "signatures";
 

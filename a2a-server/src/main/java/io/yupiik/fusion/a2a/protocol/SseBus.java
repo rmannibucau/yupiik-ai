@@ -15,6 +15,10 @@
  */
 package io.yupiik.fusion.a2a.protocol;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.logging.Level.FINEST;
+import static java.util.logging.Level.SEVERE;
+
 import java.nio.ByteBuffer;
 import java.util.Deque;
 import java.util.List;
@@ -28,10 +32,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Logger;
 
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.logging.Level.FINEST;
-import static java.util.logging.Level.SEVERE;
-
 /**
  * The {@code text/event-stream} body of an A2A stream, i.e. the queue of the events the server sends to one subscriber.
  * <p>
@@ -40,7 +40,8 @@ import static java.util.logging.Level.SEVERE;
  * microsecond loses nothing.
  */
 public class SseBus implements Flow.Publisher<ByteBuffer> {
-    private static final ByteBuffer KEEP_ALIVE = ByteBuffer.wrap(": ping\n\n".getBytes(UTF_8)).asReadOnlyBuffer();
+    private static final ByteBuffer KEEP_ALIVE =
+            ByteBuffer.wrap(": ping\n\n".getBytes(UTF_8)).asReadOnlyBuffer();
 
     private final Logger logger = Logger.getLogger(SseBus.class.getName());
 
@@ -128,7 +129,8 @@ public class SseBus implements Flow.Publisher<ByteBuffer> {
                     newSubscriber.onError(new IllegalArgumentException("Invalid request: " + n));
                     return;
                 }
-                pending.updateAndGet(p -> p == Long.MAX_VALUE || n == Long.MAX_VALUE || p + n < 0 ? Long.MAX_VALUE : p + n);
+                pending.updateAndGet(
+                        p -> p == Long.MAX_VALUE || n == Long.MAX_VALUE || p + n < 0 ? Long.MAX_VALUE : p + n);
                 drain();
                 if (closed.get() && frames.isEmpty()) {
                     complete(newSubscriber);

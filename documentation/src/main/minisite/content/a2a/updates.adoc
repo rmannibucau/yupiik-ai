@@ -129,7 +129,7 @@ X-A2A-Notification-Token: opaque-1
 | Ordering | deliveries are chained per task, so an artifact always arrives before the completion which refers to it
 | Attempts | one attempt per event. A failure is logged and forgotten, it never fails the task
 | Isolation | a slow or broken webhook never slows the task down, the calls are asynchronous
-| Timeout | `fusion.a2a.pushTimeout`, 30 seconds by default
+| Timeout | `fusion.a2a.pushTimeout`, `PT30S` by default
 |===
 
 A receiver must answer a `2xx`, process idempotently - a duplicate is always possible - and check the task identifier and

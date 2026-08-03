@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.model;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-
 import java.util.List;
 
 /**
@@ -29,8 +28,10 @@ import java.util.List;
  * @param error the failure.
  */
 @JsonModel
-public record HttpErrorResponse(@Property(documentation = "The failure.") Error error) {
-    public static HttpErrorResponse of(final int code, final String status, final String message, final List<Object> details) {
+public record HttpErrorResponse(
+        @Property(documentation = "The failure.") Error error) {
+    public static HttpErrorResponse of(
+            final int code, final String status, final String message, final List<Object> details) {
         return new HttpErrorResponse(new Error(code, status, message, details));
     }
 
@@ -43,9 +44,17 @@ public record HttpErrorResponse(@Property(documentation = "The failure.") Error 
      */
     @JsonModel
     public record Error(
-            @Property(documentation = "The HTTP status code.") int code,
-            @Property(documentation = "The canonical gRPC status name, NOT_FOUND for example - it is what tells two A2A errors sharing an HTTP status apart, together with the ErrorInfo detail.") String status,
-            @Property(documentation = "The human readable message.") String message,
-            @Property(documentation = "The structured details, each one carrying a @type key.") List<Object> details) {
-    }
+            @Property(documentation = "The HTTP status code.")
+            int code,
+
+            @Property(
+                    documentation =
+                            "The canonical gRPC status name, NOT_FOUND for example - it is what tells two A2A errors sharing an HTTP status apart, together with the ErrorInfo detail.")
+            String status,
+
+            @Property(documentation = "The human readable message.")
+            String message,
+
+            @Property(documentation = "The structured details, each one carrying a @type key.")
+            List<Object> details) {}
 }

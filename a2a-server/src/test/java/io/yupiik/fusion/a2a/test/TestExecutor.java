@@ -15,6 +15,8 @@
  */
 package io.yupiik.fusion.a2a.test;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
+
 import io.yupiik.fusion.a2a.api.A2AExecutor;
 import io.yupiik.fusion.a2a.api.AgentRequest;
 import io.yupiik.fusion.a2a.api.TaskUpdater;
@@ -23,14 +25,11 @@ import io.yupiik.fusion.a2a.model.Message;
 import io.yupiik.fusion.a2a.model.Part;
 import io.yupiik.fusion.a2a.service.A2AThreads;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-
-import static java.util.concurrent.CompletableFuture.completedFuture;
 
 /**
  * The agent the transport tests drive: the text of the message picks the behavior, which keeps every test a single
@@ -65,7 +64,8 @@ public class TestExecutor implements A2AExecutor {
             for (int i = 1; i <= count; i++) {
                 updater.artifact(
                         new Artifact("chunked", "chunked", null, List.of(Part.text("chunk-" + i)), null, null),
-                        i > 1, i == count);
+                        i > 1,
+                        i == count);
             }
             updater.complete();
             return completedFuture(null);

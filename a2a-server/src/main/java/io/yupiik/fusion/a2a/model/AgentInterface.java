@@ -33,10 +33,19 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record AgentInterface(
-        @Property(documentation = "Where this interface is available, it must be absolute.") String url,
-        @Property(documentation = "#JSONRPC, #GRPC, #HTTP_JSON or the URI of a custom binding.") String protocolBinding,
-        @Property(documentation = "An opaque routing identifier - for a server hosting several agents behind one endpoint - the client must echo in the tenant field of every request. It is null when there is nothing to route.") String tenant,
-        @Property(documentation = "The Major.Minor A2A version served there, 1.0 for example.") String protocolVersion) {
+        @Property(documentation = "Where this interface is available, it must be absolute.")
+        String url,
+
+        @Property(documentation = "#JSONRPC, #GRPC, #HTTP_JSON or the URI of a custom binding.")
+        String protocolBinding,
+
+        @Property(
+                documentation =
+                        "An opaque routing identifier - for a server hosting several agents behind one endpoint - the client must echo in the tenant field of every request. It is null when there is nothing to route.")
+        String tenant,
+
+        @Property(documentation = "The Major.Minor A2A version served there, 1.0 for example.")
+        String protocolVersion) {
     /**
      * JSON-RPC 2.0 over HTTP with Server-Sent Events for the streams, section 9 of the specification.
      */

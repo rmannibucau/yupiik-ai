@@ -45,10 +45,11 @@ import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
  *                             {@link io.yupiik.fusion.a2a.api.A2AAgentCard} with {@code extended()} returning
  *                             {@code true} to answer something.
  * @param restBinding          whether the HTTP+JSON binding is exposed next to the JSON-RPC one.
- * @param taskTimeout          how long, in seconds, a blocking {@code SendMessage} waits for the task to be settled.
- * @param taskRetention        how long, in seconds, a settled task is kept so it can still be fetched with
- *                             {@code GetTask} - {@code 0} keeps them forever.
- * @param pushTimeout          the timeout, in seconds, of a push notification webhook call.
+ * @param taskTimeout          how long a blocking {@code SendMessage} waits for the task to be settled, see
+ *                             {@link A2ADurations} for the accepted spellings.
+ * @param taskRetention        how long a settled task is kept so it can still be fetched with {@code GetTask} -
+ *                             {@code 0} keeps them forever.
+ * @param pushTimeout          the timeout of a push notification webhook call.
  * @param agentCardMaxAge      the {@code Cache-Control: max-age} of the agent card, in seconds.
  * @param signatureKey         the PKCS#8 PEM private key to sign the agent card with. Signing is optional in the
  *                             specification, so leaving it unset publishes an unsigned card. Setting it requires
@@ -64,7 +65,9 @@ public record A2AConfiguration(
         @Property(defaultValue = "\"fusion-a2a-server\"", documentation = "Agent name.")
         String name,
 
-        @Property(defaultValue = "\"An agent built with Yupiik Fusion.\"", documentation = "What the agent does, this is what other agents read.")
+        @Property(
+                defaultValue = "\"An agent built with Yupiik Fusion.\"",
+                documentation = "What the agent does, this is what other agents read.")
         String description,
 
         @Property(defaultValue = "\"1.0.0\"", documentation = "Agent version, also used as the agent card ETag.")
@@ -73,8 +76,7 @@ public record A2AConfiguration(
         @Property(documentation = "URL of the agent documentation.")
         String documentationUrl,
 
-        @Property(documentation = "URL of the agent icon.")
-        String iconUrl,
+        @Property(documentation = "URL of the agent icon.") String iconUrl,
 
         @Property(documentation = "Organization running the agent, no provider is published when unset.")
         String providerOrganization,
@@ -82,10 +84,14 @@ public record A2AConfiguration(
         @Property(documentation = "Website of the organization running the agent.")
         String providerUrl,
 
-        @Property(defaultValue = "\"text/plain,application/json\"", documentation = "Media types the agent accepts, comma separated.")
+        @Property(
+                defaultValue = "\"text/plain,application/json\"",
+                documentation = "Media types the agent accepts, comma separated.")
         String defaultInputModes,
 
-        @Property(defaultValue = "\"text/plain,application/json\"", documentation = "Media types the agent produces, comma separated.")
+        @Property(
+                defaultValue = "\"text/plain,application/json\"",
+                documentation = "Media types the agent produces, comma separated.")
         String defaultOutputModes,
 
         @Property(documentation = "Base URL of the agent, derived from the request when unset.")
@@ -94,7 +100,9 @@ public record A2AConfiguration(
         @Property(documentation = "Opaque routing identifier clients must echo, for a server hosting several agents.")
         String tenant,
 
-        @Property(defaultValue = "true", documentation = "Is streaming - SendStreamingMessage and SubscribeToTask - supported.")
+        @Property(
+                defaultValue = "true",
+                documentation = "Is streaming - SendStreamingMessage and SubscribeToTask - supported.")
         boolean streaming,
 
         @Property(defaultValue = "true", documentation = "Are push notification webhooks supported.")
@@ -106,19 +114,30 @@ public record A2AConfiguration(
         @Property(defaultValue = "true", documentation = "Is the HTTP+JSON binding exposed next to the JSON-RPC one.")
         boolean restBinding,
 
-        @Property(defaultValue = "300", documentation = "How long, in seconds, a blocking SendMessage waits for the task to settle.")
-        int taskTimeout,
+        @Property(
+                defaultValue = "\"PT5M\"",
+                documentation =
+                        "How long a blocking SendMessage waits for the task to settle, an ISO-8601 duration such as PT0.5S, PT30S or PT5M - a bare number is seconds.")
+        String taskTimeout,
 
-        @Property(defaultValue = "1800", documentation = "How long, in seconds, a settled task is kept, 0 to keep them forever.")
-        int taskRetention,
+        @Property(
+                defaultValue = "\"PT30M\"",
+                documentation =
+                        "How long a settled task is kept, 0 to keep them forever, an ISO-8601 duration such as PT30S or PT30M - a bare number is seconds.")
+        String taskRetention,
 
-        @Property(defaultValue = "30", documentation = "Timeout, in seconds, of a push notification webhook call.")
-        int pushTimeout,
+        @Property(
+                defaultValue = "\"PT30S\"",
+                documentation =
+                        "Timeout of a push notification webhook call, an ISO-8601 duration such as PT0.5S or PT30S - a bare number is seconds.")
+        String pushTimeout,
 
         @Property(defaultValue = "300", documentation = "Cache-Control max-age of the agent card, in seconds.")
         int agentCardMaxAge,
 
-        @Property(documentation = "PKCS#8 PEM private key to sign the agent card with, unset publishes an unsigned card. It requires publicUrl to be set.")
+        @Property(
+                documentation =
+                        "PKCS#8 PEM private key to sign the agent card with, unset publishes an unsigned card. It requires publicUrl to be set.")
         String signatureKey,
 
         @Property(defaultValue = "\"ES256\"", documentation = "Algorithm of signatureKey, ES256 or RS256.")
@@ -127,7 +146,6 @@ public record A2AConfiguration(
         @Property(documentation = "kid of the JWS protected header, it defaults to the agent version.")
         String signatureKid,
 
-        @Property(documentation = "JWKS url advertised in the JWS protected header so a caller can fetch the public key.")
-        String signatureJku
-) {
-}
+        @Property(
+                documentation = "JWKS url advertised in the JWS protected header so a caller can fetch the public key.")
+        String signatureJku) {}

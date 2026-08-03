@@ -15,6 +15,11 @@
  */
 package io.yupiik.fusion.a2a.protocol;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static java.util.concurrent.CompletableFuture.completedFuture;
+import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.SEVERE;
+
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
 import io.yupiik.fusion.a2a.model.CancelTaskRequest;
 import io.yupiik.fusion.a2a.model.HttpErrorResponse;
@@ -28,18 +33,12 @@ import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.http.server.api.Response;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.JsonRpcException;
-
 import java.net.URLDecoder;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.logging.Logger;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static java.util.concurrent.CompletableFuture.completedFuture;
-import static java.util.logging.Level.FINE;
-import static java.util.logging.Level.SEVERE;
 
 /**
  * The HTTP+JSON binding of A2A - section 11 of the specification - served under {@code /a2a/v1}:
@@ -102,8 +101,8 @@ public class A2ARestProtocol {
             return completedFuture(error(jre));
         } catch (final RuntimeException re) {
             logger.log(SEVERE, re, re::getMessage);
-            return completedFuture(error(A2AErrors.error(
-                    A2AErrors.INTERNAL_ERROR, String.valueOf(re.getMessage()), "INTERNAL", Map.of())));
+            return completedFuture(error(
+                    A2AErrors.error(A2AErrors.INTERNAL_ERROR, String.valueOf(re.getMessage()), "INTERNAL", Map.of())));
         }
     }
 
@@ -147,38 +146,49 @@ public class A2ARestProtocol {
     private CompletionStage<Response> routeTask(final Request request, final String method, final TaskRoute route) {
         if (route.action() != null) {
             return switch (route.action()) {
-                case "cancel" -> "POST".equals(method) ?
-                        body(request, CancelTaskRequest.class, new CancelTaskRequest(null, null, null))
-                                .thenApply(payload -> json(service.cancelTask(
-                                        tenantOr(request, payload.tenant()), route.taskId(), payload.metadata())))
-                                .exceptionally(this::onAsyncError) :
-                        completedFuture(notFound());
-                case "subscribe" -> "POST".equals(method) ?
-                        completedFuture(A2AEndpoint.sse(request, service.subscribeToTask(
-                                tenant(request), route.taskId(), sink -> A2AStream.plain(sink, jsons)))) :
-                        completedFuture(notFound());
+                case "cancel" ->
+                    "POST".equals(method)
+                            ? body(request, CancelTaskRequest.class, new CancelTaskRequest(null, null, null))
+                                    .thenApply(payload -> json(service.cancelTask(
+                                            tenantOr(request, payload.tenant()), route.taskId(), payload.metadata())))
+                                    .exceptionally(this::onAsyncError)
+                            : completedFuture(notFound());
+                case "subscribe" ->
+                    "POST".equals(method)
+                            ? completedFuture(A2AEndpoint.sse(
+                                    request,
+                                    service.subscribeToTask(
+                                            tenant(request), route.taskId(), sink -> A2AStream.plain(sink, jsons))))
+                            : completedFuture(notFound());
                 default -> completedFuture(notFound());
             };
         }
 
         if (!route.pushConfigs()) { // GET /tasks/{id}
-            return "GET".equals(method) ?
-                    completedFuture(json(service.getTask(tenant(request), route.taskId(), integer(request, "historyLength")))) :
-                    completedFuture(notFound());
+            return "GET".equals(method)
+                    ? completedFuture(
+                            json(service.getTask(tenant(request), route.taskId(), integer(request, "historyLength"))))
+                    : completedFuture(notFound());
         }
 
         if (route.configId() == null) {
             return switch (method) {
-                case "POST" -> body(request, TaskPushNotificationConfig.class)
-                        .thenApply(payload -> json(service.createPushConfig(payload, route.taskId())))
-                        .exceptionally(this::onAsyncError);
-                case "GET" -> completedFuture(json(service.listPushConfigs(
-                        tenant(request), route.taskId(), integer(request, "pageSize"), request.parameter("pageToken"))));
+                case "POST" ->
+                    body(request, TaskPushNotificationConfig.class)
+                            .thenApply(payload -> json(service.createPushConfig(payload, route.taskId())))
+                            .exceptionally(this::onAsyncError);
+                case "GET" ->
+                    completedFuture(json(service.listPushConfigs(
+                            tenant(request),
+                            route.taskId(),
+                            integer(request, "pageSize"),
+                            request.parameter("pageToken"))));
                 default -> completedFuture(notFound());
             };
         }
         return switch (method) {
-            case "GET" -> completedFuture(json(service.getPushConfig(tenant(request), route.taskId(), route.configId())));
+            case "GET" ->
+                completedFuture(json(service.getPushConfig(tenant(request), route.taskId(), route.configId())));
             case "DELETE" -> {
                 service.deletePushConfig(tenant(request), route.taskId(), route.configId());
                 yield completedFuture(json(Map.of()));
@@ -197,7 +207,7 @@ public class A2ARestProtocol {
             return null;
         }
         final var segments = path.substring("/tasks/".length()).split("/", -1);
-        if (segments.length == 0 || segments[0].isEmpty()) {
+        if (segments[0].isEmpty()) { // "/tasks/" designates no task
             return null;
         }
 
@@ -214,15 +224,16 @@ public class A2ARestProtocol {
         return switch (segments.length) {
             case 1 -> new TaskRoute(id, null, false, null);
             case 2 -> "pushNotificationConfigs".equals(segments[1]) ? new TaskRoute(id, null, true, null) : null;
-            case 3 -> "pushNotificationConfigs".equals(segments[1]) && !segments[2].isEmpty() ?
-                    new TaskRoute(id, null, true, decode(segments[2])) :
-                    null;
+            case 3 ->
+                "pushNotificationConfigs".equals(segments[1]) && !segments[2].isEmpty()
+                        ? new TaskRoute(id, null, true, decode(segments[2]))
+                        : null;
             default -> null;
         };
     }
 
     private <T> CompletionStage<T> body(final Request request, final Class<T> type) {
-        if (!hasBody(request)) {
+        if (!A2AProtocol.hasBody(request)) {
             throw A2AErrors.invalidParams("body", "A JSON body is required");
         }
         return request.fullBody().string().thenApply(payload -> {
@@ -234,10 +245,11 @@ public class A2ARestProtocol {
     }
 
     private <T> CompletionStage<T> body(final Request request, final Class<T> type, final T fallback) {
-        if (!hasBody(request)) {
+        if (!A2AProtocol.hasBody(request)) {
             return completedFuture(fallback);
         }
-        return request.fullBody().string()
+        return request.fullBody()
+                .string()
                 .thenApply(payload -> payload == null || payload.isBlank() ? fallback : read(type, payload));
     }
 
@@ -249,36 +261,15 @@ public class A2ARestProtocol {
         }
     }
 
-    /**
-     * A {@code POST} without any body is legitimate here - {@code :cancel} takes an optional one - and reading the body
-     * of such a request never completes, so the headers are what decides.
-     */
-    private static boolean hasBody(final Request request) {
-        final var transferEncoding = request.header("transfer-encoding");
-        if (transferEncoding != null && !transferEncoding.isBlank()) {
-            return true;
-        }
-        final var length = request.header("content-length");
-        if (length == null || length.isBlank()) {
-            return false;
-        }
-        try {
-            return Long.parseLong(length.strip()) > 0;
-        } catch (final NumberFormatException nfe) {
-            return false;
-        }
-    }
-
     private Response onAsyncError(final Throwable error) {
-        final var cause = error != null && error.getCause() != null ? error.getCause() : error;
+        final var cause = A2AProtocol.unwrap(error);
         if (cause instanceof JsonRpcException jre) {
             logger.log(FINE, jre, jre::getMessage);
             return error(jre);
         }
-        logger.log(SEVERE, cause, () -> cause == null ? "Unknown error" : cause.getMessage());
-        return error(A2AErrors.error(
-                A2AErrors.INTERNAL_ERROR, cause == null ? "Unknown error" : String.valueOf(cause.getMessage()),
-                "INTERNAL", Map.of()));
+        logger.log(SEVERE, cause, cause::getMessage);
+        return error(
+                A2AErrors.error(A2AErrors.INTERNAL_ERROR, String.valueOf(cause.getMessage()), "INTERNAL", Map.of()));
     }
 
     private Response json(final Object payload) {
@@ -296,7 +287,9 @@ public class A2ARestProtocol {
                 .status(status)
                 .header("content-type", A2AProtocol.MEDIA_TYPE + ";charset=utf-8")
                 .body(jsons.toString(HttpErrorResponse.of(
-                        status, A2AErrors.status(error.code()), error.getMessage(),
+                        status,
+                        A2AErrors.status(error.code()),
+                        error.getMessage(),
                         error.data() instanceof List<?> details ? (List<Object>) details : List.of())))
                 .build();
     }
@@ -331,7 +324,8 @@ public class A2ARestProtocol {
         try {
             return TaskState.valueOf(status.strip());
         } catch (final IllegalArgumentException iae) {
-            throw A2AErrors.invalidParams("status", "Unknown task state '" + status + "', it must be a TASK_STATE_* name");
+            throw A2AErrors.invalidParams(
+                    "status", "Unknown task state '" + status + "', it must be a TASK_STATE_* name");
         }
     }
 
@@ -364,6 +358,5 @@ public class A2ARestProtocol {
      * @param pushConfigs whether the route targets the push notification configurations of the task.
      * @param configId    the configuration the route targets, {@code null} for the collection itself.
      */
-    private record TaskRoute(String taskId, String action, boolean pushConfigs, String configId) {
-    }
+    private record TaskRoute(String taskId, String action, boolean pushConfigs, String configId) {}
 }

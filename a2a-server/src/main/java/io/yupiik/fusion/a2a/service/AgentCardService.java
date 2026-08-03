@@ -26,7 +26,6 @@ import io.yupiik.fusion.a2a.protocol.A2AProtocol;
 import io.yupiik.fusion.a2a.signature.CardSigner;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.http.server.api.Request;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Stream;
@@ -56,8 +55,11 @@ public class AgentCardService {
         this.requiredExtensions = List.of();
     }
 
-    public AgentCardService(final A2AConfiguration configuration, final SkillService skills,
-                            final List<A2AAgentCard> customizers, final CardSigner signer) {
+    public AgentCardService(
+            final A2AConfiguration configuration,
+            final SkillService skills,
+            final List<A2AAgentCard> customizers,
+            final CardSigner signer) {
         this.configuration = configuration;
         final var all = customizers == null ? List.<A2AAgentCard>of() : customizers;
 
@@ -65,8 +67,8 @@ public class AgentCardService {
             // without it the interface urls are resolved from each request, so the signed bytes would not be the bytes
             // served and no caller could ever verify the card
             throw new IllegalStateException(
-                    "fusion.a2a.signatureKey is set but fusion.a2a.publicUrl is not: a signed agent card must advertise " +
-                            "fixed interface urls, else the signature covers content which changes per request");
+                    "fusion.a2a.signatureKey is set but fusion.a2a.publicUrl is not: a signed agent card must advertise "
+                            + "fixed interface urls, else the signature covers content which changes per request");
         }
 
         final var raw = new AgentCard(
@@ -90,15 +92,21 @@ public class AgentCardService {
                 blankToNull(configuration.iconUrl()));
 
         // signing comes last: the customizers must not be able to change the content after it was covered
-        this.base = signer.sign(customize(raw, all.stream().filter(it -> !it.extended()).toList()));
+        this.base = signer.sign(
+                customize(raw, all.stream().filter(it -> !it.extended()).toList()));
         this.extendedConfigured = all.stream().anyMatch(A2AAgentCard::extended);
-        this.extendedBase = extendedConfigured ?
-                signer.sign(customize(base, all.stream().filter(A2AAgentCard::extended).toList())) :
-                null;
+        this.extendedBase = extendedConfigured
+                ? signer.sign(customize(
+                        base, all.stream().filter(A2AAgentCard::extended).toList()))
+                : null;
         this.outputModes = base.defaultOutputModes() == null ? List.of() : base.defaultOutputModes();
-        this.requiredExtensions = base.capabilities() == null || base.capabilities().extensions() == null ?
-                List.of() :
-                base.capabilities().extensions().stream().filter(it -> it.required()).map(it -> it.uri()).toList();
+        this.requiredExtensions =
+                base.capabilities() == null || base.capabilities().extensions() == null
+                        ? List.of()
+                        : base.capabilities().extensions().stream()
+                                .filter(it -> it.required())
+                                .map(it -> it.uri())
+                                .toList();
     }
 
     /**
@@ -180,9 +188,11 @@ public class AgentCardService {
         final var root = trimTrailingSlash(url);
         final var tenant = tenant();
         final var all = new ArrayList<AgentInterface>(2);
-        all.add(new AgentInterface(root + A2AProtocol.JSONRPC_PATH, AgentInterface.JSONRPC, tenant, A2AProtocol.VERSION));
+        all.add(new AgentInterface(
+                root + A2AProtocol.JSONRPC_PATH, AgentInterface.JSONRPC, tenant, A2AProtocol.VERSION));
         if (configuration.restBinding()) {
-            all.add(new AgentInterface(root + A2AProtocol.REST_PATH, AgentInterface.HTTP_JSON, tenant, A2AProtocol.VERSION));
+            all.add(new AgentInterface(
+                    root + A2AProtocol.REST_PATH, AgentInterface.HTTP_JSON, tenant, A2AProtocol.VERSION));
         }
         return List.copyOf(all);
     }

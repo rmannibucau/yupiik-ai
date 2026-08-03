@@ -27,7 +27,11 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record HTTPAuthSecurityScheme(
-        @Property(documentation = "An optional description.") String description,
-        @Property(documentation = "The RFC 7235 scheme sent in the Authorization header, Bearer for example.") String scheme,
-        @Property(documentation = "A hint about the token format, JWT for example. It is documentation only.") String bearerFormat) {
-}
+        @Property(documentation = "An optional description.")
+        String description,
+
+        @Property(documentation = "The RFC 7235 scheme sent in the Authorization header, Bearer for example.")
+        String scheme,
+
+        @Property(documentation = "A hint about the token format, JWT for example. It is documentation only.")
+        String bearerFormat) {}

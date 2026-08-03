@@ -15,6 +15,12 @@
  */
 package io.yupiik.fusion.a2a.signature;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 import io.yupiik.fusion.a2a.model.AgentCapabilities;
 import io.yupiik.fusion.a2a.model.AgentCard;
 import io.yupiik.fusion.a2a.model.AgentInterface;
@@ -23,18 +29,11 @@ import io.yupiik.fusion.a2a.test.Keys;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.util.List;
-
-import static java.nio.charset.StandardCharsets.UTF_8;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Signing and verifying an agent card, i.e. section 8.4 end to end.
@@ -64,9 +63,19 @@ class CardSignatureTest {
 
         // one changed member does not verify, which is the whole point of signing the card
         final var tampered = new AgentCard(
-                "impostor", signed.description(), signed.supportedInterfaces(), signed.provider(), signed.version(),
-                signed.documentationUrl(), signed.capabilities(), signed.securitySchemes(), signed.securityRequirements(),
-                signed.defaultInputModes(), signed.defaultOutputModes(), signed.skills(), signed.signatures(),
+                "impostor",
+                signed.description(),
+                signed.supportedInterfaces(),
+                signed.provider(),
+                signed.version(),
+                signed.documentationUrl(),
+                signed.capabilities(),
+                signed.securitySchemes(),
+                signed.securityRequirements(),
+                signed.defaultInputModes(),
+                signed.defaultOutputModes(),
+                signed.skills(),
+                signed.signatures(),
                 signed.iconUrl());
         assertFalse(verifier.verify(tampered, kid -> keys.getPublic()));
     }
@@ -108,8 +117,7 @@ class CardSignatureTest {
 
     private CardSigner signer(final JsonMapper jsons, final Path work, final String algorithm, final KeyPair keys)
             throws Exception {
-        return new CardSigner(
-                payloads(jsons), new Jws(), Keys.configuration(Keys.writePem(work, keys), algorithm));
+        return new CardSigner(payloads(jsons), new Jws(), Keys.configuration(Keys.writePem(work, keys), algorithm));
     }
 
     private AgentCardPayload payloads(final JsonMapper jsons) {
@@ -118,13 +126,19 @@ class CardSignatureTest {
 
     private AgentCard card(final String version) {
         return new AgentCard(
-                "signed-agent", "An agent whose card is signed.",
+                "signed-agent",
+                "An agent whose card is signed.",
                 List.of(AgentInterface.of("https://agent.example.com/a2a", AgentInterface.JSONRPC, "1.0")),
-                null, version, null,
+                null,
+                version,
+                null,
                 new AgentCapabilities(true, true, null, false),
-                null, null,
-                List.of("text/plain"), List.of("text/plain"),
+                null,
+                null,
+                List.of("text/plain"),
+                List.of("text/plain"),
                 List.of(AgentSkill.of("do/it", "Do it", "Does it.", List.of("demo"))),
-                null, null);
+                null,
+                null);
     }
 }

@@ -29,8 +29,14 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public record TaskStatus(
         @Property(documentation = "Where the task stands.") TaskState state,
-        @Property(documentation = "An optional message explaining the status - what is missing for INPUT_REQUIRED, why it failed for FAILED, .") Message message,
-        @Property(documentation = "When the status was recorded, an ISO-8601 UTC string.") String timestamp) {
+
+        @Property(
+                documentation =
+                        "An optional message explaining the status - what is missing for INPUT_REQUIRED, why it failed for FAILED, .")
+        Message message,
+
+        @Property(documentation = "When the status was recorded, an ISO-8601 UTC string.")
+        String timestamp) {
     /**
      * @param state the new state.
      * @return the status, timestamped now.

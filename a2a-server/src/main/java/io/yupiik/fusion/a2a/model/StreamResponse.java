@@ -30,10 +30,16 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record StreamResponse(
-        @Property(documentation = "The initial - or current - state of a task.") Task task,
-        @Property(documentation = "A direct message answer, it closes the stream.") Message message,
+        @Property(documentation = "The initial - or current - state of a task.")
+        Task task,
+
+        @Property(documentation = "A direct message answer, it closes the stream.")
+        Message message,
+
         @Property(documentation = "A status change.") TaskStatusUpdateEvent statusUpdate,
-        @Property(documentation = "An artifact which was produced or extended.") TaskArtifactUpdateEvent artifactUpdate) {
+
+        @Property(documentation = "An artifact which was produced or extended.")
+        TaskArtifactUpdateEvent artifactUpdate) {
     public static StreamResponse of(final Task task) {
         return new StreamResponse(task, null, null, null);
     }
@@ -59,7 +65,9 @@ public record StreamResponse(
         if (message != null) {
             return true;
         }
-        if (statusUpdate != null && statusUpdate.status() != null && statusUpdate.status().state() != null) {
+        if (statusUpdate != null
+                && statusUpdate.status() != null
+                && statusUpdate.status().state() != null) {
             return statusUpdate.status().state().isSettled();
         }
         return false;

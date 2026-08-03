@@ -23,7 +23,6 @@ import io.yupiik.fusion.a2a.model.Message;
 import io.yupiik.fusion.a2a.model.Part;
 import io.yupiik.fusion.a2a.service.A2AThreads;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletionStage;

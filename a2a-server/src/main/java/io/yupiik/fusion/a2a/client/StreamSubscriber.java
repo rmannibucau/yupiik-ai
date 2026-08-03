@@ -17,7 +17,6 @@ package io.yupiik.fusion.a2a.client;
 
 import io.yupiik.fusion.a2a.model.StreamResponse;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.util.Map;
 import java.util.concurrent.Flow;
 import java.util.function.Consumer;

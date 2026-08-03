@@ -28,7 +28,11 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  */
 @JsonModel
 public record Report(
-        @Property(documentation = "The city the report is about.") String city,
-        @Property(documentation = "The weather in one word.") String weather,
-        @Property(documentation = "The temperature, in degrees Celsius.") int temperature) {
-}
+        @Property(documentation = "The city the report is about.")
+        String city,
+
+        @Property(documentation = "The weather in one word.")
+        String weather,
+
+        @Property(documentation = "The temperature, in degrees Celsius.")
+        int temperature) {}

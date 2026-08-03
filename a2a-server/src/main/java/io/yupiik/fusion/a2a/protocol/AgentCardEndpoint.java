@@ -15,6 +15,8 @@
  */
 package io.yupiik.fusion.a2a.protocol;
 
+import static java.util.concurrent.CompletableFuture.completedFuture;
+
 import io.yupiik.fusion.a2a.configuration.A2AConfiguration;
 import io.yupiik.fusion.a2a.service.AgentCardService;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -22,10 +24,7 @@ import io.yupiik.fusion.framework.build.api.http.HttpMatcher;
 import io.yupiik.fusion.http.server.api.Request;
 import io.yupiik.fusion.http.server.api.Response;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.util.concurrent.CompletionStage;
-
-import static java.util.concurrent.CompletableFuture.completedFuture;
 
 /**
  * Publishes the agent card on {@code /.well-known/agent-card.json}, which is how a client discovers the agent - see
@@ -45,7 +44,8 @@ public class AgentCardEndpoint {
         this(null, null, null);
     }
 
-    public AgentCardEndpoint(final AgentCardService cards, final JsonMapper jsons, final A2AConfiguration configuration) {
+    public AgentCardEndpoint(
+            final AgentCardService cards, final JsonMapper jsons, final A2AConfiguration configuration) {
         this.cards = cards;
         this.jsons = jsons;
         this.maxAge = configuration == null ? 300 : Math.max(0, configuration.agentCardMaxAge());
@@ -56,7 +56,8 @@ public class AgentCardEndpoint {
         final var card = cards.card(request);
         final var etag = '"' + card.version() + '"';
         if (etag.equals(request.header("if-none-match"))) {
-            return completedFuture(Response.of().status(304).header("etag", etag).build());
+            return completedFuture(
+                    Response.of().status(304).header("etag", etag).build());
         }
         return completedFuture(Response.of()
                 .status(200)

@@ -15,6 +15,13 @@
  */
 package io.yupiik.fusion.a2a.demo;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
 import io.yupiik.fusion.a2a.client.A2AClient;
 import io.yupiik.fusion.a2a.client.A2AClientException;
 import io.yupiik.fusion.a2a.model.AgentSkill;
@@ -27,8 +34,6 @@ import io.yupiik.fusion.a2a.protocol.A2AErrors;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.testing.Fusion;
 import io.yupiik.fusion.testing.FusionSupport;
-import org.junit.jupiter.api.Test;
-
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.util.List;
@@ -39,13 +44,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
+import org.junit.jupiter.api.Test;
 
 /**
  * End to end tests of a real agent: the card the demo publishes and the four skills it exposes, both declarative and
@@ -61,7 +60,10 @@ class DemoTest {
                 List.of("demo/chat", "demo/greet", "demo/report", "demo/countdown"),
                 card.skills().stream().map(AgentSkill::id).toList());
         // the description comes from the @JsonRpc documentation, the tags from A2ASkills
-        final var greet = card.skills().stream().filter(it -> "demo/greet".equals(it.id())).findFirst().orElseThrow();
+        final var greet = card.skills().stream()
+                .filter(it -> "demo/greet".equals(it.id()))
+                .findFirst()
+                .orElseThrow();
         assertEquals("Greets someone by name.", greet.description());
         assertEquals(List.of("demo", "greeting"), greet.tags());
         assertEquals(List.of("Greet Fusion."), greet.examples());
@@ -74,8 +76,10 @@ class DemoTest {
     }
 
     @Test
-    void skillReturningAnArtifact(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
-        final var task = await(new A2AClient(agent, http, jsons).sendMessage(skill("demo/greet", Map.of("name", "fusion"))))
+    void skillReturningAnArtifact(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+        final var task = await(
+                        new A2AClient(agent, http, jsons).sendMessage(skill("demo/greet", Map.of("name", "fusion"))))
                 .task();
 
         assertEquals(TaskState.TASK_STATE_COMPLETED, task.status().state());
@@ -85,7 +89,8 @@ class DemoTest {
 
     @Test
     void skillReturningAModel(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
-        final var task = await(new A2AClient(agent, http, jsons).sendMessage(skill("demo/report", Map.of("city", "Paris"))))
+        final var task = await(
+                        new A2AClient(agent, http, jsons).sendMessage(skill("demo/report", Map.of("city", "Paris"))))
                 .task();
 
         assertEquals(TaskState.TASK_STATE_COMPLETED, task.status().state());
@@ -99,7 +104,8 @@ class DemoTest {
     }
 
     @Test
-    void skillReturningAMessage(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void skillReturningAMessage(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var response = await(new A2AClient(agent, http, jsons).sendMessage(skill("demo/chat", Map.of())));
 
         // no task is created at all, which is what a plain conversation should cost
@@ -109,7 +115,8 @@ class DemoTest {
     }
 
     @Test
-    void skillFailureFailsTheTask(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
+    void skillFailureFailsTheTask(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var task = await(new A2AClient(agent, http, jsons).sendMessage(skill("demo/greet", Map.of("name", " "))))
                 .task();
 
@@ -121,15 +128,15 @@ class DemoTest {
     void unknownSkill(@Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
 
-        final var error = assertThrows(
-                A2AClientException.class, () -> await(client.sendMessage(skill("demo/nope", Map.of()))));
+        final var error =
+                assertThrows(A2AClientException.class, () -> await(client.sendMessage(skill("demo/nope", Map.of()))));
         // naming a skill which does not exist is an invalid call, not a task failure
         assertEquals(A2AErrors.INVALID_PARAMS, error.code());
     }
 
     @Test
-    void severalSkillsNeedTheClientToPickOne(@Fusion final URI agent, @Fusion final HttpClient http,
-                                             @Fusion final JsonMapper jsons) {
+    void severalSkillsNeedTheClientToPickOne(
+            @Fusion final URI agent, @Fusion final HttpClient http, @Fusion final JsonMapper jsons) {
         final var client = new A2AClient(agent, http, jsons);
 
         final var error = assertThrows(A2AClientException.class, () -> await(client.sendMessage("hello")));
@@ -165,10 +172,14 @@ class DemoTest {
      */
     private static SendMessageRequest skill(final String skillId, final Map<String, Object> arguments) {
         return SendMessageRequest.of(new Message(
-                "m-" + skillId, null, null, Role.ROLE_USER,
+                "m-" + skillId,
+                null,
+                null,
+                Role.ROLE_USER,
                 List.of(io.yupiik.fusion.a2a.model.Part.text("hello")),
                 Map.of("skillId", skillId, "arguments", arguments),
-                null, null));
+                null,
+                null));
     }
 
     private static <T> T await(final CompletionStage<T> stage) {
