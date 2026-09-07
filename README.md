@@ -46,17 +46,11 @@ The terminal backend (jline) reads the terminal through the FFM API, so the JVM
 must be started with `--enable-native-access=ALL-UNNAMED` (otherwise a warning
 is printed and terminal handling can degrade).
 
-The structural code graph parser reaches into `jdk.compiler` internals, so its
-packages must be exported to the unnamed module at startup. When that feature is
-enabled (it is by default), append the `--add-exports` flags listed below; the
-shortcut is to use the `jre`/`jdk` variable documented in the launch examples.
-
 ```bash
-export JDK_EXPORTS="--add-exports=jdk.compiler/com.sun.source.tree=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.source.util=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.source.doctree=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED"
-java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar tui
-java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
-java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-permitAll
-java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar tui
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-permitAll
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
 ```
 
 `--yca-run-permitAll` (and `--yca-tui-permitAll` for the `tui` command) bypass
@@ -66,7 +60,7 @@ Minimal configuration (defaults to `https://api.openai.com/v1`):
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --yca-provider-model gpt-5-mini
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --yca-provider-model gpt-5-mini
 ```
 
 ## Configuration
@@ -101,7 +95,7 @@ Configuration is resolved from (highest priority first): CLI arguments
 ```
 
 Main groups: `provider` (baseUrl, apiKey, model, api, reasoningField,
-contextWindow, timeoutSeconds), `llm` (retries, rpm throttle, maxConcurrent),
+contextWindow, timeoutSeconds), `llm` (retries, rpm throttle, maxConcurrent, retryOnContextOverflow),
 `compaction` (thresholdPercent, enabled), `pruning` (thresholdPercent,
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 (disabled processors), `permissions` (mode, allow, deny, planBash), `sessions`
@@ -111,6 +105,14 @@ keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 which project instructions and skills are discovered. UI colors (under `tui`,
 e.g. `permitAll` for the red highlight shown when permissions are set to
 `all`) are themeable hex values.
+
+Context usage is estimated locally against `provider.contextWindow` and,
+before each turn, the conversation is pruned at `pruning.thresholdPercent`
+(default 65%) and compacted at `compaction.thresholdPercent` (default 80%).
+If, despite this, the model provider rejects the request as exceeding its
+real context window, the agent (when `llm.retryOnContextOverflow`, default
+true) compacts the context once, reports "context window exceeded; compacting
+and retrying", and retries the turn before falling back to an error.
 
 Each MCP server entry accepts a `readonly` list of tool names that stay
 available (read-only) in `plan` mode; `"*"` makes every tool of that server
@@ -129,8 +131,7 @@ file is written or edited, and patches only the drifted/missing files afterwards
 based on per-file content hashes.
 
 - **Requires a JDK**: the Java parser uses the `javac` compiler API, so it does
-  not run on a plain JRE. See the launch flags (`--add-exports`) in the Run
-  section.
+  not run on a plain JRE. No extra JVM flags are needed.
 - **Deterministic, no LLM by default**: the structural index (types, methods,
   fields, imports, extends/implements, calls) is extracted from the parse tree
   without any model call. Optional LLM *concept nodes* (per-subsystem Markdown

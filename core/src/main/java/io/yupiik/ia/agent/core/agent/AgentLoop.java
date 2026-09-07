@@ -9,6 +9,7 @@ import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ContextWindowExceededException;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.StreamDelta;
 import io.yupiik.ia.agent.core.llm.ToolCall;
@@ -122,6 +123,8 @@ public class AgentLoop {
 
     private String loop(final String sessionId, final List<Message> messages,
                         final BooleanSupplier cancelled) throws IOException, InterruptedException {
+        final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
+        var overflowRetried = false;
         for (var iteration = 0; iteration < MAX_ITERATIONS && !cancelled.getAsBoolean(); iteration++) {
             if (contextManager.pruneNeeded(messages)) {
                 final var pruned = contextManager.prune(messages);
@@ -143,7 +146,24 @@ public class AgentLoop {
             final var request = new ChatCompletionRequest(configuration.provider().model(), messages,
                     null, null, toolRegistry.toWireTools(), "auto", null, null, null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[]{io.yupiik.ia.agent.core.llm.Usage.EMPTY};
-            final var assistant = chatClient.stream(request, delta -> dispatch(delta, usage), cancelled);
+            final Message assistant;
+            try {
+                assistant = chatClient.stream(request, delta -> dispatch(delta, usage), cancelled);
+            } catch (final ContextWindowExceededException e) {
+                if (!retryOnOverflow || overflowRetried) {
+                    throw e;
+                }
+                emit(new AgentEvent.Status("Context window exceeded; compacting and retrying."));
+                final var compacted = contextManager.compactForOverflow(messages);
+                if (compacted != messages && !compacted.isEmpty()) {
+                    messages.clear();
+                    messages.addAll(compacted);
+                    emit(new AgentEvent.Compacted("compact-retry"));
+                    overflowRetried = true;
+                    continue;
+                }
+                throw e;
+            }
             usageTracker.record(usage[0]);
             messages.add(assistant);
             sessionStore.append(sessionId, SessionEntry.of(System.currentTimeMillis(),

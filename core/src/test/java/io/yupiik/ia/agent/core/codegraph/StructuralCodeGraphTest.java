@@ -40,7 +40,7 @@ class StructuralCodeGraphTest {
                 """);
 
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), null, null,
-                new LlmConfiguration(3, 500L, 0, 4), null, null, null, null, null, null,
+                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph"),
                 null, null, null);

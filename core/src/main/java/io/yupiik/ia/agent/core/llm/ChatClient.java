@@ -145,7 +145,7 @@ public class ChatClient implements AutoCloseable {
                         return doStreamCompletions(streaming, onDelta, cancelled);
                     }
                 } catch (final IOException e) {
-                    if (e instanceof FlavorMissingException) {
+                    if (e instanceof FlavorMissingException || e instanceof ContextWindowExceededException) {
                         throw e;
                     }
                     last = e;
@@ -205,6 +205,9 @@ public class ChatClient implements AutoCloseable {
                 .build();
         final HttpResponse<String> response = send(httpRequest);
         if (response.statusCode() >= 400) {
+            if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
+                throw new ContextWindowExceededException();
+            }
             throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
         }
         return mapper.fromString(ChatCompletionResponse.class, response.body());
@@ -286,6 +289,9 @@ public class ChatClient implements AutoCloseable {
         if (response.statusCode() >= 400) {
             if (isFlavorMissing(response.statusCode())) {
                 throw new FlavorMissingException();
+            }
+            if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
+                throw new ContextWindowExceededException();
             }
             throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
         }
@@ -478,6 +484,9 @@ public class ChatClient implements AutoCloseable {
             if (isFlavorMissing(response.statusCode())) {
                 throw new FlavorMissingException();
             }
+            if (ContextWindowExceededException.isCause(response.statusCode(), body)) {
+                throw new ContextWindowExceededException();
+            }
             throw new IOException("LLM request failed (" + response.statusCode() + "): " + body);
         }
         return new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8));
@@ -602,7 +611,7 @@ public class ChatClient implements AutoCloseable {
             try {
                 return call.get();
             } catch (final IOException e) {
-                if (e instanceof FlavorMissingException) {
+                if (e instanceof FlavorMissingException || e instanceof ContextWindowExceededException) {
                     throw e;
                 }
                 last = e;

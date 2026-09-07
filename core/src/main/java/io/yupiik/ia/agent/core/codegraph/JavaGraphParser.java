@@ -12,8 +12,9 @@ import com.sun.source.tree.PackageTree;
 import com.sun.source.tree.Tree;
 import com.sun.source.tree.VariableTree;
 import com.sun.source.util.JavacTask;
+import com.sun.source.util.SourcePositions;
 import com.sun.source.util.TreeScanner;
-import com.sun.tools.javac.tree.JCTree;
+import com.sun.source.util.Trees;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 
 import javax.tools.DiagnosticCollector;
@@ -65,7 +66,8 @@ public class JavaGraphParser implements GraphParser {
             final JavacTask task = (JavacTask) compiler.getTask(null, fm, new DiagnosticCollector<>(),
                     List.of("-proc:none"), null, units);
             final var unit = task.parse().iterator().next();
-            final var collector = new Collector(unit);
+            final var positions = Trees.instance(task).getSourcePositions();
+            final var collector = new Collector(unit, positions);
             unit.accept(collector, null);
             return new GraphModel("java", collector.nodes, collector.edges);
         } catch (final IOException e) {
@@ -79,13 +81,17 @@ public class JavaGraphParser implements GraphParser {
         private final String fileName;
         private final String packageName;
         private final com.sun.source.tree.LineMap lineMap;
+        private final SourcePositions positions;
+        private final CompilationUnitTree unit;
         private final Map<String, String> importedTypes = new HashMap<>();
         private final Deque<String> ownerStack = new java.util.ArrayDeque<>();
 
-        private Collector(final CompilationUnitTree unit) {
+        private Collector(final CompilationUnitTree unit, final SourcePositions positions) {
             this.fileName = unit.getSourceFile().getName();
             this.packageName = pkg(unit);
             this.lineMap = unit.getLineMap();
+            this.positions = positions;
+            this.unit = unit;
         }
 
         private String pkg(final CompilationUnitTree unit) {
@@ -128,13 +134,10 @@ public class JavaGraphParser implements GraphParser {
         }
 
         private int line(final Tree tree) {
-            if (!(tree instanceof final JCTree jcTree)) {
+            if (tree == null || lineMap == null || positions == null) {
                 return 0;
             }
-            if (lineMap == null) {
-                return 0;
-            }
-            final var start = jcTree.getStartPosition();
+            final var start = positions.getStartPosition(unit, tree);
             return start < 0 ? 0 : (int) lineMap.getLineNumber(start);
         }
 
