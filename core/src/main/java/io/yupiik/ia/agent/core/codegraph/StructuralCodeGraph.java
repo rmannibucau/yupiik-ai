@@ -28,6 +28,16 @@ import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 
+/**
+ * The structural code graph of the agent: a symbol-and-edge graph extracted from the working tree by the
+ * registered {@link GraphParser}s (all deterministic, model-free, cheap per-query refresh by file fingerprint),
+ * plus an optional tier-2 LLM enrichment (per-file and per-symbol summaries, and curated concept nodes).
+ *
+ * <p>The wiring model is heavily inspired by Graft ({@link https://github.com/trailhq/Graft}): the raw graph
+ * is a tier-1 structural extract persisted to {@code .graph/wiring.json}, per-file cards mirror the source
+ * tree under the doc store, and concept nodes group those files into curated LLM-written cards at the store
+ * root with typed links between them.
+ */
 @ApplicationScoped
 public class StructuralCodeGraph {
     private static final Logger LOGGER = Logger.getLogger(StructuralCodeGraph.class.getName());
@@ -56,9 +66,10 @@ public class StructuralCodeGraph {
         final var workingDir = configuration.resolveWorkingDir().toString();
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
         this.storeFile = storeRoot.resolve("graph.json");
-        this.docWriter = new DocTreeWriter(configuration,
-                Path.of(configuration.structuralCodeGraph().resolvedDocStoreDir(workingDir)).toAbsolutePath().normalize());
-        this.docEnricher = new DocEnricher(configuration, chatClient, docWriter);
+        this.docWriter = new DocTreeWriter(configuration, storeRoot);
+        this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot);
+        this.docWriter.enrichment(docEnricher);
+        this.docEnricher.onRewire(this::rewireWiring);
     }
 
     protected StructuralCodeGraph() {
@@ -124,7 +135,30 @@ public class StructuralCodeGraph {
         }
         return "symbols=" + g.symbols().size() + " edges=" + g.edges().size() + " missingFiles=" + missing
                 + " files=" + g.fingerprints().size() + " storedAt=" + g.builtAt()
-                + " dir=" + storeRoot;
+                + " dir=" + storeRoot + " graph=" + storeFile.getFileName()
+                + " wiring=" + WiringGraphWriter.pathFor(storeRoot).getFileName();
+    }
+
+    /**
+     * Force a re-sync of the structural code graph (symbols, edges, fingerprints and the per-file
+     * markdown doc tree) against the current working tree, regardless of the last build timestamp.
+     * Used by the {@code /structural-code-graph} command to refresh the graph on demand.
+     *
+     * @return a short human-readable status describing the resync.
+     */
+    public String resync() {
+        if (!enabled()) {
+            return "disabled (enable yca.structural-code-graph.enabled)";
+        }
+        final var loaded = load();
+        final GraphStore rebuilt;
+        if (loaded != null) {
+            rebuilt = patch(loaded);
+        } else {
+            rebuilt = rebuild();
+        }
+        graph = rebuilt;
+        return freshness();
     }
 
     public void onBeforeTool(@OnEvent final BeforeToolExecutionEvent event) {
@@ -268,6 +302,7 @@ public class StructuralCodeGraph {
         final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
         persist(updated);
         statusReporter.report("structural code graph refreshed (" + updated.symbols().size() + " symbols)");
+        enrichConceptsIfEnabled();
         return updated;
     }
 
@@ -303,6 +338,7 @@ public class StructuralCodeGraph {
         final var built = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
         persist(built);
         statusReporter.report("structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
+        enrichConceptsIfEnabled();
         return built;
     }
 
@@ -393,12 +429,36 @@ public class StructuralCodeGraph {
         }
     }
 
+    private void enrichConceptsIfEnabled() {
+        if (!enabled() || !configuration.structuralCodeGraph().enrich()) {
+            return;
+        }
+        try {
+            docEnricher.enrichConcepts();
+        } catch (final RuntimeException e) {
+            LOGGER.warning("Concept-node pass failed: " + e.getMessage());
+        }
+    }
+
     private void persist(final GraphStore store) {
         try {
             Files.createDirectories(storeRoot);
             Files.writeString(storeFile, mapper.toString(store), StandardCharsets.UTF_8);
+            WiringGraphWriter.write(mapper, storeRoot, store, docEnricher.cache());
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /**
+     * Re-emit the wiring graph from the current in-memory graph, now that enrichment data is available. Safe to
+     * call from the async enrichment thread; the write is atomic so it never corrupts the file.
+     */
+    private void rewireWiring() {
+        final var g = graph;
+        if (g == null) {
+            return;
+        }
+        WiringGraphWriter.write(mapper, storeRoot, g, docEnricher.cache());
     }
 }

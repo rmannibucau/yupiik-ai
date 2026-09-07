@@ -34,6 +34,7 @@ import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -92,13 +93,14 @@ public class TuiCommand implements Runnable {
             | /memory | show the project memory |
             | /context [path] | show the resolved context (system prompt + session), write to path when given |
             | /permissions (all\\|none) | allow all tools without asking (all), or restore interactive approval (none) |
+            | /structural-code-graph | resync the structural code graph (symbols, edges and doc tree) on demand |
             | /clear | clear the transcript |
             | /quit | exit yca |
             """;
 
     private static final List<String> SLASH_COMMANDS = List.of(
             "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/mode", "/memory", "/context",
-            "/permissions", "/clear", "/quit", "/exit");
+            "/permissions", "/structural-code-graph", "/clear", "/quit", "/exit");
 
     private final TuiConf conf;
     private final TuiConfiguration tuiConfiguration;
@@ -114,6 +116,7 @@ public class TuiCommand implements Runnable {
     private final SystemPromptBuilder systemPromptBuilder;
     private final McpManager mcpManager;
     private final VirtualThreadExecutor executor;
+    private final StructuralCodeGraph structuralCodeGraph;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -121,7 +124,8 @@ public class TuiCommand implements Runnable {
                       final ContextManager contextManager, final SessionStore sessionStore,
                       final TodoStore todoStore, final ChatClient chatClient, final MemoryStore memoryStore,
                       final SystemPromptBuilder systemPromptBuilder, final McpManager mcpManager,
-                      final VirtualThreadExecutor executor) {
+                      final VirtualThreadExecutor executor,
+                      final StructuralCodeGraph structuralCodeGraph) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -136,6 +140,7 @@ public class TuiCommand implements Runnable {
         this.systemPromptBuilder = systemPromptBuilder;
         this.mcpManager = mcpManager;
         this.executor = executor;
+        this.structuralCodeGraph = structuralCodeGraph;
     }
 
     @RootConfiguration("tui")
@@ -432,6 +437,7 @@ public class TuiCommand implements Runnable {
                         .append("\n```\n");
             }
             case "/context" -> context("", state);
+            case "/structural-code-graph" -> resyncGraph(runner, state);
             case "/clear" -> {
                 state.transcript.setLength(0);
                 state.thinking.setLength(0);
@@ -653,6 +659,25 @@ public class TuiCommand implements Runnable {
         final var mode = AgentMode.fromConfigurationString(value);
         permissionService.setMode(mode);
         state.status = "mode: " + mode.name().toLowerCase();
+    }
+
+    private void resyncGraph(final TuiRunner runner, final UiState state) {
+        if (state.busy) {
+            state.status = "cannot resync the graph while busy";
+            return;
+        }
+        state.status = "resyncing structural code graph...";
+        executor.execute(() -> {
+            try {
+                final var result = structuralCodeGraph.resync();
+                runner.runLater(() -> {
+                    state.status = "structural code graph resynced";
+                    state.transcript.append("\n\n> structural code graph: `").append(result).append("`\n");
+                });
+            } catch (final RuntimeException e) {
+                runner.runLater(() -> state.status = "resync failed: " + e.getMessage());
+            }
+        });
     }
 
     private void compact(final TuiRunner runner, final UiState state) {

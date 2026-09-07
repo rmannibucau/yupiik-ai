@@ -54,7 +54,7 @@ class JavaGraphParserTest {
     }
 
     @Test
-    void ignoresPrimitivesAndJavaLangTypes() throws IOException {
+    void declaresNoEdgesForFieldParameterAndLocalTypes() throws IOException {
         final var parser = new JavaGraphParser();
 
         final var src = tempDir.resolve("Contact.java");
@@ -66,49 +66,64 @@ class JavaGraphParserTest {
                     private boolean active;
                     private String name;
                     private long timestamp;
-                    public String label() { return name; }
+                    public String label(String prefix) { return prefix + name; }
                 }
                 """);
         final var model = parser.parse(src);
 
-        final var usesTo = model.edges().stream()
-                .filter(e -> e.type() == GraphModel.EdgeType.USES)
-                .map(GraphModel.Edge::to)
-                .toList();
-        assertTrue(usesTo.stream().noneMatch(t -> t.endsWith(".int") || t.endsWith(".double")
-                || t.equals("int") || t.equals("double")),
-                "expected no primitive USES edges, got " + usesTo);
-        assertTrue(usesTo.stream().noneMatch(t -> t.endsWith(".String") || t.equals("String")),
-                "expected no java.lang String USES edges, got " + usesTo);
-        assertTrue(usesTo.stream().noneMatch(t -> t.endsWith(".boolean") || t.equals("boolean")
-                || t.endsWith(".long") || t.equals("long")),
-                "expected no other primitive USES edges, got " + usesTo);
+        // Field, parameter and local variable types are receiver-typing hints only (graft's
+        // collectBindings contract) - they must never become edges, so primitives and java.lang
+        // types cannot leak as junk USES edges.
+        assertTrue(model.edges().isEmpty(),
+                "expected no edges from declaration types, got " + model.edges());
     }
 
     @Test
-    void resolvesQualifiedExternalTypes() throws IOException {
+    void heritageKeepsExternalRawNames() throws IOException {
         final var parser = new JavaGraphParser();
 
-        final var src = tempDir.resolve("HttpClientUser.java");
+        final var src = tempDir.resolve("Child.java");
         Files.writeString(src, """
                 package sample;
-                import java.net.http.HttpClient;
-                public class HttpClientUser {
-                    private HttpClient client;
-                    private java.util.concurrent.TimeUnit unit;
-                    public java.util.concurrent.TimeUnit sleep() { return java.util.concurrent.TimeUnit.SECONDS; }
+                class Child extends java.awt.Frame implements java.io.ExternalMarker {
                 }
                 """);
         final var model = parser.parse(src);
 
-        final var usesTo = model.edges().stream()
-                .filter(e -> e.type() == GraphModel.EdgeType.USES)
-                .map(GraphModel.Edge::to)
-                .toList();
-        assertTrue(usesTo.contains("java.net.http.HttpClient"),
-                "expected imported HttpClient to resolve to its FQN, got " + usesTo);
-        assertTrue(usesTo.contains("java.util.concurrent.TimeUnit"),
-                "expected fully-qualified TimeUnit to resolve as-is, got " + usesTo);
+        // An unresolved/external base or interface keeps its raw qualified name as the target
+        // (graft's 'external type' contract) instead of being dropped or fabricated.
+        assertTrue(model.edges().stream().anyMatch(e -> e.type() == GraphModel.EdgeType.EXTENDS
+                        && e.to().equals("java.awt.Frame")),
+                "expected EXTENDS edge keeping the qualified external name, got " + model.edges());
+        assertTrue(model.edges().stream().anyMatch(e -> e.type() == GraphModel.EdgeType.IMPLEMENTS
+                        && e.to().equals("java.io.ExternalMarker")),
+                "expected IMPLEMENTS edge keeping the qualified external name, got " + model.edges());
+    }
+
+    @Test
+    void constructionEmitsCallOnlyForInPackageTypes() throws IOException {
+        final var parser = new JavaGraphParser();
+
+        final var src = tempDir.resolve("Factory.java");
+        Files.writeString(src, """
+                package sample;
+                public class Factory {
+                    private Widget widget;
+                    public Object make() {
+                        widget = new Widget();
+                        return new String();
+                    }
+                }
+                """);
+        final var model = parser.parse(src);
+
+        // new Widget() (in-package type) is a CALLS edge; new String() (java.lang) is dropped.
+        assertTrue(model.edges().stream().anyMatch(e -> e.type() == GraphModel.EdgeType.CALLS
+                        && e.to().equals("sample.Widget")),
+                "expected CALLS edge to the in-package constructed type, got " + model.edges());
+        assertTrue(model.edges().stream().noneMatch(e -> e.type() == GraphModel.EdgeType.CALLS
+                        && e.to().contains("String")),
+                "expected no CALLS edge for java.lang construction, got " + model.edges());
     }
 
     @Test
@@ -132,11 +147,37 @@ class JavaGraphParserTest {
         assertTrue(importEdges.contains("not.existing.Service"),
                 "expected the off-classpath type to be seen as imported, got " + importEdges);
 
-        final var usesEdges = model.edges().stream()
-                .filter(e -> e.type() == GraphModel.EdgeType.USES)
-                .map(GraphModel.Edge::to)
+        // new Service() is an off-classpath import - drop the construction edge (graft drops
+        // unresolved construction); the IMPORTS edge already records the dependency.
+        assertTrue(model.edges().stream().noneMatch(e -> e.type() == GraphModel.EdgeType.CALLS
+                        && e.to().contains("Service")),
+                "expected off-classpath construction to be dropped, got " + model.edges());
+    }
+
+    @Test
+    void collapsesRepeatedCallsToSameTarget() throws IOException {
+        final var parser = new JavaGraphParser();
+
+        final var src = tempDir.resolve("Repeated.java");
+        Files.writeString(src, """
+                package sample;
+                import static sample.Helper.invoke;
+                public class Repeated {
+                    public void run() {
+                        invoke();
+                        invoke();
+                        invoke();
+                    }
+                }
+                """);
+        final var model = parser.parse(src);
+
+        // Multiple call sites to the same target from the same owner collapse into a single
+        // edge (graft's model), so the markdown tree has exactly one --CALLS--> per pair.
+        final var callEdges = model.edges().stream()
+                .filter(e -> e.type() == GraphModel.EdgeType.CALLS)
                 .toList();
-        assertTrue(usesEdges.contains("not.existing.Service"),
-                "expected the off-classpath type to be seen as referenced, got " + usesEdges);
+        assertEquals(1, callEdges.size(),
+                "expected exactly one CALLS edge for repeated invocations, got " + callEdges);
     }
 }

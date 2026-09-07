@@ -69,7 +69,7 @@ public class JavaGraphParser implements GraphParser {
             final var positions = Trees.instance(task).getSourcePositions();
             final var collector = new Collector(unit, positions);
             unit.accept(collector, null);
-            return new GraphModel("java", collector.nodes, collector.edges);
+            return new GraphModel("java", collector.nodes, collector.edges.stream().distinct().toList());
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -139,12 +139,15 @@ public class JavaGraphParser implements GraphParser {
             return dot >= 0 ? name.substring(dot + 1) : name;
         }
 
-        private int line(final Tree tree) {
+        private int[] startEnd(final Tree tree) {
             if (tree == null || lineMap == null || positions == null) {
-                return 0;
+                return new int[]{0, 0};
             }
             final var start = positions.getStartPosition(unit, tree);
-            return start < 0 ? 0 : (int) lineMap.getLineNumber(start);
+            final var end = positions.getEndPosition(unit, tree);
+            final var startLine = start < 0 ? 0 : (int) lineMap.getLineNumber(start);
+            final var endLine = end < 0 ? startLine : (int) lineMap.getLineNumber(end);
+            return new int[]{startLine, endLine};
         }
 
         @Override
@@ -174,7 +177,8 @@ public class JavaGraphParser implements GraphParser {
                     : node.getKind() == Tree.Kind.ANNOTATION_TYPE ? GraphModel.Kind.ANNOTATION
                     : node.getKind() == Tree.Kind.ENUM ? GraphModel.Kind.ENUM
                     : GraphModel.Kind.TYPE;
-            nodes.add(new GraphModel.Symbol(owner, kind, fileName, line(node), 0, signature(node)));
+            final var bounds = startEnd(node);
+            nodes.add(new GraphModel.Symbol(owner, kind, fileName, bounds[0], bounds[1], signature(node)));
             if (node.getExtendsClause() != null) {
                 relationship(owner, node.getExtendsClause(), GraphModel.EdgeType.EXTENDS);
             }
@@ -195,7 +199,8 @@ public class JavaGraphParser implements GraphParser {
             final var methodName = node.getName().toString();
             final var owner = join(currentOwner(), methodName);
             if (!"<init>".equals(methodName) && !"<clinit>".equals(methodName)) {
-                nodes.add(new GraphModel.Symbol(owner, GraphModel.Kind.METHOD, fileName, line(node), 0, signature(node)));
+                final var bounds = startEnd(node);
+                nodes.add(new GraphModel.Symbol(owner, GraphModel.Kind.METHOD, fileName, bounds[0], bounds[1], signature(node)));
             }
             ownerStack.push(owner);
             for (final var param : node.getParameters()) {
@@ -210,9 +215,9 @@ public class JavaGraphParser implements GraphParser {
 
         @Override
         public Void visitVariable(final VariableTree node, final Void unused) {
-            if (node.getType() != null) {
-                uses(node.getType());
-            }
+            // Field, parameter and local variable types are only receiver-typing hints, never edges
+            // (graft's collectBindings contract) - otherwise it would leak primitives and java.lang
+            // types as junk USES edges. The initializer may still contain calls and constructions.
             if (node.getInitializer() != null) {
                 scan(node.getInitializer(), unused);
             }
@@ -233,11 +238,9 @@ public class JavaGraphParser implements GraphParser {
         @Override
         public Void visitNewClass(final NewClassTree node, final Void unused) {
             final var type = node.getIdentifier() == null ? "" : node.getIdentifier().toString();
-            if (!type.isBlank()) {
-                final var resolved = resolve(type);
-                if (resolved != null) {
-                    edges.add(new GraphModel.Edge(currentOwner(), resolved, GraphModel.EdgeType.USES));
-                }
+            final var resolved = resolveConstructed(type);
+            if (resolved != null) {
+                edges.add(new GraphModel.Edge(currentOwner(), resolved, GraphModel.EdgeType.CALLS));
             }
             scan(node.getArguments(), unused);
             return null;
@@ -249,20 +252,30 @@ public class JavaGraphParser implements GraphParser {
                 return;
             }
             final var resolved = resolve(text);
-            if (resolved != null) {
-                edges.add(new GraphModel.Edge(owner, resolved, type));
-            }
+            // An unresolved base is usually an external/imported type - keep the raw name as the
+            // target (graft's 'external type' contract) instead of dropping it.
+            edges.add(new GraphModel.Edge(owner, resolved == null ? text : resolved, type));
         }
 
-        private void uses(final Tree type) {
-            final var text = type == null ? "" : type.toString();
-            if (text.isBlank()) {
-                return;
+        private String resolveConstructed(final String name) {
+            if (name == null || name.isBlank()) {
+                return null;
             }
-            final var resolved = resolve(text);
-            if (resolved != null) {
-                edges.add(new GraphModel.Edge(currentOwner(), resolved, GraphModel.EdgeType.USES));
+            if (name.indexOf('.') >= 0) {
+                // Qualified construction (new java.io.File(), new demo.Foo()) is dropped: resolving it
+                // to a scoped name risks false-matching an unrelated in-repo type (graft drops these).
+                return null;
             }
+            if (isNonSymbol(name)) {
+                // Primitives and java.lang wrappers (new String(), new Integer()) are never project symbols.
+                return null;
+            }
+            if (importedTypes.containsKey(name)) {
+                // new Foo() where Foo is only an off-classpath import -> drop (the import edge already
+                // records the dependency, matching graft).
+                return null;
+            }
+            return fqn(packageName, name);
         }
 
         private String resolve(final String name) {
@@ -296,7 +309,13 @@ public class JavaGraphParser implements GraphParser {
 
         private String resolveOwner(final Tree select) {
             if (select instanceof final MemberSelectTree m) {
-                return m.getExpression() == null ? null : resolve(m.getExpression().toString());
+                final var expr = m.getExpression();
+                if (expr instanceof final NewClassTree n) {
+                    // `new demo.Foo().bar()` - the member call owner is the constructed type.
+                    final var constructed = n.getIdentifier() == null ? "" : n.getIdentifier().toString();
+                    return resolve(constructed);
+                }
+                return expr == null ? null : resolve(expr.toString());
             }
             return null;
         }

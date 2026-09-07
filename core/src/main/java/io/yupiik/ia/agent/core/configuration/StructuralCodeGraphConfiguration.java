@@ -14,7 +14,9 @@ public record StructuralCodeGraphConfiguration(
         @Property(defaultValue = "java.util.List.of(\"java\")", documentation = "File extensions (without dot) parsed into the graph. Only extensions handled by a registered parser are processed.") List<String> languageExtensions,
         @Property(defaultValue = "\".yca/generated/graph\"", documentation = "Directory, relative to the working directory, where the graph cache is stored. It is regenerable and never committed.") String storeDir,
         @Property(defaultValue = "true", documentation = "Emit a per-source-file markdown doc tree under the graph store, mirroring the project source layout. The docs are deterministic structural extracts (symbols and edges) that agents can grep instead of reading the graph. When 'enrich' is enabled, each doc also gains an async LLM summary.") boolean docs,
-        @Property(defaultValue = "\"docs\"", documentation = "Sub-directory (under the graph store dir) where the mirrored per-file markdown doc tree is written.") String docStoreDir) {
+        @Property(defaultValue = "\"docs\"", documentation = "Sub-directory (under the graph store dir) where the mirrored per-file markdown doc tree is written.") String docStoreDir,
+        @Property(defaultValue = "false", documentation = "Deep enrichment: additionally ask the LLM for a one-line summary and a crux excerpt per symbol, cached by body content hash so only changed symbols are re-sent. Requires 'enrich'.") boolean deep,
+        @Property(defaultValue = "false", documentation = "Disable the automatic per-query graph refresh that stats the tree against the last build fingerprint. Equivalent to Graft's GRAFT_NO_REFRESH=1.") boolean noRefresh) {
 
     public String resolvedStoreDir(final String workingDir) {
         final var value = storeDir == null || storeDir.isBlank() ? ".yca/generated/graph" : storeDir;
@@ -22,8 +24,6 @@ public record StructuralCodeGraphConfiguration(
     }
 
     public String resolvedDocStoreDir(final String workingDir) {
-        final var root = resolvedStoreDir(workingDir);
-        final var value = docStoreDir == null || docStoreDir.isBlank() ? "docs" : docStoreDir;
-        return root + "/" + value;
+        return resolvedStoreDir(workingDir);
     }
 }

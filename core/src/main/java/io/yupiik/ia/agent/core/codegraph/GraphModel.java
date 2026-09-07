@@ -16,13 +16,14 @@ public record GraphModel(String language, List<Symbol> symbols, List<Edge> edges
     }
 
     @JsonModel
-    public record Symbol(String fqn, Kind kind, String file, int line, int column, String signature) {
+    public record Symbol(String fqn, Kind kind, String file, int startLine, int endLine, String signature) {
     }
 
     @JsonModel
     public record Edge(String from, String to, EdgeType type) {
     }
 
+    @JsonModel
     public enum Kind {
         TYPE,
         METHOD,
@@ -35,6 +36,7 @@ public record GraphModel(String language, List<Symbol> symbols, List<Edge> edges
         MODULE
     }
 
+    @JsonModel
     public enum EdgeType {
         CALLS,
         IMPORTS,
