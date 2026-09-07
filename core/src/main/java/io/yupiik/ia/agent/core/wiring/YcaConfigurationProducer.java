@@ -1,0 +1,61 @@
+package io.yupiik.ia.agent.core.wiring;
+
+import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
+import io.yupiik.fusion.framework.api.io.ReaderSupplier;
+import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.fusion.framework.build.api.event.OnEvent;
+import io.yupiik.fusion.framework.build.api.order.Order;
+import io.yupiik.fusion.json.configuration.JsonConfigurationSource;
+
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.function.Function;
+import java.util.logging.Logger;
+
+@DefaultScoped
+public class YcaConfigurationProducer {
+    private static final String PREFIX = "yca.";
+    private static final Function<String, String> KEY_NORMALIZER = key -> {
+        final var stripped = key.startsWith(PREFIX) ? key.substring(PREFIX.length()) : key;
+        return stripped.replace('-', '.');
+    };
+
+    public void register(
+            @OnEvent @Order(Integer.MIN_VALUE + 1) final ConfigurationRegistration registration,
+            final ArgsConfigSource args) {
+        registration.addSource().accept(args::get);
+
+        final var configuration = registration.configuration();
+        final var path = configuration.get(PREFIX + "configuration.json")
+                .orElseGet(YcaConfigurationProducer::defaultConfigurationFile);
+        loadJson(registration, Path.of(path));
+    }
+
+    private static String defaultConfigurationFile() {
+        var home = System.getProperty(PREFIX + "storage.home", System.getenv("YCA_STORAGE_HOME"));
+        if (home == null || home.isBlank()) {
+            home = System.getProperty("user.home") + "/.yupiik/coding-agent";
+        } else if (home.startsWith("~/")) {
+            home = System.getProperty("user.home") + home.substring(1);
+        }
+        return Path.of(home, "configuration.json").toString();
+    }
+
+    private void loadJson(final ConfigurationRegistration registration, final Path path) {
+        if (!Files.isRegularFile(path)) {
+            return;
+        }
+        try (final var in = Files.newInputStream(path)) {
+            final var bytes = in.readAllBytes();
+            final ReaderSupplier supplier = () -> new InputStreamReader(new ByteArrayInputStream(bytes));
+            registration.addSource().accept(new JsonConfigurationSource(supplier, KEY_NORMALIZER));
+        } catch (final IOException e) {
+            throw new UncheckedIOException("Invalid configuration file: " + path, e);
+        }
+    }
+}

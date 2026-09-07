@@ -1,0 +1,32 @@
+= Configuration
+:minisite-index: 100
+:minisite-index-title: Configuration
+:minisite-index-description: All yca options: provider, permissions, MCP servers, context management.
+:minisite-index-icon: sliders-h
+:minisite-keywords: configuration, provider, mcp, permissions
+:minisite-breadcrumb: Home[index.html] > Configuration
+
+Configuration is resolved from, highest priority first:
+
+. CLI arguments: `--yca-<key> <value>` (for example `--yca-provider-model`)
+. JSON file: `~/.yupiik/coding-agent/configuration.json` (override the location
+  with the `yca.configuration.json` key)
+. System properties: `yca.provider.model` style keys
+. Environment variables: `YCA_PROVIDER_MODEL` style keys (dots/hyphens become
+  underscores, uppercased)
+
+The main configuration groups are documented below. Command specific options
+(`run.*`, `tui.*`) are documented in the
+xref:cli/index.adoc[CLI reference].
+
+== Global configuration
+
+`yca.*` options:
+
+include::content/_partials/generated/documentation.core.adoc[]
+
+== Command configuration
+
+`run.*` and `tui.*` options:
+
+include::content/_partials/generated/documentation.tui.adoc[]

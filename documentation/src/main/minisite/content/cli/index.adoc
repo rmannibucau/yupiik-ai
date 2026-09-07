@@ -1,0 +1,22 @@
+= YCA CLI
+
+TIP: all options can also be passed in environment variables
+if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots removed.
+
+== completion/bash
+
+Print a bash completion script. Usage: <app> completion bash > /etc/bash_completion.d/<app> (then source it, or eval "$(<app> completion bash)").
+
+See xref:completion-bash.adoc[completion/bash] detail page.
+
+== run
+
+Run a single headless prompt and print the answer on stdout.
+
+See xref:run.adoc[run] detail page.
+
+== tui
+
+Interactive terminal UI session with the yca coding agent.
+
+See xref:tui.adoc[tui] detail page.

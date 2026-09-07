@@ -1,0 +1,21 @@
+= completion/bash
+:minisite-nav-prev-link: index.html
+:minisite-nav-prev-label: CLI
+
+== Description
+
+Print a bash completion script. Usage: <app> completion bash > /etc/bash_completion.d/<app> (then source it, or eval "$(<app> completion bash)").
+
+== Synopsis
+
+[source,bash]
+.completion/bash-sample
+----
+java ... io.yupiik.fusion.framework.api.main.Launcher \
+    completion/bash
+
+----
+
+== Parameters
+
+No parameter.

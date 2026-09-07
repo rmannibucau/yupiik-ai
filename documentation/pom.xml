@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ia.agent</groupId>
+    <artifactId>yca</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>documentation</artifactId>
+  <packaging>pom</packaging>
+  <name>YCA :: Documentation</name>
+  <description>YCA documentation (minisite + generated CLI/configuration pages).</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>core</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>tui</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-documentation</artifactId>
+      <scope>provided</scope>
+      <optional>true</optional>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>io.yupiik.maven</groupId>
+        <artifactId>yupiik-tools-maven-plugin</artifactId>
+        <configuration>
+          <preferYupiikAsciidoc>true</preferYupiikAsciidoc>
+          <title>${project.name}</title>
+          <description>${project.description}</description>
+          <indexText>${project.name}</indexText>
+          <indexSubTitle>${project.description}</indexSubTitle>
+          <logoText>yca</logoText>
+          <logoSideText>Documentation</logoSideText>
+          <copyright>(c) 2026 Yupiik SAS</copyright>
+          <attributes>
+            <partialsdir>${project.basedir}/src/main/minisite/content/_partials</partialsdir>
+            <project_name>${project.name}</project_name>
+            <project_version>${project.version}</project_version>
+            <project_description>${project.description}</project_description>
+          </attributes>
+          <generateIndex>true</generateIndex>
+          <siteBase>/yca</siteBase>
+          <includeProvidedScope>true</includeProvidedScope>
+          <preActions>
+            <preAction>
+              <type>io.yupiik.fusion.documentation.CliDocumentationGenerator</type>
+              <configuration>
+                <indexHeader><![CDATA[= YCA CLI
+
+TIP: all options can also be passed in environment variables
+if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots removed.
+]]></indexHeader>
+              </configuration>
+            </preAction>
+            <preAction>
+              <type>io.yupiik.fusion.documentation.DocumentationGenerator</type>
+              <configuration>
+                <includeEnvironmentNames>true</includeEnvironmentNames>
+                <formatter>definitionlist</formatter>
+              </configuration>
+            </preAction>
+          </preActions>
+        </configuration>
+        <dependencies>
+          <dependency>
+            <groupId>io.yupiik.maven</groupId>
+            <artifactId>asciidoc-java</artifactId>
+            <version>${yupiik-tools.version}</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <execution>
+            <id>doc</id>
+            <goals>
+              <goal>minisite</goal>
+            </goals>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

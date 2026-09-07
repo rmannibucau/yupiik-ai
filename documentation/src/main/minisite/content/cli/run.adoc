@@ -1,0 +1,34 @@
+= run
+:minisite-nav-prev-link: index.html
+:minisite-nav-prev-label: CLI
+
+== Description
+
+Run a single headless prompt and print the answer on stdout.
+
+== Synopsis
+
+[source,bash]
+.run-sample
+----
+java ... io.yupiik.fusion.framework.api.main.Launcher \
+    run \
+    --permitAll ...\
+    --prompt ...\
+    --session ...\
+    --showThinking ...
+----
+
+== Parameters
+
+--permitAll::
+Bypass permission checks and allow all tool calls.
+
+--prompt::
+Prompt to send to the agent.
+
+--session::
+Session id to append to; a new session is created when empty.
+
+--showThinking::
+Print reasoning deltas on stderr.

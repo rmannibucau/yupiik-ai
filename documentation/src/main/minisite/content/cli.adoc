@@ -1,0 +1,40 @@
+= CLI
+:minisite-index: 150
+:minisite-index-title: CLI
+:minisite-index-description: The tui interactive interface and the run headless command.
+:minisite-index-icon: terminal
+:minisite-keywords: cli, tui, run, commands
+:minisite-breadcrumb: Home[index.html] > CLI
+
+yca ships two commands plus the standard fusion helpers:
+
+[cols="a,2a"]
+|===
+|Command |Description
+
+| xref:cli/tui.adoc[tui]
+| Interactive terminal interface (TamboUI): markdown transcript, token gauges,
+todos, thinking stream, approval modals.
+
+| xref:cli/run.adoc[run]
+| Headless one-shot execution: `--prompt` (required) and optional `--session`,
+prints deltas on stdout, exits non-zero on failure.
+
+| xref:cli/completion-bash.adoc[completion bash]
+| Generate the bash completion script.
+
+| xref:cli/index.adoc[All commands]
+| Generated CLI reference for every command and option.
+|===
+
+Example:
+
+[source,bash]
+----
+export OPENAI_API_KEY=sk-...
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar \
+  run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
+----
+
+TUI options (`tui.*`) and run options (`run.*`) are documented in
+xref:configuration.adoc[Configuration] and on each command page.

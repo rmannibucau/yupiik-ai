@@ -1,0 +1,18 @@
+target
+.idea
+!.idea/icon.svg
+*.iws
+*.ipr
+*.iml
+.settings
+.classpath
+.project
+ignored.*
+generated
+generated_*
+.sdkmanrc
+dependency-reduced-pom.xml
+
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
