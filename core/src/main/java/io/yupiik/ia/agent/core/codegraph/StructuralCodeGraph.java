@@ -2,6 +2,7 @@ package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
+import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -39,6 +40,8 @@ public class StructuralCodeGraph {
     private final ChatClient chatClient;
     private final Path storeRoot;
     private final Path storeFile;
+    private final DocTreeWriter docWriter;
+    private final DocEnricher docEnricher;
     private volatile GraphStore graph;
     private volatile String pendingRefreshPath;
 
@@ -53,6 +56,9 @@ public class StructuralCodeGraph {
         final var workingDir = configuration.resolveWorkingDir().toString();
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
         this.storeFile = storeRoot.resolve("graph.json");
+        this.docWriter = new DocTreeWriter(configuration,
+                Path.of(configuration.structuralCodeGraph().resolvedDocStoreDir(workingDir)).toAbsolutePath().normalize());
+        this.docEnricher = new DocEnricher(configuration, chatClient, docWriter);
     }
 
     protected StructuralCodeGraph() {
@@ -63,19 +69,23 @@ public class StructuralCodeGraph {
         this.chatClient = null;
         this.storeRoot = null;
         this.storeFile = null;
+        this.docWriter = null;
+        this.docEnricher = null;
     }
 
     public boolean enabled() {
         return configuration != null && configuration.structuralCodeGraph().enabled() && !parsers.isEmpty();
     }
 
-    private boolean enrichEnabled() {
-        return configuration != null && configuration.structuralCodeGraph().enabled()
-                && configuration.structuralCodeGraph().enrich() && !parsers.isEmpty();
-    }
-
     public Path storeRoot() {
         return storeRoot;
+    }
+
+    @Destroy
+    public void close() {
+        if (docEnricher != null) {
+            docEnricher.close();
+        }
     }
 
     public void ensureReady() {
@@ -178,6 +188,13 @@ public class StructuralCodeGraph {
         final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
         graph = updated;
         persist(updated);
+        if (fp == null) {
+            docWriter.delete(rel);
+            docEnricher.drop(rel);
+        } else if (parser != null) {
+            docWriter.write(rel, model);
+            docEnricher.maybeEnrich(rel, model);
+        }
         statusReporter.report("structural code graph re-indexed " + rel);
     }
 
@@ -231,12 +248,16 @@ public class StructuralCodeGraph {
             dropFile(rel, symbols, edges);
             final var parser = parserFor(file);
             if (parser == null) {
+                docWriter.delete(rel);
+                docEnricher.drop(rel);
                 continue;
             }
             try {
                 final var model = parser.parse(file);
                 symbols.addAll(model.symbols());
                 edges.addAll(model.edges());
+                docWriter.write(rel, model);
+                docEnricher.maybeEnrich(rel, model);
             } catch (final RuntimeException e) {
                 LOGGER.warning("Cannot re-index " + rel + ": " + e.getMessage());
             }
@@ -264,12 +285,16 @@ public class StructuralCodeGraph {
             fingerprints.put(rel, fp);
             final var parser = parserFor(file);
             if (parser == null) {
+                docWriter.delete(rel);
+                docEnricher.drop(rel);
                 continue;
             }
             try {
                 final var model = parser.parse(file);
                 symbols.addAll(model.symbols());
                 edges.addAll(model.edges());
+                docWriter.write(rel, model);
+                docEnricher.maybeEnrich(rel, model);
                 count++;
             } catch (final RuntimeException e) {
                 LOGGER.warning("Cannot parse " + rel + ": " + e.getMessage());
@@ -277,15 +302,8 @@ public class StructuralCodeGraph {
         }
         final var built = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
         persist(built);
-        maybeEnrich(built);
         statusReporter.report("structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
         return built;
-    }
-
-    private void maybeEnrich(final GraphStore store) {
-        if (enrichEnabled() && (store.nodeFiles() == null || store.nodeFiles().isEmpty())) {
-            new ConceptNodeBuilder(configuration, chatClient).run(storeRoot, store.symbols());
-        }
     }
 
     private GraphParser parserFor(final Path file) {

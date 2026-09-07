@@ -70,7 +70,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         }
         final var target = resolveExact(symbol, g);
         if (target == null) {
-            return ToolResult.error("Symbol not found: " + symbol + ". Use code_find_code to locate a symbol.");
+            return ToolResult.error("Symbol not found: " + symbol + ". Grep the graph docs with the grep tool (path=" + codeGraph.storeRoot().resolve("docs") + ") to locate a symbol.");
         }
 
         final var sb = new StringBuilder();

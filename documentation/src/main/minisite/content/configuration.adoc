@@ -25,6 +25,22 @@ xref:cli/index.adoc[CLI reference].
 
 include::content/_partials/generated/documentation.core.adoc[]
 
+== Structural code graph doc tree
+
+When `yca.structuralCodeGraph.docs` is enabled (default), the agent writes a
+per-source-file markdown doc tree under the graph store, mirroring the project
+source layout. For each parsed file it emits a deterministic structural extract
+(symbols and edges). When `yca.structuralCodeGraph.enrich` is enabled, each doc
+also gains an asynchronous, serialized LLM `## Summary` section.
+
+For example `src/main/java/acme/Order.java` produces
+`<storeDir>/docs/src/main/java/acme/Order.java.md`. Symbols and relations are
+exposed as plain text, so they can be searched by simply grepping the docs
+directory (for instance with the built-in `grep` tool and
+`path=<storeDir>/docs`) instead of reading the graph store. `graph.json`
+remains the source of truth for call-graph tracing (`code_trace_calls`) and for
+the incremental fingerprint re-indexing.
+
 == Command configuration
 
 `run.*` and `tui.*` options:

@@ -76,6 +76,12 @@ public class JavaGraphParser implements GraphParser {
     }
 
     private static final class Collector extends TreeScanner<Void, Void> {
+        private static final Set<String> PRIMITIVES = Set.of(
+                "void", "boolean", "byte", "char", "short", "int", "long", "float", "double");
+        private static final Set<String> JAVA_LANG_TYPES = Set.of(
+                "String", "Integer", "Long", "Double", "Float", "Boolean", "Byte", "Short", "Character",
+                "Object", "Class", "Void", "Enum", "Record", "Exception", "RuntimeException", "Throwable",
+                "Math", "System", "StringBuilder", "StringBuffer", "Iterable", "Comparable", "CharSequence");
         private final List<GraphModel.Symbol> nodes = new ArrayList<>();
         private final List<GraphModel.Edge> edges = new ArrayList<>();
         private final String fileName;
@@ -228,7 +234,10 @@ public class JavaGraphParser implements GraphParser {
         public Void visitNewClass(final NewClassTree node, final Void unused) {
             final var type = node.getIdentifier() == null ? "" : node.getIdentifier().toString();
             if (!type.isBlank()) {
-                edges.add(new GraphModel.Edge(currentOwner(), resolve(type), GraphModel.EdgeType.USES));
+                final var resolved = resolve(type);
+                if (resolved != null) {
+                    edges.add(new GraphModel.Edge(currentOwner(), resolved, GraphModel.EdgeType.USES));
+                }
             }
             scan(node.getArguments(), unused);
             return null;
@@ -236,8 +245,12 @@ public class JavaGraphParser implements GraphParser {
 
         private void relationship(final String owner, final Tree targetType, final GraphModel.EdgeType type) {
             final var text = targetType == null ? "" : targetType.toString();
-            if (!text.isBlank()) {
-                edges.add(new GraphModel.Edge(owner, resolve(text), type));
+            if (text.isBlank()) {
+                return;
+            }
+            final var resolved = resolve(text);
+            if (resolved != null) {
+                edges.add(new GraphModel.Edge(owner, resolved, type));
             }
         }
 
@@ -246,16 +259,39 @@ public class JavaGraphParser implements GraphParser {
             if (text.isBlank()) {
                 return;
             }
-            edges.add(new GraphModel.Edge(currentOwner(), resolve(text), GraphModel.EdgeType.USES));
+            final var resolved = resolve(text);
+            if (resolved != null) {
+                edges.add(new GraphModel.Edge(currentOwner(), resolved, GraphModel.EdgeType.USES));
+            }
         }
 
         private String resolve(final String name) {
-            final var simpleFirst = first(name);
-            final var imported = importedTypes.get(simpleFirst);
+            if (name.indexOf('.') >= 0) {
+                final var simpleFirst = first(name);
+                if (isNonSymbol(simpleFirst)) {
+                    return null;
+                }
+                final var imported = importedTypes.get(simpleFirst);
+                if (imported != null) {
+                    return imported + name.substring(simpleFirst.length());
+                }
+                if (last(name).isEmpty() || Character.isLowerCase(last(name).charAt(0))) {
+                    return null;
+                }
+                return name;
+            }
+            if (isNonSymbol(name)) {
+                return null;
+            }
+            final var imported = importedTypes.get(name);
             if (imported != null) {
-                return imported + name.substring(simpleFirst.length());
+                return imported;
             }
             return fqn(packageName, name);
+        }
+
+        private static boolean isNonSymbol(final String simpleName) {
+            return PRIMITIVES.contains(simpleName) || JAVA_LANG_TYPES.contains(simpleName);
         }
 
         private String resolveOwner(final Tree select) {

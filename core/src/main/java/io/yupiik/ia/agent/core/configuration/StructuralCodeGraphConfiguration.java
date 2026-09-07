@@ -12,10 +12,18 @@ public record StructuralCodeGraphConfiguration(
         @Property(documentation = "Model for the optional concept-node enrichment pass, when it differs from the main provider. Empty falls back to the main provider.") String model,
         @Property(defaultValue = "5242880L", documentation = "Maximum file size in bytes parsed into the graph. Larger files are skipped.") long maxFileBytes,
         @Property(defaultValue = "java.util.List.of(\"java\")", documentation = "File extensions (without dot) parsed into the graph. Only extensions handled by a registered parser are processed.") List<String> languageExtensions,
-        @Property(defaultValue = "\".yca/generated/graph\"", documentation = "Directory, relative to the working directory, where the graph cache is stored. It is regenerable and never committed.") String storeDir) {
+        @Property(defaultValue = "\".yca/generated/graph\"", documentation = "Directory, relative to the working directory, where the graph cache is stored. It is regenerable and never committed.") String storeDir,
+        @Property(defaultValue = "true", documentation = "Emit a per-source-file markdown doc tree under the graph store, mirroring the project source layout. The docs are deterministic structural extracts (symbols and edges) that agents can grep instead of reading the graph. When 'enrich' is enabled, each doc also gains an async LLM summary.") boolean docs,
+        @Property(defaultValue = "\"docs\"", documentation = "Sub-directory (under the graph store dir) where the mirrored per-file markdown doc tree is written.") String docStoreDir) {
 
     public String resolvedStoreDir(final String workingDir) {
         final var value = storeDir == null || storeDir.isBlank() ? ".yca/generated/graph" : storeDir;
         return workingDir + "/" + value;
+    }
+
+    public String resolvedDocStoreDir(final String workingDir) {
+        final var root = resolvedStoreDir(workingDir);
+        final var value = docStoreDir == null || docStoreDir.isBlank() ? "docs" : docStoreDir;
+        return root + "/" + value;
     }
 }
