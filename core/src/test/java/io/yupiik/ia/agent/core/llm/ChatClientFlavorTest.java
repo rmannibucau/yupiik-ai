@@ -70,7 +70,7 @@ class ChatClientFlavorTest {
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
                 ApiFlavor.AUTO, ReasoningField.AUTO, 128000, 5);
         final var llm = new LlmConfiguration(1, 1L, 0, 1);
-        return new CodingAgentConfiguration("/tmp/yca-test", null, provider, null, llm, null, null, null, null, null, null, null, null, null);
+        return new CodingAgentConfiguration("/tmp/yca-test", null, provider, null, llm, null, null, null, null, null, null, null, null, null, null);
     }
 
     private JsonMapper mapper() {
@@ -151,7 +151,7 @@ class ChatClientFlavorTest {
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
                 ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, 5);
         client = new ChatClient(new CodingAgentConfiguration("/tmp/yca-test", null, provider, null,
-                new LlmConfiguration(1, 1L, 0, 1), null, null, null, null, null, null, null, null, null), mapper());
+                new LlmConfiguration(1, 1L, 0, 1), null, null, null, null, null, null, null, null, null, null), mapper());
 
         assertEquals("ok", client.chat(request()).message().content());
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());

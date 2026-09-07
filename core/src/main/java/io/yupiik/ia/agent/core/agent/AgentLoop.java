@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -46,13 +47,15 @@ public class AgentLoop {
     private final StatusReporter statusReporter;
     private final Emitter emitter;
     private final JsonMapper mapper;
+    private final StructuralCodeGraph structuralCodeGraph;
 
     public AgentLoop(final ChatClient chatClient, final ToolRegistry toolRegistry,
                      final ToolExecutionService toolExecutionService, final CodingAgentConfiguration configuration,
                      final PermissionService permissionService, final UsageTracker usageTracker,
                      final ContextManager contextManager, final SessionStore sessionStore,
                      final SystemPromptBuilder systemPromptBuilder, final MemoryExtractor memoryExtractor,
-                     final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper) {
+                     final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper,
+                     final StructuralCodeGraph structuralCodeGraph) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -66,6 +69,7 @@ public class AgentLoop {
         this.statusReporter = statusReporter;
         this.emitter = emitter;
         this.mapper = mapper;
+        this.structuralCodeGraph = structuralCodeGraph;
     }
 
     protected AgentLoop() {
@@ -82,10 +86,12 @@ public class AgentLoop {
         this.statusReporter = null;
         this.emitter = null;
         this.mapper = null;
+        this.structuralCodeGraph = null;
     }
 
     public String run(final String prompt, final String sessionId, final List<Message> history,
                       final BooleanSupplier cancelled) {
+        structuralCodeGraph.ensureReady();
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build()));
         if (history != null) {

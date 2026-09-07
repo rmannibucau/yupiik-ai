@@ -18,6 +18,7 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Tool output optimization settings (rtk style token reduction).") OptimizeConfiguration optimize,
         @Property(documentation = "Tool permission settings.") PermissionsConfiguration permissions,
         @Property(documentation = "MCP integration settings.") McpConfiguration mcp,
+        @Property(documentation = "Structural code graph settings (symbol/call index of the project).") StructuralCodeGraphConfiguration structuralCodeGraph,
         @Property(documentation = "Session retention settings (age based cleanup and compression).") SessionConfiguration sessions,
         @Property(documentation = "Skills loading settings.") SkillsConfiguration skills,
         @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.AgentMode.BUILD", documentation = "Agent access mode: build (all tools, any action) or plan (read-only tools only). Can be switched at runtime with /mode.") AgentMode mode) {

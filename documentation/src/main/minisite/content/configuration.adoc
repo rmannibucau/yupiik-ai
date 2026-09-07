@@ -1,9 +1,9 @@
 = Configuration
 :minisite-index: 100
 :minisite-index-title: Configuration
-:minisite-index-description: All yca options: provider, permissions, MCP servers, context management.
+:minisite-index-description: All yca options: provider, permissions, MCP servers, structural code graph, context management.
 :minisite-index-icon: sliders-h
-:minisite-keywords: configuration, provider, mcp, permissions
+:minisite-keywords: configuration, provider, mcp, permissions, code graph, structural
 :minisite-breadcrumb: Home[index.html] > Configuration
 
 Configuration is resolved from, highest priority first:

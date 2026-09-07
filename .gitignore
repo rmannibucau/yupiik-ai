@@ -19,3 +19,6 @@ dependency-reduced-pom.xml
 
 # generated CLI documentation — regenerable, not committed.
 /documentation/src/main/minisite/content/cli/
+
+# structural code graph local cache — regenerable, not committed.
+/.yca/

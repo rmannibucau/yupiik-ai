@@ -28,6 +28,8 @@
 
 - Java 25+ (26 works), Maven 4.x
 - An OpenAI compatible endpoint (base URL + API key)
+- A JDK (not just a JRE) when the structural code graph is enabled: its Java
+  parser uses the `javac` API, so it cannot run on a headless JRE.
 
 ## Build
 
@@ -42,13 +44,19 @@ The runnable artifact is the fatjar: `tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar`.
 
 The terminal backend (jline) reads the terminal through the FFM API, so the JVM
 must be started with `--enable-native-access=ALL-UNNAMED` (otherwise a warning
-is printed and terminal handling can degrade):
+is printed and terminal handling can degrade).
+
+The structural code graph parser reaches into `jdk.compiler` internals, so its
+packages must be exported to the unnamed module at startup. When that feature is
+enabled (it is by default), append the `--add-exports` flags listed below; the
+shortcut is to use the `jre`/`jdk` variable documented in the launch examples.
 
 ```bash
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar tui
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-permitAll
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
+export JDK_EXPORTS="--add-exports=jdk.compiler/com.sun.source.tree=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.source.util=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.source.doctree=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED --add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED"
+java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar tui
+java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
+java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-permitAll
+java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
 ```
 
 `--yca-run-permitAll` (and `--yca-tui-permitAll` for the `tui` command) bypass
@@ -58,7 +66,7 @@ Minimal configuration (defaults to `https://api.openai.com/v1`):
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --yca-provider-model gpt-5-mini
+java --enable-native-access=ALL-UNNAMED $JDK_EXPORTS -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --yca-provider-model gpt-5-mini
 ```
 
 ## Configuration
@@ -86,7 +94,8 @@ Configuration is resolved from (highest priority first): CLI arguments
       ]
     },
     "mode": "build",
-    "model": { "compact": "", "prune": "" }
+    "model": { "compact": "", "prune": "" },
+    "structuralCodeGraph": { "enabled": true, "enrich": false }
   }
 }
 ```
@@ -97,7 +106,8 @@ contextWindow, timeoutSeconds), `llm` (retries, rpm throttle, maxConcurrent),
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 (disabled processors), `permissions` (mode, allow, deny, planBash), `sessions`
 (retentionDays, compressDays), `mode` (build or plan), `skills` (enabled),
-`mcp` (servers). The `workingDir` option (default `.`) is the directory from
+`mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir). The
+`workingDir` option (default `.`) is the directory from
 which project instructions and skills are discovered. UI colors (under `tui`,
 e.g. `permitAll` for the red highlight shown when permissions are set to
 `all`) are themeable hex values.
@@ -109,6 +119,34 @@ tools, and `bash` commands starting with one of the `permissions.planBash`
 prefixes (defaults to read-only commands like `git status`, `git diff`,
 `ls`, `cat`, `grep`...) are allowed - everything else is denied. `build` mode
 (the default) has full access and respects the `permissions` allow/deny lists.
+
+## Structural code graph
+
+The agent builds a deterministic symbol/call index of the project and exposes it
+through the `code_*` tools so the model can reason about the codebase without a
+large text dump. It runs at startup (warm-up), refreshes incrementally when a
+file is written or edited, and patches only the drifted/missing files afterwards
+based on per-file content hashes.
+
+- **Requires a JDK**: the Java parser uses the `javac` compiler API, so it does
+  not run on a plain JRE. See the launch flags (`--add-exports`) in the Run
+  section.
+- **Deterministic, no LLM by default**: the structural index (types, methods,
+  fields, imports, extends/implements, calls) is extracted from the parse tree
+  without any model call. Optional LLM *concept nodes* (per-subsystem Markdown
+  summaries) can be enabled with `yca.structural-code-graph.enrich`.
+- **Cache**: the index is stored per-project under `workingDir/.yca/generated/graph/`
+  (`graph.json` + optional `nodes/*.md`) and is regenerable, so it is git-ignored.
+- **Tools**: `code_find_code`, `code_file_api`, `code_trace_calls`,
+  `code_find_all`, `code_repo_map`, `code_check_graph`. All are read-only and
+  therefore available in `plan` mode too.
+
+Configuration (`yca.structural-code-graph.*`): `enabled` (default `true`),
+`enrich` (default `false`), `baseUrl`/`apiKey`/`model` (optional cheaper model
+override for enrichment, falling back to the main provider), `maxFileBytes`
+(default 5242880), `languageExtensions` (default `["java"]`), `storeDir`
+(default `.yca/generated/graph`). Setting `enabled=false` disables the index
+entirely.
 
 Storage lives under `~/.yupiik/coding-agent` (`sessions/`, `memory/`,
 `todos.json`); project memory is `.yca/memory/MEMORY.md`. At startup sessions
