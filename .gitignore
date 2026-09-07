@@ -16,3 +16,6 @@ dependency-reduced-pom.xml
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# generated CLI documentation — regenerable, not committed.
+/documentation/src/main/minisite/content/cli/
