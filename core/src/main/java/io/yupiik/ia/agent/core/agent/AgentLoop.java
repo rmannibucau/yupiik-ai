@@ -35,7 +35,6 @@ import java.util.logging.Logger;
 @ApplicationScoped
 public class AgentLoop {
     private static final Logger LOGGER = Logger.getLogger(AgentLoop.class.getName());
-    private static final int MAX_ITERATIONS = 25;
 
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
@@ -140,8 +139,9 @@ public class AgentLoop {
     private String loop(final String sessionId, final List<Message> messages,
                         final BooleanSupplier cancelled) throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
+        final var maxIterations = configuration.llm().maxIterations();
         var overflowRetried = false;
-        for (var iteration = 0; iteration < MAX_ITERATIONS && !cancelled.getAsBoolean(); iteration++) {
+        for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
             if (contextManager.pruneNeeded(messages)) {
                 final var pruned = contextManager.prune(messages);
                 if (pruned != messages) {
@@ -198,7 +198,7 @@ public class AgentLoop {
         if (cancelled.getAsBoolean()) {
             emit(new AgentEvent.Error("Cancelled"));
         } else {
-            emit(new AgentEvent.Error("Maximum iterations reached (" + MAX_ITERATIONS + ")"));
+            emit(new AgentEvent.Error("Maximum iterations reached (" + maxIterations + ")"));
         }
         return null;
     }

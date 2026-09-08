@@ -19,7 +19,7 @@ import java.util.regex.Pattern;
  * while everything else stays plain. It never throws and falls back to a plain
  * generic tokenizer for unknown languages.
  */
-final class SyntaxHighlighter {
+public final class SyntaxHighlighter {
 
     private static final Pattern FENCE = Pattern.compile(
             "(?m)^\\s*```([A-Za-z0-9_+.-]*)\\s*\\n(.*?)^\\s*```\\s*$", Pattern.DOTALL);
@@ -49,8 +49,8 @@ final class SyntaxHighlighter {
         }
     }
 
-    record Segment(Type type, String language, String text) {
-        enum Type { TEXT, CODE }
+    public record Segment(Type type, String language, String text) {
+        public enum Type { TEXT, CODE }
     }
 
     private SyntaxHighlighter() {
@@ -119,7 +119,7 @@ final class SyntaxHighlighter {
                     "await", "void"),
             List.of());
 
-    static List<Segment> split(final String markdown) {
+    public static List<Segment> split(final String markdown) {
         final var out = new ArrayList<Segment>();
         if (markdown == null || markdown.isBlank()) {
             return out;
@@ -143,7 +143,7 @@ final class SyntaxHighlighter {
         return out;
     }
 
-    static Text highlight(final String lang, final String code) {
+    public static Text highlight(final String lang, final String code) {
         final var tokenizer = pick(lang);
         final var lines = code.replace("\r\n", "\n").split("\n", -1);
         final var result = new ArrayList<Line>(lines.length);

@@ -103,12 +103,26 @@ public class PlanTodoSeeder {
     }
 
     private String lastAssistantContent(final String sessionId) {
+        final var plan = plan(sessionId);
+        return plan == null || plan.length() <= MAX_PLAN_CHARS ? plan : plan.substring(0, MAX_PLAN_CHARS);
+    }
+
+    /**
+     * Returns the full (uncapped) content of the last assistant message of the
+     * session, or {@code null} when there is none. Used to export the plan for
+     * manual editing; {@code seedFromLastAssistant} operates on the capped
+     * {@code lastAssistantContent} so the LLM derivation stays bounded.
+     *
+     * @param sessionId the session to inspect.
+     * @return the last assistant message content or {@code null}.
+     */
+    public String plan(final String sessionId) {
         String last = null;
         for (final var m : sessionStore.load(sessionId)) {
             if ("assistant".equals(m.role()) && m.content() instanceof String s && !s.isBlank()) {
                 last = s;
             }
         }
-        return last == null ? null : last.length() > MAX_PLAN_CHARS ? last.substring(0, MAX_PLAN_CHARS) : last;
+        return last;
     }
 }

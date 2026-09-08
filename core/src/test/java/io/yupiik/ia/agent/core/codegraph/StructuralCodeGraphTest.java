@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class StructuralCodeGraphTest {
+    private static final long TIMEOUT_MS = java.time.Duration.ofSeconds(30).toMillis();
 
     @TempDir
     Path temp;
@@ -51,7 +52,7 @@ class StructuralCodeGraphTest {
                 """);
 
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
-                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
                 null, null, null, null);
@@ -130,10 +131,41 @@ class StructuralCodeGraphTest {
     }
 
     @Test
+    void refreshIgnoresFilesOutsideProjectDir() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+        final var outside = Files.createDirectory(temp.resolve("outside"));
+        Files.writeString(outside.resolve("Bar.java"), "package outside;\npublic class Bar { public void run() {} }\n");
+
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
+                new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
+                        List.of("java"), ".yca/generated/graph", true, "docs", false, false),
+                null, null, null, null);
+        final JsonMapper mapper = newMapper();
+        final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+        graph.ensureReady();
+        assertEquals(2, graph.graph().symbols().size());
+
+        graph.refreshFile(outside.resolve("Bar.java"));
+        assertTrue(graph.graph().symbols().stream().noneMatch(s -> s.fqn().startsWith("outside")),
+                "a file outside the project dir must not be indexed");
+        assertEquals(2, graph.graph().symbols().size(), "refreshing an outside file must not change the graph");
+
+        // any nested level inside the project dir is still indexed
+        Files.createDirectory(project.resolve("nested"));
+        Files.writeString(project.resolve("nested/Baz.java"), "package nested;\npublic class Baz { public void run() {} }\n");
+        graph.refreshFile(project.resolve("nested/Baz.java"));
+        assertTrue(graph.graph().symbols().stream().anyMatch(s -> s.fqn().equals("nested.Baz")),
+                "a nested file inside the project dir must be indexed");
+    }
+
+    @Test
     void skipsIndexingForEmptyTargetProjectDir() throws Exception {
         final var project = Files.createDirectory(temp.resolve("scaffold"));
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
-                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
                 null, null, null, null);
@@ -150,7 +182,7 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("proj"));
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
-                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
                 null, null, null, null);
@@ -206,7 +238,7 @@ class StructuralCodeGraphTest {
                 """);
 
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
-                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
                 null, null, null, null);
@@ -259,7 +291,7 @@ class StructuralCodeGraphTest {
                 """);
 
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
-                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, true, null, null, "test-model", 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", true, false),
                 null, null, null, null);
@@ -341,7 +373,8 @@ class StructuralCodeGraphTest {
     }
 
     private static void await(final java.util.function.BooleanSupplier cond) throws InterruptedException {
-        for (int i = 0; i < 200 && !cond.getAsBoolean(); i++) {
+        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
+        while (System.currentTimeMillis() < deadline && !cond.getAsBoolean()) {
             Thread.sleep(25);
         }
         assertTrue(cond.getAsBoolean(), "timed out waiting for async enrichment");

@@ -6,7 +6,7 @@
 :minisite-keywords: cli, tui, run, commands
 :minisite-breadcrumb: Home[index.html] > CLI
 
-yca ships two commands plus the standard fusion helpers:
+yca ships three commands plus the standard fusion helpers:
 
 [cols="a,2a"]
 |===
@@ -14,7 +14,11 @@ yca ships two commands plus the standard fusion helpers:
 
 | xref:cli/tui.adoc[tui]
 | Interactive terminal interface (TamboUI): markdown transcript, token gauges,
-todos, thinking stream, approval modals.
+todos, thinking stream, approval modals, editable plan (`/editplan`).
+
+| xref:cli/cli.adoc[cli]
+| Interactive plain-terminal REPL (no full-screen UI): streamed ANSI-colored
+output, sessions, todos, approval/feedback gates and the same slash commands.
 
 | xref:cli/run.adoc[run]
 | Headless one-shot execution: `--prompt` (required) and optional `--session`,
@@ -39,5 +43,5 @@ java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatja
 TIP: The structural code graph (enabled by default) uses the `javac` API and
 therefore needs a JDK (not a plain JRE). No extra JVM flags are required.
 
-TUI options (`tui.*`) and run options (`run.*`) are documented in
-xref:configuration.adoc[Configuration] and on each command page.
+TUI options (`tui.*`), cli options (`cli.*`) and run options (`run.*`) are
+documented in xref:configuration.adoc[Configuration] and on each command page.

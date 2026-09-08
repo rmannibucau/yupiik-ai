@@ -5,10 +5,13 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 
 @DefaultScoped
@@ -18,16 +21,19 @@ public class RunCommand implements Runnable {
     private final AgentLoop agentLoop;
     private final AgentEventBridge bridge;
     private final PermissionService permissionService;
+    private final UserFeedbackService userFeedbackService;
     private final SessionStore sessionStore;
     private final AgentProvider agentProvider;
 
     public RunCommand(final RunConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
-                      final PermissionService permissionService, final SessionStore sessionStore,
+                      final PermissionService permissionService, final UserFeedbackService userFeedbackService,
+                      final SessionStore sessionStore,
                       final AgentProvider agentProvider) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
         this.permissionService = permissionService;
+        this.userFeedbackService = userFeedbackService;
         this.sessionStore = sessionStore;
         this.agentProvider = agentProvider;
     }
@@ -46,16 +52,22 @@ public class RunCommand implements Runnable {
         final var sessionId = conf.session() == null || conf.session().isBlank()
                 ? sessionStore.create() : conf.session();
         final var failed = new AtomicBoolean();
+        final var lastError = new AtomicReference<String>();
         bridge.sink(event -> {
             print(event, conf.showThinking());
-            if (event instanceof AgentEvent.Error) {
+            if (event instanceof final AgentEvent.Error e) {
                 failed.set(true);
+                lastError.set(e.message());
             }
         });
         permissionService.setGate((title, detail) -> {
             System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
                     + "); set yca.permissions.mode=yolo to auto allow.");
             return false;
+        });
+        userFeedbackService.setGate(questions -> {
+            System.err.println("[ask_user] not available in headless mode; provide the required input in your prompt and retry.");
+            return null;
         });
         permissionService.setPermitAll(conf.permitAll());
         final var agentName = conf.agent() == null || conf.agent().isBlank() ? null : conf.agent();
@@ -69,9 +81,10 @@ public class RunCommand implements Runnable {
             bridge.sink(null);
             permissionService.setGate(null);
             permissionService.setPermitAll(false);
+            userFeedbackService.setGate(null);
         }
         if (failed.get()) {
-            System.exit(1);
+            throw new IllegalStateException("run failed: " + lastError.get());
         }
     }
 

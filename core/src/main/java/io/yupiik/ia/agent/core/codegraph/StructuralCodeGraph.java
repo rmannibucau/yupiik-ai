@@ -54,6 +54,7 @@ public class StructuralCodeGraph {
     private final DocTreeWriter docWriter;
     private final DocEnricher docEnricher;
     private final ProviderManager providerManager;
+    private final Path projectDir;
     private volatile GraphStore graph;
     private volatile String pendingRefreshPath;
 
@@ -67,6 +68,7 @@ public class StructuralCodeGraph {
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         final var workingDir = configuration.resolveProjectDir().toString();
+        this.projectDir = configuration.resolveProjectDir().toAbsolutePath().normalize();
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
         this.storeFile = storeRoot.resolve("graph.json");
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
@@ -82,6 +84,7 @@ public class StructuralCodeGraph {
         this.statusReporter = null;
         this.chatClient = null;
         this.providerManager = null;
+        this.projectDir = null;
         this.storeRoot = null;
         this.storeFile = null;
         this.docWriter = null;
@@ -204,6 +207,11 @@ public class StructuralCodeGraph {
             return;
         }
         final var absolute = file.toAbsolutePath().normalize();
+        // only files inside the project dir (any depth) belong to the graph; writes
+        // targeting another folder must not pollute the index
+        if (!absolute.startsWith(projectDir)) {
+            return;
+        }
         final var rel = rel(absolute);
         final var parser = parserFor(absolute);
         if (parser == null) {

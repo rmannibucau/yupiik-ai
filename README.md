@@ -255,6 +255,12 @@ Project instructions and skills are loaded into the system prompt:
 - Switching `/mode build` keeps the plan todos recorded in `plan` mode, or
   derives them from the last plan of the session when the list is empty
 - `Ctrl+S` compact, `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt
+- Mouse drag selects any visible text (transcript, sidebar, status bar...) and
+  copies it to the system clipboard on release; double/triple-click select a
+  word / a whole row, `Ctrl+Shift+C` re-copies the selection and `Esc` clears
+  it. Copying uses OSC 52 so it requires a terminal supporting it (kitty,
+  alacritty, iTerm2, Windows Terminal, tmux with clipboard passthrough, ...);
+  mouse wheel scrolling is unaffected
 - While a tool runs, a line under the input shows `calling <command>` with a
   spinner (and `esc to interrupt` on the right) and its output is streamed live
   into the transcript

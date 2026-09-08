@@ -1,0 +1,814 @@
+package io.yupiik.ia.agent.core.cli;
+
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.fusion.framework.build.api.cli.Command;
+import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.AgentEventBridge;
+import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.ContextManager;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.memory.MemoryStore;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.FeedbackGate;
+import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.todo.PlanFileService;
+import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
+import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
+
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+
+/**
+ * Interactive plain-terminal REPL for yca. Requires only a terminal
+ * ({@code stdin}/{@code stdout} lines and optional ANSI color); it is a
+ * drop-in alternative to the TamboUI {@code tui} for environments without a
+ * real terminal widget layer.
+ */
+@DefaultScoped
+@Command(name = "cli", description = "Interactive plain-terminal yca session (REPL) with optional ANSI colors.")
+public class CliCommand implements Runnable {
+    private final CliConf conf;
+    private final AgentLoop agentLoop;
+    private final AgentEventBridge bridge;
+    private final PermissionService permissionService;
+    private final UserFeedbackService userFeedbackService;
+    private final SessionStore sessionStore;
+    private final TodoStore todoStore;
+    private final MemoryStore memoryStore;
+    private final AgentProvider agentProvider;
+    private final ContextManager contextManager;
+    private final SystemPromptBuilder systemPromptBuilder;
+    private final StructuralCodeGraph structuralCodeGraph;
+    private final CodingAgentConfiguration configuration;
+    private final PlanFileService planFileService;
+    private final PlanTodoSeeder planTodoSeeder;
+    private final ChatClient chatClient;
+    private final ProviderManager providerManager;
+    private final McpManager mcpManager;
+    private final UsageTracker usageTracker;
+
+    private static final long QUIT_WINDOW_MILLIS = 2000;
+
+    private final AtomicBoolean cancelled = new AtomicBoolean();
+    private final AtomicBoolean busy = new AtomicBoolean();
+    private final MarkdownColorizer colorizer;
+    private final StreamTextBuffer textBuffer;
+    private volatile long lastInterruptAt;
+    private volatile boolean quitRequested;
+    private volatile AgentEvent.UsageUpdated lastUsage;
+    private BufferedReader stdin;
+    private String sessionId;
+    private String activeAgent = "";
+
+    public CliCommand(final CliConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
+                      final PermissionService permissionService, final UserFeedbackService userFeedbackService,
+                      final SessionStore sessionStore, final TodoStore todoStore, final MemoryStore memoryStore,
+                      final AgentProvider agentProvider, final ContextManager contextManager,
+                      final UsageTracker usageTracker,
+                      final SystemPromptBuilder systemPromptBuilder, final StructuralCodeGraph structuralCodeGraph,
+                      final CodingAgentConfiguration configuration, final PlanFileService planFileService,
+                      final PlanTodoSeeder planTodoSeeder, final ChatClient chatClient,
+                      final ProviderManager providerManager, final McpManager mcpManager) {
+        this.conf = conf;
+        this.agentLoop = agentLoop;
+        this.bridge = bridge;
+        this.permissionService = permissionService;
+        this.userFeedbackService = userFeedbackService;
+        this.sessionStore = sessionStore;
+        this.todoStore = todoStore;
+        this.memoryStore = memoryStore;
+        this.agentProvider = agentProvider;
+        this.contextManager = contextManager;
+        this.systemPromptBuilder = systemPromptBuilder;
+        this.structuralCodeGraph = structuralCodeGraph;
+        this.configuration = configuration;
+        this.planFileService = planFileService;
+        this.planTodoSeeder = planTodoSeeder;
+        this.chatClient = chatClient;
+        this.providerManager = providerManager;
+        this.mcpManager = mcpManager;
+        this.usageTracker = usageTracker;
+        this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
+        this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
+    }
+
+    @RootConfiguration("cli")
+    public record CliConf(
+            @Property(defaultValue = "\"\"", documentation = "Resume an existing session by id; a new session is created when empty.") String session,
+            @Property(defaultValue = "\"\"", documentation = "Session context file (a yca session JSONL). Its file name provides the session id to resume or create.") String context,
+            @Property(defaultValue = "\"\"", documentation = "Name of a custom agent (from yca.agents) active by default. Its prompt is injected on top of the base system prompt.") String agent,
+            @Property(defaultValue = "true", documentation = "Enable ANSI colors. Color is only emitted when stdout is a terminal and neither NO_COLOR nor TERM=dumb is set.") boolean color,
+            @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.") boolean showThinking,
+            @Property(defaultValue = "true", documentation = "Show tool invocations and output on stderr.") boolean showToolOutput,
+            @Property(defaultValue = "false", documentation = "Print the context usage (estimated tokens and percent of the context window) on stderr after each turn.") boolean showUsage,
+            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.") boolean permitAll) {
+    }
+
+    @Override
+    public void run() {
+        stdin = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        installInterruptHandler();
+        sessionId = resolveSessionId();
+        final var contextPath = sessionStore.path(sessionId);
+        if (conf.context() != null && !conf.context().isBlank()) {
+            try {
+                Files.createDirectories(contextPath.getParent() == null ? Path.of(".") : contextPath.getParent());
+                if (!Files.isRegularFile(contextPath)) {
+                    Files.writeString(contextPath, "");
+                }
+            } catch (final IOException e) {
+                println(colorizer.error("failed to prepare context file " + contextPath + ": " + e.getMessage()));
+            }
+        }
+        println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+        if (conf.permitAll()) {
+            println(colorizer.warning("WARNING: --permit-all is on; all tool calls will run without approval."));
+        }
+        if (conf.agent() != null && !conf.agent().isBlank()) {
+            if (agentProvider.byName(conf.agent()) == null) {
+                throw new IllegalArgumentException("unknown agent: " + conf.agent() + " (configure one under yca.agents)");
+            }
+            activeAgent = conf.agent();
+        }
+        permissionService.setPermitAll(conf.permitAll());
+        permissionService.setGate(approvalGate());
+        userFeedbackService.setGate(feedbackGate());
+        try {
+            repLoop();
+        } finally {
+            bridge.sink(null);
+            permissionService.setGate(null);
+            permissionService.setPermitAll(false);
+            userFeedbackService.setGate(null);
+            System.out.flush();
+            System.err.flush();
+            println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+        }
+    }
+
+    private boolean colorEnabled(final boolean configured) {
+        return configured && MarkdownColorizer.autoEnabled();
+    }
+
+    private void repLoop() {
+        try {
+            while (true) {
+                final var prompt = "yca> ";
+                print(prompt);
+                final var line = stdin.readLine();
+                if (line == null || quitRequested) {
+                    break;
+                }
+                final var text = line.strip();
+                if (text.isBlank()) {
+                    continue;
+                }
+                if (text.equals("exit")) {
+                    println(colorizer.status("bye"));
+                    break;
+                }
+                if (text.startsWith("/")) {
+                    if (slash(text)) {
+                        break;
+                    }
+                    continue;
+                }
+                println();
+                runTurn(text);
+                println();
+            }
+        } catch (final IOException e) {
+            println(colorizer.error("cli read failed: " + e.getMessage()));
+        }
+    }
+
+    private void runTurn(final String input) {
+        final var override = agentOverride(input);
+        final var agentName = override.agentName() != null ? override.agentName()
+                : (activeAgent.isBlank() ? null : activeAgent);
+        final var prompt = override.prompt();
+        cancelled.set(false);
+        busy.set(true);
+        textBuffer.reset();
+        final var todosBefore = todoStore.all();
+        final var history = sessionStore.load(sessionId);
+        bridge.sink(this::dispatch);
+        try {
+            agentLoop.run(prompt, agentName, sessionId, history, cancelled::get);
+        } finally {
+            bridge.sink(null);
+            busy.set(false);
+            print(textBuffer.flush());
+            System.out.flush();
+            System.err.flush();
+            printTodosIfChanged(todosBefore);
+            printUsage();
+        }
+    }
+
+    /**
+     * Prints the todo list once at the end of the turn, on stdout, when the
+     * turn changed it; an unchanged list stays silent.
+     */
+    private void printTodosIfChanged(final List<TodoItem> before) {
+        final var after = todoStore.all();
+        if (after.equals(before)) {
+            return;
+        }
+        final var rendered = todoStore.render();
+        println();
+        println(colorizer.status("todos:"));
+        println(rendered.isBlank() ? "(no todos)" : rendered);
+    }
+
+    private void printUsage() {
+        if (!conf.showUsage() || lastUsage == null) {
+            return;
+        }
+        final var usage = lastUsage;
+        System.err.println(colorizer.status("[context] ~"
+                + String.format(Locale.ROOT, "%,d", usage.estimatedContextTokens())
+                + " tokens (" + String.format(Locale.ROOT, "%.1f", usage.contextPercent())
+                + "% of " + String.format(Locale.ROOT, "%,d", usageTracker.contextWindow()) + ")"));
+    }
+
+    private void dispatch(final AgentEvent event) {
+        if (event instanceof final AgentEvent.TextDelta t) {
+            print(textBuffer.append(t.delta()));
+        } else if (event instanceof final AgentEvent.ThinkingDelta t) {
+            if (conf.showThinking()) {
+                System.err.print(MarkdownColorizer.dim(t.delta()));
+            }
+        } else if (event instanceof final AgentEvent.ToolStarted t) {
+            if (conf.showToolOutput()) {
+                System.err.println(colorizer.status("[tool] " + t.name() + " " + t.args()));
+            }
+        } else if (event instanceof final AgentEvent.ToolStream t) {
+            if (conf.showToolOutput()) {
+                System.err.print(MarkdownColorizer.dim(t.fragment()));
+            }
+        } else if (event instanceof final AgentEvent.ToolFinished t) {
+            if (!t.success() && conf.showToolOutput()) {
+                System.err.println(colorizer.error("[tool failed] " + t.name()));
+            }
+        } else if (event instanceof final AgentEvent.Compacted c) {
+            System.err.println(colorizer.status("[context] " + c.kind() + " applied"));
+        } else if (event instanceof final AgentEvent.Status s) {
+            System.err.println(colorizer.status("[yca] " + s.message()));
+        } else if (event instanceof final AgentEvent.Error e) {
+            System.err.println(colorizer.error("[error] " + e.message()));
+        } else if (event instanceof final AgentEvent.UsageUpdated u) {
+            lastUsage = u;
+        }
+    }
+
+    private boolean slash(final String text) {
+        final var value = text.substring(1);
+        final var command = value.split("\\s+", 2);
+        final var name = command[0].toLowerCase(Locale.ROOT);
+        final var arg = command.length > 1 ? command[1].strip() : "";
+        switch (name) {
+            case "help" -> printHelp();
+            case "quit", "exit" -> {
+                println(colorizer.status("bye"));
+                return true;
+            }
+            case "new" -> {
+                sessionId = sessionStore.create();
+                println(colorizer.status("new session " + sessionId));
+            }
+            case "resume" -> {
+                if (arg.isBlank()) {
+                    println(colorizer.status("usage: /resume <session-id>"));
+                    break;
+                }
+                sessionId = arg;
+                println(colorizer.status("resumed session " + sessionId));
+            }
+            case "mode" -> mode(arg);
+            case "model" -> model(arg);
+            case "provider" -> provider(arg);
+            case "agent" -> agent(arg);
+            case "context" -> context(arg);
+            case "memory" -> memory();
+            case "todos" -> todos();
+            case "tools" -> tools(arg);
+            case "permissions" -> permissions(arg);
+            case "structural-code-graph" -> resyncGraph();
+            case "compact" -> compact();
+            case "editplan" -> editPlan(arg);
+            default -> println(colorizer.status("unknown command /" + name + " - type /help"));
+        }
+        return false;
+    }
+
+    private void mode(final String arg) {
+        final var mode = AgentMode.fromConfigurationString(arg);
+        permissionService.setMode(mode);
+        println(colorizer.status("mode: " + mode.name().toLowerCase()));
+        if (mode == AgentMode.BUILD) {
+            try {
+                final var seeded = planTodoSeeder.seedFromLastAssistant(sessionId);
+                println(colorizer.status(seeded ? "todos seeded from the plan" : "no plan found to seed todos from"));
+            } catch (final RuntimeException e) {
+                println(colorizer.error("todo seeding failed: " + e.getMessage()));
+            }
+        }
+    }
+
+    private void model(final String arg) {
+        if (arg.isBlank()) {
+            try {
+                final var models = chatClient.models().ids();
+                println(colorizer.status("models (" + models.size() + "):"));
+                for (final var m : models) {
+                    println("- " + m);
+                }
+                println(colorizer.status("use /model <id> to switch"));
+            } catch (final IOException | InterruptedException e) {
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                println(colorizer.error("cannot list models: " + e.getMessage()));
+            }
+            return;
+        }
+        final var model = arg.startsWith("$") ? arg.substring(1) : arg;
+        chatClient.setModel(model);
+        println(colorizer.status("model: " + model));
+    }
+
+    private void provider(final String arg) {
+        final var providers = providerManager.providers();
+        if (!arg.isBlank()) {
+            chatClient.setProvider(arg);
+            println(colorizer.status("provider: " + arg));
+            return;
+        }
+        final var current = chatClient.providerId();
+        println(colorizer.status("providers (current: " + current + "):"));
+        if (providers.isEmpty()) {
+            println("(no providers configured)");
+        } else {
+            for (final var p : providers) {
+                final var id = p.id();
+                println("- " + (Objects.equals(id, current) ? id + " (current)" : id));
+            }
+        }
+        println(colorizer.status("use /provider <id> to switch"));
+    }
+
+    private void agent(final String arg) {
+        if (arg.isBlank()) {
+            final var agents = agentProvider.agents();
+            println(colorizer.status("custom agents (active: " + (activeAgent.isBlank() ? "-" : activeAgent) + "):"));
+            if (agents.isEmpty()) {
+                println("(no custom agents configured; add them under yca.agents)");
+            } else {
+                for (final var a : agents) {
+                    println("- " + a.name());
+                }
+            }
+            println(colorizer.status("use /agent <name> to set the active agent, /agent to clear it"));
+            return;
+        }
+        if (agentProvider.byName(arg) == null) {
+            println(colorizer.error("unknown agent: " + arg));
+            return;
+        }
+        activeAgent = arg;
+        println(colorizer.status("agent: " + arg));
+    }
+
+    private void context(final String arg) {
+        final var sb = new StringBuilder();
+        sb.append("## System prompt\n\n").append(systemPromptBuilder.build()).append("\n\n");
+        final var messages = sessionStore.load(sessionId);
+        sb.append("## Session ").append(sessionId).append(" (").append(messages.size()).append(" messages)\n\n");
+        for (final var message : messages) {
+            sb.append("- ").append(message.role()).append(": ").append(firstLine(String.valueOf(message.content()))).append('\n');
+        }
+        if (arg.isBlank()) {
+            println(sb.toString());
+            return;
+        }
+        try {
+            final var target = Path.of(arg).toAbsolutePath();
+            Files.createDirectories(target.getParent() == null ? Path.of(".") : target.getParent());
+            Files.writeString(target, sb.toString());
+            println(colorizer.status("context written to " + target));
+        } catch (final IOException e) {
+            println(colorizer.error("context failed: " + e.getMessage()));
+        }
+    }
+
+    private void memory() {
+        final var project = memoryStore.readProject();
+        final var global = memoryStore.readGlobal();
+        if (project.isBlank() && global.isBlank()) {
+            println(colorizer.status("(empty memory)"));
+            return;
+        }
+        if (!global.isBlank()) {
+            println(colorizer.status("-- global memory --"));
+            println(global);
+        }
+        if (!project.isBlank()) {
+            println(colorizer.status("-- project memory --"));
+            println(project);
+        }
+    }
+
+    private void todos() {
+        final var rendered = todoStore.render();
+        println(rendered.isBlank() ? colorizer.status("(no todos)") : rendered);
+    }
+
+    private void tools(final String arg) {
+        final var filters = new ArrayList<String>();
+        for (final var token : arg.split(" ")) {
+            final var filter = token.strip().toLowerCase(Locale.ROOT);
+            if (!filter.isEmpty()) {
+                filters.add(filter);
+            }
+        }
+        final var byServer = new TreeMap<>(mcpManager.toolsByServer());
+        if (byServer.isEmpty()) {
+            println(colorizer.status("(no tools available)"));
+            return;
+        }
+        var count = 0;
+        for (final var server : byServer.entrySet()) {
+            final var lines = new ArrayList<String>();
+            final var tools = server.getValue().stream()
+                    .sorted(java.util.Comparator.comparing(EmbeddedTool::name))
+                    .toList();
+            for (final var tool : tools) {
+                final var rootKey = (server.getKey() + '_' + tool.name()).toLowerCase(Locale.ROOT);
+                if (filters.stream().anyMatch(filter -> !rootKey.contains(filter))) {
+                    continue;
+                }
+                final var description = toolDescription(server.getKey(), tool);
+                lines.add(tool.name() + (description == null ? "" : ": " + description));
+            }
+            if (lines.isEmpty()) {
+                continue;
+            }
+            println(colorizer.accent(server.getKey()));
+            for (final var line : lines) {
+                println("  " + line);
+            }
+            count += lines.size();
+        }
+        if (count == 0) {
+            println(colorizer.status("(no tool matches)"));
+        }
+    }
+
+    private String toolDescription(final String server, final EmbeddedTool tool) {
+        var description = tool.description() == null ? "" : tool.description().strip();
+        final var prefix = '[' + server + "] ";
+        if (description.startsWith(prefix)) {
+            description = description.substring(prefix.length()).strip();
+        }
+        final var lineBreak = description.indexOf('\n');
+        if (lineBreak >= 0) {
+            description = description.substring(0, lineBreak).strip();
+        }
+        return description.isEmpty() || description.equals(tool.name()) ? null : description;
+    }
+
+    private void permissions(final String arg) {
+        final var v = arg == null ? "" : arg.strip();
+        if (v.equals("all") || v.equals("unsafe")) {
+            permissionService.setPermitAll(true);
+            println(colorizer.status("permissions: all tools allowed"));
+        } else if (v.equals("none") || v.equals("safe")) {
+            permissionService.setPermitAll(false);
+            println(colorizer.status("permissions: asking for approval"));
+        } else {
+            println(colorizer.status("usage: /permissions all|none"));
+        }
+    }
+
+    private void resyncGraph() {
+        try {
+            final var result = structuralCodeGraph.resync();
+            println(colorizer.status(result));
+        } catch (final RuntimeException e) {
+            println(colorizer.error("resync failed: " + e.getMessage()));
+        }
+    }
+
+    private void compact() {
+        final var history = sessionStore.load(sessionId);
+        if (history.isEmpty()) {
+            println(colorizer.status("nothing to compact"));
+            return;
+        }
+        sessionStore.replace(sessionId, contextManager.compact(history));
+        println(colorizer.status("context compacted"));
+    }
+
+    private void editPlan(final String arg) {
+        if (permissionService.mode() != AgentMode.PLAN) {
+            println(colorizer.error("editplan is only available in plan mode (run /mode plan)"));
+            return;
+        }
+        final var plan = planTodoSeeder.plan(sessionId);
+        if (plan == null || plan.isBlank()) {
+            println(colorizer.error("no plan to edit yet - produce a plan first"));
+            return;
+        }
+        final var path = arg.isBlank()
+                ? planFileService.defaultPath(Path.of(configuration.resolveStorageHome()), "", sessionId)
+                : Path.of(arg).toAbsolutePath();
+        try {
+            Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
+            Files.writeString(path, planFileService.render(plan, todoStore.all()));
+        } catch (final IOException e) {
+            println(colorizer.error("editplan failed to write " + path + ": " + e.getMessage()));
+            return;
+        }
+        final var original = planFileService.render(plan, todoStore.all());
+        println(colorizer.status("plan exported to " + path));
+        println(colorizer.status("edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
+        try {
+            final var input = stdin.readLine();
+            if (input != null) {
+                final var decision = input.trim();
+                if (decision.equalsIgnoreCase("c") || decision.equalsIgnoreCase("cancel")) {
+                    println(colorizer.status("plan edit cancelled"));
+                    return;
+                }
+            }
+        } catch (final IOException e) {
+            println(colorizer.error("editplan read failed: " + e.getMessage()));
+            return;
+        }
+        try {
+            final var edited = Files.readString(path);
+            if (edited.equals(original)) {
+                println(colorizer.status("no changes in the plan (nothing to reload)"));
+                return;
+            }
+            final var parsed = planFileService.parse(edited);
+            println(colorizer.status(planFileService.reload(sessionId, parsed)));
+        } catch (final IOException e) {
+            println(colorizer.error("editplan failed to read " + path + ": " + e.getMessage()));
+        }
+    }
+
+    private ApprovalGate approvalGate() {
+        return (title, detail) -> {
+            println(colorizer.accent("Approval required: " + title));
+            if (detail != null && !detail.isBlank()) {
+                println("  " + detail);
+            }
+            print(colorizer.status("approve? (y/n) [n] "));
+            try {
+                final var line = stdin.readLine();
+                if (line != null) {
+                    final var c = line.strip().toLowerCase(Locale.ROOT);
+                    if (c.equals("y") || c.equals("yes") || c.equals("o") || c.equals("ok")) {
+                        return true;
+                    }
+                }
+            } catch (final IOException ignored) {
+                // treat as deny
+            }
+            return false;
+        };
+    }
+
+    private FeedbackGate feedbackGate() {
+        return questions -> {
+            if (questions == null || questions.isEmpty()) {
+                return Map.of();
+            }
+            final var reader = stdin;
+            final Map<String, Object> answers = new HashMap<>();
+            boolean restart;
+            do {
+                restart = false;
+                answers.clear();
+                for (final var question : questions) {
+                    final var answer = askOne(reader, question);
+                    if (answer == null) {
+                        return null;
+                    }
+                    answers.put(question.id(), answer);
+                }
+                // summary
+                println(colorizer.status("your answers:"));
+                for (final var question : questions) {
+                    println("- " + question.prompt() + " -> " + answers.get(question.id()));
+                }
+                print(colorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "));
+                try {
+                    final var line = reader.readLine();
+                    if (line != null) {
+                        final var c = line.strip().toLowerCase(Locale.ROOT);
+                        if (c.equals("e") || c.equals("edit") || c.equals("restart")) {
+                            restart = true;
+                        } else if (c.equals("c") || c.equals("cancel")) {
+                            return null;
+                        }
+                    }
+                } catch (final IOException e) {
+                    return null;
+                }
+            } while (restart);
+            return answers;
+        };
+    }
+
+    private Object askOne(final BufferedReader reader, final Question question) {
+        println();
+        println(colorizer.accent(question.prompt()));
+        final var options = question.options() == null ? List.<String>of() : question.options();
+        for (int i = 0; i < options.size(); i++) {
+            println("  " + (i + 1) + ". " + options.get(i));
+        }
+        final var ownIndex = options.size(); // 1-based id = options.size()
+        if (question.multiple()) {
+            println("  " + (ownIndex + 1) + ". (type your own answer)");
+            println(colorizer.status("enter comma-separated numbers"));
+        } else {
+            println("  " + (ownIndex + 1) + ". (type your own answer)");
+            println(colorizer.status("enter a number, or " + (ownIndex + 1) + " then your text"));
+        }
+        print(colorizer.status("> "));
+        try {
+            final var line = reader.readLine();
+            if (line == null) {
+                return null;
+            }
+            final var trimmed = line.strip();
+            if (trimmed.isBlank()) {
+                return question.multiple() ? List.of() : "";
+            }
+            if (question.multiple()) {
+                final var values = new ArrayList<String>();
+                for (final var part : trimmed.split(",")) {
+                    final var v = part.strip();
+                    if (v.isEmpty()) {
+                        continue;
+                    }
+                    int id;
+                    try {
+                        id = Integer.parseInt(v);
+                    } catch (final NumberFormatException nfe) {
+                        values.add(v);
+                        continue;
+                    }
+                    if (id >= 1 && id <= options.size()) {
+                        values.add(options.get(id - 1));
+                    } else if (id == ownIndex + 1) {
+                        print(colorizer.status("your answer> "));
+                        final var own = reader.readLine();
+                        if (own != null && !own.isBlank()) {
+                            values.add(own);
+                        }
+                    }
+                }
+                return values;
+            }
+            int id;
+            try {
+                id = Integer.parseInt(trimmed);
+            } catch (final NumberFormatException nfe) {
+                return trimmed;
+            }
+            if (id >= 1 && id <= options.size()) {
+                return options.get(id - 1);
+            }
+            if (id == ownIndex + 1) {
+                print(colorizer.status("your answer> "));
+                final var own = reader.readLine();
+                return own == null ? "" : own;
+            }
+            return "";
+        } catch (final IOException e) {
+            return null;
+        }
+    }
+
+    private AgentOverride agentOverride(final String text) {
+        final var stripped = text.strip();
+        if (stripped.startsWith("@")) {
+            final var space = stripped.indexOf(' ');
+            if (space > 1) {
+                final var name = stripped.substring(1, space).strip();
+                final var prompt = stripped.substring(space + 1).strip();
+                if (agentProvider.byName(name) != null) {
+                    return new AgentOverride(name, prompt);
+                }
+                return new AgentOverride(null, text);
+            }
+        }
+        return new AgentOverride(null, text);
+    }
+
+    private record AgentOverride(String agentName, String prompt) {
+    }
+
+    private void printHelp() {
+        println(MarkdownColorizer.bold("yca cli - plain-terminal interactive session"));
+        println("  type a prompt to run the agent, or use a slash command:");
+        println("  /help /new /resume <id> /model [name] /provider [id] /agent [name]");
+        println("  /mode build|plan /context [path] /memory /todos /tools [filter]");
+        println("  /permissions all|none /structural-code-graph /compact /editplan [path]");
+        println("  /quit /exit - or type exit to leave the session");
+        println("  keys: Ctrl-C interrupts the running turn; pressed twice when idle (within 2s) it quits.");
+        println("  Ctrl-D exits at the prompt.");
+    }
+
+    private String resolveSessionId() {
+        if (conf.session() != null && !conf.session().isBlank()) {
+            return conf.session();
+        }
+        if (conf.context() != null && !conf.context().isBlank()) {
+            var name = Path.of(conf.context()).getFileName().toString();
+            if (name.endsWith(".jsonl")) {
+                name = name.substring(0, name.length() - ".jsonl".length());
+            }
+            return name;
+        }
+        return sessionStore.create();
+    }
+
+    private void installInterruptHandler() {
+        try {
+            sun.misc.Signal.handle(new sun.misc.Signal("INT"), signal -> onInterrupt());
+        } catch (final Throwable ignored) {
+            // signal handling is best-effort; default behavior remains
+        }
+    }
+
+    private void onInterrupt() {
+        if (busy.get()) {
+            cancelled.set(true);
+            return;
+        }
+        final var now = System.currentTimeMillis();
+        final var previous = lastInterruptAt;
+        lastInterruptAt = now;
+        if (previous > 0 && now - previous <= QUIT_WINDOW_MILLIS) {
+            quitRequested = true;
+            println(colorizer.status("bye"));
+        } else {
+            println(colorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
+        }
+    }
+
+    private static String firstLine(final String text) {
+        if (text == null) {
+            return "";
+        }
+        final var nl = text.indexOf('\n');
+        return (nl < 0 ? text : text.substring(0, nl)).strip();
+    }
+
+    private void print(final String text) {
+        System.out.print(text);
+        System.out.flush();
+    }
+
+    private void println() {
+        System.out.println();
+    }
+
+    private void println(final String text) {
+        System.out.println(text);
+    }
+}

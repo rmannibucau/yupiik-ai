@@ -26,6 +26,16 @@ legacy flat scalars (`yca.provider.baseUrl`, `.apiKey`, `.model`, `.api`,
 `.reasoningField`, `.contextWindow`, `.timeoutSeconds`) build the implicit
 `default` provider.
 
+A provider's `contextWindow` accepts an explicit token count; when zero or
+negative (the default), it is auto-detected from the provider `/v1/models`
+vendor extensions (`context_window`, `model_context_window`, `context_length`,
+`max_model_len`, llama.cpp `meta.n_ctx`, or `meta.n_ctx_train` when smaller
+than the default). Detected values are totals (prompt + completion combined);
+they are cached one day per provider and model under
+`<storageHome>/context-window/` and fall back to 128000 when nothing is found.
+Detection failures are ignored. The pruning and compaction thresholds keep the
+remaining window as headroom for completions.
+
 The main configuration groups are documented below. Command specific options
 (`run.*`, `tui.*`) are documented in the
 xref:cli/index.adoc[CLI reference].

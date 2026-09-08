@@ -24,7 +24,7 @@ class ContextManagerTest {
         return new CodingAgentConfiguration("x", ".", null,
                 new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120),
                 new ModelConfiguration("", ""),
-                new LlmConfiguration(3, 500L, 0, 4, true),
+                new LlmConfiguration(3, 500L, 0, 4, true, 250),
                 new CompactionConfiguration(true, 80),
                 new PruningConfiguration(true, 65, keepRecent, 80),
                 null, null, null, null, null, null, null, null, null);
@@ -33,7 +33,7 @@ class ContextManagerTest {
     @Test
     void compactForOverflowIsNoOpOnSmallConversations() {
         final var cfg = config(6);
-        final var manager = new ContextManager(cfg, null, new UsageTracker(providerManager(cfg)), providerManager(cfg));
+        final var manager = new ContextManager(cfg, null, new UsageTracker(providerManager(cfg), null, null), providerManager(cfg));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 6; i++) {

@@ -17,7 +17,7 @@ public record ProviderListConfiguration(
         @Property(defaultValue = "\"\"", documentation = "Convenience shorthand for the default provider model (used only when no providers are listed).") String model,
         @Property(defaultValue = "io.yupiik.ia.agent.core.llm.ApiFlavor.AUTO", documentation = "Convenience shorthand for the default provider API flavor (used only when no providers are listed).") ApiFlavor api,
         @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO", documentation = "Convenience shorthand for the default provider reasoning field (used only when no providers are listed).") ReasoningField reasoningField,
-        @Property(defaultValue = "128000", documentation = "Convenience shorthand for the default provider context window (used only when no providers are listed).") int contextWindow,
+        @Property(defaultValue = "-1", documentation = "Convenience shorthand for the default provider context window (used only when no providers are listed). Zero or negative auto-detects it from the provider /v1/models vendor extensions, caches it one day per provider and model and falls back to 128000.") int contextWindow,
         @Property(defaultValue = "120", documentation = "Convenience shorthand for the default provider timeout (used only when no providers are listed).") int timeoutSeconds) {
 
     public String resolvedDefaultProvider() {

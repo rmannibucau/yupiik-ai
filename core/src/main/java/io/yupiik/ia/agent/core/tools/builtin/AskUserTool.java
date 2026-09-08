@@ -1,0 +1,90 @@
+package io.yupiik.ia.agent.core.tools.builtin;
+
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.question.Question;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.Schemas;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolResult;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+@ApplicationScoped
+public class AskUserTool implements EmbeddedTool {
+    private final UserFeedbackService userFeedbackService;
+    private final JsonMapper mapper;
+
+    public AskUserTool(final UserFeedbackService userFeedbackService, final JsonMapper mapper) {
+        this.userFeedbackService = userFeedbackService;
+        this.mapper = mapper;
+    }
+
+    protected AskUserTool() {
+        this.userFeedbackService = null;
+        this.mapper = null;
+    }
+
+    @Override
+    public String name() {
+        return "ask_user";
+    }
+
+    @Override
+    public String description() {
+        return "Ask the user questions and get their answers. Use it whenever you need a decision, a preference or missing input the user did not specify. Each question prompts live in the terminal UI (one tab per question, then a confirm tab). Supports both single (radio) and multiple (checkbox) choice plus a free-text 'your own answer' option.";
+    }
+
+    @Override
+    public ToolCategory category() {
+        return ToolCategory.AGENT;
+    }
+
+    @Override
+    public boolean readonly() {
+        return true;
+    }
+
+    @Override
+    public Map<String, Object> schema() {
+        final var question = Schemas.object(Map.of(
+                "id", Schemas.str("A stable unique identifier for this question; the answer is returned under this key."),
+                "prompt", Schemas.str("The question to ask the user."),
+                "options", Schemas.arrayOf("Proposed answers the user can pick from (radio for single, checkbox for multiple). May be empty.", Schemas.str("One proposed answer.")),
+                "multiple", Schemas.bool("false = the user picks exactly one option, true = the user can select several options.")), "id", "prompt");
+        return Schemas.object(Map.of(
+                "questions", Schemas.arrayOf("The questions to ask the user. Each gets its own tab in the prompt panel.", question)), "questions");
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args) {
+        final var raw = args.get("questions");
+        if (!(raw instanceof final List<?> list) || list.isEmpty()) {
+            return ToolResult.error("questions must be a non empty array of {id, prompt, options, multiple}");
+        }
+        final var questions = new ArrayList<Question>(list.size());
+        for (final var item : list) {
+            if (!(item instanceof final Map<?, ?> map)) {
+                return ToolResult.error("each question must be an object with an id and a prompt");
+            }
+            final var id = String.valueOf(map.get("id"));
+            final var prompt = String.valueOf(map.get("prompt"));
+            final var options = new ArrayList<String>();
+            if (map.get("options") instanceof final List<?> opts) {
+                for (final var opt : opts) {
+                    options.add(String.valueOf(opt));
+                }
+            }
+            final var multiple = Boolean.TRUE.equals(map.get("multiple"));
+            questions.add(new Question(id, prompt, options, multiple));
+        }
+        final var answers = userFeedbackService.ask(questions);
+        if (answers == null) {
+            return ToolResult.error("ask_user is not available in headless mode (no interactive gate).");
+        }
+        return ToolResult.ok(mapper.toString(answers));
+    }
+}
