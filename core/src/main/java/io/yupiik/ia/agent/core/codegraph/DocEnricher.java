@@ -6,6 +6,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -53,6 +54,7 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
 
     private final CodingAgentConfiguration configuration;
     private final ChatClient chatClient;
+    private final ProviderManager providerManager;
     private final DocTreeWriter writer;
     private final JsonMapper mapper;
     private final DocEnricherCache cache;
@@ -63,9 +65,11 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     private volatile Runnable rewireHook;
 
     public DocEnricher(final CodingAgentConfiguration configuration, final ChatClient chatClient,
-                       final DocTreeWriter writer, final JsonMapper mapper, final Path storeRoot) {
+                       final DocTreeWriter writer, final JsonMapper mapper, final Path storeRoot,
+                       final ProviderManager providerManager) {
         this.configuration = configuration;
         this.chatClient = chatClient;
+        this.providerManager = providerManager;
         this.writer = writer;
         this.mapper = mapper;
         this.cache = new DocEnricherCache(mapper, storeRoot);
@@ -82,6 +86,7 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     protected DocEnricher() {
         this.configuration = null;
         this.chatClient = null;
+        this.providerManager = null;
         this.writer = null;
         this.mapper = null;
         this.cache = null;
@@ -390,9 +395,10 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         final var cfg = configuration.structuralCodeGraph();
         final var override = cfg == null ? null : cfg.model();
         if (override != null && !override.isBlank()) {
-            return override;
+            return providerManager.resolveModel(override);
         }
-        return configuration.provider() == null ? "default" : configuration.provider().model();
+        final var current = providerManager.current();
+        return current == null ? "default" : (current.model() == null || current.model().isBlank() ? "default" : current.model());
     }
 
     private static String text(final Object content) {

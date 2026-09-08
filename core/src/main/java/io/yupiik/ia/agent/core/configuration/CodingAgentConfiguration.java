@@ -9,7 +9,7 @@ import java.nio.file.Path;
 public record CodingAgentConfiguration(
         @Property(defaultValue = "\"~/.yupiik/coding-agent\"", documentation = "Storage root for sessions, memory, todos and the global config file.") String storageHome,
         @Property(defaultValue = "\".\"", documentation = "Working directory from which project files (AGENTS.md hierarchy, skills) are discovered. Defaults to the current directory.") String workingDir,
-        @Property(documentation = "OpenAI compatible provider settings.") ProviderConfiguration provider,
+        @Property(documentation = "OpenAI compatible provider settings. Either a list of providers (providers + defaultProvider) or the convenience flat scalars below acting as a single implicit 'default' provider.") ProviderListConfiguration provider,
         @Property(documentation = "Model overrides for compaction and pruning. Empty values fall back to the provider model.") ModelConfiguration model,
         @Property(documentation = "LLM client resilience settings: retries, rate limiting and concurrency.") LlmConfiguration llm,
         @Property(documentation = "Context compaction settings.") CompactionConfiguration compaction,

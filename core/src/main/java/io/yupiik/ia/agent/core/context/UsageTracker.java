@@ -1,26 +1,26 @@
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
 public class UsageTracker {
-    private final CodingAgentConfiguration configuration;
+    private final ProviderManager providerManager;
     private final AtomicLong promptTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
 
-    public UsageTracker(final CodingAgentConfiguration configuration) {
-        this.configuration = configuration;
+    public UsageTracker(final ProviderManager providerManager) {
+        this.providerManager = providerManager;
     }
 
     protected UsageTracker() {
-        this.configuration = null;
+        this.providerManager = null;
     }
 
     public void record(final Usage usage) {
@@ -68,7 +68,8 @@ public class UsageTracker {
     }
 
     public int contextWindow() {
-        return configuration.provider().contextWindow();
+        final var current = providerManager.current();
+        return current == null ? 128000 : current.contextWindow();
     }
 
     public double contextPercent(final int estimatedTokens) {

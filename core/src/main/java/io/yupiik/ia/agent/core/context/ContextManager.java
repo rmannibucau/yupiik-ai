@@ -6,6 +6,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -17,18 +18,21 @@ public class ContextManager {
     private final CodingAgentConfiguration configuration;
     private final ChatClient chatClient;
     private final UsageTracker usageTracker;
+    private final ProviderManager providerManager;
 
     public ContextManager(final CodingAgentConfiguration configuration, final ChatClient chatClient,
-                          final UsageTracker usageTracker) {
+                          final UsageTracker usageTracker, final ProviderManager providerManager) {
         this.configuration = configuration;
         this.chatClient = chatClient;
         this.usageTracker = usageTracker;
+        this.providerManager = providerManager;
     }
 
     protected ContextManager() {
         this.configuration = null;
         this.chatClient = null;
         this.usageTracker = null;
+        this.providerManager = null;
     }
 
     public boolean pruneNeeded(final List<Message> messages) {
@@ -63,8 +67,7 @@ public class ContextManager {
                 sb.append(content).append('\n');
             }
         }
-        final var digestModel = configuration.model().prune() == null || configuration.model().prune().isBlank()
-                ? configuration.provider().model() : configuration.model().prune();
+        final var digestModel = resolveModel(configuration.model().prune());
         final String digest;
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(digestModel, List.of(
@@ -108,8 +111,7 @@ public class ContextManager {
             }
             sb.append('\n');
         }
-        final var compactModel = configuration.model().compact() == null || configuration.model().compact().isBlank()
-                ? configuration.provider().model() : configuration.model().compact();
+        final var compactModel = resolveModel(configuration.model().compact());
         final String summary;
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(compactModel, List.of(
@@ -153,8 +155,7 @@ public class ContextManager {
             }
             sb.append('\n');
         }
-        final var compactModel = configuration.model().compact() == null || configuration.model().compact().isBlank()
-                ? configuration.provider().model() : configuration.model().compact();
+        final var compactModel = resolveModel(configuration.model().compact());
         final String summary;
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(compactModel, List.of(
@@ -196,5 +197,9 @@ public class ContextManager {
 
     private static String str(final Object content) {
         return content instanceof String s ? s : content == null ? "" : content.toString();
+    }
+
+    private String resolveModel(final String override) {
+        return providerManager.resolveModel(override);
     }
 }

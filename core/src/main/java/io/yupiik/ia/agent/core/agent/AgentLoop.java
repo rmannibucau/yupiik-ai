@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -49,6 +50,7 @@ public class AgentLoop {
     private final Emitter emitter;
     private final JsonMapper mapper;
     private final StructuralCodeGraph structuralCodeGraph;
+    private final ProviderManager providerManager;
 
     public AgentLoop(final ChatClient chatClient, final ToolRegistry toolRegistry,
                      final ToolExecutionService toolExecutionService, final CodingAgentConfiguration configuration,
@@ -56,7 +58,7 @@ public class AgentLoop {
                      final ContextManager contextManager, final SessionStore sessionStore,
                      final SystemPromptBuilder systemPromptBuilder, final MemoryExtractor memoryExtractor,
                      final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper,
-                     final StructuralCodeGraph structuralCodeGraph) {
+                     final StructuralCodeGraph structuralCodeGraph, final ProviderManager providerManager) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -71,6 +73,7 @@ public class AgentLoop {
         this.emitter = emitter;
         this.mapper = mapper;
         this.structuralCodeGraph = structuralCodeGraph;
+        this.providerManager = providerManager;
     }
 
     protected AgentLoop() {
@@ -88,6 +91,7 @@ public class AgentLoop {
         this.emitter = null;
         this.mapper = null;
         this.structuralCodeGraph = null;
+        this.providerManager = null;
     }
 
     public String run(final String prompt, final String sessionId, final List<Message> history,
@@ -143,7 +147,7 @@ public class AgentLoop {
                 }
             }
 
-            final var request = new ChatCompletionRequest(configuration.provider().model(), messages,
+            final var request = new ChatCompletionRequest(providerManager.resolveDefault().model(), messages,
                     null, null, toolRegistry.toWireTools(), "auto", null, null, null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[]{io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final Message assistant;

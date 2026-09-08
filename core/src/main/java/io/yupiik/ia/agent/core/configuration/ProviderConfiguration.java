@@ -4,13 +4,15 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 
 public record ProviderConfiguration(
+        @Property(defaultValue = "\"default\"", documentation = "Unique identifier of this provider, referenced in model properties as $<id>/<model>.") String id,
         @Property(defaultValue = "\"https://api.openai.com/v1\"", documentation = "OpenAI compatible base URL.") String baseUrl,
         @Property(defaultValue = "\"\"", documentation = "API key. When empty, falls back to the OPENAI_API_KEY environment variable.") String apiKey,
         @Property(defaultValue = "\"\"", documentation = "Default chat model (eg. gpt-5-mini). Validated at runtime, not at startup, so `help` works without configuration.") String model,
         @Property(defaultValue = "io.yupiik.ia.agent.core.llm.ApiFlavor.AUTO", documentation = "API flavor: auto (detect, starts with responses then falls back to completions), completions or responses.") ApiFlavor api,
         @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO", documentation = "Reasoning content flavor of the provider: auto, reasoning, reasoning_content or none.") ReasoningField reasoningField,
         @Property(defaultValue = "128000", documentation = "Context window size in tokens, used by the usage gauges and thresholds.") int contextWindow,
-        @Property(defaultValue = "120", documentation = "HTTP request timeout in seconds.") int timeoutSeconds) {
+        @Property(defaultValue = "120", documentation = "HTTP request timeout in seconds.") int timeoutSeconds,
+        @Property(defaultValue = "\"\"", documentation = "Optional JSON object merged into the payload of every API call for this provider (eg. {\"reasoning_effort\":\"high\"} or a variant). Empty is ignored.") String providerSpecificOptions) {
 
     public String resolveApiKey() {
         if (apiKey != null && !apiKey.isBlank()) {

@@ -8,12 +8,23 @@
 
 Configuration is resolved from, highest priority first:
 
-. CLI arguments: `--yca-<key> <value>` (for example `--yca-provider-model`)
+. CLI arguments: `--yca-<key> <value>` (for example `--yca-provider-model`). The
+  `yca.` prefix may be omitted, so `--provider-model` works too.
 . JSON file: `~/.yupiik/coding-agent/configuration.json` (override the location
   with the `yca.configuration.json` key)
 . System properties: `yca.provider.model` style keys
 . Environment variables: `YCA_PROVIDER_MODEL` style keys (dots/hyphens become
   underscores, uppercased)
+
+The `provider` group supports multiple providers. Each entry has an `id` that is
+referenced as `$<id>/<model>` anywhere a model is expected (main model,
+`model.compact`, `model.prune`, code graph enrichment). `defaultProvider`
+selects the active entry (blank falls back to the first, then to the implicit
+`default` provider). A provider's optional `providerSpecificOptions` JSON object
+is merged into every API call payload for it. For single-provider setups the
+legacy flat scalars (`yca.provider.baseUrl`, `.apiKey`, `.model`, `.api`,
+`.reasoningField`, `.contextWindow`, `.timeoutSeconds`) build the implicit
+`default` provider.
 
 The main configuration groups are documented below. Command specific options
 (`run.*`, `tui.*`) are documented in the

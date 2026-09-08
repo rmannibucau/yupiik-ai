@@ -6,7 +6,9 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.LlmConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderListConfiguration;
 import io.yupiik.ia.agent.core.configuration.ReasoningField;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -52,7 +54,7 @@ class ChatClientFlavorTest {
         server.createContext("/v1/models", exchange -> respond(exchange, 200,
                 "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}", "application/json"));
         server.start();
-        client = new ChatClient(configuration(), mapper());
+        client = new ChatClient(configuration(), mapper(), providerManager());
     }
 
     @AfterEach
@@ -67,10 +69,16 @@ class ChatClientFlavorTest {
 
     private CodingAgentConfiguration configuration() {
         final var provider = new ProviderConfiguration(
+                "default",
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
-                ApiFlavor.AUTO, ReasoningField.AUTO, 128000, 5);
+                ApiFlavor.AUTO, ReasoningField.AUTO, 128000, 5, "");
         final var llm = new LlmConfiguration(1, 1L, 0, 1, true);
-        return new CodingAgentConfiguration("/tmp/yca-test", null, provider, null, llm, null, null, null, null, null, null, null, null, null, null);
+        return new CodingAgentConfiguration("/tmp/yca-test", null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120),
+                null, llm, null, null, null, null, null, null, null, null, null, null);
+    }
+
+    private ProviderManager providerManager() {
+        return new ProviderManager(configuration(), mapper());
     }
 
     private JsonMapper mapper() {
@@ -148,10 +156,12 @@ class ChatClientFlavorTest {
                 "application/json"));
         server.start();
         final var provider = new ProviderConfiguration(
+                "default",
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
-                ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, 5);
-        client = new ChatClient(new CodingAgentConfiguration("/tmp/yca-test", null, provider, null,
-                new LlmConfiguration(1, 1L, 0, 1, true), null, null, null, null, null, null, null, null, null, null), mapper());
+                ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, 5, "");
+        final var cfg = new CodingAgentConfiguration("/tmp/yca-test", null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120), null,
+                new LlmConfiguration(1, 1L, 0, 1, true), null, null, null, null, null, null, null, null, null, null);
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()));
 
         assertEquals("ok", client.chat(request()).message().content());
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());

@@ -46,6 +46,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -99,7 +100,7 @@ public class TuiCommand implements Runnable {
             """;
 
     private static final List<String> SLASH_COMMANDS = List.of(
-            "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/mode", "/memory", "/context",
+            "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode", "/memory", "/context",
             "/permissions", "/structural-code-graph", "/clear", "/quit", "/exit");
 
     private final TuiConf conf;
@@ -117,6 +118,7 @@ public class TuiCommand implements Runnable {
     private final McpManager mcpManager;
     private final VirtualThreadExecutor executor;
     private final StructuralCodeGraph structuralCodeGraph;
+    private final ProviderManager providerManager;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -125,7 +127,8 @@ public class TuiCommand implements Runnable {
                       final TodoStore todoStore, final ChatClient chatClient, final MemoryStore memoryStore,
                       final SystemPromptBuilder systemPromptBuilder, final McpManager mcpManager,
                       final VirtualThreadExecutor executor,
-                      final StructuralCodeGraph structuralCodeGraph) {
+                      final StructuralCodeGraph structuralCodeGraph,
+                      final ProviderManager providerManager) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -141,6 +144,7 @@ public class TuiCommand implements Runnable {
         this.mcpManager = mcpManager;
         this.executor = executor;
         this.structuralCodeGraph = structuralCodeGraph;
+        this.providerManager = providerManager;
     }
 
     @RootConfiguration("tui")
@@ -431,6 +435,7 @@ public class TuiCommand implements Runnable {
             case "/resume" -> resume(state);
             case "/compact" -> compact(runner, state);
             case "/model" -> modelCommand(text, runner, state);
+            case "/provider" -> providerCommand(text, runner, state);
             case "/memory" -> {
                 final var memory = memoryStore.readProject();
                 state.transcript.append("\n```text\n").append(memory.isBlank() ? "(empty project memory)" : memory)
@@ -447,6 +452,8 @@ public class TuiCommand implements Runnable {
             default -> {
                 if (text.startsWith("/model ")) {
                     modelCommand(text, runner, state);
+                } else if (text.startsWith("/provider ")) {
+                    providerCommand(text, runner, state);
                 } else if (text.startsWith("/mode ")) {
                     mode(text.substring("/mode ".length()).strip(), state);
                 } else if (text.startsWith("/context ")) {
@@ -532,6 +539,30 @@ public class TuiCommand implements Runnable {
         final var model = arg.startsWith("$") ? arg.substring(1) : arg;
         chatClient.setModel(model);
         state.status = "model: " + model;
+    }
+
+    private void providerCommand(final String text, final TuiRunner runner, final UiState state) {
+        final var arg = text.substring("/provider".length()).strip();
+        final var providers = providerManager.providers();
+        if (!arg.isEmpty()) {
+            chatClient.setProvider(arg);
+            state.status = "provider: " + arg;
+            return;
+        }
+        final var current = chatClient.providerId();
+        final var sb = new StringBuilder("\n\n**Providers** (current: ").append(current).append(")**\n\n");
+        if (providers.isEmpty()) {
+            sb.append("(no providers configured)");
+        } else {
+            for (final var p : providers) {
+                sb.append("- ").append(p.id()).append(p.id().equals(current) ? "  <--" : "").append('\n');
+            }
+        }
+        sb.append("\nUse `/provider <id>` to switch.");
+        runner.runLater(() -> {
+            state.transcript.append(sb).append('\n');
+            state.scrollBack = 0;
+        });
     }
 
     private void completeModel(final TuiRunner runner, final UiState state) {
@@ -760,6 +791,7 @@ public class TuiCommand implements Runnable {
                 Span.styled(" coding agent", label)));
         text.add(Line.empty());
         text.add(Line.from(Span.styled("model ", label), Span.styled(ellipsize(chatClient.model(), width - 6), value)));
+        text.add(Line.from(Span.styled("provider ", label), Span.styled(ellipsize(chatClient.providerId(), width - 9), value)));
         text.add(Line.from(Span.styled("flavor ", label), Span.styled(ellipsize(chatClient.flavor().name().toLowerCase(), width - 7), value)));
         text.add(Line.from(Span.styled("cwd ", label), Span.styled(ellipsize(workingDirectory(), width - 4), value)));
         if (branch != null) {
@@ -854,15 +886,16 @@ public class TuiCommand implements Runnable {
     }
 
     private static MarkdownChunk markdownChunk(final String text, final int width) {
-        final var view = MarkdownView.builder().source(text).build();
+        final var view = MarkdownView.builder().source(text).softLineBreaks(true).build();
         final var height = Math.max(view.computeHeight(width), 1);
         return new MarkdownChunk(text, height);
     }
 
     private record MarkdownChunk(String source, int height) {
         dev.tamboui.widget.Widget at(final int skip) {
-            return skip > 0 ? MarkdownView.builder().source(source).scroll(skip).build()
-                    : MarkdownView.builder().source(source).build();
+            return skip > 0
+                    ? MarkdownView.builder().source(source).softLineBreaks(true).scroll(skip).build()
+                    : MarkdownView.builder().source(source).softLineBreaks(true).build();
         }
     }
 

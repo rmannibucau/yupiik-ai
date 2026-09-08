@@ -7,12 +7,15 @@ import io.yupiik.fusion.json.serialization.JsonCodec;
 import io.yupiik.ia.agent.core.YcaCoreModule;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.LlmConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderListConfiguration;
 import io.yupiik.ia.agent.core.configuration.StructuralCodeGraphConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -47,7 +50,7 @@ class StructuralCodeGraphTest {
                 }
                 """);
 
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), null, null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
@@ -55,7 +58,7 @@ class StructuralCodeGraphTest {
 
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
 
         graph.ensureReady();
         final var built = graph.graph();
@@ -121,7 +124,7 @@ class StructuralCodeGraphTest {
 
         // reload from disk must match in-memory state
         final var reloaded = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
         reloaded.ensureReady();
         assertEquals(after.symbols().size(), reloaded.graph().symbols().size());
     }
@@ -130,14 +133,14 @@ class StructuralCodeGraphTest {
     void docTreeSkipsUnchangedAndWritesSummaryInjection() throws Exception {
         final var project = Files.createDirectory(temp.resolve("proj"));
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), null, null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
                 null, null, null);
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
         graph.ensureReady();
 
         final var docRoot = Path.of(config.structuralCodeGraph()
@@ -186,7 +189,7 @@ class StructuralCodeGraphTest {
                 public enum Color { RED, GREEN, BLUE }
                 """);
 
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), null, null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
@@ -205,7 +208,7 @@ class StructuralCodeGraphTest {
             final JsonMapper mapper = container.lookup(JsonMapper.class).instance();
 
             final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                    new StatusReporter(), new ChatClient(config, mapper));
+                    new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
 
             final String status = graph.resync();
 
@@ -223,7 +226,7 @@ class StructuralCodeGraphTest {
 
             // a fresh instance re-loaded from the same store must not hit the null codec either
             final var reloaded = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                    new StatusReporter(), new ChatClient(config, mapper));
+                    new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
             reloaded.ensureReady();
             assertEquals(stored.symbols().size(), reloaded.graph().symbols().size());
         }
@@ -239,7 +242,7 @@ class StructuralCodeGraphTest {
                 }
                 """);
 
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), null, null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, true, null, null, "test-model", 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", true, false),
@@ -255,7 +258,7 @@ class StructuralCodeGraphTest {
 
         final var fake = new FakeChatClient();
         final var writer = new DocTreeWriter(config, storeRoot);
-        try (final var enricher = new DocEnricher(config, fake, writer, mapper, storeRoot)) {
+        try (final var enricher = new DocEnricher(config, fake, writer, mapper, storeRoot, providerManager(config, mapper))) {
             writer.enrichment(enricher);
             enricher.onRewire(() -> WiringGraphWriter.write(mapper, storeRoot,
                     new GraphStore(List.copyOf(model.symbols()), List.copyOf(model.edges()),
@@ -294,7 +297,7 @@ class StructuralCodeGraphTest {
 
             // a second enricher over the same store must hit the persistent cache (no new LLM calls)
             final var secondFake = new FakeChatClient();
-            try (final var enricher2 = new DocEnricher(config, secondFake, writer, mapper, storeRoot)) {
+            try (final var enricher2 = new DocEnricher(config, secondFake, writer, mapper, storeRoot, providerManager(config, mapper))) {
                 enricher2.maybeEnrich("Foo.java", model);
                 await(() -> enricher2.cache().file("Foo.java") != null);
                 assertEquals(0, secondFake.calls.get(), "persistent cache must avoid redundant LLM calls");
@@ -379,5 +382,16 @@ class StructuralCodeGraphTest {
                 new io.yupiik.fusion.json.internal.codec.EnumJsonCodec<>(
                         GraphModel.EdgeType.class, List.of(GraphModel.EdgeType.values()), Enum::name)),
                 key -> Optional.empty());
+    }
+
+    private static ProviderListConfiguration providerConfig() {
+        return new ProviderListConfiguration(
+                List.of(new ProviderConfiguration("default", "https://api.openai.com/v1", "", "test-model",
+                        null, null, 128000, 120, "")),
+                "", null, null, null, null, null, 128000, 120);
+    }
+
+    private static ProviderManager providerManager(final CodingAgentConfiguration cfg, final JsonMapper mapper) {
+        return new ProviderManager(cfg, mapper);
     }
 }

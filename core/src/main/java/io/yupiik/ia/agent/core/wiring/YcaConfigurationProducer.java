@@ -15,7 +15,6 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.function.Function;
-import java.util.logging.Logger;
 
 @DefaultScoped
 public class YcaConfigurationProducer {
@@ -25,10 +24,16 @@ public class YcaConfigurationProducer {
         return stripped.replace('-', '.');
     };
 
+    private final ArgsConfigSource args;
+
+    public YcaConfigurationProducer(final ArgsConfigSource args) {
+        this.args = args;
+    }
+
     public void register(
-            @OnEvent @Order(Integer.MIN_VALUE + 1) final ConfigurationRegistration registration,
-            final ArgsConfigSource args) {
-        registration.addSource().accept(args::get);
+            @OnEvent @Order(Integer.MIN_VALUE + 1) final ConfigurationRegistration registration) {
+        // first the CLI args (highest priority), wrapped so --provider-model etc. work as --yca-provider-model
+        registration.addSource().accept(new YcaPrefixShortcutConfigurationSource(args));
 
         final var configuration = registration.configuration();
         final var path = configuration.get(PREFIX + "configuration.json")

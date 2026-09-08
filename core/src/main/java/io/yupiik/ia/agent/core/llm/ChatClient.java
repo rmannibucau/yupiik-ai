@@ -5,6 +5,8 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -32,15 +34,19 @@ public class ChatClient implements AutoCloseable {
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final ProviderManager providerManager;
     private final ExtendedHttpClient client;
     private final Semaphore permits;
     private final Deque<Long> requestTimes = new ArrayDeque<>();
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
+    private volatile ProviderConfiguration targetProvider;
 
-    public ChatClient(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+    public ChatClient(final CodingAgentConfiguration configuration, final JsonMapper mapper,
+                      final ProviderManager providerManager) {
         this.configuration = configuration;
         this.mapper = mapper;
+        this.providerManager = providerManager;
         this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
                 .setDelegate(java.net.http.HttpClient.newHttpClient()));
         this.permits = new Semaphore(Math.max(1, configuration.llm().maxConcurrent()));
@@ -49,12 +55,14 @@ public class ChatClient implements AutoCloseable {
     protected ChatClient() {
         this.configuration = null;
         this.mapper = null;
+        this.providerManager = null;
         this.client = null;
         this.permits = null;
     }
 
     public ApiFlavor flavor() {
-        return resolved == ApiFlavor.AUTO ? configuration.provider().api() : resolved;
+        final var current = providerManager.current();
+        return resolved == ApiFlavor.AUTO ? (current == null ? ApiFlavor.AUTO : current.api()) : resolved;
     }
 
     public String model() {
@@ -62,15 +70,38 @@ public class ChatClient implements AutoCloseable {
         if (override != null && !override.isBlank()) {
             return override;
         }
-        return configuration.provider().model();
+        final var current = providerManager.current();
+        return current == null || current.model() == null ? "" : current.model();
     }
 
     public void setModel(final String model) {
         this.modelOverride = model == null || model.isBlank() ? null : model;
     }
 
+    public void setProvider(final String id) {
+        providerManager.setProvider(id);
+        this.modelOverride = null;
+        this.resolved = ApiFlavor.AUTO;
+    }
+
+    public String providerId() {
+        return providerManager.currentProviderId();
+    }
+
+    /** The provider currently targeted by the in-flight request (the current provider unless a $provider ref routed it). */
+    private ProviderConfiguration target() {
+        final var t = targetProvider;
+        return t == null ? providerManager.current() : t;
+    }
+
     private String resolveModel() throws IOException {
-        final var model = model();
+        final var override = modelOverride;
+        final var ref = override != null && !override.isBlank() ? override : providerManager.current().model();
+        final var resolvedModel = providerManager.resolve(ref);
+        if (resolvedModel.provider() != null) {
+            this.targetProvider = resolvedModel.provider();
+        }
+        final var model = resolvedModel.model();
         if (model == null || model.isBlank()) {
             throw new IOException(
                     "no model configured: set yca.provider.model (--yca-provider-model, configuration.json or YCA_PROVIDER_MODEL)");
@@ -78,13 +109,28 @@ public class ChatClient implements AutoCloseable {
         return model;
     }
 
+    /** Merge the resolved provider-specific options into the request extra payload, provider JSON winning. */
+    private Map<String, Object> mergeOptions(final Map<String, Object> base) {
+        final var options = providerManager.providerOptions(target());
+        if (options.isEmpty()) {
+            return base;
+        }
+        final var merged = new LinkedHashMap<String, Object>();
+        if (base != null) {
+            merged.putAll(base);
+        }
+        merged.putAll(options);
+        return merged;
+    }
+
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
         final var model = resolveModel();
-        if (model.equals(request.model())) {
+        final var others = mergeOptions(request.others());
+        if (model.equals(request.model()) && others == request.others()) {
             return request;
         }
         return new ChatCompletionRequest(model, request.messages(), request.temperature(), request.stream(),
-                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), request.others());
+                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), others);
     }
 
     public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
@@ -125,7 +171,7 @@ public class ChatClient implements AutoCloseable {
         permits.acquire();
         try {
             final var streaming = new ChatCompletionRequest(model, request.messages(), request.temperature(),
-                    true, request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), request.others());
+                    true, request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), mergeOptions(request.others()));
             var attempt = 0;
             IOException last;
             do {
@@ -165,9 +211,9 @@ public class ChatClient implements AutoCloseable {
         permits.acquire();
         try {
             final var httpRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(configuration.provider().baseUrl() + "/models"))
-                    .timeout(Duration.ofSeconds(configuration.provider().timeoutSeconds()))
-                    .header("authorization", "Bearer " + configuration.provider().resolveApiKey())
+                    .uri(URI.create(target().baseUrl() + "/models"))
+                    .timeout(Duration.ofSeconds(target().timeoutSeconds()))
+                    .header("authorization", "Bearer " + target().resolveApiKey())
                     .header("accept", "application/json")
                     .GET()
                     .build();
@@ -197,10 +243,10 @@ public class ChatClient implements AutoCloseable {
     private ChatCompletionResponse sendBlockingCompletions(final ChatCompletionRequest request) throws IOException {
         final var payload = mapper.toBytes(request);
         final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(configuration.provider().baseUrl() + "/chat/completions"))
-                .timeout(Duration.ofSeconds(configuration.provider().timeoutSeconds()))
+                .uri(URI.create(target().baseUrl() + "/chat/completions"))
+                .timeout(Duration.ofSeconds(target().timeoutSeconds()))
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer " + configuration.provider().resolveApiKey())
+                .header("authorization", "Bearer " + target().resolveApiKey())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                 .build();
         final HttpResponse<String> response = send(httpRequest);
@@ -217,9 +263,9 @@ public class ChatClient implements AutoCloseable {
                                         final BooleanSupplier cancelled) throws IOException, InterruptedException {
         final var payload = mapper.toBytes(request);
         final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(configuration.provider().baseUrl() + "/chat/completions"))
+                .uri(URI.create(target().baseUrl() + "/chat/completions"))
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer " + configuration.provider().resolveApiKey())
+                .header("authorization", "Bearer " + target().resolveApiKey())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                 .build();
         try (BufferedReader reader = openStream(httpRequest, cancelled)) {
@@ -279,10 +325,10 @@ public class ChatClient implements AutoCloseable {
         final var responsesRequest = toResponsesRequest(request, false);
         final var payload = mapper.toBytes(responsesRequest);
         final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(configuration.provider().baseUrl() + "/responses"))
-                .timeout(Duration.ofSeconds(configuration.provider().timeoutSeconds()))
+                .uri(URI.create(target().baseUrl() + "/responses"))
+                .timeout(Duration.ofSeconds(target().timeoutSeconds()))
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer " + configuration.provider().resolveApiKey())
+                .header("authorization", "Bearer " + target().resolveApiKey())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                 .build();
         final HttpResponse<String> response = send(httpRequest);
@@ -302,9 +348,9 @@ public class ChatClient implements AutoCloseable {
                                       final BooleanSupplier cancelled) throws IOException, InterruptedException {
         final var payload = mapper.toBytes(toResponsesRequest(request, true));
         final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(configuration.provider().baseUrl() + "/responses"))
+                .uri(URI.create(target().baseUrl() + "/responses"))
                 .header("content-type", "application/json")
-                .header("authorization", "Bearer " + configuration.provider().resolveApiKey())
+                .header("authorization", "Bearer " + target().resolveApiKey())
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
                 .build();
         try (BufferedReader reader = openStream(httpRequest, cancelled)) {
@@ -564,7 +610,7 @@ public class ChatClient implements AutoCloseable {
     }
 
     private String reasoningText(final ChatChunk.ChunkDelta delta) {
-        return switch (configuration.provider().reasoningField()) {
+        return switch (target().reasoningField()) {
             case REASONING -> delta.reasoning();
             case REASONING_CONTENT -> delta.reasoningContent();
             case NONE -> null;

@@ -48,7 +48,7 @@ is printed and terminal handling can degrade).
 
 ```bash
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar tui
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --yca-provider-model gpt-5-mini
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --provider-model gpt-5-mini
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-permitAll
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
 ```
@@ -56,11 +56,14 @@ java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatja
 `--yca-run-permitAll` (and `--yca-tui-permitAll` for the `tui` command) bypass
 permission prompts and allow every tool call without asking.
 
+Argument keys may be given with or without the `yca.` prefix, so both
+`--provider-model` and `--yca-provider-model` work.
+
 Minimal configuration (defaults to `https://api.openai.com/v1`):
 
 ```bash
 export OPENAI_API_KEY=sk-...
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --yca-provider-model gpt-5-mini
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --provider-model gpt-5-mini
 ```
 
 ## Configuration
@@ -74,11 +77,23 @@ Configuration is resolved from (highest priority first): CLI arguments
 {
   "yca": {
     "provider": {
-      "baseUrl": "https://api.openai.com/v1",
-      "apiKey": "",
-      "model": "gpt-5-mini",
-      "api": "auto",
-      "contextWindow": 128000
+      "providers": [
+        {
+          "id": "openai",
+          "baseUrl": "https://api.openai.com/v1",
+          "apiKey": "",
+          "model": "gpt-5-mini",
+          "api": "auto",
+          "contextWindow": 128000
+        },
+        {
+          "id": "ollama",
+          "baseUrl": "http://localhost:11434/v1",
+          "model": "qwen3-coder",
+          "providerSpecificOptions": "{\"options\":{\"temperature\":0.1}}"
+        }
+      ],
+      "defaultProvider": "openai"
     },
     "permissions": { "mode": "ask", "allow": [], "deny": ["bash:rm -rf *"] },
     "mcp": {
@@ -94,8 +109,20 @@ Configuration is resolved from (highest priority first): CLI arguments
 }
 ```
 
-Main groups: `provider` (baseUrl, apiKey, model, api, reasoningField,
-contextWindow, timeoutSeconds), `llm` (retries, rpm throttle, maxConcurrent, retryOnContextOverflow),
+The `provider` group can hold a list of providers (`providers`), each with a
+unique `id` used to reference it as `$<id>/<model>` anywhere a model is
+expected (main model, `model.compact`, `model.prune`, code graph enrichment).
+`defaultProvider` selects the active one; when it is blank it falls back to the
+first provider (or to the implicit `default` provider). For single-provider
+setups the legacy flat scalars (`baseUrl`, `apiKey`, `model`, `api`,
+`reasoningField`, `contextWindow`, `timeoutSeconds`) are still accepted and
+build the implicit `default` provider. A provider's optional
+`providerSpecificOptions` (a JSON object, empty by default) is merged into
+every API call payload for that provider (e.g. `variant` or thinking effort).
+
+Main groups: `provider` (providers, defaultProvider, baseUrl, apiKey, model,
+api, reasoningField, contextWindow, timeoutSeconds, providerSpecificOptions),
+`llm` (retries, rpm throttle, maxConcurrent, retryOnContextOverflow),
 `compaction` (thresholdPercent, enabled), `pruning` (thresholdPercent,
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 (disabled processors), `permissions` (mode, allow, deny, planBash), `sessions`

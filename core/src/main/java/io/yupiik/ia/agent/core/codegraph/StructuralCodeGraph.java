@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
@@ -52,22 +53,24 @@ public class StructuralCodeGraph {
     private final Path storeFile;
     private final DocTreeWriter docWriter;
     private final DocEnricher docEnricher;
+    private final ProviderManager providerManager;
     private volatile GraphStore graph;
     private volatile String pendingRefreshPath;
 
     public StructuralCodeGraph(final CodingAgentConfiguration configuration, final List<GraphParser> parsers,
                                final JsonMapper mapper, final StatusReporter statusReporter,
-                               final ChatClient chatClient) {
+                               final ChatClient chatClient, final ProviderManager providerManager) {
         this.configuration = configuration;
         this.parsers = parsers.stream().filter(GraphParser::available).toList();
         this.mapper = mapper;
         this.statusReporter = statusReporter;
         this.chatClient = chatClient;
+        this.providerManager = providerManager;
         final var workingDir = configuration.resolveWorkingDir().toString();
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
         this.storeFile = storeRoot.resolve("graph.json");
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
-        this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot);
+        this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot, providerManager);
         this.docWriter.enrichment(docEnricher);
         this.docEnricher.onRewire(this::rewireWiring);
     }
@@ -78,6 +81,7 @@ public class StructuralCodeGraph {
         this.mapper = null;
         this.statusReporter = null;
         this.chatClient = null;
+        this.providerManager = null;
         this.storeRoot = null;
         this.storeFile = null;
         this.docWriter = null;
