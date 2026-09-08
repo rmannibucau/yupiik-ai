@@ -92,7 +92,8 @@ class SystemPromptBuilderTest {
         assertTrue(prompt.contains("PLAN mode"));
         assertTrue(prompt.contains("must NOT modify the repository"));
         assertFalse(prompt.contains("edit files"));
-        assertFalse(prompt.contains("use todo_write"));
+        assertTrue(prompt.contains("Use todo_write to record the plan"));
+        assertTrue(prompt.contains("one pending item per concrete implementation step"));
     }
 
     @Test

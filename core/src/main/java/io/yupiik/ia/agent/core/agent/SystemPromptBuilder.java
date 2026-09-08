@@ -73,7 +73,8 @@ public class SystemPromptBuilder {
         if (plan) {
             sb.append("You are yca, a terminal coding agent, currently in PLAN mode.\n");
             sb.append("You must NOT modify the repository: no file creation, edits or deletions, and no state-changing shell commands. Only read-only tools are available.\n");
-            sb.append("Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n\n");
+            sb.append("Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
+            sb.append("Use todo_write to record the plan: one pending item per concrete implementation step, in execution order. todo_write is the only state-changing tool allowed in this mode.\n\n");
         } else {
             sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
             sb.append("You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");

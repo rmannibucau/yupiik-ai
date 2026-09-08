@@ -20,7 +20,9 @@
 - Permission modes: `ask`, `auto_edit`, `yolo` plus allow/deny glob lists
 - Plan/build access modes: `build` uses every tool and any action, `plan` is
   read-only (read tools plus MCP tools whitelisted as read-only); switchable at
-  runtime with `/mode`
+  runtime with `/mode`. In `plan` mode the plan steps are recorded with
+  `todo_write` as pending todos, and switching back to `build` seeds the todo
+  list from the last plan when the model did not record it itself
 - MCP server health shown in the TUI sidebar with status dots (enabled / disabled / failing)
 - Rate limiting, retries and concurrency limits for LLM calls
 - Custom agents (`yca.agents`): named prompts injected on top of the base system
@@ -241,21 +243,29 @@ Project instructions and skills are loaded into the system prompt:
 - `Ctrl+T` toggles all thinking blocks (live panel + transcript history):
   hides every block when shown, shows them all back when hidden - nothing is
   lost, blocks stay in memory
-- `Ctrl+Y` toggles all executed tool blocks (command names and streamed
-  output), same both-ways behavior; the live `calling <command>` spinner and
-  its streamed output stay visible either way
+- `Ctrl+Y` toggles all executed tool blocks: hidden mode keeps each block's
+  command line (`streaming \`<tool>\`: <command>`, tool failures included)
+  visible and only hides the streamed output; the live `calling <command>`
+  spinner and its streamed output stay visible either way
 - The transcript is capped in memory at
   `yca.tui.transcript.maxHistoryCharacters` (default `10000000`): once
   exceeded, the oldest content is truncated from the beginning
 - `Ctrl+P` cycles the todos panel: open -> collapsed -> hidden; the panel
   opens automatically on the first todo update
+- Switching `/mode build` keeps the plan todos recorded in `plan` mode, or
+  derives them from the last plan of the session when the list is empty
 - `Ctrl+S` compact, `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt
-- While a tool runs, a line under the input shows `calling <command>` with an
-  animated spinner (and `esc to interrupt` on the right) and its output is
-  streamed live into the transcript
+- While a tool runs, a line under the input shows `calling <command>` with a
+  spinner (and `esc to interrupt` on the right) and its output is streamed live
+  into the transcript
+- Waiting states get per-phase spinners: clock for agent/thinking waits
+  (`thinking...`, `busy - press Esc to interrupt`, `interrupting...`), square
+  corners for tool execution (`calling <command>`, `running <command>`), and a
+  bouncing ball for other background operations (`compacting...`, resyncing the
+  structural code graph); the status bar shows the same animated feedback
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact`, `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan`, `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [path]` (show the resolved context, write it to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact`, `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan`, `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [path]` (show the resolved context, write it to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

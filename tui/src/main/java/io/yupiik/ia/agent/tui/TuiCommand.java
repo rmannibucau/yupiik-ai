@@ -28,6 +28,7 @@ import dev.tamboui.widgets.gauge.Gauge;
 import dev.tamboui.widgets.input.TextArea;
 import dev.tamboui.widgets.input.TextAreaState;
 import dev.tamboui.widgets.paragraph.Paragraph;
+import dev.tamboui.widgets.spinner.SpinnerStyle;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
@@ -47,7 +48,9 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
@@ -55,7 +58,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Locale;
 import java.util.List;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -102,6 +108,7 @@ public class TuiCommand implements Runnable {
             | /memory | show the project memory |
             | /context [path] | show the resolved context (system prompt + session), write to path when given |
             | /permissions (all\\|none) | allow all tools without asking (all), or restore interactive approval (none) |
+            | /tools [filters] | list tools per MCP server; space separated filters must all match the lowercase server/tool name |
             | /structural-code-graph | resync the structural code graph (symbols, edges and doc tree) on demand |
             | /clear | clear the transcript |
             | /quit | exit yca |
@@ -109,7 +116,7 @@ public class TuiCommand implements Runnable {
 
     private static final List<String> SLASH_COMMANDS = List.of(
             "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode", "/memory", "/context",
-            "/permissions", "/structural-code-graph", "/agent", "/clear", "/quit", "/exit");
+            "/permissions", "/structural-code-graph", "/tools", "/agent", "/clear", "/quit", "/exit");
 
     private final TuiConf conf;
     private final TuiConfiguration tuiConfiguration;
@@ -120,6 +127,7 @@ public class TuiCommand implements Runnable {
     private final ContextManager contextManager;
     private final SessionStore sessionStore;
     private final TodoStore todoStore;
+    private final PlanTodoSeeder planTodoSeeder;
     private final ChatClient chatClient;
     private final MemoryStore memoryStore;
     private final SystemPromptBuilder systemPromptBuilder;
@@ -136,7 +144,7 @@ public class TuiCommand implements Runnable {
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
                       final AgentEventBridge bridge, final PermissionService permissionService,
                       final ContextManager contextManager, final SessionStore sessionStore,
-                      final TodoStore todoStore, final ChatClient chatClient, final MemoryStore memoryStore,
+                      final TodoStore todoStore, final PlanTodoSeeder planTodoSeeder, final ChatClient chatClient, final MemoryStore memoryStore,
                       final SystemPromptBuilder systemPromptBuilder, final McpManager mcpManager,
                       final VirtualThreadExecutor executor,
                       final StructuralCodeGraph structuralCodeGraph,
@@ -151,6 +159,7 @@ public class TuiCommand implements Runnable {
         this.contextManager = contextManager;
         this.sessionStore = sessionStore;
         this.todoStore = todoStore;
+        this.planTodoSeeder = planTodoSeeder;
         this.chatClient = chatClient;
         this.memoryStore = memoryStore;
         this.systemPromptBuilder = systemPromptBuilder;
@@ -277,10 +286,14 @@ public class TuiCommand implements Runnable {
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             final var running = state.runningTool;
+            final var command = state.runningToolCommand;
             state.runningTool = null;
             state.runningToolCommand = null;
             if (running != null && state.toolStream.length() > 0) {
-                state.transcript.append("\n\n").append(TOOL_BEGIN).append("\n*streaming `").append(running).append("`*\n\n```text\n")
+                final var header = command == null || command.isBlank()
+                        ? "*streaming `" + running + "`*"
+                        : "*streaming `" + running + "`: " + command.replace('`', '\'') + "*";
+                state.transcript.append("\n\n").append(TOOL_BEGIN).append('\n').append(header).append("\n\n```text\n")
                         .append(state.toolStream.toString().stripTrailing()).append("\n```\n")
                         .append(TOOL_END).append('\n');
             }
@@ -414,7 +427,7 @@ public class TuiCommand implements Runnable {
         if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
             if (state.busy) {
                 state.interrupted = true;
-                state.status = "interrupting...";
+                waiting(state, "interrupting...", SpinnerStyle.CLOCK);
             }
             return true;
         }
@@ -473,7 +486,7 @@ public class TuiCommand implements Runnable {
             return;
         }
         if (state.busy) {
-            state.status = "busy - press Esc to interrupt";
+            waiting(state, "busy - press Esc to interrupt", SpinnerStyle.CLOCK);
             return;
         }
         if (state.title == null || state.title.isBlank()) {
@@ -484,7 +497,7 @@ public class TuiCommand implements Runnable {
         state.thinking.setLength(0);
         state.interrupted = false;
         state.busy = true;
-        state.status = "thinking...";
+        waiting(state, "thinking...", SpinnerStyle.CLOCK);
         state.scrollBack = 0;
         final var override = agentOverride(text);
         final var agentName = override.agentName() != null ? override.agentName() : state.activeAgent;
@@ -532,6 +545,7 @@ public class TuiCommand implements Runnable {
                         .append("\n```\n");
             }
             case "/context" -> context("", state);
+            case "/tools" -> toolsCommand(text, runner, state);
             case "/structural-code-graph" -> resyncGraph(runner, state);
             case "/clear" -> {
                 state.transcript.setLength(0);
@@ -545,13 +559,15 @@ public class TuiCommand implements Runnable {
                 } else if (text.startsWith("/provider ")) {
                     providerCommand(text, runner, state);
                 } else if (text.startsWith("/mode ")) {
-                    mode(text.substring("/mode ".length()).strip(), state);
+                    mode(text.substring("/mode ".length()).strip(), runner, state);
                 } else if (text.startsWith("/context ")) {
                     context(text.substring("/context ".length()).strip(), state);
                 } else if (text.startsWith("/permissions ")) {
                     permissions(text.substring("/permissions ".length()).strip(), state);
                 } else if (text.startsWith("/agent ")) {
                     agentCommand(text, runner, state);
+                } else if (text.startsWith("/tools ")) {
+                    toolsCommand(text, runner, state);
                 } else {
                     state.status = "unknown command: " + text + " (/help)";
                 }
@@ -684,6 +700,72 @@ public class TuiCommand implements Runnable {
         }
         state.activeAgent = arg;
         state.status = "agent: " + arg;
+    }
+
+    private void toolsCommand(final String text, final TuiRunner runner, final UiState state) {
+        final var filters = new ArrayList<String>();
+        for (final var token : text.substring("/tools".length()).strip().split(" ")) {
+            final var filter = token.strip().toLowerCase(Locale.ROOT);
+            if (!filter.isEmpty()) {
+                filters.add(filter);
+            }
+        }
+        executor.execute(() -> {
+            try {
+                final var byServer = new TreeMap<>(mcpManager.toolsByServer());
+                final var sb = new StringBuilder("\n\n**Tools**\n\n```text\n");
+                if (byServer.isEmpty()) {
+                    sb.append("(no tools available)\n");
+                } else {
+                    var count = 0;
+                    for (final var server : byServer.entrySet()) {
+                        final var lines = new ArrayList<String>();
+                        final var tools = server.getValue().stream()
+                                .sorted(Comparator.comparing(EmbeddedTool::name))
+                                .toList();
+                        for (final var tool : tools) {
+                            final var root = (server.getKey() + '_' + tool.name()).toLowerCase(Locale.ROOT);
+                            if (filters.stream().anyMatch(filter -> !root.contains(filter))) {
+                                continue;
+                            }
+                            final var description = toolDescription(server.getKey(), tool);
+                            lines.add(tool.name() + (description == null ? "" : ": " + description));
+                        }
+                        if (lines.isEmpty()) {
+                            continue;
+                        }
+                        sb.append(server.getKey()).append('\n');
+                        for (var i = 0; i < lines.size(); i++) {
+                            sb.append(i == lines.size() - 1 ? "└─ " : "├─ ").append(lines.get(i)).append('\n');
+                        }
+                        count += lines.size();
+                    }
+                    if (count == 0) {
+                        sb.append("(no tool matches)\n");
+                    }
+                }
+                sb.append("```");
+                runner.runLater(() -> {
+                    state.transcript.append(sb).append('\n');
+                    state.scrollBack = 0;
+                });
+            } catch (final RuntimeException e) {
+                runner.runLater(() -> state.status = "tools listing failed: " + e.getMessage());
+            }
+        });
+    }
+
+    private String toolDescription(final String server, final EmbeddedTool tool) {
+        var description = tool.description() == null ? "" : tool.description().strip();
+        final var prefix = '[' + server + "] ";
+        if (description.startsWith(prefix)) {
+            description = description.substring(prefix.length()).strip();
+        }
+        final var lineBreak = description.indexOf('\n');
+        if (lineBreak >= 0) {
+            description = description.substring(0, lineBreak).strip();
+        }
+        return description.isEmpty() || description.equals(tool.name()) ? null : description;
     }
 
     private void completeModel(final TuiRunner runner, final UiState state) {
@@ -829,10 +911,23 @@ public class TuiCommand implements Runnable {
         });
     }
 
-    private void mode(final String value, final UiState state) {
+    private void mode(final String value, final TuiRunner runner, final UiState state) {
         final var mode = AgentMode.fromConfigurationString(value);
         permissionService.setMode(mode);
         state.status = "mode: " + mode.name().toLowerCase();
+        if (mode == AgentMode.BUILD && todoStore.all().isEmpty() && !state.busy) {
+            state.status = "mode: build - deriving todos from the plan...";
+            executor.execute(() -> {
+                try {
+                    final var seeded = planTodoSeeder.seedFromLastAssistant(state.sessionId);
+                    runner.runLater(() -> state.status = seeded
+                            ? "todos seeded from the plan"
+                            : "no plan found to seed todos from");
+                } catch (final RuntimeException e) {
+                    runner.runLater(() -> state.status = "todo seeding failed: " + e.getMessage());
+                }
+            });
+        }
     }
 
     private void resyncGraph(final TuiRunner runner, final UiState state) {
@@ -840,7 +935,7 @@ public class TuiCommand implements Runnable {
             state.status = "cannot resync the graph while busy";
             return;
         }
-        state.status = "resyncing structural code graph...";
+        waiting(state, "resyncing structural code graph...", SpinnerStyle.BOUNCING_BALL);
         executor.execute(() -> {
             try {
                 final var result = structuralCodeGraph.resync();
@@ -859,7 +954,7 @@ public class TuiCommand implements Runnable {
             state.status = "cannot compact while busy";
             return;
         }
-        state.status = "compacting...";
+        waiting(state, "compacting...", SpinnerStyle.BOUNCING_BALL);
         executor.execute(() -> {
             try {
                 final var history = sessionStore.load(state.sessionId);
@@ -879,7 +974,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void render(final dev.tamboui.terminal.Frame frame, final UiState state) {
-        if (state.runningTool != null) {
+        if (state.runningTool != null || activeWait(state) != null) {
             state.spinnerTick++;
         }
         trimTranscript(state);
@@ -1025,10 +1120,8 @@ public class TuiCommand implements Runnable {
                 final var chunk = thoughtChunk(region.text(), width);
                 out.add(new RenderedChunk(chunk.height(), chunk::at));
             } else if (region.tool()) {
-                if (!state.showToolActions) {
-                    continue;
-                }
-                final var chunk = toolChunk(region.text(), width);
+                final var source = state.showToolActions ? region.text() : toolHeader(region.text());
+                final var chunk = toolChunk(source, width);
                 out.add(new RenderedChunk(chunk.height(), chunk::at));
             } else if (!region.text().isBlank()) {
                 appendChunks(out, region.text(), width);
@@ -1109,6 +1202,15 @@ public class TuiCommand implements Runnable {
                 .overflow(Overflow.WRAP_WORD).build();
         final var height = Math.max(view.computeHeight(width), 1);
         return new MarkdownChunk(text, height, toolStyle, toolMarkdownStyles);
+    }
+
+    private static String toolHeader(final String regionText) {
+        for (final var line : regionText.strip().split("\n")) {
+            if (!line.isBlank()) {
+                return line;
+            }
+        }
+        return "";
     }
 
     /**
@@ -1240,7 +1342,7 @@ public class TuiCommand implements Runnable {
         if (state.runningTool != null) {
             final var name = state.runningToolCommand == null || state.runningToolCommand.isBlank()
                     ? state.runningTool : state.runningToolCommand;
-            final var line = Line.from(Span.styled(spinner(state.spinnerTick) + " calling " + ellipsize(name, 60), accent));
+            final var line = Line.from(Span.styled(spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " calling " + ellipsize(name, 60), accent));
             frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), halves.get(0));
         }
         final var hintLine = Line.from(Span.styled(hint, muted));
@@ -1251,7 +1353,9 @@ public class TuiCommand implements Runnable {
         final var statusColor = Color.hex(state.busy ? tuiConfiguration.warning() : tuiConfiguration.success());
         final var muted = Style.EMPTY.fg(Color.hex(tuiConfiguration.textMuted()));
         final var parts = new java.util.ArrayList<Span>();
-        parts.add(Span.styled(" " + state.status + "  ", Style.EMPTY.fg(statusColor)));
+        final var frameStyle = state.runningTool != null ? SpinnerStyle.SQUARE_CORNERS : activeWait(state);
+        final var prefix = frameStyle == null ? "" : spinnerFrame(frameStyle, state.spinnerTick) + " ";
+        parts.add(Span.styled(" " + prefix + state.status + "  ", Style.EMPTY.fg(statusColor)));
         parts.add(Span.styled("model " + ellipsize(chatClient.model(), 40) + "  ", muted));
         parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
         parts.add(Span.styled(modeName(), Style.EMPTY.fg(modeColor())));
@@ -1259,13 +1363,19 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.WRAP_WORD).build(), rect);
     }
 
-    private static String spinner(final int tick) {
-        return switch (tick % 4) {
-            case 0 -> "|";
-            case 1 -> "/";
-            case 2 -> "-";
-            default -> "\\";
-        };
+    private static String spinnerFrame(final SpinnerStyle style, final int tick) {
+        final var frames = style.frames();
+        return frames[tick % frames.length];
+    }
+
+    private static void waiting(final UiState state, final String message, final SpinnerStyle style) {
+        state.status = message;
+        state.wait = new UiState.Wait(message, style);
+    }
+
+    private static SpinnerStyle activeWait(final UiState state) {
+        final var wait = state.wait;
+        return wait != null && wait.message().equals(state.status) ? wait.style() : null;
     }
 
     private void renderApproval(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -1337,7 +1447,7 @@ public class TuiCommand implements Runnable {
             sb.append("\n\n**Assistant**\n\n").append(state.pending);
         }
         if (state.runningTool != null) {
-            sb.append("\n\n`").append(spinner(state.spinnerTick)).append(" running ")
+            sb.append("\n\n`").append(spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick)).append(" running ")
                     .append(state.runningToolCommand == null || state.runningToolCommand.isBlank()
                             ? state.runningTool : state.runningToolCommand).append("`");
             if (state.toolStream.length() > 0) {
@@ -1465,6 +1575,9 @@ public class TuiCommand implements Runnable {
     }
 
     private static final class UiState {
+        private record Wait(String message, SpinnerStyle style) {
+        }
+
         private final StringBuilder transcript = new StringBuilder();
         private final StringBuilder pending = new StringBuilder();
         private final StringBuilder thinking = new StringBuilder();
@@ -1472,6 +1585,7 @@ public class TuiCommand implements Runnable {
         private volatile String sessionId = "";
         private volatile String title;
         private volatile String status = "";
+        private volatile Wait wait;
         private volatile String activeAgent = "";
         private volatile boolean busy;
         private volatile boolean showThinking;

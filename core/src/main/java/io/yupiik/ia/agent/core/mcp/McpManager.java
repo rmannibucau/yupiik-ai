@@ -9,6 +9,7 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -95,6 +96,12 @@ public class McpManager {
     public List<EmbeddedTool> tools() {
         final var out = new ArrayList<EmbeddedTool>();
         toolsByServer.values().forEach(out::addAll);
+        return out;
+    }
+
+    public Map<String, List<EmbeddedTool>> toolsByServer() {
+        final var out = new LinkedHashMap<String, List<EmbeddedTool>>();
+        toolsByServer.forEach((server, serverTools) -> out.put(server, List.copyOf(serverTools)));
         return out;
     }
 
