@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -26,6 +27,11 @@ public class MavenOutputProcessor implements OutputProcessor {
     @Override
     public int order() {
         return 10;
+    }
+
+    @Override
+    public Set<String> names() {
+        return Set.of("mvn", "mvnd", "mvnw");
     }
 
     @Override

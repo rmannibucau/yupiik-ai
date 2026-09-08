@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static io.yupiik.ia.agent.core.optimize.Optimizers.containsFlag;
@@ -20,6 +21,11 @@ public class GradleOutputProcessor implements OutputProcessor {
     @Override
     public int order() {
         return 11;
+    }
+
+    @Override
+    public Set<String> names() {
+        return Set.of("gradle", "gradlew");
     }
 
     @Override

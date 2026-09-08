@@ -2,6 +2,7 @@ package io.yupiik.ia.agent.core.optimize;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
@@ -17,6 +18,11 @@ public class GhOutputProcessor implements OutputProcessor {
     @Override
     public int order() {
         return 13;
+    }
+
+    @Override
+    public Set<String> names() {
+        return Set.of("gh");
     }
 
     @Override

@@ -3,6 +3,7 @@ package io.yupiik.ia.agent.tui;
 import dev.tamboui.layout.Constraint;
 import dev.tamboui.layout.Layout;
 import dev.tamboui.layout.Rect;
+import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.markdown.MarkdownView;
 import dev.tamboui.style.Color;
 import dev.tamboui.style.Overflow;
@@ -63,6 +64,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Command(name = "tui", description = "Interactive terminal UI session with the yca coding agent.")
 public class TuiCommand implements Runnable {
     private static final String HINTS = "Enter send | Esc interrupt | Ctrl+T thinking | Ctrl+Y actions | Ctrl+P todos | Ctrl+S compact | Ctrl+L clear | Ctrl+C quit";
+    private static final String THOUGHT_BEGIN = "<<<yca:thought>>>";
+    private static final String THOUGHT_END = "<<<yca:/thought>>>";
+    private static final String TOOL_BEGIN = "<<<yca:tool>>>";
+    private static final String TOOL_END = "<<<yca:/tool>>>";
+    private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
     private static final String SHORTCUTS = """
             | key | action |
@@ -71,8 +77,8 @@ public class TuiCommand implements Runnable {
             | Shift/Alt+Enter | newline |
             | Esc | interrupt the running agent |
             | Ctrl+C | quit |
-            | Ctrl+T | toggle thinking stream |
-            | Ctrl+Y | show/hide executed tool actions |
+            | Ctrl+T | toggle all thinking blocks |
+            | Ctrl+Y | toggle all executed tool blocks |
             | Ctrl+P | toggle todo list |
             | Ctrl+S | compact the context now |
             | Ctrl+L | clear the transcript |
@@ -122,6 +128,9 @@ public class TuiCommand implements Runnable {
     private final StructuralCodeGraph structuralCodeGraph;
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
+    private final Style thoughtStyle;
+    private final Style toolStyle;
+    private final MarkdownStyles toolMarkdownStyles;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -150,12 +159,39 @@ public class TuiCommand implements Runnable {
         this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
+        final var opacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.thinkingOpacity()));
+        this.thoughtStyle = Style.EMPTY.fg(blend(tuiConfiguration.text(), tuiConfiguration.backgroundPanel(), opacity));
+        final var toolOpacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.toolOutputOpacity()));
+        final var toolFg = blend(tuiConfiguration.text(), tuiConfiguration.backgroundPanel(), toolOpacity);
+        this.toolStyle = Style.EMPTY.fg(toolFg);
+        this.toolMarkdownStyles = MarkdownStyles.builder()
+                .codeBlock(MarkdownStyles.DEFAULTS.codeBlock().fg(toolFg))
+                .inlineCode(MarkdownStyles.DEFAULTS.inlineCode().fg(toolFg))
+                .build();
+    }
+
+    private static Color blend(final String fgHex, final String bgHex, final double opacity) {
+        final var fg = parseHex(fgHex);
+        final var bg = parseHex(bgHex);
+        return Color.rgb(
+                (int) Math.round(fg[0] * opacity + bg[0] * (1 - opacity)),
+                (int) Math.round(fg[1] * opacity + bg[1] * (1 - opacity)),
+                (int) Math.round(fg[2] * opacity + bg[2] * (1 - opacity)));
+    }
+
+    private static int[] parseHex(final String hex) {
+        final var clean = hex.strip();
+        final var start = clean.startsWith("#") ? 1 : 0;
+        return new int[]{
+                Integer.parseInt(clean.substring(start, start + 2), 16),
+                Integer.parseInt(clean.substring(start + 2, start + 4), 16),
+                Integer.parseInt(clean.substring(start + 4, start + 6), 16)};
     }
 
     @RootConfiguration("tui")
     public record TuiConf(
             @Property(defaultValue = "false", documentation = "Use vim style key bindings.") boolean vimBindings,
-            @Property(defaultValue = "false", documentation = "Show the reasoning/thinking stream by default.") boolean showThinking,
+            @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream by default.") boolean showThinking,
             @Property(defaultValue = "\"dark\"", documentation = "UI theme: dark or light.") String theme,
             @Property(defaultValue = "false", documentation = "Bypass permission prompts and allow all tool calls (not persisted to the transcript).") boolean permitAll) {
     }
@@ -165,6 +201,9 @@ public class TuiCommand implements Runnable {
         final var state = new UiState();
         state.sessionId = sessionStore.create();
         state.showThinking = conf.showThinking();
+        final var transcriptConf = tuiConfiguration.transcript();
+        state.maxHistoryCharacters = transcriptConf == null || transcriptConf.maxHistoryCharacters() <= 0
+                ? DEFAULT_MAX_HISTORY_CHARACTERS : transcriptConf.maxHistoryCharacters();
         try (final var tui = createTui()) {
             bridge.sink(event -> tui.runLater(() -> onEvent(event, state)));
             permissionService.setGate(gate(tui, state));
@@ -223,6 +262,7 @@ public class TuiCommand implements Runnable {
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             state.thinking.append(t.delta());
         } else if (event instanceof final AgentEvent.ToolStarted t) {
+            flushThinking(state);
             state.runningTool = t.name();
             state.runningToolCommand = toolCommand(t.args());
             state.toolStream.setLength(0);
@@ -239,20 +279,16 @@ public class TuiCommand implements Runnable {
             final var running = state.runningTool;
             state.runningTool = null;
             state.runningToolCommand = null;
-            if (running != null && state.toolStream.length() > 0 && state.showToolActions) {
-                state.transcript.append("\n\n*streaming `").append(running).append("`*\n\n```text\n")
-                        .append(state.toolStream.toString().stripTrailing()).append("\n```\n");
+            if (running != null && state.toolStream.length() > 0) {
+                state.transcript.append("\n\n").append(TOOL_BEGIN).append("\n*streaming `").append(running).append("`*\n\n```text\n")
+                        .append(state.toolStream.toString().stripTrailing()).append("\n```\n")
+                        .append(TOOL_END).append('\n');
             }
             state.toolStream.setLength(0);
-            if (!t.success() && state.showToolActions) {
-                state.transcript.append("> tool `").append(t.name()).append("` failed: ")
-                        .append(firstLine(t.output())).append("\n");
+            if (!t.success()) {
+                state.transcript.append("\n\n").append(TOOL_BEGIN).append("\n> tool `").append(t.name()).append("` failed: ")
+                        .append(firstLine(t.output())).append('\n').append(TOOL_END).append('\n');
             }
-        } else if (event instanceof final AgentEvent.ToolStarted t) {
-            if (state.showToolActions) {
-                state.transcript.append("\n\n*executing `").append(t.name()).append("`*\n");
-            }
-            state.scrollBack = 0;
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
             state.promptTokens = u.usage() == null ? 0 : u.usage().promptTokens();
             state.completionTokens = u.usage() == null ? 0 : u.usage().completionTokens();
@@ -264,6 +300,7 @@ public class TuiCommand implements Runnable {
         } else if (event instanceof final AgentEvent.Status s) {
             state.status = s.message();
         } else if (event instanceof final AgentEvent.TurnDone t) {
+            flushThinking(state);
             state.transcript.append("\n\n**Assistant**\n\n").append(t.content()).append('\n');
             state.pending.setLength(0);
             state.thinking.setLength(0);
@@ -276,6 +313,28 @@ public class TuiCommand implements Runnable {
             state.busy = false;
             state.status = "error: " + e.message();
         }
+    }
+
+    /**
+     * Writes the accumulated thinking of the current round into the transcript
+     * (wrapped between {@code THOUGHT_BEGIN}/{@code THOUGHT_END} markers so it
+     * renders dimmed and can be shown/hidden as a block) and clears the buffer.
+     * Called before each tool execution and before the final assistant answer,
+     * keeping the transcript chronological. Thinking is always retained in the
+     * transcript whatever the current {@code Ctrl+T} visibility is so toggling
+     * never loses data.
+     */
+    private void flushThinking(final UiState state) {
+        if (state.thinking.length() == 0) {
+            return;
+        }
+        final var thought = state.thinking.toString().strip();
+        state.thinking.setLength(0);
+        if (thought.isBlank()) {
+            return;
+        }
+        state.transcript.append("\n\n").append(THOUGHT_BEGIN).append("\n**Thinking**\n\n")
+                .append(thought).append('\n').append(THOUGHT_END).append('\n');
     }
 
     private boolean onKey(final Event event, final TuiRunner runner, final UiState state) {
@@ -319,16 +378,20 @@ public class TuiCommand implements Runnable {
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('t')) {
             state.showThinking = !state.showThinking;
+            state.status = "thinking blocks " + (state.showThinking ? "shown" : "hidden");
             return true;
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('p')) {
             if (state.showTodos && !state.showTodosCollapsed) {
                 state.showTodosCollapsed = true;
+                state.status = "todos collapsed";
             } else if (state.showTodos) {
                 state.showTodos = false;
                 state.showTodosCollapsed = false;
+                state.status = "todos hidden";
             } else {
                 state.showTodos = true;
+                state.status = "todos shown";
             }
             return true;
         }
@@ -340,11 +403,12 @@ public class TuiCommand implements Runnable {
             state.transcript.setLength(0);
             state.thinking.setLength(0);
             state.scrollBack = 0;
+            state.status = "transcript cleared";
             return true;
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('y')) {
             state.showToolActions = !state.showToolActions;
-            state.status = "tool actions " + (state.showToolActions ? "shown" : "hidden");
+            state.status = "tool blocks " + (state.showToolActions ? "shown" : "hidden");
             return true;
         }
         if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
@@ -818,6 +882,14 @@ public class TuiCommand implements Runnable {
         if (state.runningTool != null) {
             state.spinnerTick++;
         }
+        trimTranscript(state);
+        final var todosRender = todoStore.render();
+        if (!todosRender.equals(state.lastTodosRender)) {
+            state.lastTodosRender = todosRender;
+            if (!todosRender.isBlank() && !"(empty)".equals(todosRender) && !state.showTodos) {
+                state.showTodos = true;
+            }
+        }
         final var root = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(3), Constraint.length(1), Constraint.length(2))
                 .split(frame.area());
@@ -831,7 +903,7 @@ public class TuiCommand implements Runnable {
                     .constraints(Constraint.fill(), Constraint.length(state.showTodosCollapsed ? 14 : 34))
                     .split(chat);
             chat = withTodos.get(0);
-            renderTodos(withTodos.get(1), frame, state);
+            renderTodos(withTodos.get(1), frame, state, todosRender);
         }
         if (state.showThinking && state.thinking.length() > 0) {
             final var withThinking = Layout.vertical()
@@ -918,7 +990,7 @@ public class TuiCommand implements Runnable {
         if (inner.isEmpty()) {
             return;
         }
-        final var chunks = chunks(transcriptMarkdown(state), inner.width());
+        final var chunks = chunks(transcriptMarkdown(state), inner.width(), state);
         final var total = chunks.stream().mapToInt(c -> c.height()).sum();
         final var maxViewOffset = Math.max(0, total - Math.max(1, inner.height()));
         final var viewOffset = Math.min(maxViewOffset, Math.max(0, maxViewOffset - state.scrollBack));
@@ -943,8 +1015,67 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private List<RenderedChunk> chunks(final String md, final int width) {
+    private List<RenderedChunk> chunks(final String md, final int width, final UiState state) {
         final var out = new ArrayList<RenderedChunk>();
+        for (final var region : regions(md)) {
+            if (region.thought()) {
+                if (!state.showThinking) {
+                    continue;
+                }
+                final var chunk = thoughtChunk(region.text(), width);
+                out.add(new RenderedChunk(chunk.height(), chunk::at));
+            } else if (region.tool()) {
+                if (!state.showToolActions) {
+                    continue;
+                }
+                final var chunk = toolChunk(region.text(), width);
+                out.add(new RenderedChunk(chunk.height(), chunk::at));
+            } else if (!region.text().isBlank()) {
+                appendChunks(out, region.text(), width);
+            }
+        }
+        return out;
+    }
+
+    private record Region(String text, boolean thought, boolean tool) {
+    }
+
+    /**
+     * Splits the transcript markdown into typed regions based on the
+     * {@code THOUGHT_BEGIN}/{@code THOUGHT_END} markers emitted by
+     * {@link #flushThinking} (rendered dimmed) and the
+     * {@code TOOL_BEGIN}/{@code TOOL_END} markers wrapping tool actions and
+     * output (rendered even more subdued). Text outside markers is regular
+     * content.
+     */
+    private List<Region> regions(final String md) {
+        final var out = new ArrayList<Region>();
+        int from = 0;
+        while (true) {
+            final var thought = md.indexOf(THOUGHT_BEGIN, from);
+            final var tool = md.indexOf(TOOL_BEGIN, from);
+            if (thought < 0 && tool < 0) {
+                out.add(new Region(md.substring(from), false, false));
+                return out;
+            }
+            final var isThought = thought >= 0 && (tool < 0 || thought < tool);
+            final var begin = isThought ? thought : tool;
+            final var beginMarker = isThought ? THOUGHT_BEGIN : TOOL_BEGIN;
+            final var endMarker = isThought ? THOUGHT_END : TOOL_END;
+            out.add(new Region(md.substring(from, begin), false, false));
+            final var end = md.indexOf(endMarker, begin + beginMarker.length());
+            final var inner = end < 0
+                    ? md.substring(begin + beginMarker.length())
+                    : md.substring(begin + beginMarker.length(), end);
+            out.add(new Region(inner, isThought, !isThought));
+            if (end < 0) {
+                return out;
+            }
+            from = end + endMarker.length();
+        }
+    }
+
+    private void appendChunks(final List<RenderedChunk> out, final String md, final int width) {
         for (final var seg : SyntaxHighlighter.split(md)) {
             if (seg.type() == SyntaxHighlighter.Segment.Type.TEXT) {
                 final var chunk = markdownChunk(normalizeMarkdownBreaks(seg.text()), width);
@@ -962,7 +1093,22 @@ public class TuiCommand implements Runnable {
                         .build()));
             }
         }
-        return out;
+    }
+
+    private MarkdownChunk thoughtChunk(final String source, final int width) {
+        final var text = normalizeMarkdownBreaks(source.strip());
+        final var view = MarkdownView.builder().source(text).style(thoughtStyle).styles(MarkdownStyles.DEFAULTS)
+                .overflow(Overflow.WRAP_WORD).build();
+        final var height = Math.max(view.computeHeight(width), 1);
+        return new MarkdownChunk(text, height, thoughtStyle, MarkdownStyles.DEFAULTS);
+    }
+
+    private MarkdownChunk toolChunk(final String source, final int width) {
+        final var text = source.strip();
+        final var view = MarkdownView.builder().source(text).style(toolStyle).styles(toolMarkdownStyles)
+                .overflow(Overflow.WRAP_WORD).build();
+        final var height = Math.max(view.computeHeight(width), 1);
+        return new MarkdownChunk(text, height, toolStyle, toolMarkdownStyles);
     }
 
     /**
@@ -1002,16 +1148,18 @@ public class TuiCommand implements Runnable {
     }
 
     private static MarkdownChunk markdownChunk(final String text, final int width) {
-        final var view = MarkdownView.builder().source(text).build();
+        final var view = MarkdownView.builder().source(text).styles(MarkdownStyles.DEFAULTS)
+                .overflow(Overflow.WRAP_WORD).build();
         final var height = Math.max(view.computeHeight(width), 1);
-        return new MarkdownChunk(text, height);
+        return new MarkdownChunk(text, height, Style.EMPTY, MarkdownStyles.DEFAULTS);
     }
 
-    private record MarkdownChunk(String source, int height) {
+    private record MarkdownChunk(String source, int height, Style baseStyle, MarkdownStyles styles) {
         dev.tamboui.widget.Widget at(final int skip) {
-            return skip > 0
-                    ? MarkdownView.builder().source(source).scroll(skip).build()
-                    : MarkdownView.builder().source(source).build();
+            return MarkdownView.builder().source(source).style(baseStyle).styles(styles)
+                    .overflow(Overflow.WRAP_WORD)
+                    .scroll(Math.max(0, skip))
+                    .build();
         }
     }
 
@@ -1037,12 +1185,12 @@ public class TuiCommand implements Runnable {
         if (inner.isEmpty()) {
             return;
         }
-        final var text = Text.styled(state.thinking.toString(), muted);
+        final var text = Text.styled(state.thinking.toString(), thoughtStyle);
         final var offset = Math.max(0, text.height() - inner.height());
         frame.renderWidget(Paragraph.builder().text(text).scroll(offset).build(), inner);
     }
 
-    private void renderTodos(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+    private void renderTodos(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state, final String todosRender) {
         final var block = Block.builder()
                 .title(" todos " + (state.showTodosCollapsed ? " (Ctrl+P to expand) " : " (Ctrl+P to collapse) "))
                 .borders(Borders.ALL)
@@ -1057,8 +1205,8 @@ public class TuiCommand implements Runnable {
         if (state.showTodosCollapsed) {
             return;
         }
-        final var render = todoStore.render();
-        final var text = Text.from(render.isBlank() ? "(no todos)" : render);
+        final var render = todosRender;
+        final var text = Text.from(render.isBlank() || "(empty)".equals(render) ? "(no todos)" : render);
         final var overflow = Math.max(0, text.height() - inner.height());
         frame.renderWidget(Paragraph.builder().text(text).scroll(overflow).build(), inner);
     }
@@ -1200,6 +1348,51 @@ public class TuiCommand implements Runnable {
         return md.isBlank() ? WELCOME : md;
     }
 
+    /**
+     * Head-truncates the persisted transcript once it grows beyond
+     * {@code maxHistoryCharacters}, keeping the tail of the conversation.
+     * Everything stays in memory between turns; only the rendered history is
+     * capped. The cut is aligned on a newline and any thought/tool region left
+     * incomplete by the truncation (pair straddling the cut) is dropped so the
+     * renderer never sees a dangling marker.
+     */
+    private void trimTranscript(final UiState state) {
+        final var max = state.maxHistoryCharacters;
+        if (max <= 0 || state.transcript.length() <= max) {
+            return;
+        }
+        final var md = state.transcript.toString();
+        var cut = md.length() - (int) Math.min(max, md.length());
+        final var nl = md.indexOf('\n', cut);
+        cut = nl < 0 ? md.length() : nl + 1;
+        var kept = md.substring(cut);
+        kept = dropDanglingRegion(kept, THOUGHT_BEGIN, THOUGHT_END);
+        kept = dropDanglingRegion(kept, TOOL_BEGIN, TOOL_END);
+        state.transcript.setLength(0);
+        state.transcript.append(kept.stripLeading());
+    }
+
+    /**
+     * Removes a region left incomplete by the truncation: an end marker
+     * without its begin marker (the pair straddled the cut) or a begin marker
+     * without its end marker (an append was interrupted). Regions never nest
+     * so a single pass per marker pair is enough.
+     */
+    private static String dropDanglingRegion(final String md, final String begin, final String end) {
+        var out = md;
+        final var firstBegin = out.indexOf(begin);
+        final var firstEnd = out.indexOf(end);
+        if (firstEnd >= 0 && (firstBegin < 0 || firstEnd < firstBegin)) {
+            out = out.substring(firstEnd + end.length());
+        }
+        final var lastBegin = out.lastIndexOf(begin);
+        final var lastEnd = out.lastIndexOf(end);
+        if (lastBegin >= 0 && (lastEnd < 0 || lastBegin > lastEnd)) {
+            out = out.substring(0, lastBegin);
+        }
+        return out;
+    }
+
     private static String toolCommand(final String argsJson) {
         if (argsJson == null || argsJson.isBlank() || argsJson.equals("{}")) {
             return "";
@@ -1300,5 +1493,7 @@ public class TuiCommand implements Runnable {
         private volatile String runningToolCommand;
         private final StringBuilder toolStream = new StringBuilder();
         private volatile int spinnerTick;
+        private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
+        private volatile String lastTodosRender = "";
     }
 }

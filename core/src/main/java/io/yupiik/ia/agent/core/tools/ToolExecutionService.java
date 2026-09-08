@@ -36,7 +36,7 @@ public class ToolExecutionService {
 
     public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
         final var optimize = configuration.optimize();
-        final var optimizeThis = optimize.enabled() && !optimize.isDisabled(tool.name());
+        final var optimizeThis = optimize.enabled() && !optimize.isDisabled(List.of(tool.name()));
         if (optimizeThis) {
             emitter.emit(new BeforeToolExecutionEvent(tool.name(), args));
         }
@@ -60,7 +60,7 @@ public class ToolExecutionService {
         final var command = args.get("command") instanceof String s ? s : tool.name();
         final var sorted = processors.stream().sorted(Comparator.comparingInt(OutputProcessor::order)).toList();
         for (final var processor : sorted) {
-            if (configuration.optimize().isDisabled(processor.getClass().getSimpleName())) {
+            if (configuration.optimize().isDisabled(processor.names())) {
                 continue;
             }
             try {
@@ -68,7 +68,7 @@ public class ToolExecutionService {
                     final var processed = processor.process(command, output.lines())
                             .collect(java.util.stream.Collectors.joining("\n"));
                     if (processed.length() < output.length()) {
-                        statusReporter.report("output optimized by " + processor.getClass().getSimpleName()
+                        statusReporter.report("output optimized by " + processor.displayName()
                                 + " (" + output.length() + " -> " + processed.length() + " chars)");
                         return processed;
                     }

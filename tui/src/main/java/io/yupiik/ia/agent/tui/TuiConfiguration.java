@@ -13,8 +13,11 @@ public record TuiConfiguration(
         @Property(defaultValue = "\"#56b6c2\"", documentation = "Info color (hex), used for gauges and informational values.") String info,
         @Property(defaultValue = "\"#eeeeee\"", documentation = "Main text color (hex).") String text,
         @Property(defaultValue = "\"#808080\"", documentation = "Muted text color (hex), used for hints and secondary values.") String textMuted,
+        @Property(defaultValue = "0.85", documentation = "Opacity (0..1) of the thinking/reasoning text, blended over the panel background, so thoughts stay distinguishable from the assistant output.") double thinkingOpacity,
+        @Property(defaultValue = "0.85", documentation = "Opacity (0..1) of the tool output text, blended over the panel background, so assistant answers stand out.") double toolOutputOpacity,
         @Property(defaultValue = "\"#484848\"", documentation = "Panel border color (hex).") String border,
         @Property(defaultValue = "\"#606060\"", documentation = "Active/focused panel border color (hex).") String borderActive,
         @Property(defaultValue = "\"#141414\"", documentation = "Panel background color (hex).") String backgroundPanel,
-        @Property(defaultValue = "\"#ff5555\"", documentation = "Highlight color (hex) used when permissions are set to all (danger mode).") String permitAll) {
+        @Property(defaultValue = "\"#ff5555\"", documentation = "Highlight color (hex) used when permissions are set to all (danger mode).") String permitAll,
+        @Property(documentation = "Conversation transcript retention settings.") TuiTranscriptConfiguration transcript) {
 }

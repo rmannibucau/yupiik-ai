@@ -5,6 +5,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
@@ -33,11 +34,16 @@ public class GenericOutputProcessor implements OutputProcessor {
     }
 
     @Override
+    public Set<String> names() {
+        return Set.of("generic");
+    }
+
+    @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var all = lines.map(ANSI::matcher).map(m -> m.replaceAll("")).toList();
+        final var all = compact(lines.map(ANSI::matcher).map(m -> m.replaceAll("")).toList());
         final var max = Math.max(10, configuration.optimize().genericMaxLines());
         if (all.size() <= max) {
-            return stripBlankTail(all).stream();
+            return all.stream();
         }
         final var head = (int) (max * 0.6);
         final var tail = max - head;
@@ -48,13 +54,35 @@ public class GenericOutputProcessor implements OutputProcessor {
         return out.stream();
     }
 
-    private List<String> stripBlankTail(final List<String> lines) {
-        var lastMeaningful = -1;
-        for (var i = 0; i < lines.size(); i++) {
-            if (!lines.get(i).isBlank()) {
-                lastMeaningful = i;
+    /**
+     * Trims trailing whitespace of each line, drops leading and trailing blank lines
+     * and collapses runs of blank lines into a single blank line.
+     */
+    private List<String> compact(final List<String> lines) {
+        final var out = new ArrayList<String>(lines.size());
+        var pendingBlank = false;
+        for (final var raw : lines) {
+            final var line = stripTrailingWhitespace(raw);
+            if (line.isBlank()) {
+                if (!out.isEmpty()) {
+                    pendingBlank = true;
+                }
+                continue;
             }
+            if (pendingBlank) {
+                out.add("");
+                pendingBlank = false;
+            }
+            out.add(line);
         }
-        return lastMeaningful < 0 ? List.of() : new ArrayList<>(lines.subList(0, lastMeaningful + 1));
+        return out;
+    }
+
+    private String stripTrailingWhitespace(final String line) {
+        var end = line.length();
+        while (end > 0 && Character.isWhitespace(line.charAt(end - 1))) {
+            end--;
+        }
+        return end == line.length() ? line : line.substring(0, end);
     }
 }

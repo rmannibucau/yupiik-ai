@@ -142,7 +142,8 @@ api, reasoningField, contextWindow, timeoutSeconds, providerSpecificOptions),
 `llm` (retries, rpm throttle, maxConcurrent, retryOnContextOverflow),
 `compaction` (thresholdPercent, enabled), `pruning` (thresholdPercent,
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
-(disabled processors), `permissions` (mode, allow, deny, planBash), `sessions`
+(disabled processors and tools, matched loosely - `mvn`, `./mvnw`,
+`git.exe` and `git` all match the git/maven processors), `permissions` (mode, allow, deny, planBash), `sessions`
 (retentionDays, compressDays), `mode` (build or plan), `skills` (enabled),
 `mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir), `agents`
 (name, prompt - inline text or a file path). The
@@ -228,11 +229,26 @@ Project instructions and skills are loaded into the system prompt:
   servers with status dots (green=enabled, grey=disabled, red=failing), token
   counts and a context gauge
 - Transcript and prompt have an accent-colored left bar; transcript renders as
-  markdown (thinking shown dimmed, toggle with `Ctrl+T`). When permissions are
-  set to `all` the left bar, mode line and status turn red
+  markdown with long lines wrapped at the panel width. Thinking is streamed
+  live in a `thinking` panel and always written into the transcript before each
+  tool call and the final answer, drawn dimmed (text blended over the panel
+  background at `yca.tui.thinkingOpacity`, default `0.85`) and wrapped in a
+  `**Thinking**` section so it stays clearly distinguishable from the real
+  output. Tool actions and their output are drawn the same subdued way
+  (`yca.tui.toolOutputOpacity`, default `0.85`) so assistant answers stand out.
+  When permissions are set to `all` the left bar, mode line and status turn red
   (`tui.permitAll`, default `#ff5555`)
-- `Ctrl+P` cycles the todos panel: open -> collapsed -> hidden
-- `Ctrl+Y` shows/hides executed tool actions (command names and streamed output)
+- `Ctrl+T` toggles all thinking blocks (live panel + transcript history):
+  hides every block when shown, shows them all back when hidden - nothing is
+  lost, blocks stay in memory
+- `Ctrl+Y` toggles all executed tool blocks (command names and streamed
+  output), same both-ways behavior; the live `calling <command>` spinner and
+  its streamed output stay visible either way
+- The transcript is capped in memory at
+  `yca.tui.transcript.maxHistoryCharacters` (default `10000000`): once
+  exceeded, the oldest content is truncated from the beginning
+- `Ctrl+P` cycles the todos panel: open -> collapsed -> hidden; the panel
+  opens automatically on the first todo update
 - `Ctrl+S` compact, `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt
 - While a tool runs, a line under the input shows `calling <command>` with an
   animated spinner (and `esc to interrupt` on the right) and its output is
