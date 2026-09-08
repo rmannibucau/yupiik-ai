@@ -157,7 +157,7 @@ class TuiCommandRenderTest {
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf(false, false, "dark", true);
         final var tuiConfiguration = new TuiConfiguration("#9d7cd8", "#fab283", "#7fd88f", "#f5a742",
-                "#e06c75", "#56b6c2", "#eeeeee", "#808080", 0.85, 0.85, "#484848", "#606060", "#141414", "#ff5555", null);
+                "#e06c75", "#56b6c2", "#eeeeee", "#808080", 0.85, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, null);
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {

@@ -19,5 +19,6 @@ public record TuiConfiguration(
         @Property(defaultValue = "\"#606060\"", documentation = "Active/focused panel border color (hex).") String borderActive,
         @Property(defaultValue = "\"#141414\"", documentation = "Panel background color (hex).") String backgroundPanel,
         @Property(defaultValue = "\"#ff5555\"", documentation = "Highlight color (hex) used when permissions are set to all (danger mode).") String permitAll,
+        @Property(defaultValue = "4000L", documentation = "How long (milliseconds) a transient toast notice stays visible. Set to 0 to disable toasts.") long toastDurationMillis,
         @Property(documentation = "Conversation transcript retention settings.") TuiTranscriptConfiguration transcript) {
 }
