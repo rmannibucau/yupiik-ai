@@ -21,13 +21,13 @@ class ContextManagerTest {
 
     private static CodingAgentConfiguration config(final int keepRecent) {
         final var provider = new ProviderConfiguration("default", "https://api.openai.com/v1", "", "m", null, null, 128000, 120, "");
-        return new CodingAgentConfiguration("x", ".",
+        return new CodingAgentConfiguration("x", ".", null,
                 new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120),
                 new ModelConfiguration("", ""),
                 new LlmConfiguration(3, 500L, 0, 4, true),
                 new CompactionConfiguration(true, 80),
                 new PruningConfiguration(true, 65, keepRecent, 80),
-                null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null);
     }
 
     @Test

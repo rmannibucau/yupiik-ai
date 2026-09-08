@@ -3,6 +3,7 @@ package io.yupiik.ia.agent.core.agent;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -51,6 +52,7 @@ public class AgentLoop {
     private final JsonMapper mapper;
     private final StructuralCodeGraph structuralCodeGraph;
     private final ProviderManager providerManager;
+    private final AgentProvider agentProvider;
 
     public AgentLoop(final ChatClient chatClient, final ToolRegistry toolRegistry,
                      final ToolExecutionService toolExecutionService, final CodingAgentConfiguration configuration,
@@ -58,7 +60,8 @@ public class AgentLoop {
                      final ContextManager contextManager, final SessionStore sessionStore,
                      final SystemPromptBuilder systemPromptBuilder, final MemoryExtractor memoryExtractor,
                      final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper,
-                     final StructuralCodeGraph structuralCodeGraph, final ProviderManager providerManager) {
+                     final StructuralCodeGraph structuralCodeGraph, final ProviderManager providerManager,
+                     final AgentProvider agentProvider) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -74,6 +77,7 @@ public class AgentLoop {
         this.mapper = mapper;
         this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
+        this.agentProvider = agentProvider;
     }
 
     protected AgentLoop() {
@@ -92,13 +96,21 @@ public class AgentLoop {
         this.mapper = null;
         this.structuralCodeGraph = null;
         this.providerManager = null;
+        this.agentProvider = null;
     }
 
     public String run(final String prompt, final String sessionId, final List<Message> history,
                       final BooleanSupplier cancelled) {
+        return run(prompt, null, sessionId, history, cancelled);
+    }
+
+    public String run(final String prompt, final String agentName, final String sessionId, final List<Message> history,
+                      final BooleanSupplier cancelled) {
+        final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
+                ? null : agentProvider.byName(agentName);
         structuralCodeGraph.ensureReady();
         final var messages = new ArrayList<Message>();
-        messages.add(Message.system(systemPromptBuilder.build()));
+        messages.add(Message.system(systemPromptBuilder.build(prompt, agent)));
         if (history != null) {
             messages.addAll(history);
         }

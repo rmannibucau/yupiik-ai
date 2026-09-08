@@ -52,6 +52,31 @@ directory (for instance with the built-in `grep` tool and
 remains the source of truth for call-graph tracing (`code_trace_calls`) and for
 the incremental fingerprint re-indexing.
 
+== Custom agents
+
+`yca.agents` defines named custom agents. Each agent is mainly a prompt; its
+instructions are injected on top of the base system prompt (rules, tools,
+environment, project context, skills and memory are kept untouched). The `prompt`
+is inline text, or a file path whose content is loaded (for example
+`prompt=~/.yupiik/coding-agent/agents/reviewer.md`). A value is treated as a file
+path when it expands to an existing regular file, otherwise it is used as inline
+text.
+
+.Example configuration.json
+[source,json]
+----
+{
+  "agents": [
+    { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md" },
+    { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them." }
+  ]
+}
+----
+
+An agent is selected on `run` with `--agent <name>`, in the TUI with
+`/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt with
+`@<name> `.
+
 == Command configuration
 
 `run.*` and `tui.*` options:

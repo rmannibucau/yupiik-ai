@@ -23,6 +23,9 @@
   runtime with `/mode`
 - MCP server health shown in the TUI sidebar with status dots (enabled / disabled / failing)
 - Rate limiting, retries and concurrency limits for LLM calls
+- Custom agents (`yca.agents`): named prompts injected on top of the base system
+  prompt, selected with `--agent` on `run`, `/agent` in the TUI, or a `@<name>`
+  prompt prefix for a single turn
 
 ## Requirements
 
@@ -66,6 +69,16 @@ export OPENAI_API_KEY=sk-...
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "list the files" --provider-model gpt-5-mini
 ```
 
+Scaffold a new project in a fresh directory (behaves like a neutral
+scaffolder: no code graph indexed over an unrelated tree, no unrelated repo
+README/AGENTS.md injected):
+
+```bash
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar \
+  run --prompt "generate a frontend project for yupiik fusion in ./frontend" \
+      --project-dir ./frontend
+```
+
 ## Configuration
 
 Configuration is resolved from (highest priority first): CLI arguments
@@ -104,6 +117,10 @@ Configuration is resolved from (highest priority first): CLI arguments
     },
     "mode": "build",
     "model": { "compact": "", "prune": "" },
+    "agents": [
+      { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md" },
+      { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests." }
+    ],
     "structuralCodeGraph": { "enabled": true, "enrich": false }
   }
 }
@@ -127,9 +144,16 @@ api, reasoningField, contextWindow, timeoutSeconds, providerSpecificOptions),
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 (disabled processors), `permissions` (mode, allow, deny, planBash), `sessions`
 (retentionDays, compressDays), `mode` (build or plan), `skills` (enabled),
-`mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir). The
+`mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir), `agents`
+(name, prompt - inline text or a file path). The
 `workingDir` option (default `.`) is the directory from
-which project instructions and skills are discovered. UI colors (under `tui`,
+which project instructions and skills are discovered. The `projectDir` option
+(defaults to `workingDir`) is the target project directory a task is about -
+where generated/edited files belong. When `projectDir` points at a fresh or
+empty directory (e.g. scaffolding a new project), the agent behaves like a
+neutral scaffolder: it does not index an unrelated structural code graph and
+does not inject an unrelated repository README/AGENTS.md, scoping to the
+target directory the way a tool like opencode does. UI colors (under `tui`,
 e.g. `permitAll` for the red highlight shown when permissions are set to
 `all`) are themeable hex values.
 
@@ -215,7 +239,7 @@ Project instructions and skills are loaded into the system prompt:
   streamed live into the transcript
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact`, `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan`, `/memory`, `/context [path]` (show the resolved context, write it to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact`, `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan`, `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [path]` (show the resolved context, write it to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

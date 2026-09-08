@@ -6,6 +6,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.AgentProvider;
 import java.util.concurrent.atomic.AtomicBoolean;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -18,20 +19,24 @@ public class RunCommand implements Runnable {
     private final AgentEventBridge bridge;
     private final PermissionService permissionService;
     private final SessionStore sessionStore;
+    private final AgentProvider agentProvider;
 
     public RunCommand(final RunConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
-                      final PermissionService permissionService, final SessionStore sessionStore) {
+                      final PermissionService permissionService, final SessionStore sessionStore,
+                      final AgentProvider agentProvider) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
         this.permissionService = permissionService;
         this.sessionStore = sessionStore;
+        this.agentProvider = agentProvider;
     }
 
     @RootConfiguration("run")
     public record RunConf(
             @Property(required = true, documentation = "Prompt to send to the agent.") String prompt,
             @Property(defaultValue = "\"\"", documentation = "Session id to append to; a new session is created when empty.") String session,
+            @Property(defaultValue = "\"\"", documentation = "Name of a custom agent (from yca.agents) to use for this run. Its prompt is injected on top of the base system prompt.") String agent,
             @Property(defaultValue = "false", documentation = "Print reasoning deltas on stderr.") boolean showThinking,
             @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.") boolean permitAll) {
     }
@@ -53,8 +58,12 @@ public class RunCommand implements Runnable {
             return false;
         });
         permissionService.setPermitAll(conf.permitAll());
+        final var agentName = conf.agent() == null || conf.agent().isBlank() ? null : conf.agent();
+        if (agentName != null && agentProvider.byName(agentName) == null) {
+            throw new IllegalArgumentException("Unknown agent: " + agentName + " (configure one under yca.agents)");
+        }
         try {
-            agentLoop.run(conf.prompt(), sessionId, null, () -> false);
+            agentLoop.run(conf.prompt(), agentName, sessionId, null, () -> false);
         } finally {
             System.out.flush();
             bridge.sink(null);

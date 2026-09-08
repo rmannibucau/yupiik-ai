@@ -33,6 +33,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -90,6 +91,7 @@ public class TuiCommand implements Runnable {
             | /resume | resume the last session |
             | /compact | compact the session context now |
             | /model [$name] | list /v1/models, or set model (Tab completes) |
+            | /agent [name] | list custom agents, or set the active agent ('' clears, Tab completes) |
             | /mode | switch mode: /mode build or /mode plan |
             | /memory | show the project memory |
             | /context [path] | show the resolved context (system prompt + session), write to path when given |
@@ -101,7 +103,7 @@ public class TuiCommand implements Runnable {
 
     private static final List<String> SLASH_COMMANDS = List.of(
             "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode", "/memory", "/context",
-            "/permissions", "/structural-code-graph", "/clear", "/quit", "/exit");
+            "/permissions", "/structural-code-graph", "/agent", "/clear", "/quit", "/exit");
 
     private final TuiConf conf;
     private final TuiConfiguration tuiConfiguration;
@@ -119,6 +121,7 @@ public class TuiCommand implements Runnable {
     private final VirtualThreadExecutor executor;
     private final StructuralCodeGraph structuralCodeGraph;
     private final ProviderManager providerManager;
+    private final AgentProvider agentProvider;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -128,7 +131,8 @@ public class TuiCommand implements Runnable {
                       final SystemPromptBuilder systemPromptBuilder, final McpManager mcpManager,
                       final VirtualThreadExecutor executor,
                       final StructuralCodeGraph structuralCodeGraph,
-                      final ProviderManager providerManager) {
+                      final ProviderManager providerManager,
+                      final AgentProvider agentProvider) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -145,6 +149,7 @@ public class TuiCommand implements Runnable {
         this.executor = executor;
         this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
+        this.agentProvider = agentProvider;
     }
 
     @RootConfiguration("tui")
@@ -225,7 +230,7 @@ public class TuiCommand implements Runnable {
             state.scrollBack = 0;
         } else if (event instanceof final AgentEvent.ToolStream t) {
             if (t.name().equals(state.runningTool)) {
-                state.toolStream.append(t.fragment()).append(' ');
+                state.toolStream.append(t.fragment()).append('\n');
                 if (state.toolStream.length() > 1600) {
                     state.toolStream.delete(0, state.toolStream.length() - 1600);
                 }
@@ -417,8 +422,27 @@ public class TuiCommand implements Runnable {
         state.busy = true;
         state.status = "thinking...";
         state.scrollBack = 0;
+        final var override = agentOverride(text);
+        final var agentName = override.agentName() != null ? override.agentName() : state.activeAgent;
+        final var prompt = override.prompt();
         final var history = sessionStore.load(state.sessionId);
-        executor.execute(() -> agentLoop.run(text, state.sessionId, history, () -> state.interrupted));
+        executor.execute(() -> agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted));
+    }
+
+    private AgentOverride agentOverride(final String text) {
+        if (text.startsWith("@")) {
+            final var space = text.indexOf(' ');
+            if (space > 1) {
+                final var name = text.substring(1, space).strip();
+                if (agentProvider.byName(name) != null) {
+                    return new AgentOverride(name, text.substring(space + 1));
+                }
+            }
+        }
+        return new AgentOverride(null, text);
+    }
+
+    private record AgentOverride(String agentName, String prompt) {
     }
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
@@ -430,12 +454,14 @@ public class TuiCommand implements Runnable {
                 state.sessionId = sessionStore.create();
                 state.transcript.setLength(0);
                 state.thinking.setLength(0);
+                state.activeAgent = "";
                 state.status = "new session " + state.sessionId;
             }
             case "/resume" -> resume(state);
             case "/compact" -> compact(runner, state);
             case "/model" -> modelCommand(text, runner, state);
             case "/provider" -> providerCommand(text, runner, state);
+            case "/agent" -> agentCommand(text, runner, state);
             case "/memory" -> {
                 final var memory = memoryStore.readProject();
                 state.transcript.append("\n```text\n").append(memory.isBlank() ? "(empty project memory)" : memory)
@@ -460,6 +486,8 @@ public class TuiCommand implements Runnable {
                     context(text.substring("/context ".length()).strip(), state);
                 } else if (text.startsWith("/permissions ")) {
                     permissions(text.substring("/permissions ".length()).strip(), state);
+                } else if (text.startsWith("/agent ")) {
+                    agentCommand(text, runner, state);
                 } else {
                     state.status = "unknown command: " + text + " (/help)";
                 }
@@ -555,7 +583,8 @@ public class TuiCommand implements Runnable {
             sb.append("(no providers configured)");
         } else {
             for (final var p : providers) {
-                sb.append("- ").append(p.id()).append(p.id().equals(current) ? "  <--" : "").append('\n');
+                final var id = p.id();
+                sb.append("- ").append(id.equals(current) ? "**" + id + "**" : id).append('\n');
             }
         }
         sb.append("\nUse `/provider <id>` to switch.");
@@ -563,6 +592,34 @@ public class TuiCommand implements Runnable {
             state.transcript.append(sb).append('\n');
             state.scrollBack = 0;
         });
+    }
+
+    private void agentCommand(final String text, final TuiRunner runner, final UiState state) {
+        final var arg = text.substring("/agent".length()).strip();
+        if (arg.isEmpty()) {
+            final var agents = agentProvider.agents();
+            final var sb = new StringBuilder("\n\n**Custom agents** (active: ").append(state.activeAgent.isBlank() ? "-" : state.activeAgent)
+                    .append(")**\n\n");
+            if (agents.isEmpty()) {
+                sb.append("(no custom agents configured; add them under yca.agents in the configuration)");
+            } else {
+                for (final var agent : agents) {
+                    sb.append("- ").append(agent.name()).append('\n');
+                }
+            }
+            sb.append("\nUse `/agent <name>` to set the active agent, `/agent` to clear it.");
+            runner.runLater(() -> {
+                state.transcript.append(sb).append('\n');
+                state.scrollBack = 0;
+            });
+            return;
+        }
+        if (agentProvider.byName(arg) == null) {
+            state.status = "unknown agent: " + arg + " (/agent)";
+            return;
+        }
+        state.activeAgent = arg;
+        state.status = "agent: " + arg;
     }
 
     private void completeModel(final TuiRunner runner, final UiState state) {
@@ -606,11 +663,33 @@ public class TuiCommand implements Runnable {
             completeModel(runner, state);
             return;
         }
+        if (text.startsWith("/agent ") && text.length() > "/agent ".length()) {
+            completeAgent(runner, state);
+            return;
+        }
         if (text.startsWith("/")) {
             completeSlash(runner, state);
             return;
         }
         state.status = "completion only applies to / (slash) commands";
+    }
+
+    private void completeAgent(final TuiRunner runner, final UiState state) {
+        final var text = state.input.text();
+        final var prefix = text.substring("/agent ".length());
+        final var names = agentProvider.agents().stream().map(a -> a.name()).filter(n -> !n.isBlank() && n.startsWith(prefix)).toList();
+        if (names.isEmpty()) {
+            state.status = "no agent matching '" + prefix + "'";
+            return;
+        }
+        if (!prefix.equals(state.slashCompletionBase)) {
+            state.slashCompletionBase = prefix;
+            state.slashCompletionOffset = 0;
+        }
+        final var choice = names.get(state.slashCompletionOffset % names.size());
+        state.slashCompletionOffset++;
+        state.input.clear();
+        state.input.insert("/agent " + choice);
     }
 
     private void completeSlash(final TuiRunner runner, final UiState state) {
@@ -792,6 +871,7 @@ public class TuiCommand implements Runnable {
         text.add(Line.empty());
         text.add(Line.from(Span.styled("model ", label), Span.styled(ellipsize(chatClient.model(), width - 6), value)));
         text.add(Line.from(Span.styled("provider ", label), Span.styled(ellipsize(chatClient.providerId(), width - 9), value)));
+        text.add(Line.from(Span.styled("agent ", label), Span.styled(ellipsize(state.activeAgent.isBlank() ? "-" : state.activeAgent, width - 7), value)));
         text.add(Line.from(Span.styled("flavor ", label), Span.styled(ellipsize(chatClient.flavor().name().toLowerCase(), width - 7), value)));
         text.add(Line.from(Span.styled("cwd ", label), Span.styled(ellipsize(workingDirectory(), width - 4), value)));
         if (branch != null) {
@@ -867,7 +947,7 @@ public class TuiCommand implements Runnable {
         final var out = new ArrayList<RenderedChunk>();
         for (final var seg : SyntaxHighlighter.split(md)) {
             if (seg.type() == SyntaxHighlighter.Segment.Type.TEXT) {
-                final var chunk = markdownChunk(seg.text(), width);
+                final var chunk = markdownChunk(normalizeMarkdownBreaks(seg.text()), width);
                 out.add(new RenderedChunk(chunk.height(), chunk::at));
             } else {
                 final var lang = seg.language();
@@ -885,8 +965,44 @@ public class TuiCommand implements Runnable {
         return out;
     }
 
+    /**
+     * Converts single {@code \n} characters into CommonMark hard line breaks
+     * (two trailing spaces + newline) so the default markdown renderer - which
+     * treats a lone newline as a soft break collapsed into a space - displays
+     * each source line on its own row. Runs of two or more consecutive newlines
+     * (blank-line paragraph/heading separators) are left untouched.
+     *
+     * @param markdown the markdown source (a text segment; fenced code excluded)
+     * @return the markdown with single newlines promoted to hard breaks
+     */
+    private static String normalizeMarkdownBreaks(final String markdown) {
+        final var normalized = markdown.replace("\r\n", "\n");
+        final var sb = new StringBuilder(normalized.length() + 16);
+        int i = 0;
+        while (i < normalized.length()) {
+            final char c = normalized.charAt(i);
+            if (c != '\n') {
+                sb.append(c);
+                i++;
+                continue;
+            }
+            int j = i;
+            while (j < normalized.length() && normalized.charAt(j) == '\n') {
+                j++;
+            }
+            final int run = j - i;
+            if (run == 1) {
+                sb.append("  \n");
+            } else {
+                sb.append("\n".repeat(run));
+            }
+            i = j;
+        }
+        return sb.toString();
+    }
+
     private static MarkdownChunk markdownChunk(final String text, final int width) {
-        final var view = MarkdownView.builder().source(text).softLineBreaks(true).build();
+        final var view = MarkdownView.builder().source(text).build();
         final var height = Math.max(view.computeHeight(width), 1);
         return new MarkdownChunk(text, height);
     }
@@ -894,8 +1010,8 @@ public class TuiCommand implements Runnable {
     private record MarkdownChunk(String source, int height) {
         dev.tamboui.widget.Widget at(final int skip) {
             return skip > 0
-                    ? MarkdownView.builder().source(source).softLineBreaks(true).scroll(skip).build()
-                    : MarkdownView.builder().source(source).softLineBreaks(true).build();
+                    ? MarkdownView.builder().source(source).scroll(skip).build()
+                    : MarkdownView.builder().source(source).build();
         }
     }
 
@@ -989,6 +1105,7 @@ public class TuiCommand implements Runnable {
         final var parts = new java.util.ArrayList<Span>();
         parts.add(Span.styled(" " + state.status + "  ", Style.EMPTY.fg(statusColor)));
         parts.add(Span.styled("model " + ellipsize(chatClient.model(), 40) + "  ", muted));
+        parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
         parts.add(Span.styled(modeName(), Style.EMPTY.fg(modeColor())));
         final var line = Line.from(parts.toArray(Span[]::new));
         frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.WRAP_WORD).build(), rect);
@@ -1162,6 +1279,7 @@ public class TuiCommand implements Runnable {
         private volatile String sessionId = "";
         private volatile String title;
         private volatile String status = "";
+        private volatile String activeAgent = "";
         private volatile boolean busy;
         private volatile boolean showThinking;
         private volatile boolean showToolActions = true;

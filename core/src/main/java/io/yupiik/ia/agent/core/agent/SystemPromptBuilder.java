@@ -1,6 +1,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
@@ -24,13 +25,16 @@ public class SystemPromptBuilder {
     private final MemoryStore memoryStore;
     private final TodoStore todoStore;
     private final PermissionService permissionService;
+    private final AgentProvider agentProvider;
 
     public SystemPromptBuilder(final CodingAgentConfiguration configuration, final MemoryStore memoryStore,
-                               final TodoStore todoStore, final PermissionService permissionService) {
+                               final TodoStore todoStore, final PermissionService permissionService,
+                               final AgentProvider agentProvider) {
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.todoStore = todoStore;
         this.permissionService = permissionService;
+        this.agentProvider = agentProvider;
     }
 
     protected SystemPromptBuilder() {
@@ -38,9 +42,32 @@ public class SystemPromptBuilder {
         this.memoryStore = null;
         this.todoStore = null;
         this.permissionService = null;
+        this.agentProvider = null;
     }
 
     public String build() {
+        return build(null);
+    }
+
+    /**
+     * Builds the system prompt.
+     *
+     * @param prompt the current (first) user message; may be null
+     * @return the assembled system prompt
+     */
+    public String build(final String prompt) {
+        return build(prompt, null);
+    }
+
+    /**
+     * Builds the system prompt, optionally augmented with a custom agent's instructions on top of
+     * the base prompt (rules, environment, project context, skills and memory).
+     *
+     * @param prompt the current (first) user message; may be null
+     * @param agent the custom agent whose prompt is injected on top; may be null
+     * @return the assembled system prompt
+     */
+    public String build(final String prompt, final AgentConfiguration agent) {
         final var sb = new StringBuilder();
         final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
         if (plan) {
@@ -48,23 +75,30 @@ public class SystemPromptBuilder {
             sb.append("You must NOT modify the repository: no file creation, edits or deletions, and no state-changing shell commands. Only read-only tools are available.\n");
             sb.append("Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n\n");
         } else {
-            sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks in the current repository.\n");
+            sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
             sb.append("You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");
             sb.append("Rules:\n");
             sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
             sb.append("- Read files before editing them; keep edits minimal and focused.\n");
             sb.append("- Use todo_write to track multi-step work and keep it up to date.\n");
             sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
-            sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n\n");
+            sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
+            sb.append("- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
+            sb.append("- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n\n");
         }
+        final var workingDir = configuration.resolveWorkingDir();
+        final var projectDir = configuration.resolveProjectDir();
         sb.append("Environment:\n");
-        sb.append("- Working directory: ").append(configuration.resolveWorkingDir()).append('\n');
+        sb.append("- Working directory: ").append(workingDir).append('\n');
+        if (!projectDir.equals(workingDir)) {
+            sb.append("- Target project directory: ").append(projectDir).append('\n');
+        }
         sb.append("- Platform: ").append(System.getProperty("os.name")).append(' ')
                 .append(System.getProperty("os.version")).append('\n');
         sb.append("- Java: ").append(System.getProperty("java.version")).append('\n');
         sb.append("- Date: ").append(LocalDate.now()).append('\n');
         sb.append("- Current todo list:\n").append(todoStore == null ? "(empty)" : todoStore.render()).append('\n');
-        final var project = projectContext();
+        final var project = projectContext(projectDir);
         if (!project.isBlank()) {
             sb.append('\n').append(project).append('\n');
         }
@@ -76,12 +110,19 @@ public class SystemPromptBuilder {
         if (!memory.isBlank()) {
             sb.append('\n').append(memory).append('\n');
         }
+        if (agent != null && agentProvider != null) {
+            final var agentPrompt = agentProvider.resolvePrompt(agent);
+            if (agentPrompt != null && !agentPrompt.isBlank()) {
+                sb.append("\n\n<agent name=\"").append(agent.name()).append("\">\n")
+                        .append(agentPrompt)
+                        .append("\n</agent>\n");
+            }
+        }
         return sb.toString();
     }
 
-    private String projectContext() {
+    private String projectContext(final Path base) {
         final var sb = new StringBuilder();
-        final var base = configuration.resolveWorkingDir();
         for (final var path : agentsFiles(base)) {
             if (path == null) {
                 continue;

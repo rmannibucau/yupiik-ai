@@ -66,7 +66,7 @@ public class StructuralCodeGraph {
         this.statusReporter = statusReporter;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
-        final var workingDir = configuration.resolveWorkingDir().toString();
+        final var workingDir = configuration.resolveProjectDir().toString();
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
         this.storeFile = storeRoot.resolve("graph.json");
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
@@ -105,6 +105,11 @@ public class StructuralCodeGraph {
 
     public void ensureReady() {
         if (!enabled() || graph != null) {
+            return;
+        }
+        // For a fresh or non-code target directory (e.g. scaffolding a new project) there is nothing
+        // meaningful to index. Skip building an unrelated graph so the model is not handed one.
+        if (!hasIndexableContent()) {
             return;
         }
         final var loaded = load();
@@ -362,7 +367,7 @@ public class StructuralCodeGraph {
     private List<Path> candidateFiles() {
         final Path root;
         try {
-            root = configuration.resolveWorkingDir();
+            root = configuration.resolveProjectDir();
         } catch (final RuntimeException e) {
             return List.of();
         }
@@ -380,6 +385,15 @@ public class StructuralCodeGraph {
         }
         result.sort(Comparator.comparing(Path::toString));
         return result;
+    }
+
+    private boolean hasIndexableContent() {
+        for (final var file : candidateFiles()) {
+            if (parserFor(file) != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean sizeOk(final Path p) {
@@ -403,7 +417,7 @@ public class StructuralCodeGraph {
 
     public String rel(final Path file) {
         try {
-            return configuration.resolveWorkingDir().relativize(file).toString();
+            return configuration.resolveProjectDir().relativize(file).toString();
         } catch (final RuntimeException e) {
             return file.toString();
         }

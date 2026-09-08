@@ -73,8 +73,8 @@ class ChatClientFlavorTest {
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
                 ApiFlavor.AUTO, ReasoningField.AUTO, 128000, 5, "");
         final var llm = new LlmConfiguration(1, 1L, 0, 1, true);
-        return new CodingAgentConfiguration("/tmp/yca-test", null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120),
-                null, llm, null, null, null, null, null, null, null, null, null, null);
+        return new CodingAgentConfiguration("/tmp/yca-test", null, null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120),
+                null, llm, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private ProviderManager providerManager() {
@@ -159,8 +159,8 @@ class ChatClientFlavorTest {
                 "default",
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
                 ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, 5, "");
-        final var cfg = new CodingAgentConfiguration("/tmp/yca-test", null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120), null,
-                new LlmConfiguration(1, 1L, 0, 1, true), null, null, null, null, null, null, null, null, null, null);
+        final var cfg = new CodingAgentConfiguration("/tmp/yca-test", null, null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120), null,
+                new LlmConfiguration(1, 1L, 0, 1, true), null, null, null, null, null, null, null, null, null, null, null);
         client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()));
 
         assertEquals("ok", client.chat(request()).message().content());

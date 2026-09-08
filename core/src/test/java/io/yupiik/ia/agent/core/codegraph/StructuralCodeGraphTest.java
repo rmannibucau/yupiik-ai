@@ -50,11 +50,11 @@ class StructuralCodeGraphTest {
                 }
                 """);
 
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null);
+                null, null, null, null);
 
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
@@ -130,14 +130,30 @@ class StructuralCodeGraphTest {
     }
 
     @Test
-    void docTreeSkipsUnchangedAndWritesSummaryInjection() throws Exception {
-        final var project = Files.createDirectory(temp.resolve("proj"));
-        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
+    void skipsIndexingForEmptyTargetProjectDir() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("scaffold"));
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null);
+                null, null, null, null);
+        final JsonMapper mapper = newMapper();
+        final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+        graph.ensureReady();
+        assertTrue(graph.graph().symbols().isEmpty(),
+                "an empty target project dir must not be indexed into a structural code graph");
+    }
+
+    @Test
+    void docTreeSkipsUnchangedAndWritesSummaryInjection() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("proj"));
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
+                new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
+                new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
+                        List.of("java"), ".yca/generated/graph", true, "docs", false, false),
+                null, null, null, null);
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
                 new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
@@ -189,11 +205,11 @@ class StructuralCodeGraphTest {
                 public enum Color { RED, GREEN, BLUE }
                 """);
 
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null);
+                null, null, null, null);
 
         // Bootstrap the JSON wiring exactly like production: JsonModule's JsonMapperBean collects
         // every JsonCodec bean registered by YcaCoreModule, which includes the generated Kind/EdgeType
@@ -242,11 +258,11 @@ class StructuralCodeGraphTest {
                 }
                 """);
 
-        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), providerConfig(), null,
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, true, null, null, "test-model", 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", true, false),
-                null, null, null);
+                null, null, null, null);
 
         final JsonMapper mapper = newMapper();
         final var storeRoot = Path.of(config.structuralCodeGraph()
