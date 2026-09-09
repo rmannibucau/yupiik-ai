@@ -6,7 +6,6 @@ import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.ToolCall;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -14,6 +13,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -49,17 +49,13 @@ public class SessionStore {
         final var now = now();
         final var retention = conf.retentionDays() > 0 ? conf.retentionDays() * MILLIS_PER_DAY : -1L;
         final var compress = conf.compressDays() > 0 ? conf.compressDays() * MILLIS_PER_DAY : -1L;
-        try (final Stream<Path> files = Files.list(dir())) {
-            files.filter(f -> {
-                final var name = f.getFileName().toString();
-                return name.endsWith(JSONL_SUFFIX) || name.endsWith(GZ_SUFFIX);
-            }).forEach(f -> {
+        try (final Stream<Path> files = storedSessions()) {
+            files.forEach(f -> {
                 try {
                     final var age = now - Files.getLastModifiedTime(f).toMillis();
-                    final var name = f.getFileName().toString();
                     if (retention >= 0 && age > retention) {
                         Files.deleteIfExists(f);
-                    } else if (compress >= 0 && age > compress && !name.endsWith(GZ_SUFFIX)) {
+                    } else if (compress >= 0 && age > compress && !f.getFileName().toString().endsWith(GZ_SUFFIX)) {
                         gzip(f);
                     }
                 } catch (final IOException e) {
@@ -67,7 +63,7 @@ public class SessionStore {
                 }
             });
         } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException("Cannot clean up the session directory " + dir(), e);
         }
     }
 
@@ -98,19 +94,39 @@ public class SessionStore {
         return Path.of(configuration.resolveStorageHome(), "sessions");
     }
 
-    public String create() {
+    private Stream<Path> storedSessions() throws IOException {
+        final var dir = dir();
+        if (!Files.isDirectory(dir)) {
+            return Stream.empty();
+        }
+        return Files.list(dir).filter(f -> {
+            final var name = f.getFileName().toString();
+            return name.endsWith(JSONL_SUFFIX) || name.endsWith(GZ_SUFFIX);
+        });
+    }
+
+    private Path writableDir() {
+        final var dir = dir();
         try {
-            Files.createDirectories(dir());
-            long stamp = System.currentTimeMillis();
-            var id = "s" + Long.toHexString(stamp);
-            while (Files.exists(path(id))) {
-                id = "s" + Long.toHexString(++stamp);
-            }
+            return Files.createDirectories(dir);
+        } catch (final IOException e) {
+            throw new UncheckedIOException("Cannot create the session directory " + dir, e);
+        }
+    }
+
+    public String create() {
+        writableDir();
+        long stamp = System.currentTimeMillis();
+        var id = "s" + Long.toHexString(stamp);
+        while (Files.exists(path(id))) {
+            id = "s" + Long.toHexString(++stamp);
+        }
+        try {
             Files.writeString(path(id), "");
-            return id;
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+        return id;
     }
 
     public Path path(final String id) {
@@ -118,9 +134,9 @@ public class SessionStore {
     }
 
     public void append(final String id, final SessionEntry entry) {
+        writableDir();
         try {
-            Files.createDirectories(dir());
-            Files.writeString(path(id), mapper.toString(entry) + "\n", java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            Files.writeString(path(id), mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
@@ -169,8 +185,8 @@ public class SessionStore {
         for (final var m : messages) {
             sb.append(mapper.toString(SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId()))).append('\n');
         }
+        writableDir();
         try {
-            Files.createDirectories(dir());
             Files.writeString(path(id), sb.toString());
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
@@ -181,12 +197,8 @@ public class SessionStore {
     }
 
     public List<SessionInfo> list() {
-        try (final Stream<Path> files = Files.list(dir())) {
-            return files.filter(f -> {
-                        final var name = f.getFileName().toString();
-                        return name.endsWith(JSONL_SUFFIX) || name.endsWith(GZ_SUFFIX);
-                    })
-                    .map(f -> {
+        try (final Stream<Path> files = storedSessions()) {
+            return files.map(f -> {
                         final var name = f.getFileName().toString();
                         final var id = name.endsWith(JSONL_SUFFIX)
                                 ? name.substring(0, name.length() - JSONL_SUFFIX.length())
