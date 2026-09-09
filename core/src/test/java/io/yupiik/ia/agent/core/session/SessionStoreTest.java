@@ -20,6 +20,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SessionStoreTest {
@@ -42,6 +43,18 @@ class SessionStoreTest {
 
     private static void setAge(final Path file, final long daysOld) throws Exception {
         Files.setLastModifiedTime(file, FileTime.fromMillis(Instant.now().toEpochMilli() - daysOld * 24L * 60L * 60L * 1000L));
+    }
+
+    @Test
+    void cleanupAndListToleratePristineStorage() {
+        final var store = newStore();
+        assertFalse(Files.exists(store.dir()), "precondition: nothing stored yet");
+
+        store.cleanup();
+
+        assertEquals(List.of(), store.list());
+        assertNull(store.lastSessionId());
+        assertFalse(Files.exists(store.dir()), "a read must not create the storage directory");
     }
 
     @Test
