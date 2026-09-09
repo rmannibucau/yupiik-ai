@@ -76,6 +76,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Command(name = "tui", description = "Interactive terminal UI session with the yca coding agent.")
 public class TuiCommand implements Runnable {
     private static final String HINTS = "Enter send | Esc interrupt | drag select+copy | Ctrl+T thinking | Ctrl+Y actions | Ctrl+P todos | Ctrl+S compact | Ctrl+L clear | Ctrl+C quit";
+    private static final String HINTS_SHORT = "Enter | Esc interrupt | drag copy | Ctrl+T | Ctrl+Y | Ctrl+P | Ctrl+S | Ctrl+L | Ctrl+C";
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
     private static final String SHORTCUTS = """
@@ -87,13 +88,14 @@ public class TuiCommand implements Runnable {
             | Mouse drag | select text and copy it to the clipboard |
             | Double/triple-click | select a word / a whole row |
             | Ctrl+Shift+C | copy the current selection again |
-            | Ctrl+C | quit |
+            | Ctrl+C | quit (or interrupt the running agent, then quit) |
             | Ctrl+T | toggle all thinking blocks |
             | Ctrl+Y | toggle all executed tool blocks |
             | Ctrl+P | toggle todo list |
             | Ctrl+S | compact the context now |
             | Ctrl+L | clear the transcript |
             | PageUp/PageDown | scroll the transcript |
+            | Ctrl+Home / Ctrl+End | jump to the top / bottom of the transcript |
             | Mouse wheel | scroll the transcript |
             | Alt+B / Alt+F | move backward/forward one word |
             | Tab | complete model name or slash command |
@@ -114,6 +116,7 @@ public class TuiCommand implements Runnable {
             | /memory | show the project memory |
             | /context [path] | show the resolved context (system prompt + session), write to path when given |
             | /permissions (all\\|none) | allow all tools without asking (all), or restore interactive approval (none) |
+            | /theme (light\\|dark) | switch between light and dark themes (persisted) |
             | /tools [filters] | list tools per MCP server; space separated filters must all match the lowercase server/tool name |
             | /structural-code-graph | resync the structural code graph (symbols, edges and doc tree) on demand |
             | /clear | clear the transcript |
@@ -142,11 +145,12 @@ public class TuiCommand implements Runnable {
     private final AgentProvider agentProvider;
     private final TuiTranscriptModel model;
     private final TuiRunnerFactory tuiRunnerFactory;
-    private final Style thoughtStyle;
-    private final Style toolStyle;
-    private final MarkdownStyles toolMarkdownStyles;
+    private volatile Style thoughtStyle;
+    private volatile Style toolStyle;
     private final TranscriptRenderer transcriptRenderer = new TranscriptRenderer();
-    private final Palette palette;
+    private volatile Palette palette;
+    private final CompletionEngine completionEngine;
+    private final PromptHistory promptHistory;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -185,15 +189,21 @@ public class TuiCommand implements Runnable {
         this.model = model;
         this.tuiRunnerFactory = tuiRunnerFactory;
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
-        final var opacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.thinkingOpacity()));
-        this.thoughtStyle = Style.EMPTY.fg(TuiColors.blend(palette.text(), palette.backgroundPanel(), opacity));
-        final var toolOpacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.toolOutputOpacity()));
-        final var toolFg = TuiColors.blend(palette.text(), palette.backgroundPanel(), toolOpacity);
-        this.toolStyle = Style.EMPTY.fg(toolFg);
-        this.toolMarkdownStyles = MarkdownStyles.builder()
-                .codeBlock(MarkdownStyles.DEFAULTS.codeBlock().fg(toolFg))
-                .inlineCode(MarkdownStyles.DEFAULTS.inlineCode().fg(toolFg))
-                .build();
+        this.completionEngine = new CompletionEngine(
+                () -> completionModels(),
+                () -> providerManager == null || providerManager.providers() == null
+                        ? List.of()
+                        : providerManager.providers().stream().map(io.yupiik.ia.agent.core.configuration.ProviderConfiguration::id).toList(),
+                () -> agentProvider == null || agentProvider.agents() == null
+                        ? List.of()
+                        : agentProvider.agents().stream().map(a -> a.name()).toList(),
+                this::sessionsForCompletion,
+                this::toolsForCompletion,
+                () -> agentProvider == null || agentProvider.agents() == null
+                        ? List.of()
+                        : agentProvider.agents().stream().map(a -> a.name()).toList());
+        this.promptHistory = new PromptHistory();
+        applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
     }
 
     @RootConfiguration("tui")
@@ -224,6 +234,47 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    private Path themeStoragePath() {
+        final var root = Path.of(configuration.resolveStorageHome()).toAbsolutePath();
+        return root.resolve("theme");
+    }
+
+    private String persistedTheme() {
+        final var file = themeStoragePath();
+        try {
+            if (java.nio.file.Files.isRegularFile(file)) {
+                final var value = java.nio.file.Files.readString(file).strip().toLowerCase(java.util.Locale.ROOT);
+                if ("light".equals(value) || "dark".equals(value)) {
+                    return value;
+                }
+            }
+        } catch (final java.io.IOException e) {
+            // ignore and fall back to the configured theme
+        }
+        return null;
+    }
+
+    private void persistTheme(final String theme) {
+        final var file = themeStoragePath();
+        try {
+            java.nio.file.Files.createDirectories(file.getParent() == null ? Path.of(".") : file.getParent());
+            java.nio.file.Files.writeString(file, theme);
+        } catch (final java.io.IOException e) {
+            // best-effort persistence; it must never break a command
+        }
+    }
+
+    private void applyTheme(final String theme) {
+        final var normalized = "light".equalsIgnoreCase(theme) ? "light" : "dark";
+        this.palette = Palette.from(normalized, tuiConfiguration);
+        final var opacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.thinkingOpacity()));
+        final var thought = TuiColors.blend(palette.text(), palette.backgroundPanel(), opacity);
+        this.thoughtStyle = Style.EMPTY.fg(thought);
+        final var toolOpacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.toolOutputOpacity()));
+        final var toolFg = TuiColors.blend(palette.text(), palette.backgroundPanel(), toolOpacity);
+        this.toolStyle = Style.EMPTY.fg(toolFg);
+    }
+
     @Override
     public void run() {
         final var state = new UiState(model);
@@ -234,6 +285,7 @@ public class TuiCommand implements Runnable {
         state.model.maxHistoryCharacters(transcriptConf == null || transcriptConf.maxHistoryCharacters() <= 0
                 ? DEFAULT_MAX_HISTORY_CHARACTERS : transcriptConf.maxHistoryCharacters());
         try (final var tui = tuiRunnerFactory.create(conf)) {
+            state.runner = tui;
             bridge.sink(event -> tui.runLater(() -> onEvent(event, state)));
             permissionService.setGate(gate(tui, state));
             userFeedbackService.setGate(feedbackGate(tui, state));
@@ -258,7 +310,8 @@ public class TuiCommand implements Runnable {
         return (title, detail) -> {
             final var latch = new CountDownLatch(1);
             final var approved = new AtomicBoolean(false);
-            tui.runLater(() -> state.approval = new Approval(title, detail, latch, approved));
+            final var toolName = toolNameOf(detail);
+            tui.runLater(() -> state.approval = new Approval(title, detail, toolName, latch, approved));
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
                     if (state.interrupted) {
@@ -276,6 +329,16 @@ public class TuiCommand implements Runnable {
             }
             return approved.get();
         };
+    }
+
+    /** Extracts the tool name from the gate detail ("Tool <name>\\n..."). */
+    private static String toolNameOf(final String detail) {
+        if (detail == null || detail.isBlank()) {
+            return "";
+        }
+        final var first = detail.strip().lines().findFirst().orElse("");
+        final var prefix = "Tool ";
+        return first.startsWith(prefix) ? first.substring(prefix.length()).strip() : first;
     }
 
     private FeedbackGate feedbackGate(final TuiRunner tui, final UiState state) {
@@ -520,6 +583,12 @@ public class TuiCommand implements Runnable {
         state.model.onEvent(event);
         if (event instanceof AgentEvent.ToolStarted) {
             state.spinnerTick = 0;
+        } else if (event instanceof AgentEvent.TurnDone && !state.pendingPrompts.isEmpty()) {
+            final var runner = state.runner;
+            if (runner != null && !state.model.busy()) {
+                final var next = state.pendingPrompts.removeFirst();
+                runner.runLater(() -> submit(next, runner, state));
+            }
         }
     }
 
@@ -546,6 +615,20 @@ public class TuiCommand implements Runnable {
         }
         if (state.feedbackPrompt != null) {
             return onFeedbackKey(event, runner, state);
+        }
+        if (state.picker != null) {
+            if (event instanceof PasteEvent) {
+                return true;
+            }
+            if (event instanceof final MouseEvent pickMouse) {
+                return onPickerMouse(pickMouse, state);
+            }
+            if (event instanceof final KeyEvent pickKey) {
+                if (!state.picker.confirm(pickKey)) {
+                    state.picker.stroke(pickKey);
+                }
+            }
+            return true;
         }
         if (event instanceof final MouseEvent mouse) {
             if (mouse.isScroll()) {
@@ -578,15 +661,33 @@ public class TuiCommand implements Runnable {
             return false;
         }
         if (state.approval != null) {
+            final var approval = state.approval;
             if (key.isConfirm()) {
-                state.approval.approved().set(true);
-                state.approval.latch().countDown();
+                final var ok = approval.perform(permissionService);
                 state.approval = null;
-                state.model.status("approved");
+                state.model.status(ok ? "approved" : "denied");
             } else if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
-                state.approval.latch().countDown();
+                approval.perform(permissionService);
                 state.approval = null;
                 state.model.status("denied");
+            } else if (key.isKey(KeyCode.LEFT)) {
+                approval.action(approval.action() - 1);
+            } else if (key.isKey(KeyCode.RIGHT) || key.isKey(KeyCode.TAB)) {
+                approval.action(approval.action() + 1);
+            } else if (key.isChar('1')) {
+                approval.action(0);
+            } else if (key.isChar('2')) {
+                approval.action(1);
+            } else if (key.isChar('3')) {
+                approval.action(2);
+            } else if (key.isKey(KeyCode.PAGE_UP)) {
+                approval.detailScroll(approval.detailScroll() - 5);
+            } else if (key.isKey(KeyCode.PAGE_DOWN)) {
+                approval.detailScroll(approval.detailScroll() + 5);
+            } else if (key.isKey(KeyCode.UP)) {
+                approval.detailScroll(approval.detailScroll() - 1);
+            } else if (key.isKey(KeyCode.DOWN)) {
+                approval.detailScroll(approval.detailScroll() + 1);
             }
             return true;
         }
@@ -595,6 +696,16 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isCtrlC()) {
+            if (state.model.busy()) {
+                // while busy: interrupt, and only arm the second press to actually quit
+                state.quitArmed = true;
+                state.interrupted = true;
+                waiting(state, "interrupting... press Ctrl+C again to quit", SpinnerStyle.CLOCK);
+                return true;
+            }
+            if (state.quitArmed) {
+                state.quitArmed = false;
+            }
             runner.quit();
             return true;
         }
@@ -632,6 +743,10 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
+            if (state.completion != null) {
+                dismissCompletion(state);
+                return true;
+            }
             if (state.selection.hasSelection()) {
                 state.selection.clear();
                 return true;
@@ -650,6 +765,14 @@ public class TuiCommand implements Runnable {
             state.model.scrollBack(Math.max(0, state.model.scrollBack() - 10));
             return true;
         }
+        if (key.hasCtrl() && key.isKey(KeyCode.HOME)) {
+            state.model.scrollBack(Integer.MAX_VALUE);
+            return true;
+        }
+        if (key.hasCtrl() && key.isKey(KeyCode.END)) {
+            state.model.scrollBack(0);
+            return true;
+        }
         if (key.isKey(KeyCode.TAB)) {
             complete(runner, state);
             return true;
@@ -662,6 +785,50 @@ public class TuiCommand implements Runnable {
             moveCursorWord(state, true);
             return true;
         }
+        if (key.hasCtrl() && key.isKey(KeyCode.LEFT)) {
+            moveCursorWord(state, false);
+            return true;
+        }
+        if (key.hasCtrl() && key.isKey(KeyCode.RIGHT)) {
+            moveCursorWord(state, true);
+            return true;
+        }
+        if (key.hasAlt() && !key.hasShift() && key.isKey(KeyCode.BACKSPACE)) {
+            deleteWordBackward(state);
+            return true;
+        }
+        if (key.hasCtrl() && key.isCharIgnoreCase('a')) {
+            state.input.moveCursorToLineStart();
+            return true;
+        }
+        if (key.hasCtrl() && key.isCharIgnoreCase('e')) {
+            state.input.moveCursorToLineEnd();
+            return true;
+        }
+        if (key.hasCtrl() && key.isCharIgnoreCase('k')) {
+            killLineForward(state);
+            return true;
+        }
+        if (key.hasCtrl() && key.isCharIgnoreCase('u')) {
+            killLineBackward(state);
+            return true;
+        }
+        if (key.hasCtrl() && key.isCharIgnoreCase('w')) {
+            deleteWordBackward(state);
+            return true;
+        }
+        if (key.hasCtrl() && key.isCharIgnoreCase('r')) {
+            recallHistory(state, true);
+            return true;
+        }
+        if (key.isKey(KeyCode.UP)) {
+            handleLineOrHistory(state, true);
+            return true;
+        }
+        if (key.isKey(KeyCode.DOWN)) {
+            handleLineOrHistory(state, false);
+            return true;
+        }
         if (key.isConfirm() && !key.hasShift() && !key.hasAlt()) {
             final var text = state.input.text().strip();
             state.input.clear();
@@ -672,17 +839,34 @@ public class TuiCommand implements Runnable {
         }
         switch (key.code()) {
             case ENTER -> state.input.insert("\n");
-            case BACKSPACE -> state.input.deleteBackward();
-            case DELETE -> state.input.deleteForward();
-            case LEFT -> state.input.moveCursorLeft();
-            case RIGHT -> state.input.moveCursorRight();
-            case UP -> state.input.moveCursorUp();
-            case DOWN -> state.input.moveCursorDown();
-            case HOME -> state.input.moveCursorToLineStart();
-            case END -> state.input.moveCursorToLineEnd();
+            case BACKSPACE -> {
+                state.input.deleteBackward();
+                liveComplete(state);
+            }
+            case DELETE -> {
+                state.input.deleteForward();
+                liveComplete(state);
+            }
+            case LEFT -> {
+                dismissCompletion(state);
+                state.input.moveCursorLeft();
+            }
+            case RIGHT -> {
+                dismissCompletion(state);
+                state.input.moveCursorRight();
+            }
+            case HOME -> {
+                dismissCompletion(state);
+                state.input.moveCursorToLineStart();
+            }
+            case END -> {
+                dismissCompletion(state);
+                state.input.moveCursorToLineEnd();
+            }
             case CHAR -> {
                 if (!key.hasCtrl()) {
                     state.input.insert(key.codePoint() > Character.MAX_VALUE ? "?" : String.valueOf((char) key.codePoint()));
+                    liveComplete(state);
                 }
             }
             default -> {
@@ -718,12 +902,18 @@ public class TuiCommand implements Runnable {
     }
 
     private void submit(final String text, final TuiRunner runner, final UiState state) {
+        promptHistory.add(text);
+        dismissCompletion(state);
+        clearError(state);
         if (text.startsWith("/")) {
             slash(text, runner, state);
             return;
         }
         if (state.model.busy()) {
-            waiting(state, "busy - press Esc to interrupt", SpinnerStyle.CLOCK);
+            state.pendingPrompts.addLast(text);
+            final var n = state.pendingPrompts.size();
+            state.model.status("queued prompt (" + n + " pending) - it will run when the agent finishes");
+            state.input.clear();
             return;
         }
         if (state.title == null || state.title.isBlank()) {
@@ -768,6 +958,7 @@ public class TuiCommand implements Runnable {
             case "/context" -> context("", state);
             case "/tools" -> toolsCommand(text, runner, state);
             case "/structural-code-graph" -> resyncGraph(runner, state);
+            case "/theme" -> themeCommand("", state);
             case "/clear" -> state.model.clearConversation();
             case "/quit", "/exit" -> runner.quit();
             default -> {
@@ -783,6 +974,8 @@ public class TuiCommand implements Runnable {
                     context(text.substring("/context ".length()).strip(), state);
                 } else if (text.startsWith("/permissions ")) {
                     permissions(text.substring("/permissions ".length()).strip(), state);
+                } else if (text.startsWith("/theme")) {
+                    themeCommand(text.substring("/theme".length()).strip(), state);
                 } else if (text.startsWith("/agent ")) {
                     agentCommand(text, runner, state);
                 } else if (text.startsWith("/tools ")) {
@@ -794,15 +987,45 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    private void themeCommand(final String arg, final UiState state) {
+        final var current = isPaletteLight() ? "light" : "dark";
+        if (arg.isBlank()) {
+            state.model.status("theme: " + current + " (/theme light|dark to switch)");
+            return;
+        }
+        final var next = arg.strip().toLowerCase(java.util.Locale.ROOT);
+        if (!"light".equals(next) && !"dark".equals(next)) {
+            state.model.status("usage: /theme light|dark (current: " + current + ")");
+            return;
+        }
+        applyTheme(next);
+        persistTheme(next);
+        state.model.status("theme: " + next);
+    }
+
+    private boolean isPaletteLight() {
+        return "#1a1a1a".equalsIgnoreCase(palette.text());
+    }
+
     private void resume(final UiState state) {
-        final var last = sessionStore.lastSessionId();
-        if (last == null) {
+        final var sessions = sessionStore.list();
+        if (sessions.isEmpty()) {
             state.model.status("no session to resume");
             return;
         }
-        state.sessionId = last;
+        final var labels = sessions.stream()
+                .map(s -> s.id() + "  (" + formatBytes(s.sizeBytes()) + ")")
+                .collect(java.util.stream.Collectors.toList());
+        openPicker(state, "resume session", labels, selected -> {
+            final var id = selected.split("\\s+")[0];
+            resumeSession(state, id);
+        }, () -> state.model.status("resume cancelled"));
+    }
+
+    private void resumeSession(final UiState state, final String id) {
+        state.sessionId = id;
         state.model.clearConversation();
-        for (final var message : sessionStore.load(last)) {
+        for (final var message : sessionStore.load(id)) {
             switch (message.role()) {
                 case "user" -> state.model.transcript().append("\n\n---\n\n**You**\n\n").append(message.content()).append('\n');
                 case "assistant" -> state.model.transcript().append("\n\n---\n\n**Assistant**\n\n").append(message.content()).append('\n');
@@ -812,7 +1035,7 @@ public class TuiCommand implements Runnable {
                 }
             }
         }
-        state.model.status("resumed session " + last);
+        state.model.status("resumed session " + id);
     }
 
     private void context(final String arg, final UiState state) {
@@ -874,41 +1097,22 @@ public class TuiCommand implements Runnable {
             state.model.status("provider: " + arg);
             return;
         }
-        final var current = chatClient.providerId();
-        final var sb = new StringBuilder("\n\n**Providers** (current: ").append(current).append(")**\n\n");
-        if (providers.isEmpty()) {
-            sb.append("(no providers configured)");
-        } else {
-            for (final var p : providers) {
-                final var id = p.id();
-                sb.append("- ").append(id.equals(current) ? "**" + id + "**" : id).append('\n');
-            }
-        }
-        sb.append("\nUse `/provider <id>` to switch.");
-        runner.runLater(() -> {
-            state.model.transcript().append(sb).append('\n');
-            state.model.scrollBack(0);
-        });
+        final var ids = providers.stream().map(p -> p.id()).collect(java.util.stream.Collectors.toList());
+        openPicker(state, "provider", ids, selected -> {
+            chatClient.setProvider(selected);
+            state.model.status("provider: " + selected);
+        }, () -> state.model.status("provider cancelled"));
     }
 
     private void agentCommand(final String text, final TuiRunner runner, final UiState state) {
         final var arg = text.substring("/agent".length()).strip();
         if (arg.isEmpty()) {
-            final var agents = agentProvider.agents();
-            final var sb = new StringBuilder("\n\n**Custom agents** (active: ").append(state.activeAgent.isBlank() ? "-" : state.activeAgent)
-                    .append(")**\n\n");
-            if (agents.isEmpty()) {
-                sb.append("(no custom agents configured; add them under yca.agents in the configuration)");
-            } else {
-                for (final var agent : agents) {
-                    sb.append("- ").append(agent.name()).append('\n');
-                }
-            }
-            sb.append("\nUse `/agent <name>` to set the active agent, `/agent` to clear it.");
-            runner.runLater(() -> {
-                state.model.transcript().append(sb).append('\n');
-                state.model.scrollBack(0);
-            });
+            final var names = agentProvider.agents().stream().map(a -> a.name())
+                    .sorted().collect(java.util.stream.Collectors.toList());
+            openPicker(state, "agent", names, selected -> {
+                state.activeAgent = selected;
+                state.model.status("agent: " + selected);
+            }, () -> state.model.status("agent picker cancelled"));
             return;
         }
         if (agentProvider.byName(arg) == null) {
@@ -967,7 +1171,7 @@ public class TuiCommand implements Runnable {
                     state.model.scrollBack(0);
                 });
             } catch (final RuntimeException e) {
-                runner.runLater(() -> state.model.status("tools listing failed: " + e.getMessage()));
+                runner.runLater(() -> modelError(state, "tools listing failed: " + e.getMessage()));
             }
         });
     }
@@ -985,92 +1189,155 @@ public class TuiCommand implements Runnable {
         return description.isEmpty() || description.equals(tool.name()) ? null : description;
     }
 
-    private void completeModel(final TuiRunner runner, final UiState state) {
-        final var text = state.input.text();
-        if (!text.startsWith("/model ")) {
-            state.model.status("completion only applies to /model ");
-            return;
-        }
-        executor.execute(() -> {
-            try {
-                final var ids = chatClient.models().ids();
-                runner.runLater(() -> {
-                    final var current = state.input.text();
-                    if (!current.startsWith("/model ")) {
-                        return;
-                    }
-                    final var prefixNow = current.substring("/model ".length());
-                    final var matches = ids.stream().filter(m -> !m.isBlank() && m.startsWith(prefixNow)).toList();
-                    if (matches.isEmpty()) {
-                        state.model.status("no model matching '" + prefixNow + "'");
-                        return;
-                    }
-                    if (!prefixNow.equals(state.modelCompletionBase)) {
-                        state.modelCompletionBase = prefixNow;
-                        state.modelCompletionOffset = 0;
-                    }
-                    final var choice = matches.get(state.modelCompletionOffset % matches.size());
-                    state.modelCompletionOffset++;
-                    state.input.clear();
-                    state.input.insert("/model " + choice);
-                });
-            } catch (final Exception e) {
-                runner.runLater(() -> state.model.status("completion failed: " + e.getMessage()));
-            }
-        });
-    }
-
     private void complete(final TuiRunner runner, final UiState state) {
         final var text = state.input.text();
-        if (text.startsWith("/model ") && text.length() > "/model ".length()) {
-            completeModel(runner, state);
+        final var cursor = state.input.cursorCol();
+        final var suggestion = completionEngine.suggest(text, cursor);
+        if (suggestion.empty()) {
+            state.model.status("no completion for '" + text + "'");
+            state.completion = null;
+            state.completionCursor = -1;
             return;
         }
-        if (text.startsWith("/agent ") && text.length() > "/agent ".length()) {
-            completeAgent(runner, state);
-            return;
+        // refresh the popup whenever the suggestion changes
+        if (state.completion == null || !sameText(suggestion, state.completion)) {
+            state.completion = suggestion;
+            state.completionCursor = cursor;
+            state.completionIndex = 0;
         }
-        if (text.startsWith("/")) {
-            completeSlash(runner, state);
-            return;
-        }
-        state.model.status("completion only applies to / (slash) commands");
+        applyCompletion(state);
     }
 
-    private void completeAgent(final TuiRunner runner, final UiState state) {
-        final var text = state.input.text();
-        final var prefix = text.substring("/agent ".length());
-        final var names = agentProvider.agents().stream().map(a -> a.name()).filter(n -> !n.isBlank() && n.startsWith(prefix)).toList();
-        if (names.isEmpty()) {
-            state.model.status("no agent matching '" + prefix + "'");
-            return;
+    private static boolean sameText(final CompletionEngine.Suggestion a, final CompletionEngine.Suggestion b) {
+        if (a == b) {
+            return true;
         }
-        if (!prefix.equals(state.slashCompletionBase)) {
-            state.slashCompletionBase = prefix;
-            state.slashCompletionOffset = 0;
-        }
-        final var choice = names.get(state.slashCompletionOffset % names.size());
-        state.slashCompletionOffset++;
-        state.input.clear();
-        state.input.insert("/agent " + choice);
+        return a != null && b != null && a.items().equals(b.items())
+                && a.replaceStart() == b.replaceStart() && a.replaceEnd() == b.replaceEnd();
     }
 
-    private void completeSlash(final TuiRunner runner, final UiState state) {
-        final var text = state.input.text();
-        final var prefix = text.startsWith("/") ? text.substring(1) : text;
-        final var matches = TuiInputSupport.slashMatches(prefix);
-        if (matches.isEmpty()) {
-            state.model.status("no command matching '/" + prefix + "'");
+    private void applyCompletion(final UiState state) {
+        final var suggestion = state.completion;
+        if (suggestion == null || suggestion.empty()) {
             return;
         }
-        if (!prefix.equals(state.slashCompletionBase)) {
-            state.slashCompletionBase = prefix;
-            state.slashCompletionOffset = 0;
+        final var items = suggestion.items();
+        final var choice = items.get(state.completionIndex % items.size());
+        state.completionIndex++;
+        replaceInput(state, suggestion, choice);
+    }
+
+    private void replaceInput(final UiState state, final CompletionEngine.Suggestion suggestion, final String replacement) {
+        final var text = state.input.text();
+        final var newValue = text.substring(0, suggestion.replaceStart())
+                + replacement
+                + text.substring(suggestion.replaceEnd());
+        state.input.setText(newValue);
+        // position the cursor just after the inserted replacement range
+        final var delta = replacement.length() - (suggestion.replaceEnd() - suggestion.replaceStart());
+        for (var i = 0; i < Math.abs(delta); i++) {
+            if (delta > 0) {
+                state.input.moveCursorRight();
+            } else {
+                state.input.moveCursorLeft();
+            }
         }
-        final var choice = matches.get(state.slashCompletionOffset % matches.size());
-        state.slashCompletionOffset++;
-        state.input.clear();
-        state.input.insert(choice + " ");
+        state.completionCursor = state.input.cursorCol();
+    }
+
+    private void cycleCompletion(final UiState state, final boolean forward) {
+        final var suggestion = state.completion;
+        if (suggestion == null || suggestion.empty()) {
+            return;
+        }
+        final var size = suggestion.items().size();
+        if (forward) {
+            state.completionIndex = (state.completionIndex + 1) % size;
+        } else {
+            state.completionIndex = (state.completionIndex + size - 1) % size;
+        }
+        applyCompletion(state);
+        // after applying, re-suggest so the popup tracks the new input
+        final var re = completionEngine.suggest(state.input.text(), state.input.cursorCol());
+        state.completion = re.empty() ? suggestion : re;
+        state.completionIndex = 0;
+    }
+
+    private void dismissCompletion(final UiState state) {
+        state.completion = null;
+        state.completionCursor = -1;
+    }
+
+    /**
+     * Live completion: keeps the popup in sync with what is typed, so slash
+     * commands and their parameters offer candidates without explicitly
+     * pressing Tab. The popup only opens for "/" prefixes and "@agent".
+     */
+    private void liveComplete(final UiState state) {
+        final var text = state.input.text();
+        if (!text.startsWith("/")) {
+            dismissCompletion(state);
+            return;
+        }
+        final var cursor = state.input.cursorCol();
+        final var suggestion = completionEngine.suggest(text, cursor);
+        if (suggestion.empty()) {
+            dismissCompletion(state);
+            return;
+        }
+        if (state.completion == null || state.completionCursor != cursor
+                || !suggestion.items().equals(state.completion.items())) {
+            state.completion = suggestion;
+            state.completionCursor = cursor;
+            state.completionIndex = 0;
+        }
+    }
+
+    private List<String> sessionsForCompletion() {
+        if (sessionStore == null) {
+            return List.of();
+        }
+        try {
+            final var sessions = sessionStore.list();
+            if (sessions == null || sessions.isEmpty()) {
+                return List.of();
+            }
+            return sessions.stream().map(s -> s.id()).toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private List<String> completionModels() {
+        if (chatClient == null) {
+            return List.of();
+        }
+        try {
+            final var ids = chatClient.models().ids();
+            return ids == null ? List.of() : ids;
+        } catch (final Exception e) {
+            return List.of();
+        }
+    }
+
+    private List<String> toolsForCompletion() {
+        if (mcpManager == null) {
+            return List.of();
+        }
+        try {
+            final var byServer = mcpManager.toolsByServer();
+            if (byServer == null || byServer.isEmpty()) {
+                return List.of();
+            }
+            return byServer.values().stream()
+                    .flatMap(List::stream)
+                    .map(EmbeddedTool::name)
+                    .distinct()
+                    .sorted()
+                    .toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
     }
 
     private void moveCursorWord(final UiState state, final boolean forward) {
@@ -1084,20 +1351,149 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    /**
+     * Up/Down on the prompt line: when a completion popup is active the arrows
+     * cycle its matches; otherwise (idle, single logical line) they recall the
+     * prompt history; in all other cases the cursor moves across lines.
+     */
+    private void handleLineOrHistory(final UiState state, final boolean up) {
+        if (state.completion != null && !state.completion.empty()) {
+            cycleCompletion(state, up);
+            return;
+        }
+        if (state.model.busy()) {
+            moveCursor(state, up);
+            return;
+        }
+        final var lastLine = Math.max(0, state.input.lineCount() - 1);
+        final var atBoundary = up ? state.input.cursorRow() == 0 : state.input.cursorRow() >= lastLine;
+        if (!atBoundary) {
+            // plain multiline editing: move the cursor across lines
+            moveCursor(state, up);
+            return;
+        }
+        if (!historyRecallable()) {
+            moveCursor(state, up);
+            return;
+        }
+        if (!state.historyActive) {
+            state.historyActive = true;
+            state.historyDraft = state.input.text();
+        }
+        final var recalled = up
+                ? promptHistory.olderPush(state.historyDraft)
+                : promptHistory.newerPull(state.historyDraft);
+        if (recalled != null) {
+            state.input.setText(recalled);
+            positionCursorAtEnd(state);
+        }
+        if (!up && !promptHistory.navigating()) {
+            state.historyActive = false;
+            state.historyDraft = "";
+        }
+    }
+
+    private boolean historyRecallable() {
+        return promptHistory.navigating() || promptHistory.size() > 0;
+    }
+
+    /**
+     * Recalls prompt history regardless of cursor position (bound to Ctrl+R for
+     * an older entry and Ctrl+Up/Ctrl+Down for older/newer).
+     */
+    private void recallHistory(final UiState state, final boolean older) {
+        if (!historyRecallable()) {
+            return;
+        }
+        if (!state.historyActive) {
+            state.historyActive = true;
+            state.historyDraft = state.input.text();
+        }
+        final var recalled = older
+                ? promptHistory.olderPush(state.historyDraft)
+                : promptHistory.newerPull(state.historyDraft);
+        if (recalled != null) {
+            state.input.setText(recalled);
+            positionCursorAtEnd(state);
+        }
+        if (!older && !promptHistory.navigating()) {
+            state.historyActive = false;
+            state.historyDraft = "";
+        }
+    }
+
+    private void moveCursor(final UiState state, final boolean up) {
+        if (up) {
+            state.input.moveCursorUp();
+        } else {
+            state.input.moveCursorDown();
+        }
+    }
+
+    private void positionCursorAtEnd(final UiState state) {
+        final var text = state.input.text();
+        state.input.setText(text);
+        for (var i = 0; i < text.length(); i++) {
+            state.input.moveCursorRight();
+        }
+        state.input.moveCursorToLineEnd();
+    }
+
+    private void deleteWordBackward(final UiState state) {
+        final var text = state.input.text();
+        final var col = state.input.cursorCol();
+        final var start = TuiInputSupport.previousWord(text, col);
+        replaceRange(state, start, col, "");
+        for (var i = col; i > start; i--) {
+            state.input.moveCursorLeft();
+        }
+    }
+
+    private void killLineForward(final UiState state) {
+        final var text = state.input.text();
+        final var col = state.input.cursorCol();
+        replaceRange(state, col, text.length(), "");
+    }
+
+    private void killLineBackward(final UiState state) {
+        final var text = state.input.text();
+        final var col = state.input.cursorCol();
+        replaceRange(state, 0, col, "");
+        for (var i = col; i > 0; i--) {
+            state.input.moveCursorLeft();
+        }
+    }
+
+    private void replaceRange(final UiState state, final int start, final int end, final String replacement) {
+        final var text = state.input.text();
+        final var safeEnd = Math.max(start, Math.min(end, text.length()));
+        state.input.setText(text.substring(0, start) + replacement + text.substring(safeEnd));
+    }
+
     private void models(final TuiRunner runner, final UiState state) {
         executor.execute(() -> {
             try {
                 final var ids = chatClient.models().ids();
-                runner.runLater(() -> {
-                    state.model.transcript().append("\n\n**Models**\n\n")
-                            .append(ids.isEmpty() ? "(provider does not expose /v1/models)" : String.join("\n", ids))
-                            .append('\n');
-                    state.model.scrollBack(0);
-                });
+                runner.runLater(() -> openModelPicker(state, ids));
             } catch (final Exception e) {
-                runner.runLater(() -> state.model.status("models failed: " + e.getMessage()));
+                runner.runLater(() -> modelError(state, "models failed: " + e.getMessage()));
             }
         });
+    }
+
+    private void openModelPicker(final UiState state, final List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            state.model.status("no models available");
+            return;
+        }
+        openPicker(state, "model", ids, selected -> {
+            try {
+                chatClient.setModel(selected);
+                state.model.status("model: " + selected);
+            } catch (final RuntimeException e) {
+                state.model.status("model failed: " + e.getMessage());
+            }
+        }, () -> state.model.status("model picker cancelled"));
     }
 
     private void mode(final String value, final TuiRunner runner, final UiState state) {
@@ -1113,7 +1509,7 @@ public class TuiCommand implements Runnable {
                             ? "todos seeded from the plan"
                             : "no plan found to seed todos from"));
                 } catch (final RuntimeException e) {
-                    runner.runLater(() -> state.model.status("todo seeding failed: " + e.getMessage()));
+                    runner.runLater(() -> modelError(state, "todo seeding failed: " + e.getMessage()));
                 }
             });
         }
@@ -1219,17 +1615,9 @@ public class TuiCommand implements Runnable {
         final var muted = Color.hex(palette.textMuted());
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(10, frame.height() / 3), frame.height());
-        final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, (frame.height() - height) / 4), width, height);
-        frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
-        final var block = Block.builder()
-                .title(" edit plan ")
-                .borders(Borders.ALL)
-                .borderType(BorderType.ROUNDED)
-                .borderStyle(Style.EMPTY.fg(warning))
-                .build();
-        frame.renderWidget(block, rect);
-        final var inner = block.inner(rect);
-        if (inner.isEmpty()) {
+        final var rect = Modal.rect(frame, width, height, 0.25);
+        final var inner = Modal.box(frame, rect, " edit plan ", warning);
+        if (inner == null) {
             return;
         }
         final var splits = Layout.vertical()
@@ -1265,7 +1653,7 @@ public class TuiCommand implements Runnable {
                     state.model.transcript().append("\n\n> structural code graph: `").append(result).append("`\n");
                 });
             } catch (final RuntimeException e) {
-                runner.runLater(() -> state.model.status("resync failed: " + e.getMessage()));
+                runner.runLater(() -> modelError(state, "resync failed: " + e.getMessage()));
             }
         });
     }
@@ -1289,7 +1677,7 @@ public class TuiCommand implements Runnable {
                     state.model.transcript().append("\n\n> session compacted\n");
                 });
             } catch (final RuntimeException e) {
-                runner.runLater(() -> state.model.status("compaction failed: " + e.getMessage()));
+                runner.runLater(() -> modelError(state, "compaction failed: " + e.getMessage()));
             }
         });
     }
@@ -1313,16 +1701,22 @@ public class TuiCommand implements Runnable {
         final var root = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(3), Constraint.length(1), Constraint.length(2))
                 .split(frame.area());
+        // responsive: drop the sidebar on narrow terminals to give the chat room
+        final var screenWidth = frame.width();
+        final var narrow = screenWidth < 68;
+        final var sidebarWidth = narrow ? 0 : (screenWidth < 95 ? 22 : 28);
         final var body = Layout.horizontal()
-                .constraints(Constraint.fill(), Constraint.length(28))
+                .constraints(Constraint.fill(), Constraint.length(sidebarWidth))
                 .split(root.get(0));
-        renderSidebar(body.get(1), frame, state);
+        if (!narrow) {
+            renderSidebar(body.get(1), frame, state);
+        }
         var chat = accentGutter(body.get(0), frame);
         final var withHints = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(chat);
         chat = withHints.get(0);
-        renderHints(withHints.get(1), frame, state);
+        renderHints(withHints.get(1), frame, state, narrow);
         if (state.showTodos) {
             final var withTodos = Layout.horizontal()
                     .constraints(Constraint.fill(), Constraint.length(state.showTodosCollapsed ? 14 : 34))
@@ -1331,8 +1725,9 @@ public class TuiCommand implements Runnable {
             renderTodos(withTodos.get(1), frame, state, todosRender);
         }
         if (state.showThinking && state.model.thinkingLength() > 0) {
+            // give the thinking panel a usable minimum height even on short terminals
             final var withThinking = Layout.vertical()
-                    .constraints(Constraint.percentage(70), Constraint.percentage(30))
+                    .constraints(Constraint.percentage(narrow ? 55 : 70), Constraint.percentage(narrow ? 45 : 30))
                     .split(chat);
             renderTranscript(withThinking.get(0), frame, state);
             renderThinking(withThinking.get(1), frame, state);
@@ -1342,6 +1737,10 @@ public class TuiCommand implements Runnable {
         renderInput(root.get(1), frame, state);
         renderCalling(root.get(2), frame, state);
         renderStatus(root.get(3), frame, state);
+        renderCompletionPopup(root.get(1), frame, state);
+        if (state.picker != null) {
+            renderPicker(frame, state);
+        }
         if (state.approval != null) {
             renderApproval(frame, state);
         }
@@ -1398,9 +1797,9 @@ public class TuiCommand implements Runnable {
                     Span.styled(ellipsize(status.name(), width - 2), value)));
         }
         text.add(Line.empty());
-        text.add(Line.from(Span.styled("tokens in  ", label), Span.styled(String.valueOf(state.model.promptTokens()), value)));
-        text.add(Line.from(Span.styled("tokens out ", label), Span.styled(String.valueOf(state.model.completionTokens()), value)));
-        text.add(Line.from(Span.styled("context ~  ", label), Span.styled(state.model.estimatedContext() + " tok (" + state.model.contextPercent() + "%)", value)));
+        text.add(Line.from(Span.styled("tokens in  ", label), Span.styled(formatTokens(state.model.promptTokens()), value)));
+        text.add(Line.from(Span.styled("tokens out ", label), Span.styled(formatTokens(state.model.completionTokens()), value)));
+        text.add(Line.from(Span.styled("context ~  ", label), Span.styled(formatTokens(state.model.estimatedContext()) + " tok (" + state.model.contextPercent() + "%)", value)));
         final var lines = Text.from(text.toArray(Line[]::new));
         final var textRect = rows.get(0);
         final var overflow = Math.max(0, lines.height() - textRect.height());
@@ -1471,9 +1870,7 @@ public class TuiCommand implements Runnable {
                 final var lines = transcriptRenderer.renderRegion(region.text(), width, thoughtStyle, MarkdownStyles.DEFAULTS);
                 addMarkdownChunk(out, lines);
             } else if (region.tool()) {
-                final var source = state.showToolActions ? region.text() : toolHeader(region.text());
-                final var lines = transcriptRenderer.renderRegion(source, width, toolStyle, toolMarkdownStyles);
-                addMarkdownChunk(out, lines);
+                addToolCardChunk(out, region.text(), width, state);
             } else if (!region.text().isBlank()) {
                 appendChunks(out, region.text(), width);
             }
@@ -1513,13 +1910,67 @@ public class TuiCommand implements Runnable {
                 .build()));
     }
 
-    private static String toolHeader(final String regionText) {
-        for (final var line : regionText.strip().split("\n")) {
-            if (!line.isBlank()) {
-                return line;
-            }
+    /** Renders a finished tool action as a bordered "card" with a status icon and diff-aware output. */
+    private void addToolCardChunk(final List<RenderedChunk> out, final String regionText, final int width, final UiState state) {
+        final var card = ToolCard.parse(regionText);
+        final var statusColor = Color.hex(card.failed() ? palette.error() : palette.success());
+        final var block = Block.builder()
+                .borders(Borders.ALL)
+                .borderType(BorderType.ROUNDED)
+                .borderColor(statusColor)
+                .title(blockTitle(card))
+                .build();
+        final var innerW = Math.max(1, width - 2);
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var lines = new ArrayList<Line>();
+        final var headerSpans = new ArrayList<Span>();
+        headerSpans.add(Span.styled(card.failed() ? "\u2716 " : "\u2713 ", Style.EMPTY.fg(statusColor).bold()));
+        headerSpans.add(Span.styled(card.name(), Style.EMPTY.bold().fg(Color.hex(palette.text()))));
+        if (!card.args().isBlank()) {
+            headerSpans.add(Span.styled((card.failed() ? "  " : " ") + card.args(), muted));
         }
-        return "";
+        lines.add(Line.from(headerSpans.toArray(Span[]::new)));
+        if (state.showToolActions && !card.output().isBlank()) {
+            lines.add(Line.empty());
+            lines.addAll(toolOutputLines(card.output(), innerW, card.isDiff()));
+        }
+        final var text = Text.from(lines.toArray(Line[]::new));
+        final var innerH = Math.max(text.height(), 1);
+        out.add(new RenderedChunk(innerH + 2, skip -> Paragraph.builder()
+                .text(text)
+                .block(block)
+                .overflow(Overflow.CLIP)
+                .scroll(Math.min(skip, Math.max(0, innerH - 1)))
+                .build()));
+    }
+
+    private static String blockTitle(final ToolCard card) {
+        if (card.failed()) {
+            return " failed ";
+        }
+        return card.elapsedMs() > 0 ? " " + card.elapsedMs() + " ms " : " tool ";
+    }
+
+    private List<Line> toolOutputLines(final String output, final int innerW, final boolean diff) {
+        final var add = Style.EMPTY.fg(Color.hex(palette.success()));
+        final var del = Style.EMPTY.fg(Color.hex(palette.error()));
+        final var meta = Style.EMPTY.fg(Color.hex(palette.accent()));
+        final var styled = new ArrayList<Line>();
+        for (final var raw : output.split("\n")) {
+            final var trimmed = raw.stripLeading();
+            final Style style;
+            if (diff && trimmed.startsWith("+")) {
+                style = add;
+            } else if (diff && trimmed.startsWith("-")) {
+                style = del;
+            } else if (diff && trimmed.startsWith("@@")) {
+                style = meta;
+            } else {
+                style = toolStyle;
+            }
+            styled.add(Line.from(Span.styled(raw, style)));
+        }
+        return MarkdownLines.wrapCode(styled, innerW);
     }
 
     private Block codeBlock(final String lang) {
@@ -1588,6 +2039,50 @@ public class TuiCommand implements Runnable {
         area.renderWithCursor(inner, frame.buffer(), state.input, frame);
     }
 
+    /**
+     * Renders the completion candidate popup just above the prompt line when a
+     * {@code /command} or parameter completion is active. The currently cycled
+     * match is highlighted among {@code items}.
+     */
+    private void renderCompletionPopup(final Rect inputRect, final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var suggestion = state.completion;
+        if (suggestion == null || suggestion.empty()) {
+            return;
+        }
+        final var items = suggestion.items();
+        final var visible = Math.min(items.size(), 8);
+        final var width = Math.min(46, Math.max(20, frame.width() - 4));
+        final var height = visible + 2; // border + items
+        final var x = Math.max(0, Math.min(inputRect.x() + 2, frame.width() - width));
+        final var y = Math.max(0, inputRect.y() - height);
+        final var rect = new Rect(x, y, width, height);
+        frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
+        final var accent = Style.EMPTY.fg(Color.hex(palette.accent()));
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
+        final var block = Block.builder()
+                .title(" " + (suggestion.label().isBlank() ? "complete" : suggestion.label()) + " ")
+                .borders(Borders.ALL)
+                .borderType(BorderType.ROUNDED)
+                .borderStyle(accent)
+                .build();
+        frame.renderWidget(block, rect);
+        final var inner = block.inner(rect);
+        if (inner.isEmpty()) {
+            return;
+        }
+        final var lines = new ArrayList<Line>();
+        for (var i = 0; i < visible; i++) {
+            final var selected = i == (state.completionIndex % items.size());
+            final var item = items.get(i);
+            final var style = selected ? accent.bold() : textStyle;
+            final var marker = selected ? "> " : "  ";
+            lines.add(Line.from(Span.styled(marker + item, style)));
+        }
+        frame.renderWidget(Paragraph.builder().text(Text.from(lines.toArray(Line[]::new)))
+                .overflow(dev.tamboui.style.Overflow.CLIP).build(), inner);
+    }
+
     private void renderCalling(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
         final var accent = Style.EMPTY.fg(Color.hex(palette.accent()));
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
@@ -1628,10 +2123,15 @@ public class TuiCommand implements Runnable {
             final var banner = Line.from(Span.styled("\u26a0  context at " + percent + "% - consider /compact  ", Style.EMPTY.fg(Color.hex(palette.warning()))));
             frame.renderWidget(Paragraph.builder().text(Text.from(banner)).overflow(dev.tamboui.style.Overflow.CLIP).build(), rect);
         }
+        if (state.errorMessage != null) {
+            final var err = Line.from(Span.styled("\u2716  " + state.errorMessage + " ", Style.EMPTY.fg(Color.hex(palette.error()))));
+            frame.renderWidget(Paragraph.builder().text(Text.from(err)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), rect);
+        }
     }
 
-    private void renderHints(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
-        final var hints = Line.from(Span.styled(HINTS, Style.EMPTY.fg(Color.hex(palette.textMuted()))));
+    private void renderHints(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state, final boolean narrow) {
+        final var message = narrow ? HINTS_SHORT : HINTS;
+        final var hints = Line.from(Span.styled(message, Style.EMPTY.fg(Color.hex(palette.textMuted()))));
         frame.renderWidget(Paragraph.builder().text(Text.from(hints)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), rect);
     }
 
@@ -1648,18 +2148,9 @@ public class TuiCommand implements Runnable {
         };
         final var accent = Style.EMPTY.fg(Color.hex(color));
         final var width = Math.min(Math.max(16, toast.message().length() + 4), Math.max(16, frame.width()));
-        final var height = 3;
-        final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, frame.height() - 6), width, height);
-        frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
-        final var block = Block.builder()
-                .title(" notice ")
-                .borders(Borders.ALL)
-                .borderType(BorderType.ROUNDED)
-                .borderStyle(accent)
-                .build();
-        frame.renderWidget(block, rect);
-        final var inner = block.inner(rect);
-        if (inner.isEmpty()) {
+        final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, frame.height() - 6), width, 3);
+        final var inner = Modal.box(frame, rect, " notice ", Color.hex(color));
+        if (inner == null) {
             return;
         }
         final var line = Line.from(Span.styled(toast.message(), accent));
@@ -1681,31 +2172,177 @@ public class TuiCommand implements Runnable {
         return wait != null && wait.message().equals(state.model.status()) ? wait.style() : null;
     }
 
+    private static void modelError(final UiState state, final String message) {
+        state.errorMessage = message;
+        state.model.status(message);
+    }
+
+    private static void clearError(final UiState state) {
+        state.errorMessage = null;
+    }
+
     private void renderApproval(final dev.tamboui.terminal.Frame frame, final UiState state) {
         final var approval = state.approval;
-        final var width = Math.min(Math.max(50, frame.width() * 3 / 5), frame.width());
-        final var height = 7;
-        final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, (frame.height() - height) / 3), width, height);
-        frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
+        final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 2 / 3), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.2);
         final var warning = Color.hex(palette.warning());
-        final var block = Block.builder()
-                .title(" approval required ")
-                .borders(Borders.ALL)
-                .borderType(BorderType.ROUNDED)
-                .borderStyle(Style.EMPTY.fg(warning))
-                .build();
-        frame.renderWidget(block, rect);
-        final var inner = block.inner(rect);
-        if (inner.isEmpty()) {
+        final var inner = Modal.box(frame, rect, " approval required ", warning);
+        if (inner == null) {
             return;
         }
-        final var text = Text.from(
-                Line.from(Span.raw(approval.title()).bold()),
-                Line.empty(),
-                Line.from(Span.styled(TuiInputSupport.firstLine(approval.detail()), Style.EMPTY.fg(Color.hex(palette.textMuted())))),
-                Line.empty(),
-                Line.from(Span.styled("Enter = allow, Esc = deny", Style.EMPTY.fg(warning))));
-        frame.renderWidget(Paragraph.builder().text(text).build(), inner);
+        final var titleStyle = Style.EMPTY.fg(warning).bold();
+        frame.renderWidget(Paragraph.builder()
+                .text(Text.from(Line.from(Span.styled(ellipsize(approval.title(), inner.width()), titleStyle))))
+                .build(), new Rect(inner.x(), inner.y(), inner.width(), 1));
+        final var actionsY = inner.y() + Math.max(1, inner.height() - 1);
+        final var bodyHeight = Math.max(1, actionsY - inner.y() - 1);
+        renderApprovalDetail(frame, approval, new Rect(inner.x(), inner.y() + 1, inner.width(), bodyHeight));
+        renderApprovalActions(frame, approval, new Rect(inner.x(), actionsY, inner.width(), 1));
+    }
+
+    private void renderApprovalDetail(final dev.tamboui.terminal.Frame frame, final Approval approval, final Rect rect) {
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var lines = detailLines(approval.detail());
+        if (lines.isEmpty()) {
+            frame.renderWidget(Paragraph.builder().text(Text.from(Line.from(Span.styled("(no additional detail)", muted)))).build(), rect);
+            return;
+        }
+        final var scroll = approval.detailScroll();
+        final var total = lines.size();
+        for (int row = 0; row < rect.height(); row++) {
+            final var idx = scroll + row;
+            if (idx >= total) {
+                break;
+            }
+            final var line = lines.get(idx);
+            final var style = idx == 0 ? Style.EMPTY.fg(Color.hex(palette.text())).bold() : muted;
+            frame.renderWidget(Paragraph.builder()
+                    .text(Text.from(Line.from(Span.styled(ellipsize(line, rect.width()), style))))
+                    .build(), new Rect(rect.x(), rect.y() + row, rect.width(), 1));
+        }
+        final var visible = Math.min(total, rect.height());
+        if (scroll + visible < total) {
+            frame.renderWidget(Paragraph.builder()
+                    .text(Text.from(Line.from(Span.styled("\u2937 " + (total - scroll - visible) + " more - PgDn", muted))))
+                    .build(), new Rect(rect.x(), rect.y() + rect.height() - 1, rect.width(), 1));
+        }
+    }
+
+    private void renderApprovalActions(final dev.tamboui.terminal.Frame frame, final Approval approval, final Rect rect) {
+        final var actions = Approval.Action.values();
+        final var accent = Color.hex(palette.accent());
+        final var muted = Color.hex(palette.textMuted());
+        final var textColor = Color.hex(palette.text());
+        final var spans = new java.util.ArrayList<Span>(actions.length);
+        for (int i = 0; i < actions.length; i++) {
+            final var label = "[" + (i + 1) + "] " + actions[i].label();
+            final var selected = i == approval.action();
+            if (selected) {
+                spans.add(Span.styled(" " + label + " ", Style.EMPTY.fg(accent).bold()));
+            } else {
+                spans.add(Span.styled(" " + label + " ", i == 0 ? Style.EMPTY.fg(textColor) : Style.EMPTY.fg(muted)));
+            }
+        }
+        frame.renderWidget(Paragraph.builder().text(Text.from(Line.from(spans.toArray(new Span[0])))).build(), rect);
+    }
+
+    private static List<String> detailLines(final String detail) {
+        if (detail == null || detail.isBlank()) {
+            return List.of();
+        }
+        return detail.strip().lines().map(String::strip).filter(l -> !l.isEmpty()).toList();
+    }
+
+    private void openPicker(final UiState state, final String title, final List<String> items,
+                            final java.util.function.Consumer<String> onSelect, final Runnable onCancel) {
+        state.picker = new PickerPrompt(title, items, selected -> {
+            state.picker = null;
+            onSelect.accept(selected);
+        }, () -> {
+            state.picker = null;
+            onCancel.run();
+        });
+    }
+
+    private void renderPicker(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var picker = state.picker;
+        final var accent = Color.hex(palette.accent());
+        final var textColor = Color.hex(palette.text());
+        final var muted = Color.hex(palette.textMuted());
+        final var width = Math.min(Math.max(50, frame.width() * 3 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 2 / 3), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.2);
+        final var inner = Modal.box(frame, rect, " " + picker.title + " ", accent);
+        if (inner == null) {
+            return;
+        }
+        // filter line
+        final var filterRect = new Rect(inner.x(), inner.y(), inner.width(), 1);
+        final var filterLabel = "filter: ";
+        final var filterText = filterLabel + picker.filter + (picker.filter.length() > 0 ? "" : "_");
+        frame.renderWidget(Paragraph.builder()
+                .text(Text.from(Line.from(
+                        Span.styled(filterLabel, Style.EMPTY.fg(muted)),
+                        Span.styled(picker.filter.toString(), filterRect.width() <= filterLabel.length() ? Style.EMPTY.fg(textColor) : Style.EMPTY.fg(accent).bold()))))
+                .overflow(dev.tamboui.style.Overflow.CLIP)
+                .build(), filterRect);
+        // items
+        final var listRect = new Rect(inner.x(), inner.y() + 1, inner.width(), Math.max(1, inner.height() - 2));
+        renderPickerList(frame, picker, listRect, textColor, muted, accent);
+        // footer hint
+        final var footerRect = new Rect(inner.x(), inner.y() + Math.max(1, inner.height() - 1), inner.width(), 1);
+        frame.renderWidget(Paragraph.builder()
+                .text(Text.from(Line.from(Span.styled("type to filter | Up/Down move | Enter select | Esc cancel", Style.EMPTY.fg(muted)))))
+                .overflow(dev.tamboui.style.Overflow.CLIP)
+                .build(), footerRect);
+    }
+
+    private void renderPickerList(final dev.tamboui.terminal.Frame frame, final PickerPrompt picker, final Rect rect,
+                                  final Color textColor, final Color muted, final Color accent) {
+        final var visible = picker.visible();
+        picker.prepareList(rect);
+        final var rows = Math.max(1, rect.height());
+        final var total = visible.size();
+        for (int row = 0; row < rows; row++) {
+            final var idx = row;
+            final var lineRect = new Rect(rect.x(), rect.y() + row, rect.width(), 1);
+            if (idx >= total) {
+                break;
+            }
+            picker.recordItem(lineRect, visible.get(idx));
+            final var selected = idx == picker.selected();
+            final var value = visible.get(idx);
+            final var marker = selected ? "\u25b8 " : "  ";
+            final var style = selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor);
+            frame.renderWidget(Paragraph.builder()
+                    .text(Text.from(Line.from(
+                            Span.styled(marker, selected ? style : Style.EMPTY.fg(muted)),
+                            Span.styled(ellipsize(value, Math.max(1, rect.width() - 2)), style))))
+                    .overflow(dev.tamboui.style.Overflow.CLIP)
+                    .build(), lineRect);
+        }
+        if (total == 0) {
+            frame.renderWidget(Paragraph.builder()
+                    .text(Text.from(Line.from(Span.styled("(no matches)", Style.EMPTY.fg(muted)))))
+                    .build(), rect);
+        }
+    }
+
+    private boolean onPickerMouse(final MouseEvent mouse, final UiState state) {
+        final var picker = state.picker;
+        if (picker == null) {
+            return true;
+        }
+        if (!(mouse.isPress() || mouse.isClick()) || !mouse.isLeftButton()) {
+            return true;
+        }
+        final var value = picker.itemAt(mouse.x(), mouse.y());
+        if (value != null) {
+            picker.onSelect().accept(value);
+            state.picker = null;
+        }
+        return true;
     }
 
     private void renderFeedbackPrompt(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -1716,17 +2353,9 @@ public class TuiCommand implements Runnable {
         final var warning = Color.hex(palette.warning());
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, 8 + prompt.questions().size() * 4), Math.max(12, frame.height() * 3 / 4));
-        final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, (frame.height() - height) / 4), width, height);
-        frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
-        final var block = Block.builder()
-                .title(" user request ")
-                .borders(Borders.ALL)
-                .borderType(BorderType.ROUNDED)
-                .borderStyle(accent)
-                .build();
-        frame.renderWidget(block, rect);
-        final var inner = block.inner(rect);
-        if (inner.isEmpty() || inner.height() < 4) {
+        final var rect = Modal.rect(frame, width, height, 0.25);
+        final var inner = Modal.box(frame, rect, " user request ", Color.hex(palette.accent()));
+        if (inner == null || inner.height() < 4) {
             return;
         }
         final var splits = Layout.vertical()
@@ -1937,6 +2566,32 @@ public class TuiCommand implements Runnable {
         return max <= 3 ? text.substring(0, Math.max(0, max)) : text.substring(0, max - 3) + "...";
     }
 
+    private static String formatTokens(final long value) {
+        if (value < 1_000) {
+            return String.valueOf(value);
+        }
+        if (value < 1_000_000) {
+            final var k = value / 1000.0;
+            return (k > 9 ? String.format("%.0fk", k) : String.format("%.1fk", k)).replace(",", ".");
+        }
+        final var m = value / 1_000_000.0;
+        return (m > 9 ? String.format("%.0fM", m) : String.format("%.1fM", m)).replace(",", ".");
+    }
+
+    private static String formatBytes(final long value) {
+        if (value < 1_024) {
+            return value + " B";
+        }
+        final double[] units = {1_024.0, 1_048_576.0, 1_073_741_824.0};
+        final String[] names = {"KB", "MB", "GB"};
+        var i = 0;
+        while (i < units.length - 1 && value >= units[i + 1]) {
+            i++;
+        }
+        final var scaled = value / units[i];
+        return (scaled > 9 ? String.format("%.0f ", scaled) : String.format("%.1f ", scaled)).replace(",", ".") + names[i];
+    }
+
     private String workingDirectory() {
         final var dir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
         final var home = Path.of(System.getProperty("user.home")).toAbsolutePath();
@@ -1963,7 +2618,228 @@ public class TuiCommand implements Runnable {
         return null;
     }
 
-    private record Approval(String title, String detail, CountDownLatch latch, AtomicBoolean approved) {
+    private static final class Approval {
+        enum Action {
+            DENY("Deny  [Esc]"),
+            ALLOW("Allow  [Enter]"),
+            ALWAYS("Always allow");
+
+            private final String label;
+
+            Action(final String label) {
+                this.label = label;
+            }
+
+            private String label() {
+                return label;
+            }
+        }
+
+        private final String title;
+        private final String detail;
+        private final String toolName;
+        private final CountDownLatch latch;
+        private final AtomicBoolean approved;
+        private int action;
+        private int detailScroll;
+
+        private Approval(final String title, final String detail, final String toolName,
+                         final CountDownLatch latch, final AtomicBoolean approved) {
+            this.title = title;
+            this.detail = detail;
+            this.toolName = toolName;
+            this.latch = latch;
+            this.approved = approved;
+            this.action = 0; // default-deny: focus Deny first
+        }
+
+        private String title() {
+            return title;
+        }
+
+        private String detail() {
+            return detail;
+        }
+
+        private String toolName() {
+            return toolName;
+        }
+
+        private CountDownLatch latch() {
+            return latch;
+        }
+
+        private int action() {
+            return action;
+        }
+
+        private void action(final int action) {
+            this.action = Math.floorMod(action, Action.values().length);
+        }
+
+        private int detailScroll() {
+            return detailScroll;
+        }
+
+        private void detailScroll(final int detailScroll) {
+            this.detailScroll = Math.max(0, detailScroll);
+        }
+
+        /** Resolves and performs the currently focused action against the permission service. */
+        private boolean perform(final PermissionService permissions) {
+            final var a = Action.values()[action];
+            if (a == Action.ALWAYS && !toolName.isBlank() && permissions != null) {
+                permissions.grantSession(toolName);
+            }
+            switch (a) {
+                case ALLOW, ALWAYS -> {
+                    approved.set(true);
+                    latch.countDown();
+                    return true;
+                }
+                default -> {
+                    latch.countDown();
+                    return false;
+                }
+            }
+        }
+    }
+
+    private static final class PickerPrompt {
+        private final String title;
+        private final List<String> items;
+        private final StringBuilder filter = new StringBuilder();
+        private final java.util.function.Consumer<String> onSelect;
+        private final Runnable onCancel;
+        private final List<Rect> itemRects = new ArrayList<>();
+        private final List<String> renderedValues = new ArrayList<>();
+        private int selected;
+        private int scroll = -1;
+
+        private PickerPrompt(final String title, final List<String> items,
+                             final java.util.function.Consumer<String> onSelect,
+                             final Runnable onCancel) {
+            this.title = title;
+            this.items = new ArrayList<>(items == null ? List.of() : items);
+            this.onSelect = onSelect;
+            this.onCancel = onCancel;
+        }
+
+        private java.util.function.Consumer<String> onSelect() {
+            return onSelect;
+        }
+
+        private int selected() {
+            return selected;
+        }
+
+        private void prepareList(final Rect rect) {
+            itemRects.clear();
+            renderedValues.clear();
+        }
+
+        private void recordItem(final Rect rect, final String value) {
+            itemRects.add(rect);
+            renderedValues.add(value);
+        }
+
+        /** @return the rendered value at the mouse position, or null when no item was hit. */
+        private String itemAt(final int x, final int y) {
+            for (int i = 0; i < itemRects.size(); i++) {
+                if (itemRects.get(i).contains(x, y)) {
+                    return renderedValues.get(i);
+                }
+            }
+            return null;
+        }
+
+        private List<String> visible() {
+            final var f = filter.toString().toLowerCase(java.util.Locale.ROOT);
+            if (f.isEmpty()) {
+                return items;
+            }
+            final var out = new ArrayList<String>();
+            for (final var it : items) {
+                if (it != null && it.toLowerCase(java.util.Locale.ROOT).contains(f)) {
+                    out.add(it);
+                }
+            }
+            return out;
+        }
+
+        private void filterAppend(final char c) {
+            filter.append(c);
+            selected = 0;
+            scroll = -1;
+        }
+
+        private void filterBackspace() {
+            if (filter.length() > 0) {
+                filter.deleteCharAt(filter.length() - 1);
+                selected = 0;
+                scroll = -1;
+            }
+        }
+
+        private void filterClear() {
+            filter.setLength(0);
+            selected = 0;
+            scroll = -1;
+        }
+
+        private void move(final int delta) {
+            final var v = visible();
+            if (v.isEmpty()) {
+                return;
+            }
+            selected = Math.floorMod(selected + delta, v.size());
+            scroll = -1;
+        }
+
+        private void stroke(final KeyEvent key) {
+            if (key.isKey(KeyCode.UP)) {
+                move(-1);
+            } else if (key.isKey(KeyCode.DOWN)) {
+                move(1);
+            } else if (key.isKey(KeyCode.HOME)) {
+                selected = 0;
+                scroll = -1;
+            } else if (key.isKey(KeyCode.END)) {
+                final var v = visible();
+                selected = v.isEmpty() ? 0 : v.size() - 1;
+                scroll = -1;
+            } else if (key.isKey(KeyCode.PAGE_UP)) {
+                move(-8);
+            } else if (key.isKey(KeyCode.PAGE_DOWN)) {
+                move(8);
+            } else if (key.hasCtrl() && key.isCharIgnoreCase('u')) {
+                filterClear();
+            } else if (key.isKey(KeyCode.BACKSPACE)) {
+                filterBackspace();
+            } else {
+                final var cp = key.codePoint();
+                if (cp >= 32 && cp != 127) {
+                    filterAppend((char) cp);
+                }
+            }
+        }
+
+        private boolean confirm(final KeyEvent key) {
+            if (key.isConfirm()) {
+                final var v = visible();
+                if (!v.isEmpty() && selected < v.size() && onSelect != null) {
+                    onSelect.accept(v.get(selected));
+                }
+                return true;
+            }
+            if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
+                if (onCancel != null) {
+                    onCancel.run();
+                }
+                return true;
+            }
+            return false;
+        }
     }
 
     private static final class PendingEditPlan {
@@ -2143,19 +3019,25 @@ public class TuiCommand implements Runnable {
         private volatile boolean showTodos;
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;
+        private volatile boolean quitArmed;
+        private volatile boolean historyActive;
+        private volatile String historyDraft = "";
         private volatile Approval approval;
         private volatile FeedbackPrompt feedbackPrompt;
+        private volatile PickerPrompt picker;
         private volatile PendingEditPlan editPlan;
-        private volatile String modelCompletionBase = "";
-        private volatile int modelCompletionOffset;
-        private volatile String slashCompletionBase = "";
-        private volatile int slashCompletionOffset;
+        private volatile CompletionEngine.Suggestion completion;
+        private volatile int completionIndex;
+        private volatile int completionCursor = -1;
         private final SelectionState selection = new SelectionState();
         private volatile String[][] screenGrid = new String[0][0];
         private volatile int spinnerTick;
         private volatile String lastTodosRender = "";
         private volatile Toast toast;
         private volatile long toastShownAt;
+        private volatile TuiRunner runner;
+        private final java.util.Deque<String> pendingPrompts = new java.util.ArrayDeque<>();
+        private volatile String errorMessage;
 
         private void pushToast(final String message, final ToastLevel level) {
             toast = new Toast(message, level);

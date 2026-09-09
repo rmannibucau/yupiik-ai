@@ -26,6 +26,7 @@ public class TuiTranscriptModel {
     private final StringBuilder toolStream = new StringBuilder();
     private volatile String runningTool;
     private volatile String runningToolCommand;
+    private long toolStartedNanos;
     private volatile boolean busy;
     private volatile String status = "";
     private volatile int scrollBack;
@@ -46,6 +47,7 @@ public class TuiTranscriptModel {
             runningTool = t.name();
             runningToolCommand = toolCommand(t.args());
             toolStream.setLength(0);
+            toolStartedNanos = System.nanoTime();
             scrollBack = 0;
         } else if (event instanceof final AgentEvent.ToolStream t) {
             if (t.name().equals(runningTool)) {
@@ -59,10 +61,11 @@ public class TuiTranscriptModel {
             final var command = runningToolCommand;
             runningTool = null;
             runningToolCommand = null;
+            final var elapsedMs = Math.max(0, (System.nanoTime() - toolStartedNanos) / 1_000_000);
             if (running != null && toolStream.length() > 0) {
                 final var header = command == null || command.isBlank()
-                        ? "*streaming `" + running + "`*"
-                        : "*streaming `" + running + "`: " + command.replace('`', '\'') + "*";
+                        ? "*streaming `" + running + "`* (" + elapsedMs + " ms)"
+                        : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (" + elapsedMs + " ms)";
                 transcript.append("\n\n").append(TOOL_BEGIN).append('\n').append(header).append("\n\n```text\n")
                         .append(toolStream.toString().stripTrailing()).append("\n```\n")
                         .append(TOOL_END).append('\n');
@@ -70,7 +73,8 @@ public class TuiTranscriptModel {
             toolStream.setLength(0);
             if (!t.success()) {
                 transcript.append("\n\n").append(TOOL_BEGIN).append("\n> tool `").append(t.name()).append("` failed: ")
-                        .append(TuiInputSupport.firstLine(t.output())).append('\n').append(TOOL_END).append('\n');
+                        .append(TuiInputSupport.firstLine(t.output())).append(" (").append(elapsedMs).append(" ms)\n")
+                        .append(TOOL_END).append('\n');
             }
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
             promptTokens = u.usage() == null ? 0 : u.usage().promptTokens();

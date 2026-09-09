@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
@@ -77,14 +78,24 @@ public class CliCommand implements Runnable {
     private final UsageTracker usageTracker;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
+    private static final int DIFF_MAX_LINES = 5;
 
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final AtomicBoolean busy = new AtomicBoolean();
     private final MarkdownColorizer colorizer;
     private final StreamTextBuffer textBuffer;
+    private final Symbols symbols;
+    private final ToolPresenter presenter;
+    private final CliVerbosity verbosity;
+    private final boolean tty;
+    private Spinner spinner;
     private volatile long lastInterruptAt;
     private volatile boolean quitRequested;
-    private volatile AgentEvent.UsageUpdated lastUsage;
+    private volatile boolean startedStreaming;
+    private volatile String lastToolArgs;
+    private volatile long turnStartNanos;
+    private volatile int toolsRun;
+    private volatile AgentEvent.UsageUpdated lastUsageEvent;
     private BufferedReader stdin;
     private String sessionId;
     private String activeAgent = "";
@@ -97,7 +108,8 @@ public class CliCommand implements Runnable {
                       final SystemPromptBuilder systemPromptBuilder, final StructuralCodeGraph structuralCodeGraph,
                       final CodingAgentConfiguration configuration, final PlanFileService planFileService,
                       final PlanTodoSeeder planTodoSeeder, final ChatClient chatClient,
-                      final ProviderManager providerManager, final McpManager mcpManager) {
+                      final ProviderManager providerManager, final McpManager mcpManager,
+                      final JsonMapper mapper) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -119,6 +131,10 @@ public class CliCommand implements Runnable {
         this.usageTracker = usageTracker;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
+        this.symbols = new Symbols(conf.ascii());
+        this.presenter = new ToolPresenter(mapper);
+        this.verbosity = CliVerbosity.parse(conf.presentation());
+        this.tty = System.console() != null;
     }
 
     @RootConfiguration("cli")
@@ -127,6 +143,8 @@ public class CliCommand implements Runnable {
             @Property(defaultValue = "\"\"", documentation = "Session context file (a yca session JSONL). Its file name provides the session id to resume or create.") String context,
             @Property(defaultValue = "\"\"", documentation = "Name of a custom agent (from yca.agents) active by default. Its prompt is injected on top of the base system prompt.") String agent,
             @Property(defaultValue = "true", documentation = "Enable ANSI colors. Color is only emitted when stdout is a terminal and neither NO_COLOR nor TERM=dumb is set.") boolean color,
+            @Property(defaultValue = "false", documentation = "Force ASCII-only symbols (no Unicode glyphs) in the output, useful for scripts or non-Unicode terminals.") boolean ascii,
+            @Property(defaultValue = "\"compact\"", documentation = "Tool output verbosity: compact (summaries and live progress), verbose (full dimmed stream) or raw (verbatim, legacy behaviour).") String presentation,
             @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.") boolean showThinking,
             @Property(defaultValue = "true", documentation = "Show tool invocations and output on stderr.") boolean showToolOutput,
             @Property(defaultValue = "false", documentation = "Print the context usage (estimated tokens and percent of the context window) on stderr after each turn.") boolean showUsage,
@@ -150,6 +168,7 @@ public class CliCommand implements Runnable {
             }
         }
         println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+        printBanner();
         if (conf.permitAll()) {
             println(colorizer.warning("WARNING: --permit-all is on; all tool calls will run without approval."));
         }
@@ -179,11 +198,43 @@ public class CliCommand implements Runnable {
         return configured && MarkdownColorizer.autoEnabled();
     }
 
+    /**
+     * Context-rich prompt line: reveals the agent mode (critical for a code
+     * writing agent - plan vs build) and the active model.
+     */
+    private String promptLine() {
+        final var mode = permissionService.mode().name().toLowerCase(Locale.ROOT);
+        final var sb = new StringBuilder("yca");
+        if (colorizer.isEnabled()) {
+            sb.append('[').append(MarkdownColorizer.dim(mode));
+            final var model = chatClient.model();
+            if (model != null && !model.isBlank()) {
+                sb.append(MarkdownColorizer.dim("\u00b7")).append(MarkdownColorizer.dim(model));
+            }
+            sb.append(']');
+        } else {
+            sb.append('[').append(mode).append(']');
+        }
+        return sb.append("> ").toString();
+    }
+
+    private void printBanner() {
+        final var sb = new StringBuilder();
+        sb.append(MarkdownColorizer.bold(symbols.toolMarker() + "yca"))
+                .append(" \u00b7 ").append(permissionService.mode().name().toLowerCase(Locale.ROOT))
+                .append(" mode \u00b7 session ").append(sessionId);
+        final var model = chatClient.model();
+        if (model != null && !model.isBlank()) {
+            sb.append(" \u00b7 ").append(model);
+        }
+        sb.append(" \u00b7 type /help for commands");
+        println(colorizer.status(sb.toString()));
+    }
+
     private void repLoop() {
         try {
             while (true) {
-                final var prompt = "yca> ";
-                print(prompt);
+                print(promptLine());
                 final var line = stdin.readLine();
                 if (line == null || quitRequested) {
                     break;
@@ -218,7 +269,12 @@ public class CliCommand implements Runnable {
         final var prompt = override.prompt();
         cancelled.set(false);
         busy.set(true);
+        startedStreaming = false;
+        toolsRun = 0;
+        turnStartNanos = System.nanoTime();
         textBuffer.reset();
+        stopSpinner();
+        beginSpinner("thinking");
         final var todosBefore = todoStore.all();
         final var history = sessionStore.load(sessionId);
         bridge.sink(this::dispatch);
@@ -227,6 +283,7 @@ public class CliCommand implements Runnable {
         } finally {
             bridge.sink(null);
             busy.set(false);
+            stopSpinner();
             print(textBuffer.flush());
             System.out.flush();
             System.err.flush();
@@ -244,50 +301,168 @@ public class CliCommand implements Runnable {
         if (after.equals(before)) {
             return;
         }
-        final var rendered = todoStore.render();
         println();
         println(colorizer.status("todos:"));
-        println(rendered.isBlank() ? "(no todos)" : rendered);
+        renderTodos(after).forEach(this::println);
+    }
+
+    /**
+     * Colored, current-state rendering of the todo list: green check for
+     * completed, yellow arrow for in-progress, dim dot for pending, plus a
+     * done/total progress line.
+     */
+    private List<String> renderTodos(final List<TodoItem> todos) {
+        final var out = new ArrayList<String>();
+        if (todos.isEmpty()) {
+            out.add(colorizer.status("(no todos)"));
+            return out;
+        }
+        var done = 0;
+        for (final var item : todos) {
+            switch (item.status() == null ? "" : item.status()) {
+                case "in_progress" -> out.add(colorizer.warning(symbols.todoInProgress() + item.content()));
+                case "completed" -> {
+                    out.add(MarkdownColorizer.diffAdd(symbols.todoCompleted() + item.content()));
+                    done++;
+                }
+                default -> out.add(MarkdownColorizer.dim(symbols.todoPending() + item.content()));
+            }
+        }
+        out.add(colorizer.status(done + "/" + todos.size() + " done"));
+        return out;
     }
 
     private void printUsage() {
-        if (!conf.showUsage() || lastUsage == null) {
+        if (lastUsageEvent == null) {
             return;
         }
-        final var usage = lastUsage;
-        System.err.println(colorizer.status("[context] ~"
-                + String.format(Locale.ROOT, "%,d", usage.estimatedContextTokens())
-                + " tokens (" + String.format(Locale.ROOT, "%.1f", usage.contextPercent())
-                + "% of " + String.format(Locale.ROOT, "%,d", usageTracker.contextWindow()) + ")"));
+        final var sb = new StringBuilder();
+        sb.append(symbols.infoMarker());
+        if (conf.showUsage()) {
+            final var usage = lastUsageEvent;
+            sb.append(String.format(Locale.ROOT, "~%,d tokens (%.1f%% of %,d)",
+                    usage.estimatedContextTokens(), usage.contextPercent(), usageTracker.contextWindow()));
+        }
+        if (toolsRun > 0) {
+            if (conf.showUsage()) {
+                sb.append(" \u00b7 ");
+            }
+            sb.append(toolsRun).append(toolsRun == 1 ? " tool" : " tools");
+        }
+        final var elapsedMillis = (System.nanoTime() - turnStartNanos) / 1_000_000L;
+        if (conf.showUsage() || toolsRun > 0) {
+            sb.append(" \u00b7 ");
+        }
+        sb.append(String.format(Locale.ROOT, "%.1fs", elapsedMillis / 1000.0));
+        System.err.println(colorizer.status(sb.toString()));
     }
 
     private void dispatch(final AgentEvent event) {
         if (event instanceof final AgentEvent.TextDelta t) {
+            stopSpinner();
+            startedStreaming = true;
             print(textBuffer.append(t.delta()));
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             if (conf.showThinking()) {
-                System.err.print(MarkdownColorizer.dim(t.delta()));
+                if (verbosity == CliVerbosity.RAW) {
+                    System.err.print(MarkdownColorizer.dim(t.delta()));
+                } else if (!startedStreaming) {
+                    stopSpinner();
+                    System.err.println(MarkdownColorizer.dim(symbols.thinkingMarker() + "thinking"));
+                }
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
-            if (conf.showToolOutput()) {
-                System.err.println(colorizer.status("[tool] " + t.name() + " " + t.args()));
-            }
+            startedStreaming = true;
+            stopSpinner();
+            onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
-            if (conf.showToolOutput()) {
+            if (verbosity == CliVerbosity.RAW) {
+                System.err.print(t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n");
+            } else if (verbosity == CliVerbosity.VERBOSE) {
                 System.err.print(MarkdownColorizer.dim(t.fragment()));
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
-            if (!t.success() && conf.showToolOutput()) {
-                System.err.println(colorizer.error("[tool failed] " + t.name()));
+            toolsRun++;
+            stopSpinner();
+            if (conf.showToolOutput()) {
+                onToolFinished(t);
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
-            System.err.println(colorizer.status("[context] " + c.kind() + " applied"));
+            stopSpinner();
+            System.err.println(colorizer.status(symbols.infoMarker() + "context " + c.kind() + " applied"));
         } else if (event instanceof final AgentEvent.Status s) {
-            System.err.println(colorizer.status("[yca] " + s.message()));
+            stopSpinner();
+            System.err.println(colorizer.status(symbols.infoMarker() + s.message()));
         } else if (event instanceof final AgentEvent.Error e) {
+            stopSpinner();
             System.err.println(colorizer.error("[error] " + e.message()));
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
-            lastUsage = u;
+            lastUsageEvent = u;
+        }
+    }
+
+private void onToolStarted(final AgentEvent.ToolStarted t) {
+        if (!conf.showToolOutput()) {
+            return;
+        }
+        if (verbosity == CliVerbosity.RAW) {
+            System.err.println(colorizer.status("[tool] " + t.name() + " " + t.args()));
+            return;
+        }
+        System.err.println(colorizer.bold(symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+        if (verbosity == CliVerbosity.COMPACT && t.name().equals("bash")) {
+            beginSpinner("running " + presenter.summarize(t.name(), t.args()));
+        }
+    }
+
+    private void onToolFinished(final AgentEvent.ToolFinished t) {
+        stopSpinner();
+        if (verbosity == CliVerbosity.RAW) {
+            if (!t.success() && t.output() != null && !t.output().isBlank()) {
+                System.err.println(colorizer.error(t.output()));
+            }
+            return;
+        }
+        final var indent = "  ";
+        System.err.println();
+        if (!t.success()) {
+            System.err.println(colorizer.error(indent + symbols.resultMarker()
+                    + presenter.result(t.name(), t.output(), false)));
+        } else {
+            System.err.println(colorizer.success(indent + symbols.resultMarker()
+                    + presenter.result(t.name(), t.output(), true)));
+        }
+        if (verbosity == CliVerbosity.COMPACT) {
+            final var diff = presenter.diff(t.name(), lastToolArgs, DIFF_MAX_LINES);
+            for (final var line : diff) {
+                System.err.println(colorizeDiff(line));
+            }
+        }
+    }
+
+    private String colorizeDiff(final String line) {
+        final var marker = line.startsWith(symbols.diffDel()) ? symbols.diffDel()
+                : line.startsWith(symbols.diffAdd()) ? symbols.diffAdd() : null;
+        if (marker == null) {
+            return MarkdownColorizer.dim(line);
+        }
+        final var rest = line.substring(marker.length());
+        return (marker.equals(symbols.diffDel()) ? MarkdownColorizer.diffDel(marker + rest)
+                : MarkdownColorizer.diffAdd(marker + rest));
+    }
+
+    private void beginSpinner(final String label) {
+        if (!tty) {
+            return;
+        }
+        spinner = new Spinner(symbols, System.err, tty);
+        spinner.start(label);
+    }
+
+    private void stopSpinner() {
+        if (spinner != null) {
+            spinner.stop();
+            spinner = null;
         }
     }
 
@@ -350,8 +525,9 @@ public class CliCommand implements Runnable {
             try {
                 final var models = chatClient.models().ids();
                 println(colorizer.status("models (" + models.size() + "):"));
+                final var current = chatClient.model();
                 for (final var m : models) {
-                    println("- " + m);
+                    println(currentEntry(Objects.equals(m, current), m));
                 }
                 println(colorizer.status("use /model <id> to switch"));
             } catch (final IOException | InterruptedException e) {
@@ -375,13 +551,13 @@ public class CliCommand implements Runnable {
             return;
         }
         final var current = chatClient.providerId();
-        println(colorizer.status("providers (current: " + current + "):"));
+        println(colorizer.status("providers (" + providers.size() + "):"));
         if (providers.isEmpty()) {
             println("(no providers configured)");
         } else {
             for (final var p : providers) {
                 final var id = p.id();
-                println("- " + (Objects.equals(id, current) ? id + " (current)" : id));
+                println(currentEntry(Objects.equals(id, current), id));
             }
         }
         println(colorizer.status("use /provider <id> to switch"));
@@ -390,12 +566,12 @@ public class CliCommand implements Runnable {
     private void agent(final String arg) {
         if (arg.isBlank()) {
             final var agents = agentProvider.agents();
-            println(colorizer.status("custom agents (active: " + (activeAgent.isBlank() ? "-" : activeAgent) + "):"));
+            println(colorizer.status("custom agents (" + agents.size() + "):"));
             if (agents.isEmpty()) {
                 println("(no custom agents configured; add them under yca.agents)");
             } else {
                 for (final var a : agents) {
-                    println("- " + a.name());
+                    println(currentEntry(Objects.equals(a.name(), activeAgent), a.name()));
                 }
             }
             println(colorizer.status("use /agent <name> to set the active agent, /agent to clear it"));
@@ -407,6 +583,16 @@ public class CliCommand implements Runnable {
         }
         activeAgent = arg;
         println(colorizer.status("agent: " + arg));
+    }
+
+    /**
+     * Renders one listing entry, marking the current selection with the filled
+     * dot marker and dimming the marker colour for inactive entries.
+     */
+    private String currentEntry(final boolean isCurrent, final String value) {
+        final var marker = isCurrent ? symbols.currentMarker() : " ";
+        final var name = isCurrent ? MarkdownColorizer.accent(value) : value;
+        return marker + " " + name + (isCurrent ? colorizer.status(" (current)") : "");
     }
 
     private void context(final String arg) {
@@ -449,8 +635,7 @@ public class CliCommand implements Runnable {
     }
 
     private void todos() {
-        final var rendered = todoStore.render();
-        println(rendered.isBlank() ? colorizer.status("(no todos)") : rendered);
+        renderTodos(todoStore.all()).forEach(this::println);
     }
 
     private void tools(final String arg) {
@@ -590,11 +775,8 @@ public class CliCommand implements Runnable {
 
     private ApprovalGate approvalGate() {
         return (title, detail) -> {
-            println(colorizer.accent("Approval required: " + title));
-            if (detail != null && !detail.isBlank()) {
-                println("  " + detail);
-            }
-            print(colorizer.status("approve? (y/n) [n] "));
+            printApprovalBox(title, detail);
+            print(colorizer.accent("allow? [y/N] "));
             try {
                 final var line = stdin.readLine();
                 if (line != null) {
@@ -608,6 +790,21 @@ public class CliCommand implements Runnable {
             }
             return false;
         };
+    }
+
+    private void printApprovalBox(final String title, final String detail) {
+        final var width = Math.max(title.length(), detail == null ? 0 : detail.length());
+        println(colorizer.accent(symbols.boxTop() + symbols.boxHorizontal().repeat(width + 2)
+                + symbols.boxCorner()));
+        println(colorizer.warning(symbols.boxLine() + "Permission: "));
+        println(colorizer.bold(symbols.boxLine() + title));
+        if (detail != null && !detail.isBlank()) {
+            for (final var line : detail.split("\n")) {
+                println(colorizer.status(symbols.boxLine() + line));
+            }
+        }
+        println(colorizer.accent(symbols.boxBottom() + symbols.boxHorizontal().repeat(width + 2)
+                + symbols.boxCornerBottom()));
     }
 
     private FeedbackGate feedbackGate() {
@@ -743,14 +940,41 @@ public class CliCommand implements Runnable {
     }
 
     private void printHelp() {
-        println(MarkdownColorizer.bold("yca cli - plain-terminal interactive session"));
+        println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - plain-terminal interactive session"));
         println("  type a prompt to run the agent, or use a slash command:");
-        println("  /help /new /resume <id> /model [name] /provider [id] /agent [name]");
-        println("  /mode build|plan /context [path] /memory /todos /tools [filter]");
-        println("  /permissions all|none /structural-code-graph /compact /editplan [path]");
-        println("  /quit /exit - or type exit to leave the session");
+        printHelpGroup("session", List.of(
+                "/new", "start a fresh session",
+                "/resume <id>", "resume an existing session",
+                "/quit /exit", "leave the session (or Ctrl-D)"));
+        printHelpGroup("config", List.of(
+                "/mode plan|build", "switch the agent working mode",
+                "/model [name]", "show or switch the model",
+                "/provider [id]", "show or switch the provider",
+                "/agent [name]", "show or set the active custom agent",
+                "/permissions all|none", "allow all tools or ask for approval"));
+        printHelpGroup("inspect", List.of(
+                "/context [path]", "dump raw context to stdout or a file",
+                "/memory", "show global and project memory",
+                "/todos", "show the todo list",
+                "/tools [filter]", "list tools, optionally filtered"));
+        printHelpGroup("maintain", List.of(
+                "/compact", "compact the context window",
+                "/editplan [path]", "edit the current plan (plan mode)",
+                "/structural-code-graph", "resync the code structure index"));
+        printHelpGroup("other", List.of(
+                "/help", "this help",
+                "exit", "alias for /exit"));
         println("  keys: Ctrl-C interrupts the running turn; pressed twice when idle (within 2s) it quits.");
-        println("  Ctrl-D exits at the prompt.");
+    }
+
+    private void printHelpGroup(final String title, final List<String> rows) {
+        println(colorizer.accent("  " + title + ":"));
+        for (int i = 0; i < rows.size(); i += 2) {
+            final var cmd = rows.get(i);
+            final var desc = i + 1 < rows.size() ? rows.get(i + 1) : "";
+            final var pad = " ".repeat(Math.max(2, 12 - cmd.length()));
+            println("    " + MarkdownColorizer.bold(cmd) + pad + desc);
+        }
     }
 
     private String resolveSessionId() {

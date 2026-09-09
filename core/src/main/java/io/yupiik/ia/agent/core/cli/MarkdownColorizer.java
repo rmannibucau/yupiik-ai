@@ -289,6 +289,18 @@ public class MarkdownColorizer {
         return "\u001b[38;5;215m" + text + RESET;
     }
 
+    public static String success(final String text) {
+        return "\u001b[38;5;114m" + text + RESET;
+    }
+
+    public static String diffAdd(final String text) {
+        return "\u001b[38;5;150m" + text + RESET;
+    }
+
+    public static String diffDel(final String text) {
+        return "\u001b[38;5;203m" + text + RESET;
+    }
+
     public static String accent(final String text) {
         return ACCENT + text + RESET;
     }

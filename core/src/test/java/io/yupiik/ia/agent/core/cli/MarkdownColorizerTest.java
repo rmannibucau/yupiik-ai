@@ -41,4 +41,20 @@ class MarkdownColorizerTest {
         assertTrue(colorizer.colorizeLine("a **bold** word").contains("\u001b[1mbold\u001b[0m"));
         assertTrue(colorizer.colorizeLine("see [docs](https://yupiik.io)").contains("https://yupiik.io"));
     }
+
+    @Test
+    void styleHelpersWrapWithSgr() {
+        assertTrue(MarkdownColorizer.success("ok").startsWith("\u001b["));
+        assertTrue(MarkdownColorizer.success("ok").endsWith("\u001b[0m"));
+        assertTrue(MarkdownColorizer.diffAdd("+ x").startsWith("\u001b["));
+        assertTrue(MarkdownColorizer.diffDel("- x").startsWith("\u001b["));
+        assertTrue(MarkdownColorizer.dim("x").startsWith("\u001b[2m"));
+    }
+
+    @Test
+    void disabledColorizerLeavesNewStyleOutputUnstyled() {
+        final var colorizer = new MarkdownColorizer(false);
+        assertEquals("final var i = 0;", colorizer.colorizeLine("final var i = 0;"));
+        assertEquals("# Title", colorizer.colorizeLine("# Title"));
+    }
 }
