@@ -24,8 +24,8 @@ public final class Symbols {
         return ascii ? "* " : "\u23fa ";
     }
 
-    public String resultMarker() {
-        return ascii ? "' " : "\u23bf ";
+    public String resultPrefix() {
+        return ascii ? "-> " : "\u21b3 ";
     }
 
     public String thinkingMarker() {

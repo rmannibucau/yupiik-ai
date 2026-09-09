@@ -97,7 +97,6 @@ public class CliCommand implements Runnable {
     private Spinner spinner;
     private volatile long lastInterruptAt;
     private volatile boolean quitRequested;
-    private volatile boolean startedStreaming;
     private volatile String lastToolArgs;
     private volatile long turnStartNanos;
     private volatile int toolsRun;
@@ -307,7 +306,6 @@ public class CliCommand implements Runnable {
         final var prompt = override.prompt();
         cancelled.set(false);
         busy.set(true);
-        startedStreaming = false;
         toolsRun = 0;
         turnStartNanos = System.nanoTime();
         textBuffer.reset();
@@ -398,19 +396,16 @@ public class CliCommand implements Runnable {
     private void dispatch(final AgentEvent event) {
         if (event instanceof final AgentEvent.TextDelta t) {
             stopSpinner();
-            startedStreaming = true;
             print(textBuffer.append(t.delta()));
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             if (conf.showThinking()) {
                 if (verbosity == CliVerbosity.RAW) {
                     System.err.print(MarkdownColorizer.dim(t.delta()));
-                } else if (!startedStreaming) {
-                    stopSpinner();
-                    System.err.println(MarkdownColorizer.dim(symbols.thinkingMarker() + "thinking"));
+                } else {
+                    beginSpinner("thinking");
                 }
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
-            startedStreaming = true;
             stopSpinner();
             onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
@@ -425,6 +420,7 @@ public class CliCommand implements Runnable {
             if (conf.showToolOutput()) {
                 onToolFinished(t);
             }
+            beginSpinner("thinking");
         } else if (event instanceof final AgentEvent.Compacted c) {
             stopSpinner();
             System.err.println(colorizer.status(symbols.infoMarker() + "context " + c.kind() + " applied"));
@@ -462,18 +458,13 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
             return;
         }
         final var indent = "  ";
-        System.err.println();
-        if (!t.success()) {
-            System.err.println(colorizer.error(indent + symbols.resultMarker()
-                    + presenter.result(t.name(), t.output(), false)));
-        } else {
-            System.err.println(colorizer.success(indent + symbols.resultMarker()
-                    + presenter.result(t.name(), t.output(), true)));
-        }
+        final var result = presenter.result(t.name(), t.output(), t.success());
+        System.err.println(MarkdownColorizer.dim(indent + symbols.resultPrefix())
+                + (t.success() ? colorizer.success(result) : colorizer.error(result)));
         if (verbosity == CliVerbosity.COMPACT) {
             final var diff = presenter.diff(t.name(), lastToolArgs, DIFF_MAX_LINES);
             for (final var line : diff) {
-                System.err.println(colorizeDiff(line));
+                System.err.println(indent + colorizeDiff(line));
             }
         }
     }
@@ -864,6 +855,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
 
     private ApprovalGate approvalGate() {
         return (title, detail) -> {
+            stopSpinner();
             printApprovalBox(title, detail);
             print(colorizer.accent("allow? [y/N] "));
             try {
@@ -882,18 +874,64 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
     }
 
     private void printApprovalBox(final String title, final String detail) {
-        final var width = Math.max(title.length(), detail == null ? 0 : detail.length());
-        println(colorizer.accent(symbols.boxTop() + symbols.boxHorizontal().repeat(width + 2)
-                + symbols.boxCorner()));
-        println(colorizer.warning(symbols.boxLine() + "Permission: "));
-        println(colorizer.bold(symbols.boxLine() + title));
+        final var lines = new ArrayList<String>();
+        lines.add("Permission required");
+        lines.add(title);
         if (detail != null && !detail.isBlank()) {
-            for (final var line : detail.split("\n")) {
-                println(colorizer.status(symbols.boxLine() + line));
+            detail.lines().forEach(line -> {
+                if (!line.isBlank()) {
+                    lines.add(line);
+                }
+            });
+        }
+        var width = 0;
+        for (final var line : lines) {
+            width = Math.max(width, line.length());
+        }
+        width = Math.min(Math.max(width, 32), 72);
+        final var rule = symbols.boxHorizontal().repeat(width);
+        println(colorizer.accent(symbols.boxTop() + rule + symbols.boxCorner()));
+        for (int i = 0; i < lines.size(); i++) {
+            for (final var fragment : wrapLine(lines.get(i), width)) {
+                final var styled = i == 0 ? colorizer.bold(padTo(fragment, width))
+                        : i == 1 ? colorizer.warning(padTo(fragment, width))
+                        : colorizer.status(padTo(fragment, width));
+                println(colorizer.accent(symbols.boxLine()) + styled);
             }
         }
-        println(colorizer.accent(symbols.boxBottom() + symbols.boxHorizontal().repeat(width + 2)
-                + symbols.boxCornerBottom()));
+        println(colorizer.accent(symbols.boxBottom() + rule + symbols.boxCornerBottom()));
+    }
+
+    private static List<String> wrapLine(final String text, final int width) {
+        if (text.isEmpty()) {
+            return List.of("");
+        }
+        final var out = new ArrayList<String>();
+        final var words = text.split("\\s+");
+        final var sb = new StringBuilder();
+        for (final var word : words) {
+            if (sb.length() > 0 && sb.length() + 1 + word.length() > width) {
+                out.add(sb.toString());
+                sb.setLength(0);
+            }
+            if (sb.length() > 0) {
+                sb.append(' ');
+            }
+            sb.append(word);
+        }
+        out.add(sb.toString());
+        return out;
+    }
+
+    private static String padTo(final String text, final int width) {
+        if (text.length() > width) {
+            return text.substring(0, Math.max(0, width - 1)) + "\u2026";
+        }
+        final var sb = new StringBuilder(text);
+        while (sb.length() < width) {
+            sb.append(' ');
+        }
+        return sb.toString();
     }
 
     private FeedbackGate feedbackGate() {
