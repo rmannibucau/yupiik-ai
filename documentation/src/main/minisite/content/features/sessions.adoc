@@ -1,0 +1,8 @@
+= Sessions and memory
+:minisite-breadcrumb: Home[index.html] > Features > Sessions and memory
+
+Sessions are recorded as JSONL transcripts that can be resumed later. Each
+session keeps a todo list and advances it as the work progresses.
+
+A memory store is maintained automatically at both the global and per-project
+levels, letting yca remember recurring facts across sessions.

@@ -1,0 +1,17 @@
+= Interactive UI and headless mode
+:minisite-breadcrumb: Home[index.html] > Features > Interactive UI and headless mode
+
+yca can be driven through two interactive frontends or in a single-shot headless
+mode.
+
+The xref:../cli/tui.adoc[`tui`] command opens a full-screen interface: markdown
+transcript, token gauges, a streaming thinking view, approval modals, todos and
+an editable plan (`/editplan`).
+
+The xref:../cli/cli.adoc[`cli`] command is a plain-terminal REPL with the same
+agent underneath: streamed ANSI-colored output, sessions, todos, approval and
+feedback gates and the same slash commands.
+
+For automation, the xref:../cli/run.adoc[`run`] command executes a single
+headless prompt and prints the result on stdout. It exits non-zero on failure,
+making it easy to call from scripts and CI.

@@ -1,0 +1,9 @@
+= Output optimization
+:minisite-breadcrumb: Home[index.html] > Features > Output optimization
+
+Tool-heavy workflows can drown the model in verbose output. yca compacts the
+output of common commands (maven, gradle, git, gh, npm, prettier) before it
+enters the model context, keeping only what matters.
+
+The compaction is pluggable: you can register your own `OutputProcessor`
+implementations to compact other tools.

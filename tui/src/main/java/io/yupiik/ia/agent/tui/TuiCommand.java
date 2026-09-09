@@ -100,28 +100,13 @@ public class TuiCommand implements Runnable {
             | Alt+B / Alt+F | move backward/forward one word |
             | Tab | complete model name or slash command |
             """;
-    private static final String HELP = """
-
-            | command | description |
-            |---|---|
-            | /help | show this help |
-            | /shortcuts | show the keyboard shortcuts |
-            | /new | start a new session |
-            | /resume | resume the last session |
-            | /compact | compact the session context now |
-            | /model [$name] | list /v1/models, or set model (Tab completes) |
-            | /agent [name] | list custom agents, or set the active agent ('' clears, Tab completes) |
-            | /mode | switch mode: /mode build or /mode plan |
-            | /editplan [path] | in plan mode, export the plan to a file, edit it in your editor, then press Enter to reload (Esc or click Cancel to abort) |
-            | /memory | show the project memory |
-            | /context [path] | show the resolved context (system prompt + session), write to path when given |
-            | /permissions (all\\|none) | allow all tools without asking (all), or restore interactive approval (none) |
-            | /theme (light\\|dark) | switch between light and dark themes (persisted) |
-            | /tools [filters] | list tools per MCP server; space separated filters must all match the lowercase server/tool name |
-            | /structural-code-graph | resync the structural code graph (symbols, edges and doc tree) on demand |
-            | /clear | clear the transcript |
-            | /quit | exit yca |
-            """;
+    private String help() {
+        final var sb = new StringBuilder("\n\n| command | description |\n|---|---|");
+        for (final var spec : slashCommands.commands()) {
+            sb.append("\n| `").append(spec.display()).append("` | ").append(spec.description()).append(" |");
+        }
+        return sb.toString();
+    }
 
     private final TuiConf conf;
     private final TuiConfiguration tuiConfiguration;
@@ -151,6 +136,7 @@ public class TuiCommand implements Runnable {
     private volatile Palette palette;
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
+    private final TuiSlashCommands slashCommands;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -165,7 +151,8 @@ public class TuiCommand implements Runnable {
                       final ProviderManager providerManager,
                       final AgentProvider agentProvider,
                       final TuiTranscriptModel model,
-                      final TuiRunnerFactory tuiRunnerFactory) {
+                      final TuiRunnerFactory tuiRunnerFactory,
+                      final TuiSlashCommands slashCommands) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -188,6 +175,7 @@ public class TuiCommand implements Runnable {
         this.agentProvider = agentProvider;
         this.model = model;
         this.tuiRunnerFactory = tuiRunnerFactory;
+        this.slashCommands = slashCommands;
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
         this.completionEngine = new CompletionEngine(
                 () -> completionModels(),
@@ -936,7 +924,7 @@ public class TuiCommand implements Runnable {
     private void slash(final String text, final TuiRunner runner, final UiState state) {
         state.model.transcript().append("\n\n---\n\n**You**\n\n`").append(text).append("`\n");
         switch (text) {
-            case "/help" -> state.model.transcript().append(HELP);
+            case "/help" -> state.model.transcript().append(help());
             case "/shortcuts" -> state.model.transcript().append(SHORTCUTS);
             case "/new" -> {
                 state.sessionId = sessionStore.create();

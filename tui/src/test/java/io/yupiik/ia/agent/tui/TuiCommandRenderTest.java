@@ -191,7 +191,7 @@ class TuiCommandRenderTest {
         return new TuiCommand(conf, tuiConfiguration, configuration, agentLoop, bridge,
                 new PermissionService(configuration), new UserFeedbackService(), null, sessionStore, todoStore, null, null, chatClient, null,
                 null, mcpManager, new VirtualThreadExecutor(), null, null, null,
-                new TuiTranscriptModel(), factory);
+                new TuiTranscriptModel(), factory, new TuiSlashCommands());
     }
 
     private CodingAgentConfiguration configuration() {

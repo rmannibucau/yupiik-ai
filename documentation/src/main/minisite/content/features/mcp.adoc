@@ -1,0 +1,9 @@
+= MCP support
+:minisite-breadcrumb: Home[index.html] > Features > MCP support
+
+Built-in yca tools are exposed as a local MCP server, so any MCP-compatible
+client can reuse them.
+
+Remote MCP servers (over stdio and streamable HTTP) are merged into the same
+tool registry, so the agent can call local and remote tools uniformly while the
+TUI sidebar shows each server's health status.

@@ -1,0 +1,206 @@
+/*
+ * Licensed to Yupiik SAS under one or more contributor
+ * license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright
+ * ownership. Yupiik SAS licenses this file to you under
+ * the Apache License, Version 2.0 (the "License"); you may
+ * not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied. See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.documentation;
+
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.Instance;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.framework.api.configuration.ConfigurationSource;
+import io.yupiik.fusion.framework.api.container.FusionListener;
+import io.yupiik.fusion.framework.api.container.FusionModule;
+import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
+import io.yupiik.fusion.framework.api.lifecycle.Start;
+import io.yupiik.fusion.framework.api.lifecycle.Stop;
+import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.ia.agent.core.cli.slash.SlashCommands;
+import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.BiPredicate;
+import java.util.stream.Stream;
+
+public class CodingAgentDocumentationGenerator implements Runnable {
+    private final Path sourceBase;
+    private final Map<String, String> configuration;
+
+    public CodingAgentDocumentationGenerator(final Path sourceBase, final Map<String, String> configuration) {
+        this.sourceBase = sourceBase;
+        this.configuration = configuration == null ? Map.of() : configuration;
+    }
+
+    @Override
+    public void run() {
+        try (final var container = ConfiguringContainer.of()
+                .register(new ProvidedInstanceBean<>(DefaultScoped.class, ArgsConfigSource.class, () -> new ArgsConfigSource(List.of())))
+                .register(new ProvidedInstanceBean<>(ApplicationScoped.class, ConfigurationSource.class, () -> new ConfigurationSource() {
+                    @Override
+                    public String get(final String key) {
+                        return null;
+                    }
+                }))
+                .register(new FusionModule() { // disable start/stop events to not launch side effects (McpManager, ...)
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+                        return (r, l) -> l.eventType() != Start.class && l.eventType() != Stop.class;
+                    }
+                })
+                .start()) {
+            writeTools(container);
+            writeSlashCommands(container);
+        }
+    }
+
+    private void writeTools(final RuntimeContainer container) {
+        final var tools = container.lookups(EmbeddedTool.class,
+                        it -> it.stream().map(Instance::instance).sorted(Comparator.comparing(EmbeddedTool::name)).toList())
+                .instance();
+        final var sb = new StringBuilder();
+        for (final var category : Stream.of(io.yupiik.ia.agent.core.tools.ToolCategory.values()).sorted(Comparator.comparing(Enum::name)).toList()) {
+            final var inCategory = tools.stream().filter(t -> t.category() == category).toList();
+            if (inCategory.isEmpty()) {
+                continue;
+            }
+            sb.append("== ").append(capitalize(category.name().toLowerCase())).append(" tools\n\n");
+            for (final var tool : inCategory) {
+                sb.append("=== `").append(tool.name()).append("`\n\n");
+                sb.append(tool.description() == null || tool.description().isBlank() ? "No description." : tool.description()).append("\n\n");
+                if (tool.readonly()) {
+                    sb.append("NOTE: Read-only tool: it never modifies the working copy.\n\n");
+                }
+                sb.append("[%collapsible]\n");
+                sb.append(".JSON schema\n====\n[source,json]\n----\n")
+                        .append(prettyJson(tool.schema())).append("\n----\n====\n\n");
+            }
+        }
+        writePartial("embedded-tools.adoc", sb.toString());
+    }
+
+    private void writeSlashCommands(final RuntimeContainer container) {
+        final var providers = container.lookups(SlashCommands.class, it -> it.stream().map(Instance::instance).toList()).instance();
+        if (providers.isEmpty()) {
+            return;
+        }
+        final var sb = new StringBuilder();
+        for (final var provider : providers) {
+            sb.append("== ").append(providerTitle(provider)).append("\n\n");
+            for (final var group : SlashGroup.values()) {
+                final var inGroup = provider.commands().stream().filter(c -> c.group() == group)
+                        .sorted(Comparator.comparing(c -> c.name())).toList();
+                if (inGroup.isEmpty()) {
+                    continue;
+                }
+                sb.append("=== ").append(capitalize(group.name().toLowerCase())).append("\n\n");
+                for (final var spec : inGroup) {
+                    sb.append("`").append(spec.display()).append("`::\n");
+                    sb.append("  ").append(spec.description()).append("\n\n");
+                }
+            }
+        }
+        writePartial("slash-commands.adoc", sb.toString());
+    }
+
+    private String providerTitle(final SlashCommands provider) {
+        if (provider instanceof io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands) {
+            return "CLI commands";
+        }
+        if (provider instanceof io.yupiik.ia.agent.tui.TuiSlashCommands) {
+            return "TUI commands";
+        }
+        return provider.getClass().getSimpleName();
+    }
+
+    private String capitalize(final String value) {
+        return value.isEmpty() ? value : Character.toUpperCase(value.charAt(0)) + value.substring(1);
+    }
+
+    private void writePartial(final String fileName, final String content) {
+        try {
+            final var base = sourceBase.resolve(configuration.getOrDefault("output", "content/_partials/generated"));
+            final var target = base.resolve(fileName).normalize();
+            if (target.getParent() != null) {
+                Files.createDirectories(target.getParent());
+            }
+            Files.writeString(target, content.endsWith("\n") ? content : content + "\n");
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static String prettyJson(final Map<String, Object> value) {
+        final var sb = new StringBuilder();
+        append(sb, value, 0);
+        return sb.toString();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void append(final StringBuilder sb, final Object value, final int indent) {
+        if (value instanceof Map<?, ?> map) {
+            sb.append("{\n");
+            final var entries = new LinkedHashMap<String, Object>((Map<String, Object>) map);
+            final var flat = entries.entrySet().stream().map(entry -> entry.getKey()).toList();
+            for (final var key : flat) {
+                pad(sb, indent + 1).append('"').append(key).append("\": ");
+                append(sb, entries.get(key), indent + 1);
+                sb.append(",\n");
+            }
+            if (!entries.isEmpty()) {
+                sb.setLength(sb.length() - 2); // drop trailing ",\n"
+            }
+            sb.append('\n');
+            pad(sb, indent);
+            sb.append('}');
+        } else if (value instanceof List<?> list) {
+            sb.append("[\n");
+            for (final var item : list) {
+                pad(sb, indent + 1);
+                append(sb, item, indent + 1);
+                sb.append(",\n");
+            }
+            if (!list.isEmpty()) {
+                sb.setLength(sb.length() - 2);
+            }
+            sb.append('\n');
+            pad(sb, indent);
+            sb.append(']');
+        } else if (value == null) {
+            sb.append("null");
+        } else if (value instanceof Number || value instanceof Boolean) {
+            sb.append(value);
+        } else {
+            sb.append('"').append(String.valueOf(value).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+        }
+    }
+
+    private static StringBuilder pad(final StringBuilder sb, final int indent) {
+        for (var i = 0; i < indent; i++) {
+            sb.append("  ");
+        }
+        return sb;
+    }
+}

@@ -103,7 +103,7 @@ class TuiCommandHeadlessTest {
                     d.userFeedbackService(), d.contextManager(), d.sessionStore(), d.todoStore(),
                     d.planTodoSeeder(), d.planFileService(), d.chatClient(), d.memoryStore(), d.systemPromptBuilder(),
                     d.mcpManager(), d.executor(), d.structuralCodeGraph(), d.providerManager(),
-                    d.agentProvider(), d.model(), headlessFactory());
+                    d.agentProvider(), d.model(), headlessFactory(), new TuiSlashCommands());
 
             uiThread = new Thread(command::run, "tui-headless-test");
             uiThread.setDaemon(true);

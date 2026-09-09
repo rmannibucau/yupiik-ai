@@ -1,0 +1,6 @@
+= MCP server health
+:minisite-breadcrumb: Home[index.html] > Features > MCP server health
+
+The TUI sidebar shows a status dot for every configured MCP server, so you can
+tell at a glance whether the built-in server and each remote server are healthy
+before relying on their tools.

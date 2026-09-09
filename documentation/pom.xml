@@ -7,9 +7,9 @@
     <version>1.0.0-SNAPSHOT</version>
   </parent>
   <artifactId>documentation</artifactId>
-  <packaging>pom</packaging>
+  <packaging>jar</packaging>
   <name>YCA :: Documentation</name>
-  <description>YCA documentation (minisite + generated CLI/configuration pages).</description>
+  <description>YCA documentation (minisite + generated CLI/configuration/tools/slash-commands pages).</description>
 
   <dependencies>
     <dependency>
@@ -55,6 +55,56 @@
           <generateIndex>true</generateIndex>
           <siteBase>/yca</siteBase>
           <includeProvidedScope>true</includeProvidedScope>
+          <customScripts><![CDATA[
+<style>
+#config-filter {
+  width: 100%; box-sizing: border-box;
+  padding: .45em .6em; margin-bottom: .8em;
+  border: 1px solid var(--border-color, #ccc); border-radius: 4px;
+  background: var(--background, #fff); color: currentColor; font: inherit;
+}
+.config-no-match { display: block; font-style: italic; opacity: .8; margin-top: .5em; }
+</style>
+<script>
+(function () {
+  var section = document.querySelector('#_global_configuration .sectionbody');
+  if (!section || document.getElementById('config-filter')) { return; }
+  var input = document.createElement('input');
+  input.type = 'search';
+  input.id = 'config-filter';
+  input.placeholder = 'Type to filter the options below by key, for example provider, mcp or contextWindow.';
+  input.autocomplete = 'off';
+  section.insertBefore(input, section.firstChild);
+  var polish = function (s) { return (s || '').toLowerCase().replace(/[^a-z0-9.]+/g, ''); };
+  var apply = function () {
+    var q = polish(input.value);
+    document.querySelectorAll('.config-list dl').forEach(function (dl) {
+      var visible = 0;
+      var noMatch = dl.querySelector('.config-no-match');
+      dl.querySelectorAll('dt.hdlist1').forEach(function (dt) {
+        var dd = dt.nextElementSibling;
+        var show = !q || polish(dt.textContent).indexOf(q) !== -1;
+        dt.style.display = show ? '' : 'none';
+        if (dd && dd.tagName === 'DD') { dd.style.display = show ? '' : 'none'; }
+        if (show) { visible++; }
+      });
+      if (visible === 0) {
+        if (!noMatch) {
+          noMatch = document.createElement('p');
+          noMatch.className = 'config-no-match';
+          noMatch.textContent = 'No option matches the filter.';
+          dl.appendChild(noMatch);
+        }
+        noMatch.style.display = '';
+      } else if (noMatch) {
+        noMatch.style.display = 'none';
+      }
+    });
+  };
+  input.addEventListener('input', apply);
+})();
+</script>
+]]></customScripts>
           <preActions>
             <preAction>
               <type>io.yupiik.fusion.documentation.CliDocumentationGenerator</type>
@@ -72,6 +122,9 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
                 <includeEnvironmentNames>true</includeEnvironmentNames>
                 <formatter>definitionlist</formatter>
               </configuration>
+            </preAction>
+            <preAction>
+              <type>io.yupiik.ia.agent.documentation.CodingAgentDocumentationGenerator</type>
             </preAction>
           </preActions>
         </configuration>

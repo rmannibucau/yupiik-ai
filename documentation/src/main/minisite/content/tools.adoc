@@ -1,0 +1,8 @@
+= Tools
+:minisite-breadcrumb: Home[index.html] > Tools
+
+The coding agent exposes a set of built-in tools to the model. They cover file
+inspection, editing, shell execution and memory. Tools listed as *read-only*
+never modify the working copy.
+
+include::content/_partials/generated/embedded-tools.adoc[]

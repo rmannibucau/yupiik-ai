@@ -1,0 +1,9 @@
+= Built-in tools
+:minisite-breadcrumb: Home[index.html] > Features > Built-in tools
+
+yca ships a set of tools the agent can call to inspect and edit a codebase:
+read/write/edit files, directory listing, glob, grep, running `bash`, a todo
+list, and a memory store.
+
+The complete list of tools, their descriptions and JSON schemas is on the
+xref:../tools.adoc[Tools] page.

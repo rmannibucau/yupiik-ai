@@ -1,0 +1,11 @@
+= Custom agents
+:minisite-breadcrumb: Home[index.html] > Features > Custom agents
+
+`yca.agents` defines named agents. Each is mostly a prompt whose instructions
+are injected on top of the base system prompt (rules, tools, environment,
+project context, skills and memory stay untouched).
+
+An agent is selected on `run` with `--agent <name>`, in the TUI with
+`/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt
+with `@<name> `. See xref:../configuration.adoc[Configuration] for the
+`yca.agents` format.

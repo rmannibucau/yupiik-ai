@@ -1,0 +1,6 @@
+= Reliability
+:minisite-breadcrumb: Home[index.html] > Features > Reliability
+
+Model calls are protected against transient failures: yca applies rate
+limiting, automatic retries and concurrency limits so bursts and API hiccups do
+not break a session.

@@ -1,0 +1,10 @@
+= Context management
+:minisite-breadcrumb: Home[index.html] > Features > Context management
+
+As a conversation grows, context usage is tracked with live gauges. When usage
+crosses configured thresholds, yca prunes or compacts the conversation to stay
+within the active model's window.
+
+Compaction/pruning can optionally run on a dedicated, smaller and cheaper model
+(`model.compact`, `model.prune`). See xref:../configuration.adoc[Configuration]
+for the `yca.pruning.*` and `yca.compaction.*` options.

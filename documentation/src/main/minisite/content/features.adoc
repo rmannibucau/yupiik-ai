@@ -1,0 +1,208 @@
+= Features
+:minisite-index: 50
+:minisite-index-title: Features
+:minisite-index-description: What yca does out of the box: interactive UI, tools, context management, sessions and more.
+:minisite-index-icon: layer-group
+:minisite-keywords: features, tools, sessions, context, mcp, agents, permissions
+:minisite-breadcrumb: Home[index.html] > Features
+
+yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
+
+++++
+<div class="row">
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-terminal"></i>
+          </span>
+          <span class="card-title-text">Interactive UI and headless mode</span>
+        </h4>
+        <div class="card-text">
+          A full-screen TUI, a plain-terminal REPL and a one-shot headless run command.
+        </div>
+        <a title="Interactive UI and headless mode" class="card-link-mask" href="features/ui.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-stream"></i>
+          </span>
+          <span class="card-title-text">Streaming output and reasoning</span>
+        </h4>
+        <div class="card-text">
+          Tokens stream in as they arrive, with reasoning deltas surfaced separately.
+        </div>
+        <a title="Streaming output and reasoning" class="card-link-mask" href="features/streaming.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-tools"></i>
+          </span>
+          <span class="card-title-text">Built-in tools</span>
+        </h4>
+        <div class="card-text">
+          Read/write/edit files, listing, glob, grep, bash, todos and memory.
+        </div>
+        <a title="Built-in tools" class="card-link-mask" href="features/tools.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-plug"></i>
+          </span>
+          <span class="card-title-text">MCP support</span>
+        </h4>
+        <div class="card-text">
+          Local MCP server plus remote stdio and streamable HTTP servers merged into one registry.
+        </div>
+        <a title="MCP support" class="card-link-mask" href="features/mcp.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-compress-arrows-alt"></i>
+          </span>
+          <span class="card-title-text">Output optimization</span>
+        </h4>
+        <div class="card-text">
+          rtk-style compaction of maven, gradle, git, gh, npm and prettier output.
+        </div>
+        <a title="Output optimization" class="card-link-mask" href="features/output.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-tachometer-alt"></i>
+          </span>
+          <span class="card-title-text">Context management</span>
+        </h4>
+        <div class="card-text">
+          Usage gauges with threshold-based pruning and compaction, optionally on a smaller model.
+        </div>
+        <a title="Context management" class="card-link-mask" href="features/context.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-history"></i>
+          </span>
+          <span class="card-title-text">Sessions and memory</span>
+        </h4>
+        <div class="card-text">
+          Resumable JSONL sessions, todos, and global and per-project auto memory.
+        </div>
+        <a title="Sessions and memory" class="card-link-mask" href="features/sessions.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-user-shield"></i>
+          </span>
+          <span class="card-title-text">Permission modes</span>
+        </h4>
+        <div class="card-text">
+          ask, auto_edit and yolo modes with allow/deny glob lists.
+        </div>
+        <a title="Permission modes" class="card-link-mask" href="features/permissions.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-code-branch"></i>
+          </span>
+          <span class="card-title-text">Plan and build modes</span>
+        </h4>
+        <div class="card-text">
+          build uses every tool; plan is read-only and records steps as pending todos.
+        </div>
+        <a title="Plan and build modes" class="card-link-mask" href="features/modes.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-heartbeat"></i>
+          </span>
+          <span class="card-title-text">MCP server health</span>
+        </h4>
+        <div class="card-text">
+          TUI sidebar status dots for the built-in and remote MCP servers.
+        </div>
+        <a title="MCP server health" class="card-link-mask" href="features/health.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-shield-alt"></i>
+          </span>
+          <span class="card-title-text">Reliability</span>
+        </h4>
+        <div class="card-text">
+          Rate limiting, retries and concurrency limits for LLM calls.
+        </div>
+        <a title="Reliability" class="card-link-mask" href="features/reliability.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-robot"></i>
+          </span>
+          <span class="card-title-text">Custom agents</span>
+        </h4>
+        <div class="card-text">
+          Named prompts on top of the base system prompt, selected with --agent, /agent or @name.
+        </div>
+        <a title="Custom agents" class="card-link-mask" href="features/agents.html"></a>
+      </div>
+    </div>
+  </div>
+</div>
+++++
+
+All options are documented in xref:configuration.adoc[Configuration].

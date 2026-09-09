@@ -11,6 +11,9 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
+import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
+import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
@@ -35,6 +38,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -47,6 +51,7 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * Interactive plain-terminal REPL for yca. Requires only a terminal
@@ -76,6 +81,7 @@ public class CliCommand implements Runnable {
     private final ProviderManager providerManager;
     private final McpManager mcpManager;
     private final UsageTracker usageTracker;
+    private final ReplSlashCommands replSlashCommands;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
     private static final int DIFF_MAX_LINES = 5;
@@ -99,6 +105,8 @@ public class CliCommand implements Runnable {
     private BufferedReader stdin;
     private String sessionId;
     private String activeAgent = "";
+    private Path contextPath;
+    private final AtomicBoolean cleaned = new AtomicBoolean();
 
     public CliCommand(final CliConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
                       final PermissionService permissionService, final UserFeedbackService userFeedbackService,
@@ -109,7 +117,7 @@ public class CliCommand implements Runnable {
                       final CodingAgentConfiguration configuration, final PlanFileService planFileService,
                       final PlanTodoSeeder planTodoSeeder, final ChatClient chatClient,
                       final ProviderManager providerManager, final McpManager mcpManager,
-                      final JsonMapper mapper) {
+                      final JsonMapper mapper, final ReplSlashCommands replSlashCommands) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -129,6 +137,7 @@ public class CliCommand implements Runnable {
         this.providerManager = providerManager;
         this.mcpManager = mcpManager;
         this.usageTracker = usageTracker;
+        this.replSlashCommands = replSlashCommands;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
         this.symbols = new Symbols(conf.ascii());
@@ -156,7 +165,7 @@ public class CliCommand implements Runnable {
         stdin = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         installInterruptHandler();
         sessionId = resolveSessionId();
-        final var contextPath = sessionStore.path(sessionId);
+        contextPath = sessionStore.path(sessionId);
         if (conf.context() != null && !conf.context().isBlank()) {
             try {
                 Files.createDirectories(contextPath.getParent() == null ? Path.of(".") : contextPath.getParent());
@@ -181,17 +190,46 @@ public class CliCommand implements Runnable {
         permissionService.setPermitAll(conf.permitAll());
         permissionService.setGate(approvalGate());
         userFeedbackService.setGate(feedbackGate());
+        final var shutdownHook = new Thread(this::shutdownCleanup, "yca-cli-shutdown");
+        Runtime.getRuntime().addShutdownHook(shutdownHook);
         try {
             repLoop();
         } finally {
-            bridge.sink(null);
-            permissionService.setGate(null);
-            permissionService.setPermitAll(false);
-            userFeedbackService.setGate(null);
-            System.out.flush();
-            System.err.flush();
-            println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+            cleanup();
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (final IllegalStateException ignored) {
+                // the JVM is already shutting down
+            }
         }
+    }
+
+    /**
+     * Best-effort cleanup, safe to run several times: both the normal exit path
+     * (finally) and the JVM shutdown hook share it.
+     */
+    private void cleanup() {
+        if (!cleaned.compareAndSet(false, true)) {
+            return;
+        }
+        stopSpinner();
+        bridge.sink(null);
+        permissionService.setGate(null);
+        permissionService.setPermitAll(false);
+        userFeedbackService.setGate(null);
+        System.out.flush();
+        System.err.flush();
+        println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+    }
+
+    /**
+     * Invoked on JVM shutdown (SIGTERM, or Ctrl-C when the signal handler is not
+     * installed): set the flags so an in-flight turn unwinds, then clean up.
+     */
+    private void shutdownCleanup() {
+        cancelled.set(true);
+        quitRequested = true;
+        cleanup();
     }
 
     private boolean colorEnabled(final boolean configured) {
@@ -471,39 +509,90 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         final var command = value.split("\\s+", 2);
         final var name = command[0].toLowerCase(Locale.ROOT);
         final var arg = command.length > 1 ? command[1].strip() : "";
-        switch (name) {
-            case "help" -> printHelp();
-            case "quit", "exit" -> {
-                println(colorizer.status("bye"));
-                return true;
-            }
-            case "new" -> {
-                sessionId = sessionStore.create();
-                println(colorizer.status("new session " + sessionId));
-            }
-            case "resume" -> {
-                if (arg.isBlank()) {
-                    println(colorizer.status("usage: /resume <session-id>"));
-                    break;
-                }
-                sessionId = arg;
-                println(colorizer.status("resumed session " + sessionId));
-            }
-            case "mode" -> mode(arg);
-            case "model" -> model(arg);
-            case "provider" -> provider(arg);
-            case "agent" -> agent(arg);
-            case "context" -> context(arg);
-            case "memory" -> memory();
-            case "todos" -> todos();
-            case "tools" -> tools(arg);
-            case "permissions" -> permissions(arg);
-            case "structural-code-graph" -> resyncGraph();
-            case "compact" -> compact();
-            case "editplan" -> editPlan(arg);
-            default -> println(colorizer.status("unknown command /" + name + " - type /help"));
+        final var handler = slashHandlers().get(name);
+        if (handler == null) {
+            println(colorizer.status("unknown command /" + name + " - type /help"));
+            return false;
         }
-        return false;
+        return handler.apply(arg);
+    }
+
+    private Map<String, Function<String, Boolean>> slashHandlers() {
+        return Map.ofEntries(
+                Map.entry("help", arg -> {
+                    printHelp();
+                    return false;
+                }),
+                Map.entry("quit", arg -> {
+                    println(colorizer.status("bye"));
+                    return true;
+                }),
+                Map.entry("exit", arg -> {
+                    println(colorizer.status("bye"));
+                    return true;
+                }),
+                Map.entry("new", arg -> {
+                    sessionId = sessionStore.create();
+                    println(colorizer.status("new session " + sessionId));
+                    return false;
+                }),
+                Map.entry("resume", arg -> {
+                    if (arg.isBlank()) {
+                        println(colorizer.status("usage: /resume <session-id>"));
+                        return false;
+                    }
+                    sessionId = arg;
+                    println(colorizer.status("resumed session " + sessionId));
+                    return false;
+                }),
+                Map.entry("mode", arg -> {
+                    mode(arg);
+                    return false;
+                }),
+                Map.entry("model", arg -> {
+                    model(arg);
+                    return false;
+                }),
+                Map.entry("provider", arg -> {
+                    provider(arg);
+                    return false;
+                }),
+                Map.entry("agent", arg -> {
+                    agent(arg);
+                    return false;
+                }),
+                Map.entry("context", arg -> {
+                    context(arg);
+                    return false;
+                }),
+                Map.entry("memory", arg -> {
+                    memory();
+                    return false;
+                }),
+                Map.entry("todos", arg -> {
+                    todos();
+                    return false;
+                }),
+                Map.entry("tools", arg -> {
+                    tools(arg);
+                    return false;
+                }),
+                Map.entry("permissions", arg -> {
+                    permissions(arg);
+                    return false;
+                }),
+                Map.entry("structural-code-graph", arg -> {
+                    resyncGraph();
+                    return false;
+                }),
+                Map.entry("compact", arg -> {
+                    compact();
+                    return false;
+                }),
+                Map.entry("editplan", arg -> {
+                    editPlan(arg);
+                    return false;
+                }));
     }
 
     private void mode(final String arg) {
@@ -942,38 +1031,25 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
     private void printHelp() {
         println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - plain-terminal interactive session"));
         println("  type a prompt to run the agent, or use a slash command:");
-        printHelpGroup("session", List.of(
-                "/new", "start a fresh session",
-                "/resume <id>", "resume an existing session",
-                "/quit /exit", "leave the session (or Ctrl-D)"));
-        printHelpGroup("config", List.of(
-                "/mode plan|build", "switch the agent working mode",
-                "/model [name]", "show or switch the model",
-                "/provider [id]", "show or switch the provider",
-                "/agent [name]", "show or set the active custom agent",
-                "/permissions all|none", "allow all tools or ask for approval"));
-        printHelpGroup("inspect", List.of(
-                "/context [path]", "dump raw context to stdout or a file",
-                "/memory", "show global and project memory",
-                "/todos", "show the todo list",
-                "/tools [filter]", "list tools, optionally filtered"));
-        printHelpGroup("maintain", List.of(
-                "/compact", "compact the context window",
-                "/editplan [path]", "edit the current plan (plan mode)",
-                "/structural-code-graph", "resync the code structure index"));
-        printHelpGroup("other", List.of(
-                "/help", "this help",
-                "exit", "alias for /exit"));
+        for (final var group : SlashGroup.values()) {
+            final var rows = replSlashCommands.commands().stream()
+                    .filter(c -> c.group() == group)
+                    .toList();
+            if (rows.isEmpty()) {
+                continue;
+            }
+            printHelpGroup(group.name().toLowerCase(Locale.ROOT), rows);
+        }
         println("  keys: Ctrl-C interrupts the running turn; pressed twice when idle (within 2s) it quits.");
     }
 
-    private void printHelpGroup(final String title, final List<String> rows) {
+    private void printHelpGroup(final String title, final List<SlashCommandSpec> rows) {
         println(colorizer.accent("  " + title + ":"));
-        for (int i = 0; i < rows.size(); i += 2) {
-            final var cmd = rows.get(i);
-            final var desc = i + 1 < rows.size() ? rows.get(i + 1) : "";
-            final var pad = " ".repeat(Math.max(2, 12 - cmd.length()));
-            println("    " + MarkdownColorizer.bold(cmd) + pad + desc);
+        for (final var spec : rows) {
+            final var display = spec.display();
+            final var desc = spec.description();
+            final var pad = " ".repeat(Math.max(2, 12 - display.length()));
+            println("    " + MarkdownColorizer.bold(display) + pad + desc);
         }
     }
 
@@ -993,9 +1069,24 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
 
     private void installInterruptHandler() {
         try {
-            sun.misc.Signal.handle(new sun.misc.Signal("INT"), signal -> onInterrupt());
+            // fired reflectively so the build does not depend on the internal
+            // sun.misc package; when unavailable the portable shutdown hook covers Ctrl-C.
+            final var signal = Class.forName("sun.misc.Signal");
+            final var handler = Class.forName("sun.misc.SignalHandler");
+            final var handle = signal.getMethod("handle", signal, handler);
+            final var ctor = signal.getConstructor(String.class);
+            final Object interruptHandler = Proxy.newProxyInstance(
+                    CliCommand.class.getClassLoader(),
+                    new Class<?>[]{handler},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("handle")) {
+                            onInterrupt();
+                        }
+                        return null;
+                    });
+            handle.invoke(null, ctor.newInstance("INT"), interruptHandler);
         } catch (final Throwable ignored) {
-            // signal handling is best-effort; default behavior remains
+            // signal handling is best-effort; the shutdown hook remains the portable fallback
         }
     }
 

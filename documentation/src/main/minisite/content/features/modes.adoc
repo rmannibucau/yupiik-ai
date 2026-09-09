@@ -1,0 +1,10 @@
+= Plan and build modes
+:minisite-breadcrumb: Home[index.html] > Features > Plan and build modes
+
+yca access modes shape how the agent works:
+
+* `build` makes every tool available;
+* `plan` is read-only: it inspects the codebase and records its approach as
+  pending todos instead of making changes.
+
+The active mode can be switched at runtime with `/mode`.

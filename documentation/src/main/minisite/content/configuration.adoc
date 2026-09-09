@@ -16,43 +16,37 @@ Configuration is resolved from, highest priority first:
 . Environment variables: `YCA_PROVIDER_MODEL` style keys (dots/hyphens become
   underscores, uppercased)
 
-The `provider` group supports multiple providers. Each entry has an `id` that is
-referenced as `$<id>/<model>` anywhere a model is expected (main model,
-`model.compact`, `model.prune`, code graph enrichment). `defaultProvider`
-selects the active entry (blank falls back to the first, then to the implicit
-`default` provider). A provider's optional `providerSpecificOptions` JSON object
-is merged into every API call payload for it. For single-provider setups the
-legacy flat scalars (`yca.provider.baseUrl`, `.apiKey`, `.model`, `.api`,
-`.reasoningField`, `.contextWindow`, `.timeoutSeconds`) build the implicit
-`default` provider.
+The `provider` group (`yca.provider.*`) supports multiple providers. Each entry
+has an `id` referenced as `$<id>/<model>` anywhere a model is expected (main
+model, `model.compact`, `model.prune`, code graph enrichment).
+`yca.provider.defaultProvider` selects the active entry (blank falls back to the
+first, then to the implicit `default` provider). A provider's optional
+`providerSpecificOptions` JSON object is merged into every API call payload for
+it. For single-provider setups, the flat `yca.provider.*` scalars build the
+implicit `default` provider.
 
-A provider's `contextWindow` accepts an explicit token count; when zero or
-negative (the default), it is auto-detected from the provider `/v1/models`
-vendor extensions (`context_window`, `model_context_window`, `context_length`,
-`max_model_len`, llama.cpp `meta.n_ctx`, or `meta.n_ctx_train` when smaller
-than the default). Detected values are totals (prompt + completion combined);
-they are cached one day per provider and model under
-`<storageHome>/context-window/` and fall back to 128000 when nothing is found.
-Detection failures are ignored. The pruning and compaction thresholds keep the
-remaining window as headroom for completions.
-
-The main configuration groups are documented below. Command specific options
-(`run.*`, `tui.*`) are documented in the
-xref:cli/index.adoc[CLI reference].
+A provider's context window (`yca.provider.*.contextWindow`) accepts an explicit
+token count; when zero or negative (the default) it is auto-detected from the
+provider `/v1/models` vendor extensions, cached one day per provider and model,
+falling back to 128000 when nothing is found. Detected values are totals (prompt
++ completion combined); the pruning and compaction thresholds (`yca.pruning.*`,
+`yca.compaction.*`) keep headroom for completions.
 
 == Global configuration
 
 `yca.*` options:
 
+[role="config-list"]
+--
 include::content/_partials/generated/documentation.core.adoc[]
+--
 
 == Structural code graph doc tree
 
 When `yca.structuralCodeGraph.docs` is enabled (default), the agent writes a
-per-source-file markdown doc tree under the graph store, mirroring the project
-source layout. For each parsed file it emits a deterministic structural extract
-(symbols and edges). When `yca.structuralCodeGraph.enrich` is enabled, each doc
-also gains an asynchronous, serialized LLM `## Summary` section.
+per-source-file markdown doc tree under the graph store (`yca.structuralCodeGraph.docStoreDir`),
+mirroring the project source layout. With `yca.structuralCodeGraph.enrich`, each
+doc also gains an asynchronous, serialized LLM `## Summary` section.
 
 For example `src/main/java/acme/Order.java` produces
 `<storeDir>/docs/src/main/java/acme/Order.java.md`. Symbols and relations are
@@ -64,13 +58,12 @@ the incremental fingerprint re-indexing.
 
 == Custom agents
 
-`yca.agents` defines named custom agents. Each agent is mainly a prompt; its
+`yca.agents` defines named custom agents. Each agent is mainly a prompt whose
 instructions are injected on top of the base system prompt (rules, tools,
 environment, project context, skills and memory are kept untouched). The `prompt`
-is inline text, or a file path whose content is loaded (for example
-`prompt=~/.yupiik/coding-agent/agents/reviewer.md`). A value is treated as a file
-path when it expands to an existing regular file, otherwise it is used as inline
-text.
+is inline text, or a file path whose content is loaded when it expands to an
+existing regular file (for example
+`prompt=~/.yupiik/coding-agent/agents/reviewer.md`).
 
 .Example configuration.json
 [source,json]
@@ -86,9 +79,3 @@ text.
 An agent is selected on `run` with `--agent <name>`, in the TUI with
 `/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt with
 `@<name> `.
-
-== Command configuration
-
-`run.*` and `tui.*` options:
-
-include::content/_partials/generated/documentation.tui.adoc[]

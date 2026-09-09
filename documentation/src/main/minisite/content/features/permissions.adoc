@@ -1,0 +1,11 @@
+= Permission modes
+:minisite-breadcrumb: Home[index.html] > Features > Permission modes
+
+yca gates tool calls behind configurable permission modes:
+
+* `ask` prompts before each call that touches the system;
+* `auto_edit` allows file edits without prompting;
+* `yolo` bypasses permission checks and allows all calls.
+
+Allow/deny glob lists refine what the agent may touch in any mode. See
+xref:../configuration.adoc[Configuration] for the permission options.

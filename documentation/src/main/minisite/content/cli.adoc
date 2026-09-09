@@ -6,30 +6,20 @@
 :minisite-keywords: cli, tui, run, commands
 :minisite-breadcrumb: Home[index.html] > CLI
 
-yca ships three commands plus the standard fusion helpers:
+yca splits its CLI into two interactive frontends and automation-oriented
+commands. The `cli` and `tui` commands each start a session in front of the same
+agent:
 
-[cols="a,2a"]
-|===
-|Command |Description
+* `cli` is a plain-terminal REPL: streamed ANSI-colored output, sessions, todos,
+  approval/feedback gates and slash commands.
+* `tui` is a full-screen interface (TamboUI): markdown transcript, token gauges,
+  a thinking stream, approval modals and an editable plan (`/editplan`).
 
-| xref:cli/tui.adoc[tui]
-| Interactive terminal interface (TamboUI): markdown transcript, token gauges,
-todos, thinking stream, approval modals, editable plan (`/editplan`).
+For automation, `run` executes a single headless prompt and prints the result on
+stdout. `completion bash` generates the bash completion script.
 
-| xref:cli/cli.adoc[cli]
-| Interactive plain-terminal REPL (no full-screen UI): streamed ANSI-colored
-output, sessions, todos, approval/feedback gates and the same slash commands.
-
-| xref:cli/run.adoc[run]
-| Headless one-shot execution: `--prompt` (required) and optional `--session`,
-prints deltas on stdout, exits non-zero on failure.
-
-| xref:cli/completion-bash.adoc[completion bash]
-| Generate the bash completion script.
-
-| xref:cli/index.adoc[All commands]
-| Generated CLI reference for every command and option.
-|===
+The complete generated reference for every command and its options (including
+`cli.*`, `tui.*` and `run.*`) is on the xref:cli/index.adoc[All commands] page.
 
 Example:
 
@@ -44,4 +34,13 @@ TIP: The structural code graph (enabled by default) uses the `javac` API and
 therefore needs a JDK (not a plain JRE). No extra JVM flags are required.
 
 TUI options (`tui.*`), cli options (`cli.*`) and run options (`run.*`) are
-documented in xref:configuration.adoc[Configuration] and on each command page.
+documented on their xref:cli/index.adoc[command pages].
+
+== Slash commands
+
+Both the `tui` and `cli` interactive sessions expose slash commands. The same
+command name may behave slightly differently in each interface (for example the
+TUI opens a picker when the argument is omitted). The lists below are generated
+from the application.
+
+include::content/_partials/generated/slash-commands.adoc[]
