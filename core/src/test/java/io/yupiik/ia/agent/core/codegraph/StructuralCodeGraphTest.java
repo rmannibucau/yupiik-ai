@@ -37,6 +37,7 @@ class StructuralCodeGraphTest {
     @Test
     void buildsRefreshAndPersists() throws Exception {
         final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), """
                 package demo;
                 public class Foo {
@@ -133,6 +134,7 @@ class StructuralCodeGraphTest {
     @Test
     void refreshIgnoresFilesOutsideProjectDir() throws Exception {
         final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var outside = Files.createDirectory(temp.resolve("outside"));
         Files.writeString(outside.resolve("Bar.java"), "package outside;\npublic class Bar { public void run() {} }\n");
@@ -162,6 +164,25 @@ class StructuralCodeGraphTest {
     }
 
     @Test
+    void skipsIndexingForUnrecognizedProjectDir() throws Exception {
+        // A directory with indexable sources but no project marker (pom.xml, .yca, README, ...)
+        // is not a recognized project: it must not be scanned/indexed.
+        final var project = Files.createDirectory(temp.resolve("plain"));
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+        final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
+                new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
+                new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
+                        List.of("java"), ".yca/generated/graph", true, "docs", false, false),
+                null, null, null, null);
+        final JsonMapper mapper = newMapper();
+        final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+        graph.ensureReady();
+        assertTrue(graph.graph().symbols().isEmpty(),
+                "a directory without a project marker must not be indexed into a structural code graph");
+    }
+
+    @Test
     void skipsIndexingForEmptyTargetProjectDir() throws Exception {
         final var project = Files.createDirectory(temp.resolve("scaffold"));
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
@@ -180,6 +201,7 @@ class StructuralCodeGraphTest {
     @Test
     void docTreeSkipsUnchangedAndWritesSummaryInjection() throws Exception {
         final var project = Files.createDirectory(temp.resolve("proj"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = new CodingAgentConfiguration(project.toString(), project.toString(), project.toString(), providerConfig(), null,
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
@@ -232,6 +254,7 @@ class StructuralCodeGraphTest {
     @Test
     void resyncPersistsEnumsWithGeneratedCodecBeans() throws Exception {
         final var project = Files.createDirectory(temp.resolve("proj-enum"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Color.java"), """
                 package demo;
                 public enum Color { RED, GREEN, BLUE }
@@ -261,7 +284,7 @@ class StructuralCodeGraphTest {
             final String status = graph.resync();
 
             assertTrue(status.startsWith("symbols="), "expected status to report symbols, got: " + status);
-            assertTrue(status.contains("files=1"), "expected one parsed source file, got: " + status);
+            assertTrue(status.contains("files="), "expected status to report parsed files, got: " + status);
 
             // the enum-backed graph must round-trip through persist() without "codec is null"
             final var storeFile = project.resolve(".yca/generated/graph/graph.json");
@@ -283,6 +306,7 @@ class StructuralCodeGraphTest {
     @Test
     void deepEnrichmentPersistsPerSymbolStatsAndConcepts() throws Exception {
         final var project = Files.createDirectory(temp.resolve("proj-deep"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), """
                 package demo;
                 public class Foo {

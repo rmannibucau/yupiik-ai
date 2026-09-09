@@ -14,8 +14,11 @@ import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -27,7 +30,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
-import java.util.stream.Stream;
 
 /**
  * The structural code graph of the agent: a symbol-and-edge graph extracted from the working tree by the
@@ -43,6 +45,10 @@ import java.util.stream.Stream;
 public class StructuralCodeGraph {
     private static final Logger LOGGER = Logger.getLogger(StructuralCodeGraph.class.getName());
     private static final Set<String> SKIP_DIRS = Set.of("target", ".git", ".idea", ".yca", "node_modules", "build", "generated-sources");
+    private static final Set<String> PROJECT_MARKERS = Set.of(
+            "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+            "build.xml", "Makefile", "package.json", "requirements.txt", "setup.py", "pyproject.toml",
+            "Cargo.toml", "go.mod", "README.md", "README.adoc", ".yca");
 
     private final CodingAgentConfiguration configuration;
     private final List<GraphParser> parsers;
@@ -383,12 +389,28 @@ public class StructuralCodeGraph {
             return List.of();
         }
         final var result = new ArrayList<Path>();
-        try (final Stream<Path> walk = Files.walk(root)) {
-            walk.filter(Files::isRegularFile)
-                    .filter(p -> !isSkipped(p))
-                    .filter(this::sizeOk)
-                    .forEach(result::add);
-        } catch (final IOException e) {
+        try {
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                    return isSkipped(dir) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
+                    if (attrs.isRegularFile() && sizeOk(file)) {
+                        result.add(file);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
+                    LOGGER.fine(() -> "Skipping unreadable path during structural scan: " + file + " (" + exc + ")");
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (final IOException | UncheckedIOException e) {
             return List.of();
         }
         result.sort(Comparator.comparing(Path::toString));
@@ -396,8 +418,23 @@ public class StructuralCodeGraph {
     }
 
     private boolean hasIndexableContent() {
+        // Only index directories that look like an actual project (build file, manifest or a README
+        // marker, or an explicit .yca marker). Otherwise a random working directory (e.g. /tmp) must
+        // not trigger a full recursive scan of the filesystem.
+        if (!isRecognizedProject()) {
+            return false;
+        }
         for (final var file : candidateFiles()) {
             if (parserFor(file) != null) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isRecognizedProject() {
+        for (final var marker : PROJECT_MARKERS) {
+            if (Files.exists(projectDir.resolve(marker))) {
                 return true;
             }
         }
