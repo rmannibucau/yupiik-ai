@@ -16,8 +16,4 @@ public record SessionEntry(long at, String role, Object content, List<ToolCall> 
                                   final List<ToolCall> toolCalls, final String toolCallId) {
         return new SessionEntry(at, role, content, toolCalls, toolCallId, null, null, null);
     }
-
-    public static SessionEntry marker(final long at, final String event) {
-        return new SessionEntry(at, null, null, null, null, null, event, null);
-    }
 }

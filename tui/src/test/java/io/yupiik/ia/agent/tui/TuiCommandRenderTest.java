@@ -26,6 +26,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
@@ -155,7 +156,7 @@ class TuiCommandRenderTest {
     private TuiCommand command(final AgentEventBridge bridge, final AgentLoop agentLoop) {
         final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
-        final var conf = new TuiCommand.TuiConf(false, false, "dark", true);
+        final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, false, "dark", true);
         final var tuiConfiguration = new TuiConfiguration("#9d7cd8", "#fab283", "#7fd88f", "#f5a742",
                 "#e06c75", "#56b6c2", "#eeeeee", "#808080", 0.85, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, null);
         final var sessionStore = new SessionStore() {
@@ -169,7 +170,7 @@ class TuiCommandRenderTest {
                 return List.of();
             }
         };
-        final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper));
+        final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
         final var todoStore = new TodoStore(configuration, mapper);
         final var mcpManager = new McpManager(configuration, mapper, List.of());
         final var factory = new TuiRunnerFactory() {
@@ -191,7 +192,7 @@ class TuiCommandRenderTest {
         return new TuiCommand(conf, tuiConfiguration, configuration, agentLoop, bridge,
                 new PermissionService(configuration), new UserFeedbackService(), null, sessionStore, todoStore, null, null, chatClient, null,
                 null, mcpManager, new VirtualThreadExecutor(), null, null, null,
-                new TuiTranscriptModel(), factory, new TuiSlashCommands());
+                new TuiTranscriptModel(), factory, new TuiSlashCommands(), Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {

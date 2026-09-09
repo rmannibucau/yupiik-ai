@@ -8,28 +8,13 @@ import dev.tamboui.tui.event.KeyModifiers;
 import dev.tamboui.tui.event.PasteEvent;
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
 import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
 import io.yupiik.fusion.framework.api.container.FusionListener;
 import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
-import io.yupiik.fusion.framework.api.configuration.impl.MapConfigSource;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
-import io.yupiik.ia.agent.core.agent.AgentProvider;
-import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.context.ContextManager;
-import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.memory.MemoryStore;
-import io.yupiik.ia.agent.core.mcp.McpManager;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
-import io.yupiik.ia.agent.core.question.UserFeedbackService;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
-import io.yupiik.ia.agent.core.session.SessionStore;
-import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
-import io.yupiik.ia.agent.core.todo.TodoStore;
-import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -39,11 +24,11 @@ import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.BooleanSupplier;
 
 import static java.time.Duration.ofMillis;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -98,12 +83,12 @@ class TuiCommandHeadlessTest {
     void answersThroughRealAgentLoop() throws Exception {
         try (final var container = container(); final var deps = container.lookup(TuiDeps.class)) {
             final var d = deps.instance();
-            final var command = new TuiCommand(new TuiCommand.TuiConf(false, true, "dark", true),
+            final var command = new TuiCommand(new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
                     d.tuiConfiguration(), d.configuration(), d.agentLoop(), d.bridge(), d.permissionService(),
                     d.userFeedbackService(), d.contextManager(), d.sessionStore(), d.todoStore(),
                     d.planTodoSeeder(), d.planFileService(), d.chatClient(), d.memoryStore(), d.systemPromptBuilder(),
                     d.mcpManager(), d.executor(), d.structuralCodeGraph(), d.providerManager(),
-                    d.agentProvider(), d.model(), headlessFactory(), new TuiSlashCommands());
+                    d.agentProvider(), d.model(), headlessFactory(), new TuiSlashCommands(), Clock.systemUTC());
 
             uiThread = new Thread(command::run, "tui-headless-test");
             uiThread.setDaemon(true);

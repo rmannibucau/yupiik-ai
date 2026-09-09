@@ -17,9 +17,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
 import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optBool;
 import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
 
 @ApplicationScoped
 public class GrepTool implements EmbeddedTool {

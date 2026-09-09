@@ -10,6 +10,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Clock;
 import java.util.Optional;
 
 /**
@@ -23,15 +24,18 @@ public class ContextWindowCache {
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final Clock clock;
 
-    public ContextWindowCache(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+    public ContextWindowCache(final CodingAgentConfiguration configuration, final JsonMapper mapper, final Clock clock) {
         this.configuration = configuration;
         this.mapper = mapper;
+        this.clock = clock;
     }
 
     protected ContextWindowCache() {
         this.configuration = null;
         this.mapper = null;
+        this.clock = null;
     }
 
     @JsonModel
@@ -44,7 +48,7 @@ public class ContextWindowCache {
         if (!Files.isRegularFile(file)) {
             return Optional.empty();
         }
-        final var now = System.currentTimeMillis();
+        final var now = clock.millis();
         try {
             Optional<Integer> found = Optional.empty();
             for (final var line : Files.readAllLines(file)) {

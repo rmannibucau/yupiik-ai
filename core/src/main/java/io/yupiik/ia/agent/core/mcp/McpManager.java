@@ -3,7 +3,6 @@ package io.yupiik.ia.agent.core.mcp;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 
 import java.io.IOException;

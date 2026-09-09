@@ -1,8 +1,8 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import io.yupiik.fusion.framework.build.api.json.JsonOthers;
+import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 
 import java.util.List;
 import java.util.Map;

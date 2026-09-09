@@ -3,9 +3,8 @@ package io.yupiik.ia.agent.core.agent;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -25,6 +24,7 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,6 +52,7 @@ public class AgentLoop {
     private final StructuralCodeGraph structuralCodeGraph;
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
+    private final Clock clock;
 
     public AgentLoop(final ChatClient chatClient, final ToolRegistry toolRegistry,
                      final ToolExecutionService toolExecutionService, final CodingAgentConfiguration configuration,
@@ -60,7 +61,7 @@ public class AgentLoop {
                      final SystemPromptBuilder systemPromptBuilder, final MemoryExtractor memoryExtractor,
                      final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper,
                      final StructuralCodeGraph structuralCodeGraph, final ProviderManager providerManager,
-                     final AgentProvider agentProvider) {
+                     final AgentProvider agentProvider, final Clock clock) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -77,6 +78,7 @@ public class AgentLoop {
         this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
+        this.clock = clock;
     }
 
     protected AgentLoop() {
@@ -96,11 +98,7 @@ public class AgentLoop {
         this.structuralCodeGraph = null;
         this.providerManager = null;
         this.agentProvider = null;
-    }
-
-    public String run(final String prompt, final String sessionId, final List<Message> history,
-                      final BooleanSupplier cancelled) {
-        return run(prompt, null, sessionId, history, cancelled);
+        this.clock = null;
     }
 
     public String run(final String prompt, final String agentName, final String sessionId, final List<Message> history,
@@ -114,7 +112,7 @@ public class AgentLoop {
             messages.addAll(history);
         }
         messages.add(Message.user(prompt));
-        sessionStore.append(sessionId, SessionEntry.of(System.currentTimeMillis(), "user", prompt, null, null));
+        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", prompt, null, null));
         statusReporter.setSink(message -> emitter.emit(new AgentEvent.Status(message)));
 
         try {
@@ -140,6 +138,8 @@ public class AgentLoop {
                         final BooleanSupplier cancelled) throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         final var maxIterations = configuration.llm().maxIterations();
+        final var model = providerManager.resolveDefault().model();
+        final var tools = toolRegistry.toWireTools();
         var overflowRetried = false;
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
             if (contextManager.pruneNeeded(messages)) {
@@ -159,8 +159,8 @@ public class AgentLoop {
                 }
             }
 
-            final var request = new ChatCompletionRequest(providerManager.resolveDefault().model(), messages,
-                    null, null, toolRegistry.toWireTools(), "auto", null, null, null);
+            final var request = new ChatCompletionRequest(model, messages,
+                    null, null, tools, "auto", null, null, null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[]{io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final Message assistant;
             try {
@@ -182,7 +182,7 @@ public class AgentLoop {
             }
             usageTracker.record(usage[0]);
             messages.add(assistant);
-            sessionStore.append(sessionId, SessionEntry.of(System.currentTimeMillis(),
+            sessionStore.append(sessionId, SessionEntry.of(clock.millis(),
                     "assistant", str(assistant.content()), assistant.toolCalls(), null));
             emitUsage(messages);
 
@@ -232,7 +232,7 @@ public class AgentLoop {
         }
         final ToolResult result = toolExecutionService.execute(tool, args);
         messages.add(Message.tool(call.id(), result.output() == null || result.output().isBlank() ? "(no output)" : result.output()));
-        sessionStore.append(sessionId, SessionEntry.of(System.currentTimeMillis(), "tool",
+        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool",
                 result.output(), null, name));
         emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
     }

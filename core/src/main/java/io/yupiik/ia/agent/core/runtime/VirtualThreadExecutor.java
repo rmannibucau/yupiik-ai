@@ -14,10 +14,6 @@ public class VirtualThreadExecutor {
         delegate.execute(task);
     }
 
-    public <A> java.util.concurrent.CompletableFuture<A> supply(final java.util.function.Supplier<A> task) {
-        return java.util.concurrent.CompletableFuture.supplyAsync(task, delegate);
-    }
-
     @Destroy
     public void shutdown() {
         delegate.shutdown();

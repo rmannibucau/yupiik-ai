@@ -130,8 +130,4 @@ public final class PromptHistory {
         index--;
         return entries.get(index);
     }
-
-    public void cancel() {
-        index = -1;
-    }
 }

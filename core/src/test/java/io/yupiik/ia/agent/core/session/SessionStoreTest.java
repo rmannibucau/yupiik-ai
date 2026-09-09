@@ -7,13 +7,13 @@ import io.yupiik.ia.agent.core.configuration.SessionConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
-import io.yupiik.ia.agent.core.llm.Usage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -38,7 +38,7 @@ class SessionStoreTest {
                 new io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec(),
                 new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
                 new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec()), key -> Optional.empty());
-        return new SessionStore(new CodingAgentConfiguration(dir.toString(), null, null, null, null, null, null, null, null, null, null, null, null, sessions, null, null, null), mapper);
+        return new SessionStore(new CodingAgentConfiguration(dir.toString(), null, null, null, null, null, null, null, null, null, null, null, null, sessions, null, null, null), mapper, Clock.systemUTC());
     }
 
     private static void setAge(final Path file, final long daysOld) throws Exception {
@@ -127,7 +127,6 @@ class SessionStoreTest {
         store.append(id, SessionEntry.of(1, "user", "hi", null, null));
         store.append(id, SessionEntry.of(2, "assistant", "reading",
                 List.of(new ToolCall("c1", "function", new FunctionCall("read_file", "{\"path\":\"a\"}"), null)), "c1"));
-        store.append(id, SessionEntry.marker(3, "compacted"));
 
         final var loaded = store.load(id);
         assertEquals(2, loaded.size());

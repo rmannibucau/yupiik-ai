@@ -111,7 +111,7 @@ public final class ToolPresenter {
         if (workdir == null || workdir.isBlank() || workdir.equals(".")) {
             return "";
         }
-        return " \u00b7 " + compact(workdir);
+        return " · " + compact(workdir);
     }
 
     private static int todoCount(final String argsJson) {
@@ -137,7 +137,7 @@ public final class ToolPresenter {
         if (oldString != null && !oldString.isBlank()) {
             for (final var line : oldString.split("\n", -1)) {
                 if (out.size() >= maxLines) {
-                    out.add("\u2026 more");
+                    out.add("â¦ more");
                     return out;
                 }
                 out.add("- " + line);
@@ -146,7 +146,7 @@ public final class ToolPresenter {
         if (newString != null && !newString.isBlank()) {
             for (final var line : newString.split("\n", -1)) {
                 if (out.size() >= maxLines) {
-                    out.add("\u2026 more");
+                    out.add("â¦ more");
                     return out;
                 }
                 out.add("+ " + line);
@@ -167,7 +167,7 @@ public final class ToolPresenter {
             out.add("+ " + lines[i]);
         }
         if (lines.length > shown) {
-            out.add("\u2026 +" + (lines.length - shown) + " more");
+            out.add("â¦ +" + (lines.length - shown) + " more");
         }
         return out;
     }
@@ -190,7 +190,7 @@ public final class ToolPresenter {
         if (t.length() <= RAW_TRUNCATE) {
             return t;
         }
-        return t.substring(0, RAW_TRUNCATE) + "\u2026";
+        return t.substring(0, RAW_TRUNCATE) + "â¦";
     }
 
     private static String compact(final String s) {
@@ -201,7 +201,7 @@ public final class ToolPresenter {
         if (t.length() <= 60) {
             return t;
         }
-        return t.substring(0, 60) + "\u2026";
+        return t.substring(0, 60) + "â¦";
     }
 
     private static String shortString(final String s) {
@@ -212,7 +212,7 @@ public final class ToolPresenter {
         if (t.length() <= 24) {
             return t;
         }
-        return t.substring(0, 24) + "\u2026";
+        return t.substring(0, 24) + "â¦";
     }
 
     private static String lastMeaningfulLine(final String output) {

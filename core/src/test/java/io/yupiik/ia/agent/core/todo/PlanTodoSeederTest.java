@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 
@@ -114,7 +115,7 @@ class PlanTodoSeederTest {
     }
 
     private SessionStore newSessionStore() {
-        return new SessionStore(configuration(), mapper());
+        return new SessionStore(configuration(), mapper(), Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {

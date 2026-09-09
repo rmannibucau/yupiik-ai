@@ -23,6 +23,7 @@ import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 
@@ -52,7 +53,7 @@ class UsageTrackerTest {
                 new ContextWindowCache$Entry$FusionJsonCodec()), key -> Optional.empty());
         configuration = configuration(-1);
         providerManager = new ProviderManager(configuration, mapper);
-        client = new ChatClient(configuration, mapper, providerManager);
+        client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());
     }
 
     @AfterEach
@@ -68,7 +69,7 @@ class UsageTrackerTest {
     @Test
     void configuredWindowWins() {
         final var cfg = configuration(32000);
-        final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null);
+        final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
         assertEquals(32000, tracker.contextWindow());
     }
 
@@ -80,12 +81,12 @@ class UsageTrackerTest {
         server.stop(0);
         server = null;
         assertEquals(196608, tracker.contextWindow());
-        assertEquals(Optional.of(196608), new ContextWindowCache(configuration, mapper).get("default", "test-model"));
+        assertEquals(Optional.of(196608), new ContextWindowCache(configuration, mapper, Clock.systemUTC()).get("default", "test-model"));
     }
 
     @Test
     void staleCacheTriggersRefetchAndRefresh() {
-        final var cache = new ContextWindowCache(configuration, mapper);
+        final var cache = new ContextWindowCache(configuration, mapper, Clock.systemUTC());
         cache.put("default", "test-model", 4096, System.currentTimeMillis() - 25L * 60L * 60L * 1000L);
         modelsBody = "{\"data\":[{\"id\":\"test-model\",\"context_window\":8192}]}";
         assertEquals(8192, tracker().contextWindow());
@@ -94,7 +95,7 @@ class UsageTrackerTest {
 
     @Test
     void freshCacheSkipsModelsCall() {
-        new ContextWindowCache(configuration, mapper).put("default", "test-model", 64000, System.currentTimeMillis());
+        new ContextWindowCache(configuration, mapper, Clock.systemUTC()).put("default", "test-model", 64000, System.currentTimeMillis());
         modelsStatus = 500;
         assertEquals(64000, tracker().contextWindow());
     }
@@ -112,7 +113,7 @@ class UsageTrackerTest {
     }
 
     private UsageTracker tracker() {
-        return new UsageTracker(providerManager, client, new ContextWindowCache(configuration, mapper));
+        return new UsageTracker(providerManager, client, new ContextWindowCache(configuration, mapper, Clock.systemUTC()), Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration(final int contextWindow) {

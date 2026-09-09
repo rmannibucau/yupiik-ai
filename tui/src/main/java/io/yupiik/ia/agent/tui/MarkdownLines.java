@@ -12,8 +12,8 @@ import org.commonmark.ext.gfm.tables.TableCell;
 import org.commonmark.ext.gfm.tables.TableHead;
 import org.commonmark.ext.gfm.tables.TableRow;
 import org.commonmark.ext.gfm.tables.TablesExtension;
-import org.commonmark.ext.task.list.items.TaskListItemsExtension;
 import org.commonmark.ext.task.list.items.TaskListItemMarker;
+import org.commonmark.ext.task.list.items.TaskListItemsExtension;
 import org.commonmark.node.BlockQuote;
 import org.commonmark.node.BulletList;
 import org.commonmark.node.Code;
@@ -132,7 +132,7 @@ public final class MarkdownLines {
         } else if (node instanceof ThematicBreak) {
             final var style = styles.horizontalRule() == null ? base : styles.horizontalRule().patch(base);
             final var avail = Math.max(1, width - widthOf(prefix.first()));
-            out.add(Line.from(concat(prefix.first(), List.of(Span.styled("\u2500".repeat(avail), style)))));
+            out.add(Line.from(concat(prefix.first(), List.of(Span.styled("─".repeat(avail), style)))));
         } else if (node instanceof TableBlock table) {
             renderTable(table, prefix, width, out);
         } else {
@@ -147,7 +147,7 @@ public final class MarkdownLines {
                     : (task ? styles.taskChecked() : styles.taskUnchecked()).patch(base);
             return Span.styled(task ? symbol(styles.taskCheckedSymbol()) : symbol(styles.taskUncheckedSymbol()), style);
         }
-        return Span.styled("\u2022 ", listMarkerStyle(styles, base));
+        return Span.styled("• ", listMarkerStyle(styles, base));
     }
 
     private static Style listMarkerStyle(final MarkdownStyles styles, final Style base) {

@@ -14,27 +14,30 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
-import java.time.Instant;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
-import java.util.stream.Stream;
 
 @ApplicationScoped
 public class SessionStore {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final Clock clock;
 
-    public SessionStore(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+    public SessionStore(final CodingAgentConfiguration configuration, final JsonMapper mapper, final Clock clock) {
         this.configuration = configuration;
         this.mapper = mapper;
+        this.clock = clock;
     }
 
     protected SessionStore() {
         this.configuration = null;
         this.mapper = null;
+        this.clock = null;
     }
 
     public void onStart(@OnEvent final Start start) {
@@ -116,7 +119,7 @@ public class SessionStore {
 
     public String create() {
         writableDir();
-        long stamp = System.currentTimeMillis();
+        long stamp = clock.millis();
         var id = "s" + Long.toHexString(stamp);
         while (Files.exists(path(id))) {
             id = "s" + Long.toHexString(++stamp);
@@ -226,7 +229,7 @@ public class SessionStore {
     private static final String GZ_SUFFIX = ".jsonl.gz";
     private static final long MILLIS_PER_DAY = 24L * 60L * 60L * 1000L;
 
-    public static long now() {
-        return Instant.now().toEpochMilli();
+    public long now() {
+        return clock.millis();
     }
 }

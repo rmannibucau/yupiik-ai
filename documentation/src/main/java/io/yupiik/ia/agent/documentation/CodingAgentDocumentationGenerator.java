@@ -102,27 +102,29 @@ public class CodingAgentDocumentationGenerator implements Runnable {
     }
 
     private void writeSlashCommands(final RuntimeContainer container) {
-        final var providers = container.lookups(SlashCommands.class, it -> it.stream().map(Instance::instance).toList()).instance();
-        if (providers.isEmpty()) {
-            return;
-        }
-        final var sb = new StringBuilder();
-        for (final var provider : providers) {
-            sb.append("== ").append(providerTitle(provider)).append("\n\n");
-            for (final var group : SlashGroup.values()) {
-                final var inGroup = provider.commands().stream().filter(c -> c.group() == group)
-                        .sorted(Comparator.comparing(c -> c.name())).toList();
-                if (inGroup.isEmpty()) {
-                    continue;
-                }
-                sb.append("=== ").append(capitalize(group.name().toLowerCase())).append("\n\n");
-                for (final var spec : inGroup) {
-                    sb.append("`").append(spec.display()).append("`::\n");
-                    sb.append("  ").append(spec.description()).append("\n\n");
+        try (final var providersInstance = container.lookups(SlashCommands.class, it -> it.stream().map(Instance::instance).toList())) {
+            final var providers = providersInstance.instance();
+            if (providers.isEmpty()) {
+                return;
+            }
+            final var sb = new StringBuilder();
+            for (final var provider : providers) {
+                sb.append("== ").append(providerTitle(provider)).append("\n\n");
+                for (final var group : SlashGroup.values()) {
+                    final var inGroup = provider.commands().stream().filter(c -> c.group() == group)
+                            .sorted(Comparator.comparing(c -> c.name())).toList();
+                    if (inGroup.isEmpty()) {
+                        continue;
+                    }
+                    sb.append("=== ").append(capitalize(group.name().toLowerCase())).append("\n\n");
+                    for (final var spec : inGroup) {
+                        sb.append("`").append(spec.display()).append("`::\n");
+                        sb.append("  ").append(spec.description()).append("\n\n");
+                    }
                 }
             }
+            writePartial("slash-commands.adoc", sb.toString());
         }
-        writePartial("slash-commands.adoc", sb.toString());
     }
 
     private String providerTitle(final SlashCommands provider) {

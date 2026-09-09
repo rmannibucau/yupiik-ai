@@ -3,7 +3,6 @@ package io.yupiik.ia.agent.core.optimize;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 
 import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
 

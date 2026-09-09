@@ -1,7 +1,5 @@
 package io.yupiik.ia.agent.tui;
 
-import java.util.List;
-
 /**
  * Parses a tool region of the transcript (the markdown emitted by
  * {@link TuiTranscriptModel} between its {@code TOOL_BEGIN}/{@code TOOL_END}

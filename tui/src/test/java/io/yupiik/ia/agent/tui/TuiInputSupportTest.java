@@ -2,8 +2,6 @@ package io.yupiik.ia.agent.tui;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -16,15 +14,6 @@ class TuiInputSupportTest {
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/quit"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/exit"));
         assertThrows(UnsupportedOperationException.class, () -> TuiInputSupport.SLASH_COMMANDS.add("/nope"));
-    }
-
-    @Test
-    void slashMatchesFiltersByPrefix() {
-        assertEquals(List.of("/help"), TuiInputSupport.slashMatches("he"));
-        assertEquals(List.of("/help"), TuiInputSupport.slashMatches("h"));
-        assertEquals(List.of("/new"), TuiInputSupport.slashMatches("n"));
-        assertEquals(17, TuiInputSupport.slashMatches("").size());
-        assertEquals(List.of(), TuiInputSupport.slashMatches("zzz"));
     }
 
     @Test

@@ -48,7 +48,7 @@ public class StreamTextBuffer {
             pending.delete(0, newline + 1);
             newline = pending.indexOf("\n");
         }
-        if (flush && pending.length() > 0) {
+        if (flush && !pending.isEmpty()) {
             out.append(lineRenderer.apply(pending.toString()));
             if (out.charAt(out.length() - 1) != '\n') {
                 out.append('\n');

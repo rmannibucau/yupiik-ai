@@ -1,11 +1,11 @@
 package io.yupiik.ia.agent.core.codegraph;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.fusion.framework.build.api.json.JsonModel;
-import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.nio.file.Path;

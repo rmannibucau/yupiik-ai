@@ -8,6 +8,7 @@ import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -24,18 +25,21 @@ public class UsageTracker {
     private final AtomicLong promptTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
+    private final Clock clock;
 
     public UsageTracker(final ProviderManager providerManager, final ChatClient chatClient,
-                        final ContextWindowCache contextWindowCache) {
+                        final ContextWindowCache contextWindowCache, final Clock clock) {
         this.providerManager = providerManager;
         this.chatClient = chatClient;
         this.contextWindowCache = contextWindowCache;
+        this.clock = clock;
     }
 
     protected UsageTracker() {
         this.providerManager = null;
         this.chatClient = null;
         this.contextWindowCache = null;
+        this.clock = null;
     }
 
     public void record(final Usage usage) {
@@ -126,7 +130,7 @@ public class UsageTracker {
                 if (model.equals(entry.id())) {
                     final var window = entry.contextWindow();
                     if (window != null && window > 0) {
-                        contextWindowCache.put(providerId, model, window, System.currentTimeMillis());
+                        contextWindowCache.put(providerId, model, window, clock.millis());
                         return Optional.of(window);
                     }
                     break;

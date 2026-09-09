@@ -6,8 +6,8 @@ package io.yupiik.ia.agent.core.cli;
  * portable equivalent so scripts never see non-ASCII characters.
  */
 public final class Symbols {
-    private static final char[] UNICODE_SPINNER = {'\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834',
-            '\u2826', '\u2827', '\u2807', '\u280f'};
+    private static final char[] UNICODE_SPINNER = {'⠋', '⠙', '⠹', '⠸', '⠼',
+            '⠴', '⠦', '⠧', '⠇', '⠏'};
     private static final char[] ASCII_SPINNER = {'|', '/', '-', '\\'};
 
     private final boolean ascii;
@@ -16,48 +16,40 @@ public final class Symbols {
         this.ascii = ascii;
     }
 
-    public boolean isAscii() {
-        return ascii;
-    }
-
     public String toolMarker() {
-        return ascii ? "* " : "\u23fa ";
+        return ascii ? "* " : "⏺ ";
     }
 
     public String resultPrefix() {
-        return ascii ? "-> " : "\u21b3 ";
-    }
-
-    public String thinkingMarker() {
-        return ascii ? "~ " : "\u273b ";
+        return ascii ? "-> " : "↳ ";
     }
 
     public String infoMarker() {
-        return ascii ? "[i] " : "\u2139 ";
+        return ascii ? "[i] " : "ℹ ";
     }
 
     public String currentMarker() {
-        return ascii ? "*" : "\u25cf";
+        return ascii ? "*" : "●";
     }
 
     public String todoInProgress() {
-        return ascii ? "[>] " : "[\u25b8] ";
+        return ascii ? "[>] " : "[▸] ";
     }
 
     public String todoCompleted() {
-        return ascii ? "[x] " : "[\u2713] ";
+        return ascii ? "[x] " : "[✓] ";
     }
 
     public String todoPending() {
-        return ascii ? "[ ] " : "[\u00b7] ";
+        return ascii ? "[ ] " : "[·] ";
     }
 
     public String diffAdd() {
-        return ascii ? "+ " : "\u2795 ";
+        return ascii ? "+ " : "➕ ";
     }
 
     public String diffDel() {
-        return ascii ? "- " : "\u2796 ";
+        return ascii ? "- " : "➖ ";
     }
 
     public char[] spinner() {
@@ -65,34 +57,26 @@ public final class Symbols {
     }
 
     public String boxTop() {
-        return ascii ? " +" : " \u250c";
+        return ascii ? " +" : " ┌";
     }
 
     public String boxBottom() {
-        return ascii ? " +" : " \u2514";
+        return ascii ? " +" : " └";
     }
 
     public String boxLine() {
-        return ascii ? " | " : " \u2502 ";
+        return ascii ? " | " : " │ ";
     }
 
     public String boxHorizontal() {
-        return ascii ? "-" : "\u2500";
+        return ascii ? "-" : "─";
     }
 
     public String boxCorner() {
-        return ascii ? "+" : "\u2510";
+        return ascii ? "+" : "┐";
     }
 
     public String boxCornerBottom() {
-        return ascii ? "+" : "\u2518";
-    }
-
-    public String turnProgress(final int lines, final long elapsedMillis) {
-        final var seconds = elapsedMillis / 1000.0;
-        if (ascii) {
-            return String.format("running... %d lines, %.1fs", lines, seconds);
-        }
-        return String.format("running\u2026 %d lines, %.1fs", lines, seconds);
+        return ascii ? "+" : "┘";
     }
 }

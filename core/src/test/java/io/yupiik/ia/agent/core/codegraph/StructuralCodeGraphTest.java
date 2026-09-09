@@ -21,6 +21,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -60,7 +61,7 @@ class StructuralCodeGraphTest {
 
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
 
         graph.ensureReady();
         final var built = graph.graph();
@@ -126,7 +127,7 @@ class StructuralCodeGraphTest {
 
         // reload from disk must match in-memory state
         final var reloaded = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
         reloaded.ensureReady();
         assertEquals(after.symbols().size(), reloaded.graph().symbols().size());
     }
@@ -146,7 +147,7 @@ class StructuralCodeGraphTest {
                 null, null, null, null);
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
         graph.ensureReady();
         assertEquals(2, graph.graph().symbols().size());
 
@@ -176,7 +177,7 @@ class StructuralCodeGraphTest {
                 null, null, null, null);
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
         graph.ensureReady();
         assertTrue(graph.graph().symbols().isEmpty(),
                 "a directory without a project marker must not be indexed into a structural code graph");
@@ -192,7 +193,7 @@ class StructuralCodeGraphTest {
                 null, null, null, null);
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
         graph.ensureReady();
         assertTrue(graph.graph().symbols().isEmpty(),
                 "an empty target project dir must not be indexed into a structural code graph");
@@ -210,7 +211,7 @@ class StructuralCodeGraphTest {
                 null, null, null, null);
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
         graph.ensureReady();
 
         final var docRoot = Path.of(config.structuralCodeGraph()
@@ -279,7 +280,7 @@ class StructuralCodeGraphTest {
             final JsonMapper mapper = container.lookup(JsonMapper.class).instance();
 
             final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                    new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                    new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
 
             final String status = graph.resync();
 
@@ -297,7 +298,7 @@ class StructuralCodeGraphTest {
 
             // a fresh instance re-loaded from the same store must not hit the null codec either
             final var reloaded = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
-                    new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper)), providerManager(config, mapper));
+                    new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
             reloaded.ensureReady();
             assertEquals(stored.symbols().size(), reloaded.graph().symbols().size());
         }

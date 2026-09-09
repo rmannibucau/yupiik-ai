@@ -14,7 +14,6 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SelectionStateTest {
     @Test
@@ -181,8 +180,8 @@ class SelectionStateTest {
     @Test
     void osc52PayloadEncodesUtf8Text() {
         assertEquals("\u001B]52;c;aGk=\u0007", SelectionState.osc52Payload("hi"));
-        assertEquals("\u001B]52;c;" + Base64.getEncoder().encodeToString("h\u00e9llo".getBytes(StandardCharsets.UTF_8)) + "\u0007",
-                SelectionState.osc52Payload("h\u00e9llo"));
+        assertEquals("\u001B]52;c;" + Base64.getEncoder().encodeToString("héllo".getBytes(StandardCharsets.UTF_8)) + "\u0007",
+                SelectionState.osc52Payload("héllo"));
     }
 
     @Test

@@ -32,11 +32,6 @@ public final class CompletionEngine {
         }
     }
 
-    @FunctionalInterface
-    public interface ArgCompleter {
-        List<String> complete(String token);
-    }
-
     private final Supplier<List<String>> models;
     private final Supplier<List<String>> providers;
     private final Supplier<List<String>> agents;
@@ -57,10 +52,6 @@ public final class CompletionEngine {
 
     private static Supplier<List<String>> orEmpty(final Supplier<List<String>> supplier) {
         return supplier == null ? () -> List.of() : supplier;
-    }
-
-    public static List<String> slashNames() {
-        return SLASH_NAMES;
     }
 
     /**

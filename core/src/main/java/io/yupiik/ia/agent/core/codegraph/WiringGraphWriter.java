@@ -10,7 +10,6 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -55,10 +54,6 @@ public class WiringGraphWriter {
             throw new UncheckedIOException(e);
         }
         return path;
-    }
-
-    public static Path write(final JsonMapper mapper, final Path storeRoot, final GraphStore store) {
-        return write(mapper, storeRoot, store, null);
     }
 
     static String render(final JsonMapper mapper, final GraphStore store, final DocEnricherCache cache) {

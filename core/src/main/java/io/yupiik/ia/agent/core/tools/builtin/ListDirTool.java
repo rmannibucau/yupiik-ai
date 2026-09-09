@@ -11,10 +11,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.Map;
-import java.util.stream.Stream;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 @ApplicationScoped
 public class ListDirTool implements EmbeddedTool {

@@ -44,14 +44,6 @@ public class AgentProvider {
      * Inflates the agent prompt. A value is treated as a file path when it expands to an existing
      * regular file; otherwise it is used as inline text. Returns null when the agent is unknown.
      */
-    public String resolvePrompt(final String name) {
-        final var agent = byName(name);
-        if (agent == null) {
-            return null;
-        }
-        return resolvePrompt(agent);
-    }
-
     public String resolvePrompt(final AgentConfiguration agent) {
         final var raw = agent.prompt() == null ? "" : agent.prompt();
         if (raw.isBlank()) {

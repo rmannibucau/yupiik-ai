@@ -4,12 +4,12 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -21,6 +21,7 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -61,18 +62,20 @@ public class StructuralCodeGraph {
     private final DocEnricher docEnricher;
     private final ProviderManager providerManager;
     private final Path projectDir;
+    private final Clock clock;
     private volatile GraphStore graph;
     private volatile String pendingRefreshPath;
 
     public StructuralCodeGraph(final CodingAgentConfiguration configuration, final List<GraphParser> parsers,
                                final JsonMapper mapper, final StatusReporter statusReporter,
-                               final ChatClient chatClient, final ProviderManager providerManager) {
+                               final ChatClient chatClient, final ProviderManager providerManager, final Clock clock) {
         this.configuration = configuration;
         this.parsers = parsers.stream().filter(GraphParser::available).toList();
         this.mapper = mapper;
         this.statusReporter = statusReporter;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
+        this.clock = clock;
         final var workingDir = configuration.resolveProjectDir().toString();
         this.projectDir = configuration.resolveProjectDir().toAbsolutePath().normalize();
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
@@ -91,6 +94,7 @@ public class StructuralCodeGraph {
         this.chatClient = null;
         this.providerManager = null;
         this.projectDir = null;
+        this.clock = null;
         this.storeRoot = null;
         this.storeFile = null;
         this.docWriter = null;
@@ -242,7 +246,7 @@ public class StructuralCodeGraph {
             symbols.addAll(model.symbols());
             edges.addAll(model.edges());
         }
-        final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
+        final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         graph = updated;
         persist(updated);
         if (fp == null) {
@@ -322,7 +326,7 @@ public class StructuralCodeGraph {
         if (!changed) {
             return current;
         }
-        final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
+        final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         persist(updated);
         statusReporter.report("structural code graph refreshed (" + updated.symbols().size() + " symbols)");
         enrichConceptsIfEnabled();
@@ -358,7 +362,7 @@ public class StructuralCodeGraph {
                 LOGGER.warning("Cannot parse " + rel + ": " + e.getMessage());
             }
         }
-        final var built = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), System.currentTimeMillis());
+        final var built = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         persist(built);
         statusReporter.report("structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
         enrichConceptsIfEnabled();

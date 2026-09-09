@@ -32,12 +32,6 @@ public final class TuiInputSupport {
         return new AgentOverride(null, text);
     }
 
-    public static List<String> slashMatches(final String prefix) {
-        return SLASH_COMMANDS.stream()
-                .filter(c -> c.substring(1).startsWith(prefix))
-                .toList();
-    }
-
     public static int nextWord(final String s, final int col) {
         final var len = s.length();
         var i = col;

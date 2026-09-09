@@ -180,13 +180,6 @@ public class DocTreeWriter {
     }
 
     /**
-     * Deterministic structural card content only (no summary section).
-     */
-    public String structuralDoc(final String relSource, final GraphModel model) {
-        return render(relSource, model);
-    }
-
-    /**
      * The structural digest of a model — the staleness key for the tier-2 LLM cache. Computed from a stable,
      * sorted serialization of symbols and edges so unchanged sources produce the same hash across runs.
      */

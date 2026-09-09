@@ -21,7 +21,6 @@ import dev.tamboui.tui.event.TickEvent;
 import dev.tamboui.widgets.block.Block;
 import dev.tamboui.widgets.block.BorderType;
 import dev.tamboui.widgets.block.Borders;
-import dev.tamboui.widgets.checkbox.Checkbox;
 import dev.tamboui.widgets.checkbox.CheckboxState;
 import dev.tamboui.widgets.gauge.Gauge;
 import dev.tamboui.widgets.input.TextArea;
@@ -40,12 +39,13 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
@@ -62,10 +62,11 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.Locale;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
@@ -137,6 +138,7 @@ public class TuiCommand implements Runnable {
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
     private final TuiSlashCommands slashCommands;
+    private final Clock clock;
 
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
@@ -152,7 +154,7 @@ public class TuiCommand implements Runnable {
                       final AgentProvider agentProvider,
                       final TuiTranscriptModel model,
                       final TuiRunnerFactory tuiRunnerFactory,
-                      final TuiSlashCommands slashCommands) {
+                      final TuiSlashCommands slashCommands, final Clock clock) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -176,27 +178,28 @@ public class TuiCommand implements Runnable {
         this.model = model;
         this.tuiRunnerFactory = tuiRunnerFactory;
         this.slashCommands = slashCommands;
+        this.clock = clock;
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
         this.completionEngine = new CompletionEngine(
-                () -> completionModels(),
+                this::completionModels,
                 () -> providerManager == null || providerManager.providers() == null
                         ? List.of()
                         : providerManager.providers().stream().map(io.yupiik.ia.agent.core.configuration.ProviderConfiguration::id).toList(),
                 () -> agentProvider == null || agentProvider.agents() == null
                         ? List.of()
-                        : agentProvider.agents().stream().map(a -> a.name()).toList(),
+                        : agentProvider.agents().stream().map(AgentConfiguration::name).toList(),
                 this::sessionsForCompletion,
                 this::toolsForCompletion,
                 () -> agentProvider == null || agentProvider.agents() == null
                         ? List.of()
-                        : agentProvider.agents().stream().map(a -> a.name()).toList());
+                        : agentProvider.agents().stream().map(AgentConfiguration::name).toList());
         this.promptHistory = new PromptHistory();
         applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
     }
 
     @RootConfiguration("tui")
     public record TuiConf(
-            @Property(defaultValue = "false", documentation = "Use vim style key bindings.") boolean vimBindings,
+            @Property(defaultValue = "io.yupiik.ia.agent.tui.KeyBindingPreset.STANDARD", documentation = "Key binding preset: STANDARD, VIM, EMACS, INTELLIJ or VSCODE.") KeyBindingPreset bindings,
             @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream by default.") boolean showThinking,
             @Property(defaultValue = "\"dark\"", documentation = "UI theme: dark or light.") String theme,
             @Property(defaultValue = "false", documentation = "Bypass permission prompts and allow all tool calls (not persisted to the transcript).") boolean permitAll) {
@@ -255,17 +258,17 @@ public class TuiCommand implements Runnable {
     private void applyTheme(final String theme) {
         final var normalized = "light".equalsIgnoreCase(theme) ? "light" : "dark";
         this.palette = Palette.from(normalized, tuiConfiguration);
-        final var opacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.thinkingOpacity()));
+        final var opacity = Math.clamp(tuiConfiguration.thinkingOpacity(), 0.05, 1.0);
         final var thought = TuiColors.blend(palette.text(), palette.backgroundPanel(), opacity);
         this.thoughtStyle = Style.EMPTY.fg(thought);
-        final var toolOpacity = Math.min(1.0, Math.max(0.05, tuiConfiguration.toolOutputOpacity()));
+        final var toolOpacity = Math.clamp(tuiConfiguration.toolOutputOpacity(), 0.05, 1.0);
         final var toolFg = TuiColors.blend(palette.text(), palette.backgroundPanel(), toolOpacity);
         this.toolStyle = Style.EMPTY.fg(toolFg);
     }
 
     @Override
     public void run() {
-        final var state = new UiState(model);
+        final var state = new UiState(model, clock);
         state.sessionId = sessionStore.create();
         state.showThinking = conf.showThinking();
         final var transcriptConf = tuiConfiguration.transcript();
@@ -398,13 +401,11 @@ public class TuiCommand implements Runnable {
             return true;
         }
         switch (key.code()) {
-            case LEFT -> toggleTab(prompt, false);
-            case RIGHT -> toggleTab(prompt, true);
+            case LEFT, BACKSPACE -> toggleTab(prompt, false);
+            case RIGHT, ENTER -> toggleTab(prompt, true);
             case UP -> moveOption(prompt, qIndex, -1);
             case DOWN -> moveOption(prompt, qIndex, 1);
-            case BACKSPACE -> toggleTab(prompt, false);
             case TAB -> prompt.focusInput(true);
-            case ENTER -> toggleTab(prompt, true);
             case CHAR -> {
                 if (key.codePoint() == ' ') {
                     if (fq.question.multiple()) {
@@ -472,7 +473,7 @@ public class TuiCommand implements Runnable {
         final var total = opts + (opts == 0 ? 0 : 1);
         if (!fq.question.multiple() && opts > 0) {
             final var current = fq.selectedIndex();
-            fq.selectedIndex(Math.floorMod((current < 0 ? 0 : current) + delta, total));
+            fq.selectedIndex(Math.floorMod((Math.max(current, 0)) + delta, total));
             setOptionFocus(prompt, fq, fq.selectedIndex());
         } else if (fq.question.multiple() && opts > 0) {
             final var current = prompt.optionsFocus();
@@ -1095,7 +1096,7 @@ public class TuiCommand implements Runnable {
     private void agentCommand(final String text, final TuiRunner runner, final UiState state) {
         final var arg = text.substring("/agent".length()).strip();
         if (arg.isEmpty()) {
-            final var names = agentProvider.agents().stream().map(a -> a.name())
+            final var names = agentProvider.agents().stream().map(AgentConfiguration::name)
                     .sorted().collect(java.util.stream.Collectors.toList());
             openPicker(state, "agent", names, selected -> {
                 state.activeAgent = selected;
@@ -1290,7 +1291,7 @@ public class TuiCommand implements Runnable {
             if (sessions == null || sessions.isEmpty()) {
                 return List.of();
             }
-            return sessions.stream().map(s -> s.id()).toList();
+            return sessions.stream().map(SessionStore.SessionInfo::id).toList();
         } catch (final RuntimeException e) {
             return List.of();
         }
@@ -1676,7 +1677,7 @@ public class TuiCommand implements Runnable {
         }
         state.model.trim();
         if (state.toast != null && tuiConfiguration.toastDurationMillis() > 0
-                && System.currentTimeMillis() - state.toastShownAt > tuiConfiguration.toastDurationMillis()) {
+                && clock.millis() - state.toastShownAt > tuiConfiguration.toastDurationMillis()) {
             state.clearToast();
         }
         final var todosRender = todoStore.render();
@@ -1695,7 +1696,7 @@ public class TuiCommand implements Runnable {
         final var sidebarWidth = narrow ? 0 : (screenWidth < 95 ? 22 : 28);
         final var body = Layout.horizontal()
                 .constraints(Constraint.fill(), Constraint.length(sidebarWidth))
-                .split(root.get(0));
+                .split(root.getFirst());
         if (!narrow) {
             renderSidebar(body.get(1), frame, state);
         }
@@ -1771,7 +1772,7 @@ public class TuiCommand implements Runnable {
             text.add(Line.from(Span.styled("branch ", label), Span.styled(ellipsize(branch, width - 7), value)));
         }
         text.add(Line.from(Span.styled(permissionService.isPermitAll() ? "permissions all " : "mode ", label),
-                Span.styled(permissionService.isPermitAll() ? "\u26a0" : permissionService.mode().name().toLowerCase(),
+                Span.styled(permissionService.isPermitAll() ? "⚠" : permissionService.mode().name().toLowerCase(),
                         Style.EMPTY.fg(modeColor()))));
         text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
         text.add(Line.from(Span.styled("servers ", label)));
@@ -1781,7 +1782,7 @@ public class TuiCommand implements Runnable {
                 case DISABLED -> Color.hex(palette.textMuted());
                 case FAILED -> Color.hex(palette.error());
             };
-            text.add(Line.from(Span.styled("\u25CF ", Style.EMPTY.fg(dotColor)),
+            text.add(Line.from(Span.styled("● ", Style.EMPTY.fg(dotColor)),
                     Span.styled(ellipsize(status.name(), width - 2), value)));
         }
         text.add(Line.empty());
@@ -1789,11 +1790,11 @@ public class TuiCommand implements Runnable {
         text.add(Line.from(Span.styled("tokens out ", label), Span.styled(formatTokens(state.model.completionTokens()), value)));
         text.add(Line.from(Span.styled("context ~  ", label), Span.styled(formatTokens(state.model.estimatedContext()) + " tok (" + state.model.contextPercent() + "%)", value)));
         final var lines = Text.from(text.toArray(Line[]::new));
-        final var textRect = rows.get(0);
+        final var textRect = rows.getFirst();
         final var overflow = Math.max(0, lines.height() - textRect.height());
         frame.renderWidget(Paragraph.builder().text(lines).scroll(overflow).build(), textRect);
         if (!rows.get(1).isEmpty()) {
-            final var percent = Math.max(0, Math.min(100, state.model.contextPercent()));
+            final var percent = Math.clamp(state.model.contextPercent(), 0, 100);
             final var gaugeColor = Color.hex(percent >= 80 ? palette.error()
                     : percent >= 65 ? palette.warning() : palette.info());
             frame.renderWidget(Gauge.builder()
@@ -1812,9 +1813,9 @@ public class TuiCommand implements Runnable {
             return;
         }
         final var chunks = chunks(state.model.markdown(spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick), WELCOME), inner.width(), state);
-        final var total = chunks.stream().mapToInt(c -> c.height()).sum();
+        final var total = chunks.stream().mapToInt(RenderedChunk::height).sum();
         final var maxViewOffset = Math.max(0, total - Math.max(1, inner.height()));
-        final var viewOffset = Math.min(maxViewOffset, Math.max(0, maxViewOffset - state.model.scrollBack()));
+        final var viewOffset = Math.clamp(maxViewOffset - state.model.scrollBack(), 0, maxViewOffset);
         var chunkTop = 0;
         for (final var chunk : chunks) {
             final var top = chunkTop - viewOffset;
@@ -1828,16 +1829,17 @@ public class TuiCommand implements Runnable {
             final var sub = new Rect(inner.x(), inner.y() + visibleTop, inner.width(), visibleH);
             frame.renderWidget(chunk.widget(skip), sub);
         }
+        int x = inner.x() + inner.width() - 1;
         if (maxViewOffset > 0) {
-            final var ratio = Math.max(0.0, Math.min(1.0, 1.0 - (double) viewOffset / maxViewOffset));
+            final var ratio = Math.clamp(1.0 - (double) viewOffset / maxViewOffset, 0.0, 1.0);
             final var indH = Math.max(1, (int) Math.round(inner.height() * ratio));
             final var indY = inner.y() + inner.height() - indH;
-            frame.buffer().setStyle(new Rect(inner.x() + inner.width() - 1, indY, 1, indH), Style.EMPTY.reversed());
+            frame.buffer().setStyle(new Rect(x, indY, 1, indH), Style.EMPTY.reversed());
         }
         if (state.model.busy() && state.spinnerTick % 2 == 0 && inner.height() > 0) {
-            final var caretRect = new Rect(inner.x() + inner.width() - 1, inner.y() + inner.height() - 1, 1, 1);
+            final var caretRect = new Rect(x, inner.y() + inner.height() - 1, 1, 1);
             frame.renderWidget(Paragraph.builder()
-                    .text(Text.from(Line.from(Span.styled("\u258c", Style.EMPTY.fg(Color.hex(palette.accent()))))))
+                    .text(Text.from(Line.from(Span.styled("▌", Style.EMPTY.fg(Color.hex(palette.accent()))))))
                     .build(), caretRect);
         }
     }
@@ -1882,7 +1884,7 @@ public class TuiCommand implements Runnable {
                         .text(wrappedText)
                         .block(boxed)
                         .overflow(Overflow.CLIP)
-                        .scroll(Math.min(skip, Math.max(0, innerH - 1)))
+                        .scroll(Math.clamp(innerH - 1, 0, skip))
                         .build()));
             }
         }
@@ -1894,7 +1896,7 @@ public class TuiCommand implements Runnable {
         out.add(new RenderedChunk(innerH, skip -> Paragraph.builder()
                 .text(text)
                 .overflow(Overflow.CLIP)
-                .scroll(Math.min(skip, Math.max(0, innerH - 1)))
+                .scroll(Math.clamp(innerH - 1, 0, skip))
                 .build()));
     }
 
@@ -1912,7 +1914,7 @@ public class TuiCommand implements Runnable {
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var lines = new ArrayList<Line>();
         final var headerSpans = new ArrayList<Span>();
-        headerSpans.add(Span.styled(card.failed() ? "\u2716 " : "\u2713 ", Style.EMPTY.fg(statusColor).bold()));
+        headerSpans.add(Span.styled(card.failed() ? "✖ " : "✓ ", Style.EMPTY.fg(statusColor).bold()));
         headerSpans.add(Span.styled(card.name(), Style.EMPTY.bold().fg(Color.hex(palette.text()))));
         if (!card.args().isBlank()) {
             headerSpans.add(Span.styled((card.failed() ? "  " : " ") + card.args(), muted));
@@ -1928,7 +1930,7 @@ public class TuiCommand implements Runnable {
                 .text(text)
                 .block(block)
                 .overflow(Overflow.CLIP)
-                .scroll(Math.min(skip, Math.max(0, innerH - 1)))
+                .scroll(Math.clamp(innerH - 1, 0, skip))
                 .build()));
     }
 
@@ -2039,7 +2041,7 @@ public class TuiCommand implements Runnable {
         }
         final var items = suggestion.items();
         final var visible = Math.min(items.size(), 8);
-        final var width = Math.min(46, Math.max(20, frame.width() - 4));
+        final var width = Math.clamp(frame.width() - 4, 20, 46);
         final var height = visible + 2; // border + items
         final var x = Math.max(0, Math.min(inputRect.x() + 2, frame.width() - width));
         final var y = Math.max(0, inputRect.y() - height);
@@ -2081,10 +2083,10 @@ public class TuiCommand implements Runnable {
                 final var name = state.model.runningToolCommand() == null || state.model.runningToolCommand().isBlank()
                         ? state.model.runningTool() : state.model.runningToolCommand();
                 final var line = Line.from(Span.styled(spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " calling " + ellipsize(name, 60), accent));
-                frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), halves.get(0));
+                frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), halves.getFirst());
             } else {
                 final var line = Line.from(Span.styled(spinnerFrame(SpinnerStyle.DOTS, state.spinnerTick) + " agent is working...", muted));
-                frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), halves.get(0));
+                frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), halves.getFirst());
             }
             final var hintLine = Line.from(Span.styled(hint, muted));
             frame.renderWidget(Paragraph.builder().text(Text.from(hintLine)).overflow(dev.tamboui.style.Overflow.CLIP).build(), halves.get(1));
@@ -2101,18 +2103,18 @@ public class TuiCommand implements Runnable {
         parts.add(Span.styled("model " + ellipsize(chatClient.model(), 40) + "  ", muted));
         parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
         parts.add(Span.styled(modeName(), Style.EMPTY.fg(modeColor())));
-        if (conf.vimBindings()) {
+        if (conf.bindings() == KeyBindingPreset.VIM) {
             parts.add(Span.styled("  [vim insert]  ", muted));
         }
         final var line = Line.from(parts.toArray(Span[]::new));
         frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.WRAP_WORD).build(), rect);
         final var percent = state.model.contextPercent();
         if (percent >= 80) {
-            final var banner = Line.from(Span.styled("\u26a0  context at " + percent + "% - consider /compact  ", Style.EMPTY.fg(Color.hex(palette.warning()))));
+            final var banner = Line.from(Span.styled("⚠  context at " + percent + "% - consider /compact  ", Style.EMPTY.fg(Color.hex(palette.warning()))));
             frame.renderWidget(Paragraph.builder().text(Text.from(banner)).overflow(dev.tamboui.style.Overflow.CLIP).build(), rect);
         }
         if (state.errorMessage != null) {
-            final var err = Line.from(Span.styled("\u2716  " + state.errorMessage + " ", Style.EMPTY.fg(Color.hex(palette.error()))));
+            final var err = Line.from(Span.styled("✖  " + state.errorMessage + " ", Style.EMPTY.fg(Color.hex(palette.error()))));
             frame.renderWidget(Paragraph.builder().text(Text.from(err)).overflow(dev.tamboui.style.Overflow.ELLIPSIS).build(), rect);
         }
     }
@@ -2135,7 +2137,7 @@ public class TuiCommand implements Runnable {
             case INFO -> palette.info();
         };
         final var accent = Style.EMPTY.fg(Color.hex(color));
-        final var width = Math.min(Math.max(16, toast.message().length() + 4), Math.max(16, frame.width()));
+        final var width = Math.clamp(toast.message().length() + 4, 16, Math.max(16, frame.width()));
         final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, frame.height() - 6), width, 3);
         final var inner = Modal.box(frame, rect, " notice ", Color.hex(color));
         if (inner == null) {
@@ -2212,7 +2214,7 @@ public class TuiCommand implements Runnable {
         final var visible = Math.min(total, rect.height());
         if (scroll + visible < total) {
             frame.renderWidget(Paragraph.builder()
-                    .text(Text.from(Line.from(Span.styled("\u2937 " + (total - scroll - visible) + " more - PgDn", muted))))
+                    .text(Text.from(Line.from(Span.styled("⤷ " + (total - scroll - visible) + " more - PgDn", muted))))
                     .build(), new Rect(rect.x(), rect.y() + rect.height() - 1, rect.width(), 1));
         }
     }
@@ -2293,15 +2295,14 @@ public class TuiCommand implements Runnable {
         final var rows = Math.max(1, rect.height());
         final var total = visible.size();
         for (int row = 0; row < rows; row++) {
-            final var idx = row;
             final var lineRect = new Rect(rect.x(), rect.y() + row, rect.width(), 1);
-            if (idx >= total) {
+            if (row >= total) {
                 break;
             }
-            picker.recordItem(lineRect, visible.get(idx));
-            final var selected = idx == picker.selected();
-            final var value = visible.get(idx);
-            final var marker = selected ? "\u25b8 " : "  ";
+            picker.recordItem(lineRect, visible.get(row));
+            final var selected = row == picker.selected();
+            final var value = visible.get(row);
+            final var marker = selected ? "▸ " : "  ";
             final var style = selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor);
             frame.renderWidget(Paragraph.builder()
                     .text(Text.from(Line.from(
@@ -2423,16 +2424,15 @@ public class TuiCommand implements Runnable {
             return;
         }
         if (!fq.question.multiple()) {
-            fq.selectedIndex(Math.max(0, Math.min(fq.selectedIndex(), opts)));
+            fq.selectedIndex(Math.clamp(fq.selectedIndex(), 0, opts));
         } else {
-            prompt.optionsFocus(Math.max(0, Math.min(prompt.optionsFocus(), opts)));
+            prompt.optionsFocus(Math.clamp(prompt.optionsFocus(), 0, opts));
         }
         final var shown = Math.min(opts + 1, rect.height());
         for (int row = 0; row < shown; row++) {
-            final var i = row;
             final var lineRect = new Rect(rect.x(), rect.y() + row, rect.width(), 1);
             fq.optionRects().add(lineRect);
-            final var line = Line.from(buildOptionLine(fq, i, accent, muted, textColor));
+            final var line = Line.from(buildOptionLine(fq, row, accent, muted, textColor));
             frame.renderWidget(Paragraph.builder().text(Text.from(line)).build(), lineRect);
         }
     }
@@ -2444,12 +2444,12 @@ public class TuiCommand implements Runnable {
             if (fq.question.multiple()) {
                 final var checked = fq.ownBox().isChecked();
                 return new Span[]{
-                        Span.raw(checked ? "\u25a3 " : "\u25a2 ").style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
+                        Span.raw(checked ? "▣ " : "▢ ").style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
                         Span.raw("Type your own answer...").style(Style.EMPTY.fg(checked ? accent : textColor))};
             }
             final var selected = fq.selectedIndex() == idx;
             return new Span[]{
-                    Span.raw("\u270e ").style(Style.EMPTY.fg(selected ? accent : muted)),
+                    Span.raw("✎ ").style(Style.EMPTY.fg(selected ? accent : muted)),
                     Span.raw("Type your own answer...")
                             .style(selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor))};
         }
@@ -2457,12 +2457,12 @@ public class TuiCommand implements Runnable {
         if (fq.question.multiple()) {
             final var checked = fq.boxes()[idx].isChecked();
             return new Span[]{
-                    Span.raw(checked ? "\u25a3 " : "\u25a2 ").style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
+                    Span.raw(checked ? "▣ " : "▢ ").style(checked ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
                     Span.raw(option).style(Style.EMPTY.fg(textColor))};
         }
         final var selected = fq.selectedIndex() == idx;
         return new Span[]{
-                Span.raw(selected ? "\u25c9 " : "\u25cb ").style(selected ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
+                Span.raw(selected ? "◉ " : "○ ").style(selected ? Style.EMPTY.fg(accent) : Style.EMPTY.fg(muted)),
                 Span.raw(option).style(selected ? Style.EMPTY.fg(accent).bold() : Style.EMPTY.fg(textColor))};
     }
 
@@ -2997,6 +2997,7 @@ public class TuiCommand implements Runnable {
         }
 
         private final TuiTranscriptModel model;
+        private final Clock clock;
         private final TextAreaState input = new TextAreaState();
         private volatile String sessionId = "";
         private volatile String title;
@@ -3029,15 +3030,16 @@ public class TuiCommand implements Runnable {
 
         private void pushToast(final String message, final ToastLevel level) {
             toast = new Toast(message, level);
-            toastShownAt = System.currentTimeMillis();
+            toastShownAt = clock.millis();
         }
 
         private void clearToast() {
             toast = null;
         }
 
-        private UiState(final TuiTranscriptModel model) {
+        private UiState(final TuiTranscriptModel model, final Clock clock) {
             this.model = model;
+            this.clock = clock;
         }
     }
 

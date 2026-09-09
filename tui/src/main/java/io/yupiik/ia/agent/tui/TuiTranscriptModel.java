@@ -37,32 +37,32 @@ public class TuiTranscriptModel {
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
     public void onEvent(final AgentEvent event) {
-        if (event instanceof final AgentEvent.TextDelta t) {
-            pending.append(t.delta());
+        if (event instanceof AgentEvent.TextDelta(String delta)) {
+            pending.append(delta);
             scrollBack = 0;
-        } else if (event instanceof final AgentEvent.ThinkingDelta t) {
-            thinking.append(t.delta());
-        } else if (event instanceof final AgentEvent.ToolStarted t) {
+        } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
+            thinking.append(delta);
+        } else if (event instanceof AgentEvent.ToolStarted(String name, String args)) {
             flushThinking();
-            runningTool = t.name();
-            runningToolCommand = toolCommand(t.args());
+            runningTool = name;
+            runningToolCommand = toolCommand(args);
             toolStream.setLength(0);
             toolStartedNanos = System.nanoTime();
             scrollBack = 0;
-        } else if (event instanceof final AgentEvent.ToolStream t) {
-            if (t.name().equals(runningTool)) {
-                toolStream.append(t.fragment()).append('\n');
+        } else if (event instanceof AgentEvent.ToolStream(String name, String fragment)) {
+            if (name.equals(runningTool)) {
+                toolStream.append(fragment).append('\n');
                 if (toolStream.length() > 1600) {
                     toolStream.delete(0, toolStream.length() - 1600);
                 }
             }
-        } else if (event instanceof final AgentEvent.ToolFinished t) {
+        } else if (event instanceof AgentEvent.ToolFinished(String name, String output, boolean success)) {
             final var running = runningTool;
             final var command = runningToolCommand;
             runningTool = null;
             runningToolCommand = null;
             final var elapsedMs = Math.max(0, (System.nanoTime() - toolStartedNanos) / 1_000_000);
-            if (running != null && toolStream.length() > 0) {
+            if (running != null && !toolStream.isEmpty()) {
                 final var header = command == null || command.isBlank()
                         ? "*streaming `" + running + "`* (" + elapsedMs + " ms)"
                         : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (" + elapsedMs + " ms)";
@@ -71,34 +71,36 @@ public class TuiTranscriptModel {
                         .append(TOOL_END).append('\n');
             }
             toolStream.setLength(0);
-            if (!t.success()) {
-                transcript.append("\n\n").append(TOOL_BEGIN).append("\n> tool `").append(t.name()).append("` failed: ")
-                        .append(TuiInputSupport.firstLine(t.output())).append(" (").append(elapsedMs).append(" ms)\n")
+            if (!success) {
+                transcript.append("\n\n").append(TOOL_BEGIN).append("\n> tool `").append(name).append("` failed: ")
+                        .append(TuiInputSupport.firstLine(output)).append(" (").append(elapsedMs).append(" ms)\n")
                         .append(TOOL_END).append('\n');
             }
-        } else if (event instanceof final AgentEvent.UsageUpdated u) {
-            promptTokens = u.usage() == null ? 0 : u.usage().promptTokens();
-            completionTokens = u.usage() == null ? 0 : u.usage().completionTokens();
-            estimatedContext = u.estimatedContextTokens();
-            contextPercent = (int) Math.round(u.contextPercent());
-        } else if (event instanceof final AgentEvent.Compacted c) {
-            status = "context " + c.kind() + " done";
-            transcript.append("\n\n> context ").append(c.kind()).append(" applied\n");
-        } else if (event instanceof final AgentEvent.Status s) {
-            status = s.message();
-        } else if (event instanceof final AgentEvent.TurnDone t) {
+        } else if (event instanceof AgentEvent.UsageUpdated(
+                io.yupiik.ia.agent.core.llm.Usage usage, int estimatedContextTokens, double percent
+        )) {
+            promptTokens = usage == null ? 0 : usage.promptTokens();
+            completionTokens = usage == null ? 0 : usage.completionTokens();
+            estimatedContext = estimatedContextTokens;
+            contextPercent = (int) Math.round(percent);
+        } else if (event instanceof AgentEvent.Compacted(String kind)) {
+            status = "context " + kind + " done";
+            transcript.append("\n\n> context ").append(kind).append(" applied\n");
+        } else if (event instanceof AgentEvent.Status(String message)) {
+            status = message;
+        } else if (event instanceof AgentEvent.TurnDone(String content)) {
             flushThinking();
-            transcript.append("\n\n**Assistant**\n\n").append(t.content()).append('\n');
+            transcript.append("\n\n**Assistant**\n\n").append(content).append('\n');
             pending.setLength(0);
             thinking.setLength(0);
             scrollBack = 0;
             busy = false;
             status = "ready";
-        } else if (event instanceof final AgentEvent.Error e) {
-            transcript.append("\n\n> error: ").append(e.message()).append("\n");
+        } else if (event instanceof AgentEvent.Error(String message)) {
+            transcript.append("\n\n> error: ").append(message).append("\n");
             pending.setLength(0);
             busy = false;
-            status = "error: " + e.message();
+            status = "error: " + message;
         }
     }
 
@@ -112,7 +114,7 @@ public class TuiTranscriptModel {
      * never loses data.
      */
     public void flushThinking() {
-        if (thinking.length() == 0) {
+        if (thinking.isEmpty()) {
             return;
         }
         final var thought = thinking.toString().strip();
@@ -126,14 +128,14 @@ public class TuiTranscriptModel {
 
     public String markdown(final String spinner, final String fallback) {
         final var sb = new StringBuilder(transcript);
-        if (busy && pending.length() > 0) {
+        if (busy && !pending.isEmpty()) {
             sb.append("\n\n**Assistant**\n\n").append(pending);
         }
         if (runningTool != null) {
             sb.append("\n\n`").append(spinner).append(" running ")
                     .append(runningToolCommand == null || runningToolCommand.isBlank()
                             ? runningTool : runningToolCommand).append("`");
-            if (toolStream.length() > 0) {
+            if (!toolStream.isEmpty()) {
                 sb.append("\n\n```text\n").append(toolStream.toString().stripTrailing()).append("```\n");
             }
         }

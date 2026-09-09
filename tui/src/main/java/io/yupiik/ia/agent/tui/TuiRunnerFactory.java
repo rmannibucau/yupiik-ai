@@ -2,7 +2,6 @@ package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
-import dev.tamboui.tui.bindings.BindingSets;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 
 import java.time.Duration;
@@ -17,7 +16,7 @@ public class TuiRunnerFactory {
         return TuiRunner.create(TuiConfig.builder()
                 .mouseCapture(true)
                 .tickRate(Duration.ofMillis(100))
-                .bindings(conf.vimBindings() ? BindingSets.vim() : BindingSets.defaults())
+                .bindings(conf.bindings().toBindings())
                 .build());
     }
 }

@@ -11,6 +11,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -33,7 +34,7 @@ class ContextManagerTest {
     @Test
     void compactForOverflowIsNoOpOnSmallConversations() {
         final var cfg = config(6);
-        final var manager = new ContextManager(cfg, null, new UsageTracker(providerManager(cfg), null, null), providerManager(cfg));
+        final var manager = new ContextManager(cfg, null, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()), providerManager(cfg));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 6; i++) {

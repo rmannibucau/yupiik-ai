@@ -10,6 +10,7 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 
 import java.io.IOException;
+import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
@@ -25,14 +26,17 @@ public class MemoryExtractor {
     private final JsonMapper mapper;
     private final VirtualThreadExecutor executor;
     private final AtomicLong lastRun = new AtomicLong();
+    private final Clock clock;
 
     public MemoryExtractor(final ChatClient chatClient, final CodingAgentConfiguration configuration,
-                           final MemoryStore memoryStore, final JsonMapper mapper, final VirtualThreadExecutor executor) {
+                           final MemoryStore memoryStore, final JsonMapper mapper, final VirtualThreadExecutor executor,
+                           final Clock clock) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.mapper = mapper;
         this.executor = executor;
+        this.clock = clock;
     }
 
     protected MemoryExtractor() {
@@ -41,13 +45,14 @@ public class MemoryExtractor {
         this.memoryStore = null;
         this.mapper = null;
         this.executor = null;
+        this.clock = null;
     }
 
     public void maybeExtract(final List<Message> messages) {
         if (!configuration.memory().enabled()) {
             return;
         }
-        final var now = System.currentTimeMillis();
+        final var now = clock.millis();
         final var last = lastRun.get();
         if (now - last < DEBOUNCE_MS || !lastRun.compareAndSet(last, now)) {
             return;

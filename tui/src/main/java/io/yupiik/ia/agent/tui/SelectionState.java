@@ -54,8 +54,8 @@ final class SelectionState {
             return;
         }
         final var width = grid[0].length;
-        final var x = clamp(rawX, 0, width - 1);
-        final var y = clamp(rawY, 0, height - 1);
+        final var x = Math.clamp(rawX, 0, width - 1);
+        final var y = Math.clamp(rawY, 0, height - 1);
         final var now = System.nanoTime();
         if (now - lastClickNanos <= CLICK_WINDOW_NANOS && y == lastClickY && Math.abs(x - lastClickX) <= 1) {
             clickCount = Math.min(3, clickCount + 1);
@@ -88,8 +88,8 @@ final class SelectionState {
             return;
         }
         final var width = grid[0].length;
-        final var x = clamp(rawX, 0, width - 1);
-        final var y = clamp(rawY, 0, grid.length - 1);
+        final var x = Math.clamp(rawX, 0, width - 1);
+        final var y = Math.clamp(rawY, 0, grid.length - 1);
         if (clickCount == 2) {
             focusX = x >= anchorX ? wordEnd(grid, y, x) : wordStart(grid, y, x);
             focusY = y;
@@ -177,8 +177,8 @@ final class SelectionState {
      */
     private record Bounds(int fromY, int toY, int fromX, int toX, int lastColumn) {
         private Bounds {
-            fromX = Math.max(0, Math.min(fromX, lastColumn));
-            toX = Math.max(0, Math.min(toX, lastColumn));
+            fromX = Math.clamp(fromX, 0, lastColumn);
+            toX = Math.clamp(toX, 0, lastColumn);
         }
 
         private int startX(final int y) {
@@ -211,10 +211,6 @@ final class SelectionState {
             i++;
         }
         return i;
-    }
-
-    private static int clamp(final int value, final int min, final int max) {
-        return Math.max(min, Math.min(value, max));
     }
 
     /**

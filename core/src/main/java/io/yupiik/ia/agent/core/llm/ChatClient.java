@@ -11,11 +11,11 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.lang.reflect.Type;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -41,12 +41,14 @@ public class ChatClient implements AutoCloseable {
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
     private volatile ProviderConfiguration targetProvider;
+    private final Clock clock;
 
     public ChatClient(final CodingAgentConfiguration configuration, final JsonMapper mapper,
-                      final ProviderManager providerManager) {
+                      final ProviderManager providerManager, final Clock clock) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
+        this.clock = clock;
         this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
                 .setDelegate(java.net.http.HttpClient.newHttpClient()));
         this.permits = new Semaphore(Math.max(1, configuration.llm().maxConcurrent()));
@@ -58,6 +60,7 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = null;
         this.client = null;
         this.permits = null;
+        this.clock = null;
     }
 
     public ApiFlavor flavor() {
@@ -723,7 +726,7 @@ public class ChatClient implements AutoCloseable {
             return;
         }
         do {
-            final long now = System.currentTimeMillis();
+            final long now = clock.millis();
             final Long waitMs;
             synchronized (requestTimes) {
                 while (!requestTimes.isEmpty() && now - requestTimes.peekFirst() >= 60_000) {

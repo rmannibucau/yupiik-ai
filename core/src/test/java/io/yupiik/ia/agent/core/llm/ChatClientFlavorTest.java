@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -54,7 +55,7 @@ class ChatClientFlavorTest {
         server.createContext("/v1/models", exchange -> respond(exchange, 200,
                 "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}", "application/json"));
         server.start();
-        client = new ChatClient(configuration(), mapper(), providerManager());
+        client = new ChatClient(configuration(), mapper(), providerManager(), Clock.systemUTC());
     }
 
     @AfterEach
@@ -161,7 +162,7 @@ class ChatClientFlavorTest {
                 ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, 5, "");
         final var cfg = new CodingAgentConfiguration("/tmp/yca-test", null, null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120), null,
                 new LlmConfiguration(1, 1L, 0, 1, true, 250), null, null, null, null, null, null, null, null, null, null, null);
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
 
         assertEquals("ok", client.chat(request()).message().content());
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());

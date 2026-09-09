@@ -39,13 +39,13 @@ class MarkdownLinesTest {
 
     @Test
     void bulletList() {
-        assertEquals(List.of("\u2022 one", "\u2022 two"),
+        assertEquals(List.of("• one", "• two"),
                 plain(renderer.render("- one\n- two", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
     }
 
     @Test
     void bulletListContinuationIndentsWrappedLine() {
-        assertEquals(List.of("\u2022 alpha beta gamma delta epsilon zeta eta",
+        assertEquals(List.of("• alpha beta gamma delta epsilon zeta eta",
                         "  theta iota kappa lambda"),
                 plain(renderer.render("- alpha beta gamma delta epsilon zeta eta theta iota kappa lambda",
                         45, Style.EMPTY, MarkdownStyles.DEFAULTS)));
@@ -65,13 +65,13 @@ class MarkdownLinesTest {
 
     @Test
     void blockquotePrefixedOnEveryLine() {
-        assertEquals(List.of("\u2502quoted", "\u2502second"),
+        assertEquals(List.of("│quoted", "│second"),
                 plain(renderer.render("> quoted\n> second", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
     }
 
     @Test
     void thematicBreak() {
-        assertEquals(List.of("\u2500\u2500\u2500\u2500\u2500"), 
+        assertEquals(List.of("─────"), 
                 plain(renderer.render("---", 5, Style.EMPTY, MarkdownStyles.DEFAULTS)));
     }
 

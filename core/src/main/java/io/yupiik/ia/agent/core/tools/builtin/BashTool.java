@@ -16,8 +16,8 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 @ApplicationScoped
 public class BashTool implements EmbeddedTool {

@@ -10,16 +10,15 @@ import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
@@ -42,6 +41,7 @@ import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -50,7 +50,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -82,6 +81,7 @@ public class CliCommand implements Runnable {
     private final McpManager mcpManager;
     private final UsageTracker usageTracker;
     private final ReplSlashCommands replSlashCommands;
+    private final Clock clock;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
     private static final int DIFF_MAX_LINES = 5;
@@ -116,7 +116,7 @@ public class CliCommand implements Runnable {
                       final CodingAgentConfiguration configuration, final PlanFileService planFileService,
                       final PlanTodoSeeder planTodoSeeder, final ChatClient chatClient,
                       final ProviderManager providerManager, final McpManager mcpManager,
-                      final JsonMapper mapper, final ReplSlashCommands replSlashCommands) {
+                      final JsonMapper mapper, final ReplSlashCommands replSlashCommands, final Clock clock) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -137,6 +137,7 @@ public class CliCommand implements Runnable {
         this.mcpManager = mcpManager;
         this.usageTracker = usageTracker;
         this.replSlashCommands = replSlashCommands;
+        this.clock = clock;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
         this.symbols = new Symbols(conf.ascii());
@@ -172,13 +173,13 @@ public class CliCommand implements Runnable {
                     Files.writeString(contextPath, "");
                 }
             } catch (final IOException e) {
-                println(colorizer.error("failed to prepare context file " + contextPath + ": " + e.getMessage()));
+                println(MarkdownColorizer.error("failed to prepare context file " + contextPath + ": " + e.getMessage()));
             }
         }
-        println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+        println(MarkdownColorizer.status("session " + sessionId + " - context file: " + contextPath));
         printBanner();
         if (conf.permitAll()) {
-            println(colorizer.warning("WARNING: --permit-all is on; all tool calls will run without approval."));
+            println(MarkdownColorizer.warning("WARNING: --permit-all is on; all tool calls will run without approval."));
         }
         if (conf.agent() != null && !conf.agent().isBlank()) {
             if (agentProvider.byName(conf.agent()) == null) {
@@ -218,7 +219,7 @@ public class CliCommand implements Runnable {
         userFeedbackService.setGate(null);
         System.out.flush();
         System.err.flush();
-        println(colorizer.status("session " + sessionId + " - context file: " + contextPath));
+        println(MarkdownColorizer.status("session " + sessionId + " - context file: " + contextPath));
     }
 
     /**
@@ -246,7 +247,7 @@ public class CliCommand implements Runnable {
             sb.append('[').append(MarkdownColorizer.dim(mode));
             final var model = chatClient.model();
             if (model != null && !model.isBlank()) {
-                sb.append(MarkdownColorizer.dim("\u00b7")).append(MarkdownColorizer.dim(model));
+                sb.append(MarkdownColorizer.dim("·")).append(MarkdownColorizer.dim(model));
             }
             sb.append(']');
         } else {
@@ -258,14 +259,14 @@ public class CliCommand implements Runnable {
     private void printBanner() {
         final var sb = new StringBuilder();
         sb.append(MarkdownColorizer.bold(symbols.toolMarker() + "yca"))
-                .append(" \u00b7 ").append(permissionService.mode().name().toLowerCase(Locale.ROOT))
-                .append(" mode \u00b7 session ").append(sessionId);
+                .append(" · ").append(permissionService.mode().name().toLowerCase(Locale.ROOT))
+                .append(" mode · session ").append(sessionId);
         final var model = chatClient.model();
         if (model != null && !model.isBlank()) {
-            sb.append(" \u00b7 ").append(model);
+            sb.append(" · ").append(model);
         }
-        sb.append(" \u00b7 type /help for commands");
-        println(colorizer.status(sb.toString()));
+        sb.append(" · type /help for commands");
+        println(MarkdownColorizer.status(sb.toString()));
     }
 
     private void repLoop() {
@@ -281,7 +282,7 @@ public class CliCommand implements Runnable {
                     continue;
                 }
                 if (text.equals("exit")) {
-                    println(colorizer.status("bye"));
+                    println(MarkdownColorizer.status("bye"));
                     break;
                 }
                 if (text.startsWith("/")) {
@@ -295,7 +296,7 @@ public class CliCommand implements Runnable {
                 println();
             }
         } catch (final IOException e) {
-            println(colorizer.error("cli read failed: " + e.getMessage()));
+            println(MarkdownColorizer.error("cli read failed: " + e.getMessage()));
         }
     }
 
@@ -338,7 +339,7 @@ public class CliCommand implements Runnable {
             return;
         }
         println();
-        println(colorizer.status("todos:"));
+        println(MarkdownColorizer.status("todos:"));
         renderTodos(after).forEach(this::println);
     }
 
@@ -350,13 +351,13 @@ public class CliCommand implements Runnable {
     private List<String> renderTodos(final List<TodoItem> todos) {
         final var out = new ArrayList<String>();
         if (todos.isEmpty()) {
-            out.add(colorizer.status("(no todos)"));
+            out.add(MarkdownColorizer.status("(no todos)"));
             return out;
         }
         var done = 0;
         for (final var item : todos) {
             switch (item.status() == null ? "" : item.status()) {
-                case "in_progress" -> out.add(colorizer.warning(symbols.todoInProgress() + item.content()));
+                case "in_progress" -> out.add(MarkdownColorizer.warning(symbols.todoInProgress() + item.content()));
                 case "completed" -> {
                     out.add(MarkdownColorizer.diffAdd(symbols.todoCompleted() + item.content()));
                     done++;
@@ -364,7 +365,7 @@ public class CliCommand implements Runnable {
                 default -> out.add(MarkdownColorizer.dim(symbols.todoPending() + item.content()));
             }
         }
-        out.add(colorizer.status(done + "/" + todos.size() + " done"));
+        out.add(MarkdownColorizer.status(done + "/" + todos.size() + " done"));
         return out;
     }
 
@@ -381,26 +382,26 @@ public class CliCommand implements Runnable {
         }
         if (toolsRun > 0) {
             if (conf.showUsage()) {
-                sb.append(" \u00b7 ");
+                sb.append(" · ");
             }
             sb.append(toolsRun).append(toolsRun == 1 ? " tool" : " tools");
         }
         final var elapsedMillis = (System.nanoTime() - turnStartNanos) / 1_000_000L;
         if (conf.showUsage() || toolsRun > 0) {
-            sb.append(" \u00b7 ");
+            sb.append(" · ");
         }
         sb.append(String.format(Locale.ROOT, "%.1fs", elapsedMillis / 1000.0));
-        System.err.println(colorizer.status(sb.toString()));
+        System.err.println(MarkdownColorizer.status(sb.toString()));
     }
 
     private void dispatch(final AgentEvent event) {
-        if (event instanceof final AgentEvent.TextDelta t) {
+        if (event instanceof AgentEvent.TextDelta(String delta)) {
             stopSpinner();
-            print(textBuffer.append(t.delta()));
-        } else if (event instanceof final AgentEvent.ThinkingDelta t) {
+            print(textBuffer.append(delta));
+        } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
             if (conf.showThinking()) {
                 if (verbosity == CliVerbosity.RAW) {
-                    System.err.print(MarkdownColorizer.dim(t.delta()));
+                    System.err.print(MarkdownColorizer.dim(delta));
                 } else {
                     beginSpinner("thinking");
                 }
@@ -421,29 +422,29 @@ public class CliCommand implements Runnable {
                 onToolFinished(t);
             }
             beginSpinner("thinking");
-        } else if (event instanceof final AgentEvent.Compacted c) {
+        } else if (event instanceof AgentEvent.Compacted(String kind)) {
             stopSpinner();
-            System.err.println(colorizer.status(symbols.infoMarker() + "context " + c.kind() + " applied"));
-        } else if (event instanceof final AgentEvent.Status s) {
+            System.err.println(MarkdownColorizer.status(symbols.infoMarker() + "context " + kind + " applied"));
+        } else if (event instanceof AgentEvent.Status(String message)) {
             stopSpinner();
-            System.err.println(colorizer.status(symbols.infoMarker() + s.message()));
-        } else if (event instanceof final AgentEvent.Error e) {
+            System.err.println(MarkdownColorizer.status(symbols.infoMarker() + message));
+        } else if (event instanceof AgentEvent.Error(String message)) {
             stopSpinner();
-            System.err.println(colorizer.error("[error] " + e.message()));
+            System.err.println(MarkdownColorizer.error("[error] " + message));
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
             lastUsageEvent = u;
         }
     }
 
-private void onToolStarted(final AgentEvent.ToolStarted t) {
+    private void onToolStarted(final AgentEvent.ToolStarted t) {
         if (!conf.showToolOutput()) {
             return;
         }
         if (verbosity == CliVerbosity.RAW) {
-            System.err.println(colorizer.status("[tool] " + t.name() + " " + t.args()));
+            System.err.println(MarkdownColorizer.status("[tool] " + t.name() + " " + t.args()));
             return;
         }
-        System.err.println(colorizer.bold(symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+        System.err.println(MarkdownColorizer.bold(symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
         if (verbosity == CliVerbosity.COMPACT && t.name().equals("bash")) {
             beginSpinner("running " + presenter.summarize(t.name(), t.args()));
         }
@@ -453,14 +454,14 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         stopSpinner();
         if (verbosity == CliVerbosity.RAW) {
             if (!t.success() && t.output() != null && !t.output().isBlank()) {
-                System.err.println(colorizer.error(t.output()));
+                System.err.println(MarkdownColorizer.error(t.output()));
             }
             return;
         }
         final var indent = "  ";
         final var result = presenter.result(t.name(), t.output(), t.success());
         System.err.println(MarkdownColorizer.dim(indent + symbols.resultPrefix())
-                + (t.success() ? colorizer.success(result) : colorizer.error(result)));
+                + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
         if (verbosity == CliVerbosity.COMPACT) {
             final var diff = presenter.diff(t.name(), lastToolArgs, DIFF_MAX_LINES);
             for (final var line : diff) {
@@ -502,7 +503,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         final var arg = command.length > 1 ? command[1].strip() : "";
         final var handler = slashHandlers().get(name);
         if (handler == null) {
-            println(colorizer.status("unknown command /" + name + " - type /help"));
+            println(MarkdownColorizer.status("unknown command /" + name + " - type /help"));
             return false;
         }
         return handler.apply(arg);
@@ -514,26 +515,34 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
                     printHelp();
                     return false;
                 }),
+                Map.entry("shortcuts", arg -> {
+                    printShortcuts();
+                    return false;
+                }),
+                Map.entry("clear", arg -> {
+                    clearScreen();
+                    return false;
+                }),
                 Map.entry("quit", arg -> {
-                    println(colorizer.status("bye"));
+                    println(MarkdownColorizer.status("bye"));
                     return true;
                 }),
                 Map.entry("exit", arg -> {
-                    println(colorizer.status("bye"));
+                    println(MarkdownColorizer.status("bye"));
                     return true;
                 }),
                 Map.entry("new", arg -> {
                     sessionId = sessionStore.create();
-                    println(colorizer.status("new session " + sessionId));
+                    println(MarkdownColorizer.status("new session " + sessionId));
                     return false;
                 }),
                 Map.entry("resume", arg -> {
                     if (arg.isBlank()) {
-                        println(colorizer.status("usage: /resume <session-id>"));
+                        println(MarkdownColorizer.status("usage: /resume <session-id>"));
                         return false;
                     }
                     sessionId = arg;
-                    println(colorizer.status("resumed session " + sessionId));
+                    println(MarkdownColorizer.status("resumed session " + sessionId));
                     return false;
                 }),
                 Map.entry("mode", arg -> {
@@ -589,13 +598,13 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
     private void mode(final String arg) {
         final var mode = AgentMode.fromConfigurationString(arg);
         permissionService.setMode(mode);
-        println(colorizer.status("mode: " + mode.name().toLowerCase()));
+        println(MarkdownColorizer.status("mode: " + mode.name().toLowerCase()));
         if (mode == AgentMode.BUILD) {
             try {
                 final var seeded = planTodoSeeder.seedFromLastAssistant(sessionId);
-                println(colorizer.status(seeded ? "todos seeded from the plan" : "no plan found to seed todos from"));
+                println(MarkdownColorizer.status(seeded ? "todos seeded from the plan" : "no plan found to seed todos from"));
             } catch (final RuntimeException e) {
-                println(colorizer.error("todo seeding failed: " + e.getMessage()));
+                println(MarkdownColorizer.error("todo seeding failed: " + e.getMessage()));
             }
         }
     }
@@ -604,34 +613,34 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         if (arg.isBlank()) {
             try {
                 final var models = chatClient.models().ids();
-                println(colorizer.status("models (" + models.size() + "):"));
+                println(MarkdownColorizer.status("models (" + models.size() + "):"));
                 final var current = chatClient.model();
                 for (final var m : models) {
                     println(currentEntry(Objects.equals(m, current), m));
                 }
-                println(colorizer.status("use /model <id> to switch"));
+                println(MarkdownColorizer.status("use /model <id> to switch"));
             } catch (final IOException | InterruptedException e) {
                 if (e instanceof InterruptedException) {
                     Thread.currentThread().interrupt();
                 }
-                println(colorizer.error("cannot list models: " + e.getMessage()));
+                println(MarkdownColorizer.error("cannot list models: " + e.getMessage()));
             }
             return;
         }
         final var model = arg.startsWith("$") ? arg.substring(1) : arg;
         chatClient.setModel(model);
-        println(colorizer.status("model: " + model));
+        println(MarkdownColorizer.status("model: " + model));
     }
 
     private void provider(final String arg) {
         final var providers = providerManager.providers();
         if (!arg.isBlank()) {
             chatClient.setProvider(arg);
-            println(colorizer.status("provider: " + arg));
+            println(MarkdownColorizer.status("provider: " + arg));
             return;
         }
         final var current = chatClient.providerId();
-        println(colorizer.status("providers (" + providers.size() + "):"));
+        println(MarkdownColorizer.status("providers (" + providers.size() + "):"));
         if (providers.isEmpty()) {
             println("(no providers configured)");
         } else {
@@ -640,13 +649,13 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
                 println(currentEntry(Objects.equals(id, current), id));
             }
         }
-        println(colorizer.status("use /provider <id> to switch"));
+        println(MarkdownColorizer.status("use /provider <id> to switch"));
     }
 
     private void agent(final String arg) {
         if (arg.isBlank()) {
             final var agents = agentProvider.agents();
-            println(colorizer.status("custom agents (" + agents.size() + "):"));
+            println(MarkdownColorizer.status("custom agents (" + agents.size() + "):"));
             if (agents.isEmpty()) {
                 println("(no custom agents configured; add them under yca.agents)");
             } else {
@@ -654,15 +663,15 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
                     println(currentEntry(Objects.equals(a.name(), activeAgent), a.name()));
                 }
             }
-            println(colorizer.status("use /agent <name> to set the active agent, /agent to clear it"));
+            println(MarkdownColorizer.status("use /agent <name> to set the active agent, /agent to clear it"));
             return;
         }
         if (agentProvider.byName(arg) == null) {
-            println(colorizer.error("unknown agent: " + arg));
+            println(MarkdownColorizer.error("unknown agent: " + arg));
             return;
         }
         activeAgent = arg;
-        println(colorizer.status("agent: " + arg));
+        println(MarkdownColorizer.status("agent: " + arg));
     }
 
     /**
@@ -672,7 +681,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
     private String currentEntry(final boolean isCurrent, final String value) {
         final var marker = isCurrent ? symbols.currentMarker() : " ";
         final var name = isCurrent ? MarkdownColorizer.accent(value) : value;
-        return marker + " " + name + (isCurrent ? colorizer.status(" (current)") : "");
+        return marker + " " + name + (isCurrent ? MarkdownColorizer.status(" (current)") : "");
     }
 
     private void context(final String arg) {
@@ -691,9 +700,9 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
             final var target = Path.of(arg).toAbsolutePath();
             Files.createDirectories(target.getParent() == null ? Path.of(".") : target.getParent());
             Files.writeString(target, sb.toString());
-            println(colorizer.status("context written to " + target));
+            println(MarkdownColorizer.status("context written to " + target));
         } catch (final IOException e) {
-            println(colorizer.error("context failed: " + e.getMessage()));
+            println(MarkdownColorizer.error("context failed: " + e.getMessage()));
         }
     }
 
@@ -701,15 +710,15 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         final var project = memoryStore.readProject();
         final var global = memoryStore.readGlobal();
         if (project.isBlank() && global.isBlank()) {
-            println(colorizer.status("(empty memory)"));
+            println(MarkdownColorizer.status("(empty memory)"));
             return;
         }
         if (!global.isBlank()) {
-            println(colorizer.status("-- global memory --"));
+            println(MarkdownColorizer.status("-- global memory --"));
             println(global);
         }
         if (!project.isBlank()) {
-            println(colorizer.status("-- project memory --"));
+            println(MarkdownColorizer.status("-- project memory --"));
             println(project);
         }
     }
@@ -728,7 +737,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         }
         final var byServer = new TreeMap<>(mcpManager.toolsByServer());
         if (byServer.isEmpty()) {
-            println(colorizer.status("(no tools available)"));
+            println(MarkdownColorizer.status("(no tools available)"));
             return;
         }
         var count = 0;
@@ -748,14 +757,14 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
             if (lines.isEmpty()) {
                 continue;
             }
-            println(colorizer.accent(server.getKey()));
+            println(MarkdownColorizer.accent(server.getKey()));
             for (final var line : lines) {
                 println("  " + line);
             }
             count += lines.size();
         }
         if (count == 0) {
-            println(colorizer.status("(no tool matches)"));
+            println(MarkdownColorizer.status("(no tool matches)"));
         }
     }
 
@@ -776,42 +785,42 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         final var v = arg == null ? "" : arg.strip();
         if (v.equals("all") || v.equals("unsafe")) {
             permissionService.setPermitAll(true);
-            println(colorizer.status("permissions: all tools allowed"));
+            println(MarkdownColorizer.status("permissions: all tools allowed"));
         } else if (v.equals("none") || v.equals("safe")) {
             permissionService.setPermitAll(false);
-            println(colorizer.status("permissions: asking for approval"));
+            println(MarkdownColorizer.status("permissions: asking for approval"));
         } else {
-            println(colorizer.status("usage: /permissions all|none"));
+            println(MarkdownColorizer.status("usage: /permissions all|none"));
         }
     }
 
     private void resyncGraph() {
         try {
             final var result = structuralCodeGraph.resync();
-            println(colorizer.status(result));
+            println(MarkdownColorizer.status(result));
         } catch (final RuntimeException e) {
-            println(colorizer.error("resync failed: " + e.getMessage()));
+            println(MarkdownColorizer.error("resync failed: " + e.getMessage()));
         }
     }
 
     private void compact() {
         final var history = sessionStore.load(sessionId);
         if (history.isEmpty()) {
-            println(colorizer.status("nothing to compact"));
+            println(MarkdownColorizer.status("nothing to compact"));
             return;
         }
         sessionStore.replace(sessionId, contextManager.compact(history));
-        println(colorizer.status("context compacted"));
+        println(MarkdownColorizer.status("context compacted"));
     }
 
     private void editPlan(final String arg) {
         if (permissionService.mode() != AgentMode.PLAN) {
-            println(colorizer.error("editplan is only available in plan mode (run /mode plan)"));
+            println(MarkdownColorizer.error("editplan is only available in plan mode (run /mode plan)"));
             return;
         }
         final var plan = planTodoSeeder.plan(sessionId);
         if (plan == null || plan.isBlank()) {
-            println(colorizer.error("no plan to edit yet - produce a plan first"));
+            println(MarkdownColorizer.error("no plan to edit yet - produce a plan first"));
             return;
         }
         final var path = arg.isBlank()
@@ -821,35 +830,35 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
             Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
             Files.writeString(path, planFileService.render(plan, todoStore.all()));
         } catch (final IOException e) {
-            println(colorizer.error("editplan failed to write " + path + ": " + e.getMessage()));
+            println(MarkdownColorizer.error("editplan failed to write " + path + ": " + e.getMessage()));
             return;
         }
         final var original = planFileService.render(plan, todoStore.all());
-        println(colorizer.status("plan exported to " + path));
-        println(colorizer.status("edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
+        println(MarkdownColorizer.status("plan exported to " + path));
+        println(MarkdownColorizer.status("edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
         try {
             final var input = stdin.readLine();
             if (input != null) {
                 final var decision = input.trim();
                 if (decision.equalsIgnoreCase("c") || decision.equalsIgnoreCase("cancel")) {
-                    println(colorizer.status("plan edit cancelled"));
+                    println(MarkdownColorizer.status("plan edit cancelled"));
                     return;
                 }
             }
         } catch (final IOException e) {
-            println(colorizer.error("editplan read failed: " + e.getMessage()));
+            println(MarkdownColorizer.error("editplan read failed: " + e.getMessage()));
             return;
         }
         try {
             final var edited = Files.readString(path);
             if (edited.equals(original)) {
-                println(colorizer.status("no changes in the plan (nothing to reload)"));
+                println(MarkdownColorizer.status("no changes in the plan (nothing to reload)"));
                 return;
             }
             final var parsed = planFileService.parse(edited);
-            println(colorizer.status(planFileService.reload(sessionId, parsed)));
+            println(MarkdownColorizer.status(planFileService.reload(sessionId, parsed)));
         } catch (final IOException e) {
-            println(colorizer.error("editplan failed to read " + path + ": " + e.getMessage()));
+            println(MarkdownColorizer.error("editplan failed to read " + path + ": " + e.getMessage()));
         }
     }
 
@@ -857,7 +866,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         return (title, detail) -> {
             stopSpinner();
             printApprovalBox(title, detail);
-            print(colorizer.accent("allow? [y/N] "));
+            print(MarkdownColorizer.accent("allow? [y/N] "));
             try {
                 final var line = stdin.readLine();
                 if (line != null) {
@@ -888,18 +897,18 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         for (final var line : lines) {
             width = Math.max(width, line.length());
         }
-        width = Math.min(Math.max(width, 32), 72);
+        width = Math.clamp(width, 32, 72);
         final var rule = symbols.boxHorizontal().repeat(width);
-        println(colorizer.accent(symbols.boxTop() + rule + symbols.boxCorner()));
+        println(MarkdownColorizer.accent(symbols.boxTop() + rule + symbols.boxCorner()));
         for (int i = 0; i < lines.size(); i++) {
             for (final var fragment : wrapLine(lines.get(i), width)) {
-                final var styled = i == 0 ? colorizer.bold(padTo(fragment, width))
-                        : i == 1 ? colorizer.warning(padTo(fragment, width))
-                        : colorizer.status(padTo(fragment, width));
-                println(colorizer.accent(symbols.boxLine()) + styled);
+                final var styled = i == 0 ? MarkdownColorizer.bold(padTo(fragment, width))
+                        : i == 1 ? MarkdownColorizer.warning(padTo(fragment, width))
+                        : MarkdownColorizer.status(padTo(fragment, width));
+                println(MarkdownColorizer.accent(symbols.boxLine()) + styled);
             }
         }
-        println(colorizer.accent(symbols.boxBottom() + rule + symbols.boxCornerBottom()));
+        println(MarkdownColorizer.accent(symbols.boxBottom() + rule + symbols.boxCornerBottom()));
     }
 
     private static List<String> wrapLine(final String text, final int width) {
@@ -910,11 +919,11 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         final var words = text.split("\\s+");
         final var sb = new StringBuilder();
         for (final var word : words) {
-            if (sb.length() > 0 && sb.length() + 1 + word.length() > width) {
+            if (!sb.isEmpty() && sb.length() + 1 + word.length() > width) {
                 out.add(sb.toString());
                 sb.setLength(0);
             }
-            if (sb.length() > 0) {
+            if (!sb.isEmpty()) {
                 sb.append(' ');
             }
             sb.append(word);
@@ -925,7 +934,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
 
     private static String padTo(final String text, final int width) {
         if (text.length() > width) {
-            return text.substring(0, Math.max(0, width - 1)) + "\u2026";
+            return text.substring(0, Math.max(0, width - 1)) + "…";
         }
         final var sb = new StringBuilder(text);
         while (sb.length() < width) {
@@ -953,11 +962,11 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
                     answers.put(question.id(), answer);
                 }
                 // summary
-                println(colorizer.status("your answers:"));
+                println(MarkdownColorizer.status("your answers:"));
                 for (final var question : questions) {
                     println("- " + question.prompt() + " -> " + answers.get(question.id()));
                 }
-                print(colorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "));
+                print(MarkdownColorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "));
                 try {
                     final var line = reader.readLine();
                     if (line != null) {
@@ -978,7 +987,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
 
     private Object askOne(final BufferedReader reader, final Question question) {
         println();
-        println(colorizer.accent(question.prompt()));
+        println(MarkdownColorizer.accent(question.prompt()));
         final var options = question.options() == null ? List.<String>of() : question.options();
         for (int i = 0; i < options.size(); i++) {
             println("  " + (i + 1) + ". " + options.get(i));
@@ -986,12 +995,12 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
         final var ownIndex = options.size(); // 1-based id = options.size()
         if (question.multiple()) {
             println("  " + (ownIndex + 1) + ". (type your own answer)");
-            println(colorizer.status("enter comma-separated numbers"));
+            println(MarkdownColorizer.status("enter comma-separated numbers"));
         } else {
             println("  " + (ownIndex + 1) + ". (type your own answer)");
-            println(colorizer.status("enter a number, or " + (ownIndex + 1) + " then your text"));
+            println(MarkdownColorizer.status("enter a number, or " + (ownIndex + 1) + " then your text"));
         }
-        print(colorizer.status("> "));
+        print(MarkdownColorizer.status("> "));
         try {
             final var line = reader.readLine();
             if (line == null) {
@@ -1018,7 +1027,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
                     if (id >= 1 && id <= options.size()) {
                         values.add(options.get(id - 1));
                     } else if (id == ownIndex + 1) {
-                        print(colorizer.status("your answer> "));
+                        print(MarkdownColorizer.status("your answer> "));
                         final var own = reader.readLine();
                         if (own != null && !own.isBlank()) {
                             values.add(own);
@@ -1037,7 +1046,7 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
                 return options.get(id - 1);
             }
             if (id == ownIndex + 1) {
-                print(colorizer.status("your answer> "));
+                print(MarkdownColorizer.status("your answer> "));
                 final var own = reader.readLine();
                 return own == null ? "" : own;
             }
@@ -1082,13 +1091,24 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
     }
 
     private void printHelpGroup(final String title, final List<SlashCommandSpec> rows) {
-        println(colorizer.accent("  " + title + ":"));
+        println(MarkdownColorizer.accent("  " + title + ":"));
         for (final var spec : rows) {
             final var display = spec.display();
             final var desc = spec.description();
             final var pad = " ".repeat(Math.max(2, 12 - display.length()));
             println("    " + MarkdownColorizer.bold(display) + pad + desc);
         }
+    }
+
+    private void printShortcuts() {
+        println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - keys"));
+        println(MarkdownColorizer.accent("  editing:"));
+        println("    Ctrl-C   interrupt the running turn; pressed twice when idle (within 2s) it quits");
+        println("    Ctrl-D   exit");
+    }
+
+    private void clearScreen() {
+        println("\u001B[2J\u001B[H");
     }
 
     private String resolveSessionId() {
@@ -1113,10 +1133,10 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
             final var handler = Class.forName("sun.misc.SignalHandler");
             final var handle = signal.getMethod("handle", signal, handler);
             final var ctor = signal.getConstructor(String.class);
-            final Object interruptHandler = Proxy.newProxyInstance(
+            final var interruptHandler = Proxy.newProxyInstance(
                     CliCommand.class.getClassLoader(),
                     new Class<?>[]{handler},
-                    (proxy, method, args) -> {
+                    (_, method, _) -> {
                         if (method.getName().equals("handle")) {
                             onInterrupt();
                         }
@@ -1133,14 +1153,14 @@ private void onToolStarted(final AgentEvent.ToolStarted t) {
             cancelled.set(true);
             return;
         }
-        final var now = System.currentTimeMillis();
+        final var now = clock.millis();
         final var previous = lastInterruptAt;
         lastInterruptAt = now;
         if (previous > 0 && now - previous <= QUIT_WINDOW_MILLIS) {
             quitRequested = true;
-            println(colorizer.status("bye"));
+            println(MarkdownColorizer.status("bye"));
         } else {
-            println(colorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
+            println(MarkdownColorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
         }
     }
 
