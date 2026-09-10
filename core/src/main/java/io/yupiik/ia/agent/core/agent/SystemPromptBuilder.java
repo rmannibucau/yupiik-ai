@@ -7,6 +7,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -26,15 +27,20 @@ public class SystemPromptBuilder {
     private final TodoStore todoStore;
     private final PermissionService permissionService;
     private final AgentProvider agentProvider;
+    private final ProviderManager providerManager;
+    private final TodoPromptResolver todoPromptResolver;
 
     public SystemPromptBuilder(final CodingAgentConfiguration configuration, final MemoryStore memoryStore,
                                final TodoStore todoStore, final PermissionService permissionService,
-                               final AgentProvider agentProvider) {
+                               final AgentProvider agentProvider, final ProviderManager providerManager,
+                               final TodoPromptResolver todoPromptResolver) {
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.todoStore = todoStore;
         this.permissionService = permissionService;
         this.agentProvider = agentProvider;
+        this.providerManager = providerManager;
+        this.todoPromptResolver = todoPromptResolver;
     }
 
     protected SystemPromptBuilder() {
@@ -43,6 +49,8 @@ public class SystemPromptBuilder {
         this.todoStore = null;
         this.permissionService = null;
         this.agentProvider = null;
+        this.providerManager = null;
+        this.todoPromptResolver = null;
     }
 
     public String build() {
@@ -74,7 +82,9 @@ public class SystemPromptBuilder {
             sb.append("You are yca, a terminal coding agent, currently in PLAN mode.\n");
             sb.append("You must NOT modify the repository: no file creation, edits or deletions, and no state-changing shell commands. Only read-only tools are available.\n");
             sb.append("Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
-            sb.append("Use todo_write to record the plan: one pending item per concrete implementation step, in execution order. todo_write is the only state-changing tool allowed in this mode.\n\n");
+            sb.append("Use todo_write to record the plan: one pending item per concrete implementation step, in execution order. todo_write is the only state-changing tool allowed in this mode.\n");
+            appendTodoGuidance(sb);
+            sb.append('\n');
         } else {
             sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
             sb.append("You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");
@@ -85,7 +95,9 @@ public class SystemPromptBuilder {
             sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
             sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
             sb.append("- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
-            sb.append("- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n\n");
+            sb.append("- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n");
+            appendTodoGuidance(sb);
+            sb.append('\n');
         }
         final var workingDir = configuration.resolveWorkingDir();
         final var projectDir = configuration.resolveProjectDir();
@@ -120,6 +132,19 @@ public class SystemPromptBuilder {
             }
         }
         return sb.toString();
+    }
+
+    private void appendTodoGuidance(final StringBuilder sb) {
+        if (todoPromptResolver == null) {
+            return;
+        }
+        final var provider = providerManager == null ? null : providerManager.current();
+        final var baseUrl = provider == null ? null : provider.baseUrl();
+        final var mode = provider == null ? "auto" : provider.todoPrompt();
+        final var guidance = todoPromptResolver.resolve(mode, baseUrl);
+        if (!guidance.isBlank()) {
+            sb.append("<todo-guidance>\n").append(guidance).append("\n</todo-guidance>\n");
+        }
     }
 
     private String projectContext(final Path base) {

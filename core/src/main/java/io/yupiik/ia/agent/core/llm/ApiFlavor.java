@@ -1,7 +1,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 public enum ApiFlavor {
-    AUTO, COMPLETIONS, RESPONSES;
+    AUTO, COMPLETIONS, RESPONSES, ANTHROPIC;
 
     public static ApiFlavor fromConfigurationString(final String value) {
         if (value == null || value.isBlank()) {

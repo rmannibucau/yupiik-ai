@@ -130,7 +130,7 @@ public class UsageTracker {
                 if (model.equals(entry.id())) {
                     final var window = entry.contextWindow();
                     if (window != null && window > 0) {
-                        contextWindowCache.put(providerId, model, window, clock.millis());
+                        contextWindowCache.put(providerId, model, window, entry.maxTokens(), clock.millis());
                         return Optional.of(window);
                     }
                     break;

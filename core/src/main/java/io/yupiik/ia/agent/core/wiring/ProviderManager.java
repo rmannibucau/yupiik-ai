@@ -145,4 +145,54 @@ public class ProviderManager {
             throw new IllegalArgumentException("Invalid providerSpecificOptions JSON: " + e.getMessage(), e);
         }
     }
+
+    /**
+     * Resolve the effective output token budget override for a model of a provider: an exact id
+     * match in the provider {@code outputs} wins, then the first matching glob ({@code *} wildcard),
+     * else 0 when no override applies. The provider {@code outputTokens} default is not folded in
+     * here so the caller can distinguish "override" from "default".
+     */
+    public int outputTokensOverride(final ProviderConfiguration provider, final String model) {
+        if (provider == null || provider.outputs() == null || model == null) {
+            return 0;
+        }
+        Integer exact = null;
+        Integer glob = null;
+        for (final var limit : provider.outputs()) {
+            if (limit.tokens() <= 0) {
+                continue;
+            }
+            final var pattern = limit.model() == null ? "" : limit.model();
+            if (pattern.equals(model)) {
+                if (exact == null) {
+                    exact = limit.tokens();
+                }
+                continue;
+            }
+            final var regex = glob(pattern);
+            if (regex != null && regex.matcher(model).matches() && glob == null) {
+                glob = limit.tokens();
+            }
+        }
+        if (exact != null) {
+            return exact;
+        }
+        return glob == null ? 0 : glob;
+    }
+
+    private static java.util.regex.Pattern glob(final String pattern) {
+        if (pattern == null || !pattern.contains("*")) {
+            return null;
+        }
+        final var sb = new StringBuilder();
+        for (int i = 0; i < pattern.length(); i++) {
+            final char c = pattern.charAt(i);
+            if (c == '*') {
+                sb.append(".*");
+            } else {
+                sb.append(java.util.regex.Pattern.quote(String.valueOf(c)));
+            }
+        }
+        return java.util.regex.Pattern.compile(sb.toString());
+    }
 }

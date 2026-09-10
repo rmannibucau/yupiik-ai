@@ -39,18 +39,27 @@ public class ContextWindowCache {
     }
 
     @JsonModel
-    public record Entry(String providerId, String model, int window, long fetchedAt) {
+    public record Entry(String providerId, String model, int window, Integer maxTokens, long fetchedAt) {
     }
 
     /** The cached window for the provider+model pair when fresher than a day; the last entry wins. */
     public Optional<Integer> get(final String providerId, final String model) {
+        return getEntry(providerId, model).map(Entry::window);
+    }
+
+    /** The cached max output tokens for the provider+model pair when fresher than a day; nullable when absent or unknown. */
+    public Optional<Integer> getMaxTokens(final String providerId, final String model) {
+        return getEntry(providerId, model).flatMap(e -> e.maxTokens() == null ? Optional.empty() : Optional.of(e.maxTokens()));
+    }
+
+    private Optional<Entry> getEntry(final String providerId, final String model) {
         final var file = file();
         if (!Files.isRegularFile(file)) {
             return Optional.empty();
         }
         final var now = clock.millis();
         try {
-            Optional<Integer> found = Optional.empty();
+            Optional<Entry> found = Optional.empty();
             for (final var line : Files.readAllLines(file)) {
                 if (line.isBlank()) {
                     continue;
@@ -62,7 +71,7 @@ public class ContextWindowCache {
                     continue;
                 }
                 if (matches(entry, providerId, model)) {
-                    found = now - entry.fetchedAt() <= TTL_MILLIS ? Optional.of(entry.window()) : Optional.empty();
+                    found = now - entry.fetchedAt() <= TTL_MILLIS ? Optional.of(entry) : Optional.empty();
                 }
             }
             return found;
@@ -72,9 +81,14 @@ public class ContextWindowCache {
     }
 
     public void put(final String providerId, final String model, final int window, final long fetchedAt) {
+        put(providerId, model, window, null, fetchedAt);
+    }
+
+    public void put(final String providerId, final String model, final int window, final Integer maxTokens,
+                    final long fetchedAt) {
         try {
             Files.createDirectories(dir());
-            Files.writeString(file(), mapper.toString(new Entry(providerId, model, window, fetchedAt)) + "\n",
+            Files.writeString(file(), mapper.toString(new Entry(providerId, model, window, maxTokens, fetchedAt)) + "\n",
                     StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         } catch (final IOException e) {
             throw new UncheckedIOException(e);

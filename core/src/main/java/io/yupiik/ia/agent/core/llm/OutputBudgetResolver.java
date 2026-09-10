@@ -1,0 +1,50 @@
+package io.yupiik.ia.agent.core.llm;
+
+/**
+ * Computes the per-request output token budget (the {@code max_tokens} parameter for providers
+ * that require it, such as Anthropic).
+ *
+ * <p>Resolution order: an explicit {@code max_tokens} on the request wins, then a per-model
+ * override configured on the provider, then the per-provider default, then a value detected from
+ * the provider /v1/models, then {@link #DEFAULT_MAX_TOKEN} (mirroring opencode's
+ * {@code min(model.limit.output, 32000) || 32000} cap-and-fallback). The result is clamped down to
+ * leave room inside a known, smaller context window.</p>
+ */
+public final class OutputBudgetResolver {
+    /** Hard cap and fallback for the output budget, matching opencode's OUTPUT_TOKEN_MAX. */
+    public static final int DEFAULT_MAX_TOKEN = 32_000;
+
+    private OutputBudgetResolver() {
+        // utility
+    }
+
+    /**
+     * @param requested explicit {@code max_tokens} on the request (nullable)
+     * @param configuredPerModel positive per-model override, or 0/negative when unset
+     * @param configuredPerProvider positive per-provider default, or 0/negative when unset
+     * @param detected value detected from /v1/models, or null/positive when known
+     * @param contextWindow total context window in tokens, or null/positive when known
+     */
+    public static int resolve(final Integer requested,
+                              final int configuredPerModel,
+                              final int configuredPerProvider,
+                              final Integer detected,
+                              final Integer contextWindow) {
+        int budget;
+        if (requested != null && requested > 0) {
+            budget = requested;
+        } else if (configuredPerModel > 0) {
+            budget = configuredPerModel;
+        } else if (configuredPerProvider > 0) {
+            budget = configuredPerProvider;
+        } else if (detected != null && detected > 0) {
+            budget = detected;
+        } else {
+            budget = DEFAULT_MAX_TOKEN;
+        }
+        if (contextWindow != null && contextWindow > 0 && budget > contextWindow - 1) {
+            return Math.max(1, contextWindow - 1);
+        }
+        return Math.max(1, budget);
+    }
+}

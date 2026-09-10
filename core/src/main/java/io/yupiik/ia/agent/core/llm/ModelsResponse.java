@@ -26,16 +26,26 @@ public record ModelsResponse(List<Model> data) {
          * Best effort context window extraction from the vendor extensions: flat keys first, then
          * the llama.cpp effective {@code meta.n_ctx}, then {@code meta.n_ctx_train} but only when
          * smaller than {@link #DEFAULT_CONTEXT_WINDOW} so it can only lower the estimate.
-         * Detected values are totals (prompt + completion combined).
+         * Anthropic exposes it as {@code max_input_tokens}. Detected values are totals
+         * (prompt + completion combined).
          */
         public Integer contextWindow() {
             final var primary = firstPositive("/context_window", "/model_context_window",
-                    "/context_length", "/max_model_len", "/meta/n_ctx");
+                    "/context_length", "/max_model_len", "/max_input_tokens", "/meta/n_ctx");
             if (primary != null) {
                 return primary;
             }
             final var train = firstPositive("/meta/n_ctx_train");
             return train != null && train < DEFAULT_CONTEXT_WINDOW ? train : null;
+        }
+
+        /**
+         * Best effort max output tokens (the cap for the {@code max_tokens} parameter) extracted
+         * from the vendor extensions, or null when unknown. Anthropic exposes it as
+         * {@code max_tokens}; OpenAI models occasionally set {@code max_completion_tokens}.
+         */
+        public Integer maxTokens() {
+            return firstPositive("/max_tokens", "/max_completion_tokens", "/output_token_limit");
         }
 
         private Integer firstPositive(final String... pointers) {

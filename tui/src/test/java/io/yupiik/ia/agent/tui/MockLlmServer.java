@@ -138,9 +138,9 @@ public final class MockLlmServer implements AutoCloseable {
                                                         final PermissionsConfiguration permissions,
                                                         final StructuralCodeGraphConfiguration codeGraph) {
         final var provider = new ProviderConfiguration("default", baseUrl, "test-key", "test-model",
-                ApiFlavor.AUTO, ReasoningField.AUTO, 128000, 5, "");
+                ApiFlavor.AUTO, ReasoningField.AUTO, 128000, -1, List.of(), 5, "", null);
         return new CodingAgentConfiguration(storageHome, null, null,
-                new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, 120),
+                new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, -1, List.of(), 120),
                 null, new LlmConfiguration(1, 1L, 0, 1, true, 250),
                 null, null, null, null, permissions, null, codeGraph, null, null, null, null);
     }

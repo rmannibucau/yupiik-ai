@@ -23,7 +23,11 @@ model, `model.compact`, `model.prune`, code graph enrichment).
 first, then to the implicit `default` provider). A provider's optional
 `providerSpecificOptions` JSON object is merged into every API call payload for
 it. For single-provider setups, the flat `yca.provider.*` scalars build the
-implicit `default` provider.
+ implicit `default` provider.
+
+ Per-provider system-prompt tuning, such as the strength of todo-guidance
+ (`yca.provider.*.prompt.todo`), is covered in
+ xref:features/todo-guidance.adoc[Todo and plan guidance].
 
 A provider's context window (`yca.provider.*.contextWindow`) accepts an explicit
 token count; when zero or negative (the default) it is auto-detected from the

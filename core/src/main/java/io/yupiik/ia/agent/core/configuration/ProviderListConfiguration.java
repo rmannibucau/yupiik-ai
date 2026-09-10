@@ -18,6 +18,8 @@ public record ProviderListConfiguration(
         @Property(defaultValue = "io.yupiik.ia.agent.core.llm.ApiFlavor.AUTO", documentation = "Convenience shorthand for the default provider API flavor (used only when no providers are listed).") ApiFlavor api,
         @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO", documentation = "Convenience shorthand for the default provider reasoning field (used only when no providers are listed).") ReasoningField reasoningField,
         @Property(defaultValue = "-1", documentation = "Convenience shorthand for the default provider context window (used only when no providers are listed). Zero or negative auto-detects it from the provider /v1/models vendor extensions, caches it one day per provider and model and falls back to 128000.") int contextWindow,
+        @Property(defaultValue = "-1", documentation = "Convenience shorthand for the default provider output token budget (used only when no providers are listed). Zero or negative auto-detects it from the provider /v1/models max_tokens and falls back to 32000.") int outputTokens,
+        @Property(defaultValue = "java.util.List.of()", documentation = "Convenience shorthand for the default provider per-model output token overrides (used only when no providers are listed).") List<ProviderConfiguration.OutputLimit> outputs,
         @Property(defaultValue = "120", documentation = "Convenience shorthand for the default provider timeout (used only when no providers are listed).") int timeoutSeconds) {
 
     public String resolvedDefaultProvider() {
@@ -37,6 +39,8 @@ public record ProviderListConfiguration(
         // for convenience, present the legacy flat scalars as an implicit provider named "default"
         return new ProviderConfiguration("default", baseUrl == null ? "https://api.openai.com/v1" : baseUrl,
                 apiKey == null ? "" : apiKey, model == null ? "" : model,
-                api, reasoningField, contextWindow, timeoutSeconds, "");
+                api, reasoningField, contextWindow, outputTokens,
+                outputs == null ? List.of() : outputs,
+                timeoutSeconds, "", new PromptConfiguration("auto"));
     }
 }

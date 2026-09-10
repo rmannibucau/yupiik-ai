@@ -1,25 +1,17 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.net.URI;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.time.Duration;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Deque;
+import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,20 +20,32 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
+/**
+ * Facade and dispatcher over the protocol-specific {@link LlmClient} implementations
+ * ({@link OpenAICompletionClient}, {@link OpenAIResponsesClient} and {@link AnthropicMessagesClient}).
+ *
+ * <p>Keeps the historical public API ({@link #chat}, {@link #stream}, {@link #models}, {@link #model},
+ * {@link #setModel}, {@link #setProvider}, {@link #flavor}, {@link #providerId}) and owns the concerns
+ * shared across every provider: model/provider resolution, provider-specific option merging, the
+ * per-request output budget, the AUTO flavor detection and fallback, and the concurrency / throttling /
+ * retries orchestration. The wire protocol and authentication are delegated to the selected client.</p>
+ */
 @ApplicationScoped
 public class ChatClient implements AutoCloseable {
-    private static final List<String> FLAVOR_MISSING_CODES = List.of("(404)", "(405)", "(501)");
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final ProviderManager providerManager;
-    private final ExtendedHttpClient client;
+    private final Clock clock;
+    private final ContextWindowCache contextWindowCache;
+    private final Map<ApiFlavor, LlmClient> clients;
     private final Semaphore permits;
     private final Deque<Long> requestTimes = new ArrayDeque<>();
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
     private volatile ProviderConfiguration targetProvider;
-    private final Clock clock;
+    private volatile Consumer<PauseEvent> pauses = event -> {
+    };
 
     public ChatClient(final CodingAgentConfiguration configuration, final JsonMapper mapper,
                       final ProviderManager providerManager, final Clock clock) {
@@ -49,23 +53,47 @@ public class ChatClient implements AutoCloseable {
         this.mapper = mapper;
         this.providerManager = providerManager;
         this.clock = clock;
-        this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
-                .setDelegate(java.net.http.HttpClient.newHttpClient()));
+        this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
         this.permits = new Semaphore(Math.max(1, configuration.llm().maxConcurrent()));
+        this.clients = new EnumMap<>(ApiFlavor.class);
+        this.clients.put(ApiFlavor.COMPLETIONS, new OpenAICompletionClient(mapper));
+        this.clients.put(ApiFlavor.RESPONSES, new OpenAIResponsesClient(mapper));
+        this.clients.put(ApiFlavor.ANTHROPIC, new AnthropicMessagesClient(mapper));
     }
 
     protected ChatClient() {
         this.configuration = null;
         this.mapper = null;
         this.providerManager = null;
-        this.client = null;
-        this.permits = null;
         this.clock = null;
+        this.contextWindowCache = null;
+        this.clients = null;
+        this.permits = null;
     }
 
     public ApiFlavor flavor() {
-        final var current = providerManager.current();
-        return resolved == ApiFlavor.AUTO ? (current == null ? ApiFlavor.AUTO : current.api()) : resolved;
+        return effectiveFlavor();
+    }
+
+    /**
+     * The flavor used to select a client: an explicitly resolved flavor wins, then the configured
+     * provider flavor, then a flavor deduced from the base URL route; {@link ApiFlavor#AUTO} when it
+     * cannot be pinned (in which case the responses flavour is probed first and falls back).
+     */
+    private ApiFlavor effectiveFlavor() {
+        if (resolved != ApiFlavor.AUTO) {
+            return resolved;
+        }
+        final var current = providerManager == null ? null : providerManager.current();
+        if (current == null) {
+            return ApiFlavor.AUTO;
+        }
+        final var configured = current.api();
+        if (configured != null && configured != ApiFlavor.AUTO) {
+            return configured;
+        }
+        final var detected = LlmEndpoints.detectFlavor(current.baseUrl());
+        return detected == null ? ApiFlavor.AUTO : detected;
     }
 
     public String model() {
@@ -73,7 +101,7 @@ public class ChatClient implements AutoCloseable {
         if (override != null && !override.isBlank()) {
             return override;
         }
-        final var current = providerManager.current();
+        final var current = providerManager == null ? null : providerManager.current();
         return current == null || current.model() == null ? "" : current.model();
     }
 
@@ -85,6 +113,12 @@ public class ChatClient implements AutoCloseable {
         providerManager.setProvider(id);
         this.modelOverride = null;
         this.resolved = ApiFlavor.AUTO;
+    }
+
+    /** Registers a listener notified whenever the resilience layer delays a request (throttle or retry backoff). */
+    public void setPauseListener(final Consumer<PauseEvent> listener) {
+        this.pauses = listener == null ? event -> {
+        } : listener;
     }
 
     public String providerId() {
@@ -136,6 +170,36 @@ public class ChatClient implements AutoCloseable {
                 request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), others);
     }
 
+    /**
+     * Resolve the effective output budget and, when it differs from the request, return a copy carrying
+     * it. Providers that require {@code max_tokens} (Anthropic) are guaranteed a value; OpenAI flavors
+     * are left untouched to preserve their existing behaviour.
+     */
+    private ChatCompletionRequest applyOutputBudget(final ChatCompletionRequest request, final ApiFlavor flavor) {
+        if (flavor != ApiFlavor.ANTHROPIC) {
+            return request;
+        }
+        final var provider = target();
+        final var model = request.model();
+        final var detectedMaxTokens = contextWindowCache.getMaxTokens(providerManager.currentProviderId(), model).orElse(null);
+        Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
+        if (contextWindow == null) {
+            contextWindow = contextWindowCache.get(providerManager.currentProviderId(), model).orElse(null);
+        }
+        final var budget = OutputBudgetResolver.resolve(
+                request.maxTokens(),
+                providerManager.outputTokensOverride(provider, model),
+                provider.outputTokens(),
+                detectedMaxTokens,
+                contextWindow);
+        final var maxTokens = request.maxTokens();
+        if (maxTokens != null && budget == maxTokens) {
+            return request;
+        }
+        return new ChatCompletionRequest(model, request.messages(), request.temperature(), request.stream(),
+                request.tools(), request.toolChoice(), budget, request.reasoningEffort(), request.others());
+    }
+
     public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
         return chat(request, () -> false);
     }
@@ -143,21 +207,10 @@ public class ChatClient implements AutoCloseable {
     public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var effective = useModel(request);
+        throttle();
         permits.acquire();
         try {
-            final var flavor = flavor();
-            if (flavor == ApiFlavor.RESPONSES) {
-                return withRetries(() -> sendBlockingResponses(effective), cancelled);
-            }
-            if (flavor == ApiFlavor.COMPLETIONS) {
-                return toResult(withRetries(() -> sendBlockingCompletions(effective), cancelled));
-            }
-            try {
-                return withRetries(() -> sendBlockingResponses(effective), cancelled);
-            } catch (final FlavorMissingException e) {
-                resolved = ApiFlavor.COMPLETIONS;
-                return toResult(withRetries(() -> sendBlockingCompletions(effective), cancelled));
-            }
+            return doWithFallback(effective, cancelled, false, null);
         } finally {
             permits.release();
         }
@@ -171,487 +224,54 @@ public class ChatClient implements AutoCloseable {
     public Message stream(final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta,
                           final BooleanSupplier cancelled) throws IOException, InterruptedException {
         final var model = resolveModel();
+        final var effective = new ChatCompletionRequest(model, request.messages(), request.temperature(),
+                true, request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), mergeOptions(request.others()));
+        throttle();
         permits.acquire();
         try {
-            final var streaming = new ChatCompletionRequest(model, request.messages(), request.temperature(),
-                    true, request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), mergeOptions(request.others()));
-            var attempt = 0;
-            IOException last;
-            do {
-                throttle();
-                try {
-                    final var flavor = flavor();
-                    if (flavor == ApiFlavor.RESPONSES) {
-                        return doStreamResponses(streaming, onDelta, cancelled);
-                    }
-                    if (flavor == ApiFlavor.COMPLETIONS) {
-                        return doStreamCompletions(streaming, onDelta, cancelled);
-                    }
-                    try {
-                        return doStreamResponses(streaming, onDelta, cancelled);
-                    } catch (final FlavorMissingException e) {
-                        resolved = ApiFlavor.COMPLETIONS;
-                        return doStreamCompletions(streaming, onDelta, cancelled);
-                    }
-                } catch (final IOException e) {
-                    if (e instanceof FlavorMissingException || e instanceof ContextWindowExceededException) {
-                        throw e;
-                    }
-                    last = e;
-                    attempt++;
-                }
-                if (attempt >= configuration.llm().retriesMaxAttempts() || cancelled.getAsBoolean()) {
-                    throw new IOException("LLM request failed: " + last.getMessage(), last);
-                }
-                sleepBackoff(attempt, null);
-            } while (true);
+            return doWithFallback(effective, cancelled, true, onDelta);
         } finally {
             permits.release();
         }
     }
 
-    public ModelsResponse models() throws IOException, InterruptedException {
-        permits.acquire();
-        try {
-            final var httpRequest = HttpRequest.newBuilder()
-                    .uri(URI.create(target().baseUrl() + "/models"))
-                    .timeout(Duration.ofSeconds(target().timeoutSeconds()))
-                    .header("authorization", "Bearer " + target().resolveApiKey())
-                    .header("accept", "application/json")
-                    .GET()
-                    .build();
-            final HttpResponse<String> response;
-            try {
-                response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IOException(e);
-            }
-            if (response.statusCode() == 404 || response.statusCode() == 405 || response.statusCode() == 501) {
-                return new ModelsResponse(List.of());
-            }
-            if (response.statusCode() >= 400) {
-                throw new IOException("Models request failed (" + response.statusCode() + "): " + response.body());
-            }
-            return mapper.fromString(ModelsResponse.class, response.body());
-        } finally {
-            permits.release();
+    @SuppressWarnings("unchecked")
+    private <A> A doWithFallback(final ChatCompletionRequest request, final BooleanSupplier cancelled,
+                                 final boolean stream, final Consumer<StreamDelta> onDelta)
+            throws IOException, InterruptedException {
+        @SuppressWarnings("unchecked")
+        final var onDeltaSafe = (Consumer<StreamDelta>) (onDelta == null ? (Consumer<StreamDelta>) d -> {
+        } : onDelta);
+        final var flavor = effectiveFlavor();
+        if (flavor == ApiFlavor.ANTHROPIC) {
+            final var effective = applyOutputBudget(request, flavor);
+            final var client = clients.get(ApiFlavor.ANTHROPIC);
+            return withRetries(stream ? (IoCall<A>) () -> (A) client.stream(target(), effective, onDeltaSafe, cancelled)
+                    : (IoCall<A>) () -> (A) client.chat(target(), effective, cancelled), cancelled);
         }
-    }
-
-    //
-    // completions flavor
-    //
-
-    private ChatCompletionResponse sendBlockingCompletions(final ChatCompletionRequest request) throws IOException {
-        final var payload = mapper.toBytes(request);
-        final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(target().baseUrl() + "/chat/completions"))
-                .timeout(Duration.ofSeconds(target().timeoutSeconds()))
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer " + target().resolveApiKey())
-                .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
-                .build();
-        final HttpResponse<String> response = send(httpRequest);
-        if (response.statusCode() >= 400) {
-            if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
-                throw new ContextWindowExceededException();
-            }
-            throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
+        if (flavor == ApiFlavor.RESPONSES) {
+            final var client = clients.get(ApiFlavor.RESPONSES);
+            return withRetries(stream ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
+                    : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled), cancelled);
         }
-        return mapper.fromString(ChatCompletionResponse.class, response.body());
-    }
-
-    private Message doStreamCompletions(final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta,
-                                        final BooleanSupplier cancelled) throws IOException, InterruptedException {
-        final var payload = mapper.toBytes(request);
-        final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(target().baseUrl() + "/chat/completions"))
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer " + target().resolveApiKey())
-                .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
-                .build();
-        try (BufferedReader reader = openStream(httpRequest, cancelled)) {
-            final var content = new StringBuilder();
-            final var toolCalls = new LinkedHashMap<Integer, ToolCall>();
-            final var parser = new SseParser();
-            String line;
-            while (!cancelled.getAsBoolean() && (line = reader.readLine()) != null) {
-                for (final var event : parser.feed(line)) {
-                    if ("[DONE]".equals(event.data())) {
-                        continue;
-                    }
-                    final ChatChunk chunk = tryParse(ChatChunk.class, event.data());
-                    if (chunk == null) {
-                        continue;
-                    }
-                    if (chunk.usage() != null) {
-                        onDelta.accept(StreamDelta.usage(chunk.usage()));
-                    }
-                    if (chunk.choices() == null) {
-                        continue;
-                    }
-                    for (final var choice : chunk.choices()) {
-                        final var delta = choice.delta();
-                        if (delta != null) {
-                            final var reason = reasoningText(delta);
-                            if (reason != null && !reason.isEmpty()) {
-                                onDelta.accept(StreamDelta.reasoning(reason));
-                            }
-                            if (delta.content() instanceof String s && !s.isEmpty()) {
-                                content.append(s);
-                                onDelta.accept(StreamDelta.text(s));
-                            }
-                            if (delta.toolCalls() != null) {
-                                for (final var call : delta.toolCalls()) {
-                                    merge(toolCalls, call);
-                                    onDelta.accept(StreamDelta.toolCall(call));
-                                }
-                            }
-                        }
-                        if (choice.finishReason() != null) {
-                            onDelta.accept(StreamDelta.finish(choice.finishReason()));
-                        }
-                    }
-                }
-            }
-            return new Message("assistant", content.toString(), null,
-                    toolCalls.isEmpty() ? null : List.copyOf(toolCalls.values()), null, null);
-        }
-    }
-
-    //
-    // responses flavor
-    //
-
-    private ChatResult sendBlockingResponses(final ChatCompletionRequest request) throws IOException {
-        final var responsesRequest = toResponsesRequest(request, false);
-        final var payload = mapper.toBytes(responsesRequest);
-        final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(target().baseUrl() + "/responses"))
-                .timeout(Duration.ofSeconds(target().timeoutSeconds()))
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer " + target().resolveApiKey())
-                .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
-                .build();
-        final HttpResponse<String> response = send(httpRequest);
-        if (response.statusCode() >= 400) {
-            if (isFlavorMissing(response.statusCode())) {
-                throw new FlavorMissingException();
-            }
-            if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
-                throw new ContextWindowExceededException();
-            }
-            throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
-        }
-        return parseResponsesResponse(parse(response.body()));
-    }
-
-    private Message doStreamResponses(final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta,
-                                      final BooleanSupplier cancelled) throws IOException, InterruptedException {
-        final var payload = mapper.toBytes(toResponsesRequest(request, true));
-        final var httpRequest = HttpRequest.newBuilder()
-                .uri(URI.create(target().baseUrl() + "/responses"))
-                .header("content-type", "application/json")
-                .header("authorization", "Bearer " + target().resolveApiKey())
-                .POST(HttpRequest.BodyPublishers.ofByteArray(payload))
-                .build();
-        try (BufferedReader reader = openStream(httpRequest, cancelled)) {
-            final var content = new StringBuilder();
-            final var calls = new LinkedHashMap<String, ToolCall>();
-            final var argsIndex = new LinkedHashMap<String, String>();
-            final var parser = new SseParser();
-            final Message[] done = {null};
-            final Usage[] usage = {Usage.EMPTY};
-            String line;
-            while (!cancelled.getAsBoolean() && (line = reader.readLine()) != null) {
-                for (final var event : parser.feed(line)) {
-                    final var json = parse(event.data());
-                    if (!(json instanceof Map<?, ?> data)) {
-                        continue;
-                    }
-                    final var type = event.event() != null && !event.event().isBlank() ? event.event() : str(data.get("type"));
-                    switch (type == null ? "" : type) {
-                        case "response.output_text.delta" -> {
-                            final var d = str(data.get("delta"));
-                            if (d != null && !d.isEmpty()) {
-                                content.append(d);
-                                onDelta.accept(StreamDelta.text(d));
-                            }
-                        }
-                        case "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.reasoning_summary_part.added" -> {
-                            final var d = str(data.get("delta"));
-                            if (d != null && !d.isEmpty()) {
-                                onDelta.accept(StreamDelta.reasoning(d));
-                            }
-                        }
-                        case "response.output_item.added" -> {
-                            final var item = data.get("item");
-                            if (item instanceof Map<?, ?> m && "function_call".equals(str(m.get("type")))) {
-                                final var callId = str(m.get("call_id"));
-                                final var itemId = str(m.get("id"));
-                                if (itemId != null && callId != null) {
-                                    argsIndex.put(itemId, callId);
-                                }
-                                if (callId != null) {
-                                    calls.putIfAbsent(callId, new ToolCall(callId, "function",
-                                            new ToolCall.FunctionCall(str(m.get("name")), str(m.get("arguments")) == null ? "" : str(m.get("arguments"))), null));
-                                    onDelta.accept(StreamDelta.toolCall(calls.get(callId)));
-                                }
-                            }
-                        }
-                        case "response.function_call_arguments.delta" -> {
-                            final var callId = argsIndex.get(str(data.get("item_id")));
-                            final var call = callId == null ? null : calls.get(callId);
-                            final var d = str(data.get("delta"));
-                            if (call != null && d != null) {
-                                final var fn = call.function();
-                                calls.put(callId, new ToolCall(call.id(), call.type(),
-                                        new ToolCall.FunctionCall(fn.name(), (fn.arguments() == null ? "" : fn.arguments()) + d), null));
-                                onDelta.accept(StreamDelta.toolCall(calls.get(callId)));
-                            }
-                        }
-                        case "response.completed", "response.incomplete" -> {
-                            final var resp = data.get("response");
-                            if (resp instanceof Map<?, ?> r) {
-                                final var parsed = parseResponsesResponse(r);
-                                done[0] = parsed.message();
-                                usage[0] = parsed.usage();
-                                onDelta.accept(StreamDelta.usage(parsed.usage()));
-                            }
-                        }
-                        case "response.failed", "response.error", "error" -> {
-                            final var msg = data.get("response") instanceof Map<?, ?> r ? str(r.get("status_error")) : str(data.get("message"));
-                            throw new IOException("LLM responses stream failed: " + (msg == null ? event.data() : msg));
-                        }
-                        default -> {
-                        }
-                    }
-                }
-            }
-            if (done[0] != null) {
-                return done[0];
-            }
-            return new Message("assistant", content.toString(), null,
-                    calls.isEmpty() ? null : List.copyOf(calls.values()), null, null);
-        }
-    }
-
-    private ChatResult parseResponsesResponse(final Object json) throws IOException {
-        if (!(json instanceof Map<?, ?> map)) {
-            throw new IOException("Unexpected responses payload: " + json);
-        }
-        final var err = map.get("error");
-        if (err instanceof Map<?, ?> e && e.get("message") != null) {
-            throw new IOException("LLM request failed: " + e.get("message"));
-        }
-        final var status = str(map.get("status"));
-        if ("failed".equals(status)) {
-            throw new IOException("LLM responses request failed: " + map.get("error"));
-        }
-        final var content = new StringBuilder();
-        final var calls = new ArrayList<ToolCall>();
-        if (map.get("output") instanceof List<?> output) {
-            for (final var o : output) {
-                if (!(o instanceof Map<?, ?> item)) {
-                    continue;
-                }
-                switch (str(item.get("type")) == null ? "" : str(item.get("type"))) {
-                    case "message" -> {
-                        if (item.get("content") instanceof List<?> parts) {
-                            for (final var p : parts) {
-                                if (p instanceof Map<?, ?> pm && "output_text".equals(str(pm.get("type")))) {
-                                    final var t = str(pm.get("text"));
-                                    if (t != null) {
-                                        content.append(t);
-                                    }
-                                }
-                            }
-                        } else if (item.get("content") instanceof String s) {
-                            content.append(s);
-                        }
-                    }
-                    case "function_call" -> calls.add(new ToolCall(
-                            str(item.get("call_id")) != null ? str(item.get("call_id")) : str(item.get("id")),
-                            "function",
-                            new ToolCall.FunctionCall(str(item.get("name")), str(item.get("arguments")) == null ? "" : str(item.get("arguments"))),
-                            null));
-                    default -> {
-                    }
-                }
-            }
-        }
-        return new ChatResult(
-                new Message("assistant", content.toString(), null, calls.isEmpty() ? null : List.copyOf(calls), null, null),
-                parseUsage(map.get("usage")));
-    }
-
-    private ResponsesRequest toResponsesRequest(final ChatCompletionRequest request, final boolean stream) {
-        String instructions = null;
-        final var input = new ArrayList<ResponsesInput>();
-        for (final var m : request.messages()) {
-            final var text = textOf(m.content());
-            switch (m.role() == null ? "" : m.role()) {
-                case "system", "developer" -> instructions = instructions == null ? text : instructions + "\n\n" + text;
-                case "user" -> input.add(ResponsesInput.message("user", text));
-                case "assistant" -> {
-                    if (text != null && !text.isEmpty()) {
-                        input.add(ResponsesInput.message("assistant", text));
-                    }
-                    if (m.toolCalls() != null) {
-                        for (final var tc : m.toolCalls()) {
-                            if (tc.function() != null) {
-                                input.add(ResponsesInput.functionCall(tc.id(), tc.function().name(), tc.function().arguments()));
-                            }
-                        }
-                    }
-                }
-                case "tool" -> input.add(ResponsesInput.functionCallOutput(m.toolCallId(), text));
-                default -> input.add(ResponsesInput.message(m.role(), text));
-            }
-        }
-        final var tools = request.tools() == null ? null : request.tools().stream()
-                .filter(t -> t.function() != null)
-                .map(t -> new ResponsesTool("function", t.function().name(), t.function().description(), t.function().parameters()))
-                .toList();
-        final var reasoning = request.reasoningEffort() == null ? null : Map.<String, Object>of("effort", request.reasoningEffort());
-        return new ResponsesRequest(request.model(), input, instructions, stream, false, tools,
-                request.toolChoice(), reasoning, request.others());
-    }
-
-    //
-    // shared plumbing
-    //
-
-    private BufferedReader openStream(final HttpRequest httpRequest, final BooleanSupplier cancelled) throws IOException, InterruptedException {
-        final var response = client.send(httpRequest, HttpResponse.BodyHandlers.ofInputStream());
-        if (response.statusCode() >= 400) {
-            final String body;
-            try (var is = response.body()) {
-                body = new String(is.readAllBytes(), StandardCharsets.UTF_8);
-            }
-            if (isFlavorMissing(response.statusCode())) {
-                throw new FlavorMissingException();
-            }
-            if (ContextWindowExceededException.isCause(response.statusCode(), body)) {
-                throw new ContextWindowExceededException();
-            }
-            throw new IOException("LLM request failed (" + response.statusCode() + "): " + body);
-        }
-        return new BufferedReader(new InputStreamReader(response.body(), StandardCharsets.UTF_8));
-    }
-
-    private HttpResponse<String> send(final HttpRequest httpRequest) throws IOException {
-        final HttpResponse<String> response;
-        try {
-            response = client.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException(e);
-        }
-        return response;
-    }
-
-    private Object parse(final String json) {
-        if (json == null || json.isBlank()) {
-            return null;
+        if (flavor == ApiFlavor.COMPLETIONS) {
+            final var client = clients.get(ApiFlavor.COMPLETIONS);
+            return withRetries(stream ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
+                    : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled), cancelled);
         }
         try {
-            return mapper.fromString(Object.class, json);
-        } catch (final RuntimeException e) {
-            return null;
+            final var responses = clients.get(ApiFlavor.RESPONSES);
+            return withRetries(stream ? (IoCall<A>) () -> (A) responses.stream(target(), request, onDeltaSafe, cancelled)
+                    : (IoCall<A>) () -> (A) responses.chat(target(), request, cancelled), cancelled);
+        } catch (final FlavorMissingException e) {
+            resolved = ApiFlavor.COMPLETIONS;
+            final var completions = clients.get(ApiFlavor.COMPLETIONS);
+            return withRetries(stream ? (IoCall<A>) () -> (A) completions.stream(target(), request, onDeltaSafe, cancelled)
+                    : (IoCall<A>) () -> (A) completions.chat(target(), request, cancelled), cancelled);
         }
     }
 
-    private <A> A tryParse(final Class<A> type, final String json) {
-        try {
-            return mapper.fromString(type, json);
-        } catch (final RuntimeException e) {
-            return null;
-        }
-    }
-
-    private Usage parseUsage(final Object usage) {
-        if (!(usage instanceof Map<?, ?> u)) {
-            return Usage.EMPTY;
-        }
-        final var in = number(u.get("input_tokens") != null ? u.get("input_tokens") : u.get("prompt_tokens"));
-        final var out = number(u.get("output_tokens") != null ? u.get("output_tokens") : u.get("completion_tokens"));
-        final var total = number(u.get("total_tokens"));
-        return new Usage(in, out, total > 0 ? total : in + out);
-    }
-
-    private static int number(final Object o) {
-        if (o instanceof Number n) {
-            return n.intValue();
-        }
-        try {
-            return o == null ? 0 : Integer.parseInt(o.toString());
-        } catch (final NumberFormatException e) {
-            return 0;
-        }
-    }
-
-    private static String str(final Object o) {
-        return o == null ? null : o.toString();
-    }
-
-    private static String textOf(final Object content) {
-        if (content instanceof String s) {
-            return s;
-        }
-        if (content instanceof List<?> parts) {
-            final var sb = new StringBuilder();
-            for (final var p : parts) {
-                if (p instanceof Map<?, ?> m && m.get("text") != null) {
-                    sb.append(m.get("text"));
-                }
-            }
-            return sb.toString();
-        }
-        return content == null ? "" : content.toString();
-    }
-
-    private String reasoningText(final ChatChunk.ChunkDelta delta) {
-        return switch (target().reasoningField()) {
-            case REASONING -> delta.reasoning();
-            case REASONING_CONTENT -> delta.reasoningContent();
-            case NONE -> null;
-            case AUTO -> delta.reasoningContent() != null ? delta.reasoningContent() : delta.reasoning();
-        };
-    }
-
-    private void merge(final Map<Integer, ToolCall> toolCalls, final ToolCall call) {
-        final var key = call.index() != null ? call.index() : toolCalls.size();
-        final var existing = toolCalls.get(key);
-        if (existing == null) {
-            toolCalls.put(key, call);
-            return;
-        }
-        final var fn = call.function();
-        final var mergedFn = fn == null ? existing.function() : new ToolCall.FunctionCall(
-                fn.name() != null ? fn.name() : (existing.function() != null ? existing.function().name() : null),
-                (existing.function() != null && existing.function().arguments() != null ? existing.function().arguments() : "")
-                        + (fn.arguments() != null ? fn.arguments() : ""));
-        toolCalls.put(key, new ToolCall(
-                call.id() != null ? call.id() : existing.id(),
-                call.type() != null ? call.type() : existing.type(),
-                mergedFn,
-                call.index()));
-    }
-
-    private ChatResult toResult(final ChatCompletionResponse response) throws IOException {
-        return new ChatResult(response.firstMessage(), response.usage() == null ? Usage.EMPTY : response.usage());
-    }
-
-    private boolean isFlavorMissing(final int statusCode) {
-        return FLAVOR_MISSING_CODES.contains("(" + statusCode + ")");
-    }
-
-    private static String retryAfter(final HttpResponse<?> response) {
-        return response.headers().firstValue("retry-after").map(v -> " retry-after=" + v).orElse("");
-    }
-
+    @SuppressWarnings("unchecked")
     private <A> A withRetries(final IoCall<A> call, final BooleanSupplier cancelled) throws IOException, InterruptedException {
         var attempt = 0;
         String retryAfter = null;
@@ -675,6 +295,17 @@ public class ChatClient implements AutoCloseable {
             }
             sleepBackoff(attempt, retryAfter);
         } while (true);
+    }
+
+    public ModelsResponse models() throws IOException, InterruptedException {
+        permits.acquire();
+        try {
+            final var flavor = effectiveFlavor();
+            final var client = clients.get(flavor == ApiFlavor.RESPONSES ? ApiFlavor.RESPONSES : ApiFlavor.COMPLETIONS);
+            return client.models(target());
+        } finally {
+            permits.release();
+        }
     }
 
     private boolean retryable(final IOException e) {
@@ -717,7 +348,16 @@ public class ChatClient implements AutoCloseable {
                 // date form, ignore
             }
         }
-        Thread.sleep(Math.min(delay, 60_000));
+        final var capped = Math.min(delay, 60_000);
+        final var msg = retryAfter != null && !retryAfter.isBlank()
+                ? "Rate limited, waiting ~" + (capped / 1000) + "s before retrying"
+                : "LLM call failed, retrying in ~" + (capped / 1000) + "s (attempt " + (attempt + 1) + ")";
+        try {
+            pauses.accept(PauseEvent.retry(msg, capped));
+        } catch (final RuntimeException re) {
+            // listener failures must not break the request
+        }
+        Thread.sleep(capped);
     }
 
     private void throttle() throws InterruptedException {
@@ -738,23 +378,24 @@ public class ChatClient implements AutoCloseable {
                 }
                 waitMs = 60_000 - (now - requestTimes.peekFirst()) + 50;
             }
+            try {
+                pauses.accept(PauseEvent.throttle("Rate limit reached, waiting ~" + (waitMs / 1000) + "s", waitMs));
+            } catch (final RuntimeException re) {
+                // listener failures must not break the request
+            }
             Thread.sleep(waitMs);
         } while (true);
     }
 
     @Override
     public void close() {
-        client.close();
-    }
-
-    private static final class FlavorMissingException extends IOException {
-        private FlavorMissingException() {
-            super("responses flavor not supported by the provider");
+        if (clients != null) {
+            clients.values().forEach(LlmClient::close);
         }
     }
 
     @FunctionalInterface
     private interface IoCall<A> {
-        A get() throws IOException;
+        A get() throws IOException, InterruptedException;
     }
 }

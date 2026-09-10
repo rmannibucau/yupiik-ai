@@ -461,8 +461,8 @@ class StructuralCodeGraphTest {
     private static ProviderListConfiguration providerConfig() {
         return new ProviderListConfiguration(
                 List.of(new ProviderConfiguration("default", "https://api.openai.com/v1", "", "test-model",
-                        null, null, 128000, 120, "")),
-                "", null, null, null, null, null, 128000, 120);
+                        null, null, 128000, -1, List.of(), 120, "", null)),
+                "", null, null, null, null, null, 128000, -1, List.of(), 120);
     }
 
     private static ProviderManager providerManager(final CodingAgentConfiguration cfg, final JsonMapper mapper) {

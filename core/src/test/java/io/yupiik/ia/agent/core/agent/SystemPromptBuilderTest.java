@@ -4,6 +4,8 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -11,6 +13,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -34,7 +37,7 @@ class SystemPromptBuilderTest {
         final var builder = new SystemPromptBuilder(config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", nested.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null);
+                "yca.skills.enabled", "true")), null, null, null, null, null, null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("project rule"));
         assertTrue(prompt.contains("nested rule"));
@@ -49,7 +52,7 @@ class SystemPromptBuilderTest {
         final var builder = new SystemPromptBuilder(config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null);
+                "yca.skills.enabled", "true")), null, null, null, null, null, null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("<skill name=\"custom-name\">"));
         assertTrue(prompt.contains("Use the skill body here."));
@@ -63,7 +66,7 @@ class SystemPromptBuilderTest {
         final var builder = new SystemPromptBuilder(config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null);
+                "yca.skills.enabled", "true")), null, null, null, null, null, null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("<skill name=\"proj-skill\">"));
         assertTrue(prompt.contains("project skill body"));
@@ -77,7 +80,7 @@ class SystemPromptBuilderTest {
         final var builder = new SystemPromptBuilder(config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "false")), null, null, null, null);
+                "yca.skills.enabled", "false")), null, null, null, null, null, null);
         final var prompt = builder.build();
         assertFalse(prompt.contains("<skill name=\"my-skill\">"));
     }
@@ -87,7 +90,7 @@ class SystemPromptBuilderTest {
         final var cfg = config(Map.of("yca.mode", "plan"));
         final var permissions = new PermissionService(cfg);
         permissions.setMode(AgentMode.PLAN);
-        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg));
+        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("PLAN mode"));
         assertTrue(prompt.contains("must NOT modify the repository"));
@@ -105,7 +108,7 @@ class SystemPromptBuilderTest {
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
                 "yca.projectDir", target.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null);
+                "yca.skills.enabled", "true")), null, null, null, null, null, null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("Target project directory: " + target.toAbsolutePath().normalize()),
                 "persona should name the separate target project dir");
@@ -120,7 +123,7 @@ class SystemPromptBuilderTest {
         final var builder = new SystemPromptBuilder(config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null);
+                "yca.skills.enabled", "true")), null, null, null, null, null, null);
         final var prompt = builder.build(
                 "generate in /tmp/foo a frontend landing page for the yupiik fusion project");
         assertTrue(prompt.contains("Target directory: if the user names an explicit directory"),
@@ -135,12 +138,86 @@ class SystemPromptBuilderTest {
         final var builder = new SystemPromptBuilder(config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null);
+                "yca.skills.enabled", "true")), null, null, null, null, null, null);
         final var prompt = builder.build("explain how the retry logic works");
         assertTrue(prompt.contains("owner docs"),
                 "workingDir README stays when the prompt names no target dir");
         assertFalse(prompt.contains("Target project directory:"),
                 "no target persona when the prompt names no target dir");
+    }
+
+    @Test
+    void todoGuidanceAutoOpenAiDefaultForUnknownFamily() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "https://mystery.example/v1",
+                "yca.provider.providers.0.model", "m"));
+        final var builder = builder(cfg, todoResolver(), providerManager(cfg));
+        final var prompt = builder.build();
+        assertTrue(prompt.contains("<todo-guidance>"), "guidance appendix should be present by default");
+        assertTrue(prompt.contains("Do not batch up several todos"), "default family should map to the OpenAI block");
+    }
+
+    @Test
+    void todoGuidanceAnthropicFamilyUsesAnthropicBlock() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "https://api.anthropic.com",
+                "yca.provider.providers.0.model", "m"));
+        final var builder = builder(cfg, todoResolver(), providerManager(cfg));
+        final var prompt = builder.build();
+        assertTrue(prompt.contains("VERY frequently"), "anthropic family should map to the Anthropic block");
+    }
+
+    @Test
+    void todoGuidanceVerbatimOverride() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "https://api.openai.com/v1",
+                "yca.provider.providers.0.model", "m",
+                "yca.provider.providers.0.prompt.todo", "custom guidance text"));
+        final var builder = builder(cfg, todoResolver(), providerManager(cfg));
+        final var prompt = builder.build();
+        assertTrue(prompt.contains("<todo-guidance>"));
+        assertTrue(prompt.contains("custom guidance text"));
+        assertFalse(prompt.contains("Do not batch up several todos"), "verbatim override must replace the canned block");
+    }
+
+    @Test
+    void todoGuidanceDisabledForLiteralFalse() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "https://api.openai.com/v1",
+                "yca.provider.providers.0.model", "m",
+                "yca.provider.providers.0.prompt.todo", "false"));
+        final var builder = builder(cfg, todoResolver(), providerManager(cfg));
+        final var prompt = builder.build();
+        assertFalse(prompt.contains("<todo-guidance>"), "false must disable the guidance appendix");
+    }
+
+    private static TodoPromptResolver todoResolver() {
+        return new TodoPromptResolver();
+    }
+
+    private static ProviderManager providerManager(final CodingAgentConfiguration cfg) {
+        return new ProviderManager(cfg, new JsonMapperImpl(List.of(), key -> Optional.empty()));
+    }
+
+    private static SystemPromptBuilder builder(final CodingAgentConfiguration cfg, final TodoPromptResolver resolver,
+                                               final ProviderManager manager) {
+        return new SystemPromptBuilder(cfg, null, null, new PermissionService(cfg), new AgentProvider(cfg), manager, resolver);
     }
 
     private static CodingAgentConfiguration config(final Map<String, String> overrides) {

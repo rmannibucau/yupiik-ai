@@ -119,9 +119,9 @@ class UsageTrackerTest {
     private CodingAgentConfiguration configuration(final int contextWindow) {
         final var provider = new ProviderConfiguration("default",
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
-                null, null, contextWindow, 5, "");
+                null, null, contextWindow, -1, List.of(), 5, "", null);
         return new CodingAgentConfiguration(storageHome.toString(), null, null,
-                new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, contextWindow, 120),
+                new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, contextWindow, -1, List.of(), 120),
                 null, new LlmConfiguration(1, 1L, 0, 1, true, 250),
                 null, null, null, null, null, null, null, null, null, null, null);
     }
