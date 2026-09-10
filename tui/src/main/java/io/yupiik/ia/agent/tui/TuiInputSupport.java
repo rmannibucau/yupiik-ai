@@ -1,12 +1,11 @@
 package io.yupiik.ia.agent.tui;
 
 import java.util.List;
-import java.util.function.Predicate;
 
 /**
  * Pure input helpers of the TUI: slash command registry, word motions and
- * prompt parsing (agent overrides). Extracted from the TUI command so they can
- * be unit tested without a terminal.
+ * first-line extraction. Extracted from the TUI command so they can be unit
+ * tested without a terminal.
  */
 public final class TuiInputSupport {
     public static final List<String> SLASH_COMMANDS = List.of(
@@ -14,22 +13,6 @@ public final class TuiInputSupport {
             "/permissions", "/structural-code-graph", "/tools", "/agent", "/clear", "/quit", "/exit");
 
     private TuiInputSupport() {
-    }
-
-    public record AgentOverride(String agentName, String prompt) {
-    }
-
-    public static AgentOverride agentOverride(final String text, final Predicate<String> knownAgent) {
-        if (text.startsWith("@")) {
-            final var space = text.indexOf(' ');
-            if (space > 1) {
-                final var name = text.substring(1, space).strip();
-                if (knownAgent.test(name)) {
-                    return new AgentOverride(name, text.substring(space + 1));
-                }
-            }
-        }
-        return new AgentOverride(null, text);
     }
 
     public static int nextWord(final String s, final int col) {

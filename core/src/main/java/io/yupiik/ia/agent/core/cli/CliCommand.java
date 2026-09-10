@@ -9,29 +9,20 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
-import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
-import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
-import io.yupiik.ia.agent.core.configuration.AgentMode;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.mcp.McpManager;
-import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
-import io.yupiik.ia.agent.core.todo.PlanFileService;
-import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
-import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 
 import java.io.BufferedReader;
@@ -48,7 +39,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
-import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 
@@ -68,17 +58,10 @@ public class CliCommand implements Runnable {
     private final UserFeedbackService userFeedbackService;
     private final SessionStore sessionStore;
     private final TodoStore todoStore;
-    private final MemoryStore memoryStore;
     private final AgentProvider agentProvider;
-    private final ContextManager contextManager;
-    private final SystemPromptBuilder systemPromptBuilder;
-    private final StructuralCodeGraph structuralCodeGraph;
-    private final CodingAgentConfiguration configuration;
-    private final PlanFileService planFileService;
-    private final PlanTodoSeeder planTodoSeeder;
     private final ChatClient chatClient;
     private final ProviderManager providerManager;
-    private final McpManager mcpManager;
+    private final AgentSessionService agentSessionService;
     private final UsageTracker usageTracker;
     private final ReplSlashCommands replSlashCommands;
     private final Clock clock;
@@ -109,13 +92,12 @@ public class CliCommand implements Runnable {
 
     public CliCommand(final CliConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
                       final PermissionService permissionService, final UserFeedbackService userFeedbackService,
-                      final SessionStore sessionStore, final TodoStore todoStore, final MemoryStore memoryStore,
-                      final AgentProvider agentProvider, final ContextManager contextManager,
+                      final SessionStore sessionStore, final TodoStore todoStore,
+                      final AgentProvider agentProvider,
                       final UsageTracker usageTracker,
-                      final SystemPromptBuilder systemPromptBuilder, final StructuralCodeGraph structuralCodeGraph,
-                      final CodingAgentConfiguration configuration, final PlanFileService planFileService,
-                      final PlanTodoSeeder planTodoSeeder, final ChatClient chatClient,
-                      final ProviderManager providerManager, final McpManager mcpManager,
+                      final ChatClient chatClient,
+                      final ProviderManager providerManager,
+                      final AgentSessionService agentSessionService,
                       final JsonMapper mapper, final ReplSlashCommands replSlashCommands, final Clock clock) {
         this.conf = conf;
         this.agentLoop = agentLoop;
@@ -124,18 +106,11 @@ public class CliCommand implements Runnable {
         this.userFeedbackService = userFeedbackService;
         this.sessionStore = sessionStore;
         this.todoStore = todoStore;
-        this.memoryStore = memoryStore;
         this.agentProvider = agentProvider;
-        this.contextManager = contextManager;
-        this.systemPromptBuilder = systemPromptBuilder;
-        this.structuralCodeGraph = structuralCodeGraph;
-        this.configuration = configuration;
-        this.planFileService = planFileService;
-        this.planTodoSeeder = planTodoSeeder;
+        this.usageTracker = usageTracker;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
-        this.mcpManager = mcpManager;
-        this.usageTracker = usageTracker;
+        this.agentSessionService = agentSessionService;
         this.replSlashCommands = replSlashCommands;
         this.clock = clock;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
@@ -301,7 +276,7 @@ public class CliCommand implements Runnable {
     }
 
     private void runTurn(final String input) {
-        final var override = agentOverride(input);
+        final var override = agentSessionService.agentOverride(input);
         final var agentName = override.agentName() != null ? override.agentName()
                 : (activeAgent.isBlank() ? null : activeAgent);
         final var prompt = override.prompt();
@@ -596,16 +571,13 @@ public class CliCommand implements Runnable {
     }
 
     private void mode(final String arg) {
-        final var mode = AgentMode.fromConfigurationString(arg);
-        permissionService.setMode(mode);
-        println(MarkdownColorizer.status("mode: " + mode.name().toLowerCase()));
-        if (mode == AgentMode.BUILD) {
-            try {
-                final var seeded = planTodoSeeder.seedFromLastAssistant(sessionId);
-                println(MarkdownColorizer.status(seeded ? "todos seeded from the plan" : "no plan found to seed todos from"));
-            } catch (final RuntimeException e) {
-                println(MarkdownColorizer.error("todo seeding failed: " + e.getMessage()));
-            }
+        final var result = agentSessionService.setMode(arg, sessionId);
+        println(MarkdownColorizer.status(result.message()));
+        if (result.seedMessage() != null) {
+            println(MarkdownColorizer.status(result.seedMessage()));
+        }
+        if (result.seedError() != null) {
+            println(MarkdownColorizer.error(result.seedError()));
         }
     }
 
@@ -627,16 +599,15 @@ public class CliCommand implements Runnable {
             }
             return;
         }
-        final var model = arg.startsWith("$") ? arg.substring(1) : arg;
-        chatClient.setModel(model);
+        final var model = agentSessionService.setModel(arg);
         println(MarkdownColorizer.status("model: " + model));
     }
 
     private void provider(final String arg) {
         final var providers = providerManager.providers();
         if (!arg.isBlank()) {
-            chatClient.setProvider(arg);
-            println(MarkdownColorizer.status("provider: " + arg));
+            final var id = agentSessionService.setProvider(arg);
+            println(MarkdownColorizer.status("provider: " + id));
             return;
         }
         final var current = chatClient.providerId();
@@ -666,12 +637,13 @@ public class CliCommand implements Runnable {
             println(MarkdownColorizer.status("use /agent <name> to set the active agent, /agent to clear it"));
             return;
         }
-        if (agentProvider.byName(arg) == null) {
+        final var name = agentSessionService.setAgent(arg);
+        if (name == null) {
             println(MarkdownColorizer.error("unknown agent: " + arg));
             return;
         }
-        activeAgent = arg;
-        println(MarkdownColorizer.status("agent: " + arg));
+        activeAgent = name;
+        println(MarkdownColorizer.status("agent: " + name));
     }
 
     /**
@@ -685,12 +657,12 @@ public class CliCommand implements Runnable {
     }
 
     private void context(final String arg) {
+        final var dump = agentSessionService.context(sessionId);
         final var sb = new StringBuilder();
-        sb.append("## System prompt\n\n").append(systemPromptBuilder.build()).append("\n\n");
-        final var messages = sessionStore.load(sessionId);
-        sb.append("## Session ").append(sessionId).append(" (").append(messages.size()).append(" messages)\n\n");
-        for (final var message : messages) {
-            sb.append("- ").append(message.role()).append(": ").append(firstLine(String.valueOf(message.content()))).append('\n');
+        sb.append("## System prompt\n\n").append(dump.systemPrompt()).append("\n\n");
+        sb.append("## Session ").append(dump.sessionId()).append(" (").append(dump.messages().size()).append(" messages)\n\n");
+        for (final var message : dump.messages()) {
+            sb.append("- ").append(message.role()).append(": ").append(message.firstLine()).append('\n');
         }
         if (arg.isBlank()) {
             println(sb.toString());
@@ -707,19 +679,18 @@ public class CliCommand implements Runnable {
     }
 
     private void memory() {
-        final var project = memoryStore.readProject();
-        final var global = memoryStore.readGlobal();
-        if (project.isBlank() && global.isBlank()) {
+        final var memory = agentSessionService.memory();
+        if (memory.global().isBlank() && memory.project().isBlank()) {
             println(MarkdownColorizer.status("(empty memory)"));
             return;
         }
-        if (!global.isBlank()) {
+        if (!memory.global().isBlank()) {
             println(MarkdownColorizer.status("-- global memory --"));
-            println(global);
+            println(memory.global());
         }
-        if (!project.isBlank()) {
+        if (!memory.project().isBlank()) {
             println(MarkdownColorizer.status("-- project memory --"));
-            println(project);
+            println(memory.project());
         }
     }
 
@@ -728,75 +699,36 @@ public class CliCommand implements Runnable {
     }
 
     private void tools(final String arg) {
-        final var filters = new ArrayList<String>();
-        for (final var token : arg.split(" ")) {
-            final var filter = token.strip().toLowerCase(Locale.ROOT);
-            if (!filter.isEmpty()) {
-                filters.add(filter);
-            }
-        }
-        final var byServer = new TreeMap<>(mcpManager.toolsByServer());
-        if (byServer.isEmpty()) {
+        final var listing = agentSessionService.tools(arg);
+        if (!listing.anyTool()) {
             println(MarkdownColorizer.status("(no tools available)"));
             return;
         }
-        var count = 0;
-        for (final var server : byServer.entrySet()) {
-            final var lines = new ArrayList<String>();
-            final var tools = server.getValue().stream()
-                    .sorted(java.util.Comparator.comparing(EmbeddedTool::name))
-                    .toList();
-            for (final var tool : tools) {
-                final var rootKey = (server.getKey() + '_' + tool.name()).toLowerCase(Locale.ROOT);
-                if (filters.stream().anyMatch(filter -> !rootKey.contains(filter))) {
-                    continue;
-                }
-                final var description = toolDescription(server.getKey(), tool);
-                lines.add(tool.name() + (description == null ? "" : ": " + description));
+        for (final var server : listing.servers()) {
+            println(MarkdownColorizer.accent(server.server()));
+            for (final var tool : server.tools()) {
+                println("  " + tool.name() + (tool.description() == null ? "" : ": " + tool.description()));
             }
-            if (lines.isEmpty()) {
-                continue;
-            }
-            println(MarkdownColorizer.accent(server.getKey()));
-            for (final var line : lines) {
-                println("  " + line);
-            }
-            count += lines.size();
         }
-        if (count == 0) {
+        if (listing.matches() == 0) {
             println(MarkdownColorizer.status("(no tool matches)"));
         }
     }
 
-    private String toolDescription(final String server, final EmbeddedTool tool) {
-        var description = tool.description() == null ? "" : tool.description().strip();
-        final var prefix = '[' + server + "] ";
-        if (description.startsWith(prefix)) {
-            description = description.substring(prefix.length()).strip();
-        }
-        final var lineBreak = description.indexOf('\n');
-        if (lineBreak >= 0) {
-            description = description.substring(0, lineBreak).strip();
-        }
-        return description.isEmpty() || description.equals(tool.name()) ? null : description;
-    }
-
     private void permissions(final String arg) {
-        final var v = arg == null ? "" : arg.strip();
-        if (v.equals("all") || v.equals("unsafe")) {
-            permissionService.setPermitAll(true);
-            println(MarkdownColorizer.status("permissions: all tools allowed"));
-        } else if (v.equals("none") || v.equals("safe")) {
-            permissionService.setPermitAll(false);
-            println(MarkdownColorizer.status("permissions: asking for approval"));
-        } else {
+        final var permitAll = agentSessionService.setPermissions(arg);
+        if (permitAll == null) {
             println(MarkdownColorizer.status("usage: /permissions all|none"));
+        } else if (permitAll) {
+            println(MarkdownColorizer.status("permissions: all tools allowed"));
+        } else {
+            println(MarkdownColorizer.status("permissions: asking for approval"));
         }
     }
 
     private void resyncGraph() {
         try {
-            final var result = structuralCodeGraph.resync();
+            final var result = agentSessionService.resyncGraph();
             println(MarkdownColorizer.status(result));
         } catch (final RuntimeException e) {
             println(MarkdownColorizer.error("resync failed: " + e.getMessage()));
@@ -804,37 +736,17 @@ public class CliCommand implements Runnable {
     }
 
     private void compact() {
-        final var history = sessionStore.load(sessionId);
-        if (history.isEmpty()) {
-            println(MarkdownColorizer.status("nothing to compact"));
-            return;
-        }
-        sessionStore.replace(sessionId, contextManager.compact(history));
-        println(MarkdownColorizer.status("context compacted"));
+        final var result = agentSessionService.compact(sessionId);
+        println(MarkdownColorizer.status(result == null ? "nothing to compact" : result));
     }
 
     private void editPlan(final String arg) {
-        if (permissionService.mode() != AgentMode.PLAN) {
-            println(MarkdownColorizer.error("editplan is only available in plan mode (run /mode plan)"));
+        final var export = agentSessionService.exportPlan(sessionId, arg, "");
+        if (export.error() != null) {
+            println(MarkdownColorizer.error(export.error()));
             return;
         }
-        final var plan = planTodoSeeder.plan(sessionId);
-        if (plan == null || plan.isBlank()) {
-            println(MarkdownColorizer.error("no plan to edit yet - produce a plan first"));
-            return;
-        }
-        final var path = arg.isBlank()
-                ? planFileService.defaultPath(Path.of(configuration.resolveStorageHome()), "", sessionId)
-                : Path.of(arg).toAbsolutePath();
-        try {
-            Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
-            Files.writeString(path, planFileService.render(plan, todoStore.all()));
-        } catch (final IOException e) {
-            println(MarkdownColorizer.error("editplan failed to write " + path + ": " + e.getMessage()));
-            return;
-        }
-        final var original = planFileService.render(plan, todoStore.all());
-        println(MarkdownColorizer.status("plan exported to " + path));
+        println(MarkdownColorizer.status("plan exported to " + export.path()));
         println(MarkdownColorizer.status("edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
         try {
             final var input = stdin.readLine();
@@ -849,16 +761,11 @@ public class CliCommand implements Runnable {
             println(MarkdownColorizer.error("editplan read failed: " + e.getMessage()));
             return;
         }
-        try {
-            final var edited = Files.readString(path);
-            if (edited.equals(original)) {
-                println(MarkdownColorizer.status("no changes in the plan (nothing to reload)"));
-                return;
-            }
-            final var parsed = planFileService.parse(edited);
-            println(MarkdownColorizer.status(planFileService.reload(sessionId, parsed)));
-        } catch (final IOException e) {
-            println(MarkdownColorizer.error("editplan failed to read " + path + ": " + e.getMessage()));
+        final var reload = agentSessionService.reloadPlan(sessionId, export.path(), export.original());
+        if (reload.error() != null) {
+            println(MarkdownColorizer.error(reload.error()));
+        } else {
+            println(MarkdownColorizer.status(reload.message()));
         }
     }
 
@@ -1056,25 +963,6 @@ public class CliCommand implements Runnable {
         }
     }
 
-    private AgentOverride agentOverride(final String text) {
-        final var stripped = text.strip();
-        if (stripped.startsWith("@")) {
-            final var space = stripped.indexOf(' ');
-            if (space > 1) {
-                final var name = stripped.substring(1, space).strip();
-                final var prompt = stripped.substring(space + 1).strip();
-                if (agentProvider.byName(name) != null) {
-                    return new AgentOverride(name, prompt);
-                }
-                return new AgentOverride(null, text);
-            }
-        }
-        return new AgentOverride(null, text);
-    }
-
-    private record AgentOverride(String agentName, String prompt) {
-    }
-
     private void printHelp() {
         println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - plain-terminal interactive session"));
         println("  type a prompt to run the agent, or use a slash command:");
@@ -1162,14 +1050,6 @@ public class CliCommand implements Runnable {
         } else {
             println(MarkdownColorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
         }
-    }
-
-    private static String firstLine(final String text) {
-        if (text == null) {
-            return "";
-        }
-        final var nl = text.indexOf('\n');
-        return (nl < 0 ? text : text.substring(0, nl)).strip();
     }
 
     private void print(final String text) {

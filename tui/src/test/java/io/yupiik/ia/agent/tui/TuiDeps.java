@@ -14,6 +14,7 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
@@ -43,6 +44,7 @@ TodoStore todoStore,
                       VirtualThreadExecutor executor,
                       StructuralCodeGraph structuralCodeGraph,
                       ProviderManager providerManager,
-                      AgentProvider agentProvider,
-                      TuiTranscriptModel model) {
+AgentProvider agentProvider,
+                       AgentSessionService agentSessionService,
+                       TuiTranscriptModel model) {
 }

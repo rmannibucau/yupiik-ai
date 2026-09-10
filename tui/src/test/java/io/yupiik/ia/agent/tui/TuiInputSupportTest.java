@@ -17,34 +17,6 @@ class TuiInputSupportTest {
     }
 
     @Test
-    void agentOverrideSplitsKnownAgent() {
-        final var override = TuiInputSupport.agentOverride("@coder do the thing", name -> name.equals("coder"));
-        assertEquals("coder", override.agentName());
-        assertEquals("do the thing", override.prompt());
-    }
-
-    @Test
-    void agentOverrideKeepsTextForUnknownAgent() {
-        final var override = TuiInputSupport.agentOverride("@nope do the thing", name -> false);
-        assertEquals(null, override.agentName());
-        assertEquals("@nope do the thing", override.prompt());
-    }
-
-    @Test
-    void agentOverrideWithoutPromptKeepsFullText() {
-        final var override = TuiInputSupport.agentOverride("@coder", name -> name.equals("coder"));
-        assertEquals(null, override.agentName());
-        assertEquals("@coder", override.prompt());
-    }
-
-    @Test
-    void agentOverrideWithoutAgentPrefixKeepsFullText() {
-        final var override = TuiInputSupport.agentOverride("plain prompt", name -> true);
-        assertEquals(null, override.agentName());
-        assertEquals("plain prompt", override.prompt());
-    }
-
-    @Test
     void nextWordStopsAtWordEnds() {
         assertEquals(3, TuiInputSupport.nextWord("foo bar baz", 0));
         assertEquals(7, TuiInputSupport.nextWord("foo bar baz", 4));

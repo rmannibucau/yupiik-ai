@@ -4,15 +4,16 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 @ApplicationScoped
-public class ReplSlashCommands implements SlashCommands {
+public class ReplSlashCommands extends BaseSlashCommands {
     @Override
     public List<SlashCommandSpec> commands() {
-        final var out = new ArrayList<>(SlashCommands.commonCommands());
-        out.add(new SlashCommandSpec("/todos", null, "show the todo list", SlashGroup.INSPECT));
-        return List.copyOf(out);
+        return Stream.concat(
+                        super.commands().stream(),
+                        Stream.of(new SlashCommandSpec("/todos", null, "show the todo list", SlashGroup.INSPECT)))
+                .toList();
     }
 }

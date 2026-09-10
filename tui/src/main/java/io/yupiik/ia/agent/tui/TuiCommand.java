@@ -37,24 +37,19 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
-import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
-import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
-import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
-import io.yupiik.ia.agent.core.todo.PlanFileService;
-import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -64,11 +59,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
-import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -116,19 +108,14 @@ public class TuiCommand implements Runnable {
     private final AgentEventBridge bridge;
     private final PermissionService permissionService;
     private final UserFeedbackService userFeedbackService;
-    private final ContextManager contextManager;
     private final SessionStore sessionStore;
     private final TodoStore todoStore;
-    private final PlanTodoSeeder planTodoSeeder;
-    private final PlanFileService planFileService;
     private final ChatClient chatClient;
-    private final MemoryStore memoryStore;
-    private final SystemPromptBuilder systemPromptBuilder;
     private final McpManager mcpManager;
     private final VirtualThreadExecutor executor;
-    private final StructuralCodeGraph structuralCodeGraph;
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
+    private final AgentSessionService agentSessionService;
     private final TuiTranscriptModel model;
     private final TuiRunnerFactory tuiRunnerFactory;
     private volatile Style thoughtStyle;
@@ -144,14 +131,14 @@ public class TuiCommand implements Runnable {
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
                       final AgentEventBridge bridge, final PermissionService permissionService,
                       final UserFeedbackService userFeedbackService,
-                      final ContextManager contextManager, final SessionStore sessionStore,
-                      final TodoStore todoStore, final PlanTodoSeeder planTodoSeeder, final PlanFileService planFileService,
-                      final ChatClient chatClient, final MemoryStore memoryStore,
-                      final SystemPromptBuilder systemPromptBuilder, final McpManager mcpManager,
+                      final SessionStore sessionStore,
+                      final TodoStore todoStore,
+                      final ChatClient chatClient,
+                      final McpManager mcpManager,
                       final VirtualThreadExecutor executor,
-                      final StructuralCodeGraph structuralCodeGraph,
                       final ProviderManager providerManager,
                       final AgentProvider agentProvider,
+                      final AgentSessionService agentSessionService,
                       final TuiTranscriptModel model,
                       final TuiRunnerFactory tuiRunnerFactory,
                       final TuiSlashCommands slashCommands, final Clock clock) {
@@ -162,19 +149,14 @@ public class TuiCommand implements Runnable {
         this.bridge = bridge;
         this.permissionService = permissionService;
         this.userFeedbackService = userFeedbackService;
-        this.contextManager = contextManager;
         this.sessionStore = sessionStore;
         this.todoStore = todoStore;
-        this.planTodoSeeder = planTodoSeeder;
-        this.planFileService = planFileService;
         this.chatClient = chatClient;
-        this.memoryStore = memoryStore;
-        this.systemPromptBuilder = systemPromptBuilder;
         this.mcpManager = mcpManager;
         this.executor = executor;
-        this.structuralCodeGraph = structuralCodeGraph;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
+        this.agentSessionService = agentSessionService;
         this.model = model;
         this.tuiRunnerFactory = tuiRunnerFactory;
         this.slashCommands = slashCommands;
@@ -911,15 +893,11 @@ public class TuiCommand implements Runnable {
         state.model.startUserTurn(text);
         state.interrupted = false;
         waiting(state, "thinking...", SpinnerStyle.CLOCK);
-        final var override = agentOverride(text);
+        final var override = agentSessionService.agentOverride(text);
         final var agentName = override.agentName() != null ? override.agentName() : state.activeAgent;
         final var prompt = override.prompt();
         final var history = sessionStore.load(state.sessionId);
         executor.execute(() -> agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted));
-    }
-
-    private TuiInputSupport.AgentOverride agentOverride(final String text) {
-        return TuiInputSupport.agentOverride(text, name -> agentProvider.byName(name) != null);
     }
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
@@ -940,9 +918,20 @@ public class TuiCommand implements Runnable {
             case "/provider" -> providerCommand(text, runner, state);
             case "/agent" -> agentCommand(text, runner, state);
             case "/memory" -> {
-                final var memory = memoryStore.readProject();
-                state.model.transcript().append("\n```text\n").append(memory.isBlank() ? "(empty project memory)" : memory)
-                        .append("\n```\n");
+                final var memory = agentSessionService.memory();
+                final var sb = new StringBuilder("\n```text\n");
+                if (memory.global().isBlank() && memory.project().isBlank()) {
+                    sb.append("(empty memory)");
+                } else {
+                    if (!memory.global().isBlank()) {
+                        sb.append("-- global memory --\n").append(memory.global()).append('\n');
+                    }
+                    if (!memory.project().isBlank()) {
+                        sb.append("-- project memory --\n").append(memory.project()).append('\n');
+                    }
+                }
+                sb.append("\n```\n");
+                state.model.transcript().append(sb).append('\n');
             }
             case "/context" -> context("", state);
             case "/tools" -> toolsCommand(text, runner, state);
@@ -1029,14 +1018,14 @@ public class TuiCommand implements Runnable {
 
     private void context(final String arg, final UiState state) {
         try {
+            final var dump = agentSessionService.context(state.sessionId);
             final var sb = new StringBuilder();
-            sb.append("**System prompt**\n\n```text\n").append(systemPromptBuilder.build()).append("\n```\n");
-            final var messages = sessionStore.load(state.sessionId);
-            sb.append("\n**Session ").append(state.sessionId).append(" (").append(messages.size())
+            sb.append("**System prompt**\n\n```text\n").append(dump.systemPrompt()).append("\n```\n");
+            sb.append("\n**Session ").append(dump.sessionId()).append(" (").append(dump.messages().size())
                     .append(" messages)**\n\n");
-            for (final var message : messages) {
+            for (final var message : dump.messages()) {
                 sb.append("- **").append(message.role()).append("**: ")
-                        .append(TuiInputSupport.firstLine(String.valueOf(message.content()))).append('\n');
+                        .append(TuiInputSupport.firstLine(message.content())).append('\n');
             }
             final var context = sb.toString();
             state.model.transcript().append("\n").append(context).append('\n');
@@ -1046,7 +1035,7 @@ public class TuiCommand implements Runnable {
                 Files.writeString(target, context);
                 state.model.status("context written to " + target);
             } else {
-                state.model.status("context shown (" + messages.size() + " messages)");
+                state.model.status("context shown (" + dump.messages().size() + " messages)");
             }
             state.model.scrollBack(0);
         } catch (final IOException e) {
@@ -1055,15 +1044,13 @@ public class TuiCommand implements Runnable {
     }
 
     private void permissions(final String value, final UiState state) {
-        final var v = value == null ? "" : value.strip();
-        if (v.equals("all") || v.equals("unsafe")) {
-            permissionService.setPermitAll(true);
-            state.model.status("permissions: all tools allowed");
-        } else if (v.equals("none") || v.equals("safe")) {
-            permissionService.setPermitAll(false);
-            state.model.status("permissions: asking for approval");
-        } else {
+        final var permitAll = agentSessionService.setPermissions(value);
+        if (permitAll == null) {
             state.model.status("usage: /permissions all|none");
+        } else if (permitAll) {
+            state.model.status("permissions: all tools allowed");
+        } else {
+            state.model.status("permissions: asking for approval");
         }
     }
 
@@ -1073,8 +1060,7 @@ public class TuiCommand implements Runnable {
             models(runner, state);
             return;
         }
-        final var model = arg.startsWith("$") ? arg.substring(1) : arg;
-        chatClient.setModel(model);
+        final var model = agentSessionService.setModel(arg);
         state.model.status("model: " + model);
     }
 
@@ -1082,8 +1068,8 @@ public class TuiCommand implements Runnable {
         final var arg = text.substring("/provider".length()).strip();
         final var providers = providerManager.providers();
         if (!arg.isEmpty()) {
-            chatClient.setProvider(arg);
-            state.model.status("provider: " + arg);
+            final var id = agentSessionService.setProvider(arg);
+            state.model.status("provider: " + id);
             return;
         }
         final var ids = providers.stream().map(p -> p.id()).collect(java.util.stream.Collectors.toList());
@@ -1104,54 +1090,36 @@ public class TuiCommand implements Runnable {
             }, () -> state.model.status("agent picker cancelled"));
             return;
         }
-        if (agentProvider.byName(arg) == null) {
+        final var name = agentSessionService.setAgent(arg);
+        if (name == null) {
             state.model.status("unknown agent: " + arg + " (/agent)");
             return;
         }
-        state.activeAgent = arg;
-        state.model.status("agent: " + arg);
+        state.activeAgent = name;
+        state.model.status("agent: " + name);
     }
 
     private void toolsCommand(final String text, final TuiRunner runner, final UiState state) {
-        final var filters = new ArrayList<String>();
-        for (final var token : text.substring("/tools".length()).strip().split(" ")) {
-            final var filter = token.strip().toLowerCase(Locale.ROOT);
-            if (!filter.isEmpty()) {
-                filters.add(filter);
-            }
-        }
+        final var arg = text.substring("/tools".length()).strip();
         executor.execute(() -> {
             try {
-                final var byServer = new TreeMap<>(mcpManager.toolsByServer());
+                final var listing = agentSessionService.tools(arg);
                 final var sb = new StringBuilder("\n\n**Tools**\n\n```text\n");
-                if (byServer.isEmpty()) {
+                if (!listing.anyTool()) {
                     sb.append("(no tools available)\n");
                 } else {
-                    var count = 0;
-                    for (final var server : byServer.entrySet()) {
-                        final var lines = new ArrayList<String>();
-                        final var tools = server.getValue().stream()
-                                .sorted(Comparator.comparing(EmbeddedTool::name))
-                                .toList();
-                        for (final var tool : tools) {
-                            final var root = (server.getKey() + '_' + tool.name()).toLowerCase(Locale.ROOT);
-                            if (filters.stream().anyMatch(filter -> !root.contains(filter))) {
-                                continue;
-                            }
-                            final var description = toolDescription(server.getKey(), tool);
-                            lines.add(tool.name() + (description == null ? "" : ": " + description));
-                        }
-                        if (lines.isEmpty()) {
-                            continue;
-                        }
-                        sb.append(server.getKey()).append('\n');
-                        for (var i = 0; i < lines.size(); i++) {
-                            sb.append(i == lines.size() - 1 ? "└─ " : "├─ ").append(lines.get(i)).append('\n');
-                        }
-                        count += lines.size();
-                    }
-                    if (count == 0) {
+                    if (listing.matches() == 0) {
                         sb.append("(no tool matches)\n");
+                    } else {
+                        for (final var server : listing.servers()) {
+                            sb.append(server.server()).append('\n');
+                            final var tools = server.tools();
+                            for (var i = 0; i < tools.size(); i++) {
+                                final var tool = tools.get(i);
+                                sb.append(i == tools.size() - 1 ? "└─ " : "├─ ").append(tool.name())
+                                        .append(tool.description() == null ? "" : ": " + tool.description()).append('\n');
+                            }
+                        }
                     }
                 }
                 sb.append("```");
@@ -1163,19 +1131,6 @@ public class TuiCommand implements Runnable {
                 runner.runLater(() -> modelError(state, "tools listing failed: " + e.getMessage()));
             }
         });
-    }
-
-    private String toolDescription(final String server, final EmbeddedTool tool) {
-        var description = tool.description() == null ? "" : tool.description().strip();
-        final var prefix = '[' + server + "] ";
-        if (description.startsWith(prefix)) {
-            description = description.substring(prefix.length()).strip();
-        }
-        final var lineBreak = description.indexOf('\n');
-        if (lineBreak >= 0) {
-            description = description.substring(0, lineBreak).strip();
-        }
-        return description.isEmpty() || description.equals(tool.name()) ? null : description;
     }
 
     private void complete(final TuiRunner runner, final UiState state) {
@@ -1486,55 +1441,43 @@ public class TuiCommand implements Runnable {
     }
 
     private void mode(final String value, final TuiRunner runner, final UiState state) {
-        final var mode = AgentMode.fromConfigurationString(value);
-        permissionService.setMode(mode);
-        state.model.status("mode: " + mode.name().toLowerCase());
-        if (mode == AgentMode.BUILD && todoStore.all().isEmpty() && !state.model.busy()) {
-            state.model.status("mode: build - deriving todos from the plan...");
-            executor.execute(() -> {
-                try {
-                    final var seeded = planTodoSeeder.seedFromLastAssistant(state.sessionId);
-                    runner.runLater(() -> state.model.status(seeded
-                            ? "todos seeded from the plan"
-                            : "no plan found to seed todos from"));
-                } catch (final RuntimeException e) {
-                    runner.runLater(() -> modelError(state, "todo seeding failed: " + e.getMessage()));
-                }
-            });
+        if (state.model.busy()) {
+            state.model.status("cannot switch mode while busy");
+            return;
         }
+        state.model.status("mode: switching...");
+        executor.execute(() -> {
+            try {
+                final var result = agentSessionService.setMode(value, state.sessionId);
+                runner.runLater(() -> {
+                    state.model.status(result.message());
+                    if (result.seedMessage() != null) {
+                        state.model.status(result.seedMessage());
+                    }
+                    if (result.seedError() != null) {
+                        modelError(state, result.seedError());
+                    }
+                });
+            } catch (final RuntimeException e) {
+                runner.runLater(() -> modelError(state, "mode failed: " + e.getMessage()));
+            }
+        });
     }
 
     private void editPlan(final String arg, final TuiRunner runner, final UiState state) {
-        if (permissionService.mode() != AgentMode.PLAN) {
-            state.model.status("editplan is only available in plan mode (run /mode plan)");
-            return;
-        }
         if (state.model.busy()) {
             state.model.status("editplan is not available while busy");
             return;
         }
-        final var plan = planTodoSeeder.plan(state.sessionId);
-        if (plan == null || plan.isBlank()) {
-            state.model.status("no plan to edit yet - produce a plan first");
+        final var title = state.title == null || state.title.isBlank() ? "plan" : state.title;
+        final var export = agentSessionService.exportPlan(state.sessionId, arg, title);
+        if (export.error() != null) {
+            state.model.status(export.error());
             return;
         }
-        final Path path;
-        if (arg != null && !arg.isBlank()) {
-            path = Path.of(arg).toAbsolutePath();
-        } else {
-            path = planFileService.defaultPath(Path.of(configuration.resolveStorageHome()),
-                    state.title == null || state.title.isBlank() ? "plan" : state.title, state.sessionId);
-        }
-        try {
-            Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
-            Files.writeString(path, planFileService.render(plan, todoStore.all()));
-        } catch (final IOException e) {
-            state.model.status("editplan failed to write " + path + ": " + e.getMessage());
-            return;
-        }
-        state.editPlan = new PendingEditPlan(path, planFileService.render(plan, todoStore.all()), null, null);
-        state.model.status("plan exported to " + path + " - edit it, save, then press Enter to reload (Esc or click Cancel to abort)");
-        state.model.transcript().append("\n\n> plan exported to `").append(path)
+        state.editPlan = new PendingEditPlan(export.path(), export.original(), null, null);
+        state.model.status("plan exported to " + export.path() + " - edit it, save, then press Enter to reload (Esc or click Cancel to abort)");
+        state.model.transcript().append("\n\n> plan exported to `").append(export.path())
                 .append("` - edit it, save, then press Enter to reload, or Esc to abort\n");
     }
 
@@ -1571,24 +1514,19 @@ public class TuiCommand implements Runnable {
             return;
         }
         final Path path = pending.path();
-        if (!Files.isRegularFile(path)) {
-            state.model.status("plan file not found: " + path + " (still waiting - edit and press Enter)");
-            return;
-        }
-        try {
-            final var edited = Files.readString(path);
-            if (edited.equals(pending.original())) {
-                state.editPlan = null;
-                state.model.status("no changes in the plan (nothing to reload)");
+        final var reload = agentSessionService.reloadPlan(state.sessionId, path, pending.original());
+        if (reload.error() != null) {
+            if (("plan file not found: " + path).equals(reload.error())) {
+                state.model.status("plan file not found: " + path + " (still waiting - edit and press Enter)");
                 return;
             }
-            final var parsed = planFileService.parse(edited);
-            planFileService.reload(state.sessionId, parsed);
-            state.editPlan = null;
-            state.model.status((parsed.todos().isEmpty() ? "plan reloaded from " : "plan and todos reloaded from ") + path);
-        } catch (final IOException e) {
-            state.model.status("editplan failed to read " + path + ": " + e.getMessage());
+            state.model.status(reload.error());
+            return;
         }
+        if (reload.changed()) {
+            state.editPlan = null;
+        }
+        state.model.status(reload.message());
     }
 
     private void abortEditPlan(final UiState state) {
@@ -1636,7 +1574,7 @@ public class TuiCommand implements Runnable {
         waiting(state, "resyncing structural code graph...", SpinnerStyle.BOUNCING_BALL);
         executor.execute(() -> {
             try {
-                final var result = structuralCodeGraph.resync();
+                final var result = agentSessionService.resyncGraph();
                 runner.runLater(() -> {
                     state.model.status("structural code graph resynced");
                     state.model.transcript().append("\n\n> structural code graph: `").append(result).append("`\n");
@@ -1655,15 +1593,12 @@ public class TuiCommand implements Runnable {
         waiting(state, "compacting...", SpinnerStyle.BOUNCING_BALL);
         executor.execute(() -> {
             try {
-                final var history = sessionStore.load(state.sessionId);
-                if (history.isEmpty()) {
-                    runner.runLater(() -> state.model.status("nothing to compact"));
-                    return;
-                }
-                sessionStore.replace(state.sessionId, contextManager.compact(history));
+                final var result = agentSessionService.compact(state.sessionId);
                 runner.runLater(() -> {
-                    state.model.status("session compacted");
-                    state.model.transcript().append("\n\n> session compacted\n");
+                    state.model.status(result == null ? "nothing to compact" : result);
+                    if (result != null) {
+                        state.model.transcript().append("\n\n> session compacted\n");
+                    }
                 });
             } catch (final RuntimeException e) {
                 runner.runLater(() -> modelError(state, "compaction failed: " + e.getMessage()));

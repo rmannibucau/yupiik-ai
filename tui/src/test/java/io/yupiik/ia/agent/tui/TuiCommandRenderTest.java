@@ -9,6 +9,7 @@ import dev.tamboui.tui.event.PasteEvent;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -16,6 +17,7 @@ import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -190,8 +192,11 @@ class TuiCommandRenderTest {
             }
         };
         return new TuiCommand(conf, tuiConfiguration, configuration, agentLoop, bridge,
-                new PermissionService(configuration), new UserFeedbackService(), null, sessionStore, todoStore, null, null, chatClient, null,
-                null, mcpManager, new VirtualThreadExecutor(), null, null, null,
+                new PermissionService(configuration), new UserFeedbackService(),
+                sessionStore, todoStore, chatClient, mcpManager, new VirtualThreadExecutor(),
+                new ProviderManager(configuration, mapper), new AgentProvider(configuration),
+                new AgentSessionService(new PermissionService(configuration), chatClient, mcpManager,
+                        new AgentProvider(configuration), sessionStore, null, null, null, null, null, null, todoStore, configuration),
                 new TuiTranscriptModel(), factory, new TuiSlashCommands(), Clock.systemUTC());
     }
 

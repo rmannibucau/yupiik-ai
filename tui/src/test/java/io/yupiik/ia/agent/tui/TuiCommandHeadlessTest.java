@@ -85,10 +85,10 @@ class TuiCommandHeadlessTest {
             final var d = deps.instance();
             final var command = new TuiCommand(new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
                     d.tuiConfiguration(), d.configuration(), d.agentLoop(), d.bridge(), d.permissionService(),
-                    d.userFeedbackService(), d.contextManager(), d.sessionStore(), d.todoStore(),
-                    d.planTodoSeeder(), d.planFileService(), d.chatClient(), d.memoryStore(), d.systemPromptBuilder(),
-                    d.mcpManager(), d.executor(), d.structuralCodeGraph(), d.providerManager(),
-                    d.agentProvider(), d.model(), headlessFactory(), new TuiSlashCommands(), Clock.systemUTC());
+                    d.userFeedbackService(), d.sessionStore(), d.todoStore(),
+                    d.chatClient(), d.mcpManager(), d.executor(), d.providerManager(),
+                    d.agentProvider(), d.agentSessionService(), d.model(), headlessFactory(),
+                    new TuiSlashCommands(), Clock.systemUTC());
 
             uiThread = new Thread(command::run, "tui-headless-test");
             uiThread.setDaemon(true);
