@@ -199,6 +199,15 @@ public class SessionStore {
     public record SessionInfo(String id, long modifiedAt, long sizeBytes) {
     }
 
+    public String summary(final String id) {
+        return load(id).stream()
+                .filter(m -> "user".equals(m.role()) && m.content() instanceof final String text && !text.isBlank())
+                .map(m -> (String) m.content())
+                .map(AgentSessionService::firstLine)
+                .findFirst()
+                .orElse("");
+    }
+
     public List<SessionInfo> list() {
         try (final Stream<Path> files = storedSessions()) {
             return files.map(f -> {

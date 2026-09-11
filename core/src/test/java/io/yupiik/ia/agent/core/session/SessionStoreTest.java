@@ -174,4 +174,29 @@ class SessionStoreTest {
         assertTrue(store.load("missing").isEmpty());
         assertTrue(store.list().isEmpty());
     }
+
+    @Test
+    void summaryReturnsFirstUserLine() {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "assistant", "ignored", null, null));
+        store.append(id, SessionEntry.of(2, "user", "first line\nsecond", null, null));
+        store.append(id, SessionEntry.of(3, "user", "another", null, null));
+        assertEquals("first line", store.summary(id));
+    }
+
+    @Test
+    void summarySkipsBlankUserAndMissingSession() {
+        final var store = newStore();
+        assertEquals("", store.summary("missing"));
+
+        final var blank = store.create();
+        store.append(blank, SessionEntry.of(1, "user", "   ", null, null));
+        store.append(blank, SessionEntry.of(2, "user", "hello there", null, null));
+        assertEquals("hello there", store.summary(blank));
+
+        final var noUser = store.create();
+        store.append(noUser, SessionEntry.of(1, "assistant", "only assistant", null, null));
+        assertEquals("", store.summary(noUser));
+    }
 }

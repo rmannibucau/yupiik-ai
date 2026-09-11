@@ -69,6 +69,8 @@ public class CliCommand implements Runnable {
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
     private static final int DIFF_MAX_LINES = 5;
+    private static final int MAX_RESUME_LIST = 25;
+    private static final int RESUME_SUMMARY_WIDTH = 80;
 
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final AtomicBoolean busy = new AtomicBoolean();
@@ -577,13 +579,12 @@ public class CliCommand implements Runnable {
                     return false;
                 }),
                 Map.entry("resume", arg -> {
-                    if (arg.isBlank()) {
-                        println(MarkdownColorizer.status("usage: /resume <session-id>"));
+                    if (!arg.isBlank()) {
+                        sessionId = arg;
+                        println(MarkdownColorizer.status("resumed session " + sessionId));
                         return false;
                     }
-                    sessionId = arg;
-                    println(MarkdownColorizer.status("resumed session " + sessionId));
-                    return false;
+                    return resumePicker();
                 }),
                 Map.entry("mode", arg -> {
                     mode(arg);
@@ -765,6 +766,53 @@ public class CliCommand implements Runnable {
             println(MarkdownColorizer.status("-- project memory --"));
             println(memory.project());
         }
+    }
+
+    private boolean resumePicker() {
+        final var sessions = sessionStore.list().stream().limit(MAX_RESUME_LIST).toList();
+        if (sessions.isEmpty()) {
+            println(MarkdownColorizer.status("no session to resume"));
+            return false;
+        }
+        println(MarkdownColorizer.status("recent sessions:"));
+        for (int i = 0; i < sessions.size(); i++) {
+            final var s = sessions.get(i);
+            final var title = sessionStore.summary(s.id());
+            println((i + 1) + ". " + MarkdownColorizer.accent(s.id()) + "  (" + s.sizeBytes() + " bytes)"
+                    + (title.isBlank() ? "" : " -- " + MarkdownColorizer.status(cap(title, RESUME_SUMMARY_WIDTH))));
+        }
+        print(MarkdownColorizer.accent("select session [1-" + sessions.size() + "] or Enter/c to cancel: "));
+        try {
+            final var line = stdin.readLine();
+            if (line == null) {
+                return false;
+            }
+            final var choice = line.strip().toLowerCase(Locale.ROOT);
+            if (choice.isBlank() || choice.equals("c") || choice.equals("cancel")) {
+                println(MarkdownColorizer.status("resume cancelled"));
+                return false;
+            }
+            final int index;
+            try {
+                index = Integer.parseInt(choice) - 1;
+            } catch (final NumberFormatException e) {
+                println(MarkdownColorizer.status("invalid selection"));
+                return false;
+            }
+            if (index < 0 || index >= sessions.size()) {
+                println(MarkdownColorizer.status("invalid selection"));
+                return false;
+            }
+            sessionId = sessions.get(index).id();
+            println(MarkdownColorizer.status("resumed session " + sessionId));
+        } catch (final IOException e) {
+            println(MarkdownColorizer.error("resume read failed: " + e.getMessage()));
+        }
+        return false;
+    }
+
+    private static String cap(final String text, final int max) {
+        return text.length() <= max ? text : text.substring(0, max) + "...";
     }
 
     private void todos() {

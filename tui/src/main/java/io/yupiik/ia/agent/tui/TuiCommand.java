@@ -129,6 +129,9 @@ public class TuiCommand implements Runnable {
     private final TuiSlashCommands slashCommands;
     private final Clock clock;
 
+    private static final int MAX_RESUME_LIST = 25;
+    private static final int RESUME_SUMMARY_WIDTH = 80;
+
     public TuiCommand(final TuiConf conf, final TuiConfiguration tuiConfiguration,
                       final CodingAgentConfiguration configuration, final AgentLoop agentLoop,
                       final AgentEventBridge bridge, final PermissionService permissionService,
@@ -1012,13 +1015,15 @@ public class TuiCommand implements Runnable {
     }
 
     private void resume(final UiState state) {
-        final var sessions = sessionStore.list();
+        final var sessions = sessionStore.list().stream().limit(MAX_RESUME_LIST).toList();
         if (sessions.isEmpty()) {
             state.model.status("no session to resume");
             return;
         }
         final var labels = sessions.stream()
-                .map(s -> s.id() + "  (" + formatBytes(s.sizeBytes()) + ")")
+                .map(s -> s.id() + "  (" + formatBytes(s.sizeBytes()) + ")"
+                        + (sessionStore.summary(s.id()).isBlank() ? ""
+                        : " -- " + cap(sessionStore.summary(s.id()), RESUME_SUMMARY_WIDTH)))
                 .collect(java.util.stream.Collectors.toList());
         openPicker(state, "resume session", labels, selected -> {
             final var id = selected.split("\\s+")[0];
@@ -2545,6 +2550,10 @@ public class TuiCommand implements Runnable {
         }
         final var m = value / 1_000_000.0;
         return (m > 9 ? String.format("%.0fM", m) : String.format("%.1fM", m)).replace(",", ".");
+    }
+
+    private static String cap(final String text, final int max) {
+        return text.length() <= max ? text : text.substring(0, max) + "...";
     }
 
     private static String formatBytes(final long value) {
