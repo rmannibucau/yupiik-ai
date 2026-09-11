@@ -7,6 +7,7 @@ import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -192,8 +193,18 @@ public class PermissionService {
     }
 
     private static String detail(final String toolName, final Map<String, Object> args) {
+        final var shownInTitle = new HashSet<String>();
+        if (args.get("command") instanceof String) {
+            shownInTitle.add("command");
+        }
+        if (args.get("path") instanceof String) {
+            shownInTitle.add("path");
+        }
         final var sb = new StringBuilder("Tool ").append(toolName).append('\n');
         for (final var e : args.entrySet()) {
+            if (shownInTitle.contains(e.getKey())) {
+                continue;
+            }
             var v = String.valueOf(e.getValue());
             if (v.length() > 400) {
                 v = v.substring(0, 400) + "...";
