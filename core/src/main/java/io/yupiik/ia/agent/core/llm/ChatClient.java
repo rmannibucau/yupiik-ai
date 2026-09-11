@@ -242,7 +242,10 @@ public class ChatClient implements AutoCloseable {
         if (request.others() != null) {
             base.putAll(request.others());
         }
-        base.putAll(mergeOptions(null));
+        final var otherOptions = mergeOptions(null);
+        if (otherOptions != null) {
+            base.putAll(otherOptions);
+        }
         final var plainReq = new ChatCompletionRequest(model, request.messages(), request.temperature(), false,
                 request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), base);
         final var structuredReq = new ChatCompletionRequest(model, request.messages(), request.temperature(), false,

@@ -143,6 +143,14 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void chatStructuredWithNullOthersIgnoresMissingProviderOptions() throws Exception {
+        final var result = client.chatStructured(request(), "todo_steps", java.util.Map.of("type", "object"));
+        assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
+        assertTrue(result.structured());
+        assertEquals("hello there", result.result().message().content());
+    }
+
+    @Test
     void modelsListsIds() throws Exception {
         assertEquals(List.of("model-a", "model-b"), client.models().ids());
     }
