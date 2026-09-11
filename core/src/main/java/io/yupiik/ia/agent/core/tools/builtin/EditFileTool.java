@@ -71,7 +71,10 @@ public class EditFileTool implements EmbeddedTool {
                 }
             }
             if (count == 0) {
-                return ToolResult.error("oldString not found in " + path);
+                return ToolResult.error("oldString not found in " + path
+                        + ". It must match the current file content exactly (whitespace sensitive). "
+                        + "Re-read the file for current content. File starts with: "
+                        + snippet(content) + ".");
             }
             Files.writeString(path, optBool(args, "replaceAll", false)
                     ? content.replace(oldString, newString)
@@ -80,5 +83,10 @@ public class EditFileTool implements EmbeddedTool {
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot edit " + path + ": " + e.getMessage());
         }
+    }
+
+    private static String snippet(final String content) {
+        final var s = content.stripLeading();
+        return s.length() > 200 ? s.substring(0, 200) + "..." : s;
     }
 }

@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @ApplicationScoped
@@ -61,7 +62,9 @@ public class MemoryExtractor {
             try {
                 doExtract(messages);
             } catch (final RuntimeException e) {
-                LOGGER.warning("Memory extraction failed: " + e.getMessage());
+                if (LOGGER.isLoggable(Level.FINER)) {
+                    LOGGER.log(Level.FINER, "Memory extraction failed", e);
+                }
             }
         });
     }
@@ -79,19 +82,50 @@ public class MemoryExtractor {
                     Message.system("Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. Reply with a JSON array of short sentences (max 5). Reply with [] when nothing is worth remembering. Do not include transient task state."),
                     Message.user(sb.toString())), null, false, null, null, null, null, null));
             final var content = res.message() == null || res.message().content() == null ? "" : String.valueOf(res.message().content());
-            final var start = content.indexOf('[');
-            final var end = content.lastIndexOf(']');
-            if (start < 0 || end <= start) {
-                return;
-            }
-            final var array = mapper.fromString(Object.class, content.substring(start, end + 1));
-            if (array instanceof List<?> list && !list.isEmpty()) {
-                memoryStore.append(false, list.stream().map(String::valueOf).toList());
+            final var facts = extractFacts(content);
+            if (!facts.isEmpty()) {
+                memoryStore.append(false, facts);
             }
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
         }
+    }
+
+    private List<String> extractFacts(final String content) {
+        final var json = sliceJsonArray(content);
+        if (json == null) {
+            return List.of();
+        }
+        try {
+            final var array = mapper.fromString(List.class, json);
+            return array.stream().map(String::valueOf).toList();
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.FINEST, "Skipping unparsable memory facts: " + json, e);
+            return List.of();
+        }
+    }
+
+    private static String sliceJsonArray(final String content) {
+        var text = content.strip();
+        if (text.startsWith("```")) {
+            final var firstNewLine = text.indexOf('\n');
+            text = (firstNewLine >= 0 ? text.substring(firstNewLine + 1) : text).strip();
+            final var lastFence = text.lastIndexOf("```");
+            if (lastFence >= 0) {
+                text = text.substring(0, lastFence).strip();
+            }
+        }
+        final var start = text.indexOf('[');
+        final var end = text.lastIndexOf(']');
+        if (start < 0 || end <= start) {
+            return null;
+        }
+        final var candidate = text.substring(start, end + 1).strip();
+        if (!candidate.startsWith("[") || !candidate.endsWith("]") || candidate.length() <= 2) {
+            return null;
+        }
+        return candidate;
     }
 }
