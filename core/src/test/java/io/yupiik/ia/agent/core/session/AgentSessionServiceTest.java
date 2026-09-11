@@ -108,6 +108,19 @@ class AgentSessionServiceTest {
     }
 
     @Test
+    void permissionsInfoExposesStateAndSessionGrants() {
+        final var permissions = new PermissionService(cfg());
+        permissions.setPermitAll(true);
+        permissions.grantSession("bash", Map.of("command", "mvn install"));
+        final var service = service(permissions);
+
+        final var info = service.permissionsInfo();
+        assertTrue(info.permitAll());
+        assertFalse(info.sessionGrants().isEmpty());
+        assertTrue(info.sessionGrants().stream().anyMatch(g -> g.contains("|bash:mvn")));
+    }
+
+    @Test
     void setModelStripsDollarPrefix() {
         final var client = chatClient();
         final var service = service(client);

@@ -1,5 +1,13 @@
 package io.yupiik.ia.agent.core.permissions;
 
+import java.util.Map;
+
 public interface ApprovalGate {
-    boolean approve(String title, String detail);
+    Result approve(String title, String detail, String toolName, Map<String, Object> args);
+
+    enum Result {
+        DENY,
+        ALLOW_ONCE,
+        ALLOW_SESSION
+    }
 }

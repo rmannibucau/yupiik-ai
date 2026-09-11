@@ -733,9 +733,26 @@ public class CliCommand implements Runnable {
     }
 
     private void permissions(final String arg) {
-        final var permitAll = agentSessionService.setPermissions(arg);
+        final var value = arg == null ? "" : arg.strip();
+        if (value.equals("show") || value.equals("list")) {
+            final var info = agentSessionService.permissionsInfo();
+            println(MarkdownColorizer.accent("permissions status (session-scoped):"));
+            println(MarkdownColorizer.status("permit all: " + (info.permitAll() ? "on" : "off")));
+            println(MarkdownColorizer.status("agent mode: " + info.agentMode().name().toLowerCase(Locale.ROOT)
+                    + ", permission mode: " + (info.permissionMode() == null ? "?" : info.permissionMode().toString().toLowerCase(Locale.ROOT))));
+            if (info.sessionGrants().isEmpty()) {
+                println(MarkdownColorizer.status("session grants: none (use 'a' in the approval prompt to add one)"));
+            } else {
+                println(MarkdownColorizer.status("session grants (in-memory, lost on restart):"));
+                for (final var grant : info.sessionGrants()) {
+                    println(MarkdownColorizer.status("  - " + grant));
+                }
+            }
+            return;
+        }
+        final var permitAll = agentSessionService.setPermissions(value);
         if (permitAll == null) {
-            println(MarkdownColorizer.status("usage: /permissions all|none"));
+            println(MarkdownColorizer.status("usage: /permissions all|none|show"));
         } else if (permitAll) {
             println(MarkdownColorizer.status("permissions: all tools allowed"));
         } else {
@@ -818,22 +835,25 @@ public class CliCommand implements Runnable {
     }
 
     private ApprovalGate approvalGate() {
-        return (title, detail) -> {
+        return (title, detail, toolName, args) -> {
             stopSpinner();
             printApprovalBox(title, detail);
-            print(MarkdownColorizer.accent("allow? [y/N] "));
+            print(MarkdownColorizer.accent("allow? [y/n/a] (y=once, n=no, a=always this session) "));
             try {
                 final var line = stdin.readLine();
                 if (line != null) {
                     final var c = line.strip().toLowerCase(Locale.ROOT);
                     if (c.equals("y") || c.equals("yes") || c.equals("o") || c.equals("ok")) {
-                        return true;
+                        return ApprovalGate.Result.ALLOW_ONCE;
+                    }
+                    if (c.equals("a") || c.equals("always")) {
+                        return ApprovalGate.Result.ALLOW_SESSION;
                     }
                 }
             } catch (final IOException ignored) {
                 // treat as deny
             }
-            return false;
+            return ApprovalGate.Result.DENY;
         };
     }
 

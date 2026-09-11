@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -58,11 +59,11 @@ class PermissionServiceTest {
     @Test
     void gateApprovedAndRefused() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
-        service.setGate((title, detail) -> true);
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_ONCE);
         assertTrue(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
 
         final var refused = service(PermissionMode.ASK, List.of(), List.of());
-        refused.setGate((title, detail) -> false);
+        refused.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
         final var decision = refused.check("write_file", ToolCategory.EDIT, Map.of());
         assertFalse(decision.allowed());
         assertEquals("refused by the user", decision.reason());
@@ -91,11 +92,32 @@ class PermissionServiceTest {
     }
 
     @Test
-    void planModeBlocksEditAndBash() {
+    void planModeBlocksEditAndBashWithoutGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
         assertFalse(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
         assertFalse(service.check("bash", ToolCategory.BASH, Map.of()).allowed());
+    }
+
+    @Test
+    void planModeAsksThroughGate() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        final AtomicReference<String> asked = new AtomicReference<>();
+        service.setMode(AgentMode.PLAN);
+        service.setGate((title, detail, tool, args) -> {
+            asked.set(title);
+            return ApprovalGate.Result.ALLOW_ONCE;
+        });
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing")).allowed());
+        assertTrue(asked.get().contains("cd /somewhere && doThing"));
+    }
+
+    @Test
+    void planModeGateCanDeny() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setMode(AgentMode.PLAN);
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing")).allowed());
     }
 
     @Test
@@ -127,7 +149,33 @@ class PermissionServiceTest {
     @Test
     void buildModeUsesPermissionModeForMcp() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
-        service.setGate((title, detail) -> false);
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
         assertFalse(service.check("ctx_write", ToolCategory.MCP, Map.of(), false).allowed());
+    }
+
+    @Test
+    void sessionGrantAppliesToCommandFamilyInProject() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install")).allowed());
+        service.grantSession("bash", Map.of("command", "mvn install"));
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install")).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test")).allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "gradle build")).allowed());
+    }
+
+    @Test
+    void sessionGrantDoesNotCrossProjectDir() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.grantSession("bash", Map.of("command", "mvn install"));
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /")).allowed());
+        assertTrue(service.sessionGrants().stream().anyMatch(g -> g.contains("|bash:mvn")));
+    }
+
+    @Test
+    void sessionGrantViaGate() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install")).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test")).allowed());
     }
 }

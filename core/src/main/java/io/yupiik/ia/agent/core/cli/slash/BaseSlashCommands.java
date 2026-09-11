@@ -21,7 +21,7 @@ public abstract class BaseSlashCommands implements SlashCommands {
                 new SlashCommandSpec("/model", "[name]", "show or switch the model", SlashGroup.CONFIG),
                 new SlashCommandSpec("/provider", "[id]", "show or switch the provider", SlashGroup.CONFIG),
                 new SlashCommandSpec("/agent", "[name]", "show or set the active custom agent", SlashGroup.CONFIG),
-                new SlashCommandSpec("/permissions", "all|none", "allow all tools or ask for approval", SlashGroup.CONFIG),
+                new SlashCommandSpec("/permissions", "all|none|show", "allow all tools, ask for approval, or show current (session-scoped) settings", SlashGroup.CONFIG),
                 new SlashCommandSpec("/thinking", "show|hide", "show or hide the reasoning/thinking stream", SlashGroup.CONFIG),
                 new SlashCommandSpec("/tool-output", "show|hide", "show or hide tool invocations and output", SlashGroup.CONFIG),
                 new SlashCommandSpec("/context", "[path]", "dump raw context to stdout or a file", SlashGroup.INSPECT),

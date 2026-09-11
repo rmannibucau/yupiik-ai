@@ -8,6 +8,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -61,10 +62,10 @@ public class RunCommand implements Runnable {
                 lastError.set(e.message());
             }
         });
-        permissionService.setGate((title, detail) -> {
+        permissionService.setGate((title, detail, tool, args) -> {
             System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
                     + "); set yca.permissions.mode=yolo to auto allow.");
-            return false;
+            return ApprovalGate.Result.DENY;
         });
         userFeedbackService.setGate(questions -> {
             System.err.println("[ask_user] not available in headless mode; provide the required input in your prompt and retry.");

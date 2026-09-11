@@ -101,7 +101,7 @@ public final class CompletionEngine {
             case "resume" -> complete(prefixInner, tokenStart, sessions.get(), "session");
             case "tools" -> complete(prefixInner, tokenStart, tools.get(), "tool");
             case "mode" -> suggestionsWithHint("build", "plan", prefixInner, tokenStart);
-            case "permissions" -> suggestionsWithHint("all", "none", prefixInner, tokenStart);
+            case "permissions" -> suggestionsWithHint("all", "none", "show", prefixInner, tokenStart);
             case "thinking", "tool-output" -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
             case "context", "editplan" -> {
                 final var items = pathCandidates(prefixInner);
@@ -131,6 +131,21 @@ public final class CompletionEngine {
         }
         return out.isEmpty() ? Suggestion.none()
                 : new Suggestion(out, tokenStart, tokenStart + token.length(), "option");
+    }
+
+    private Suggestion suggestionsWithHint(final String first, final String second, final String third,
+                                           final String token, final int tokenStart) {
+        final var a = suggestionsWithHint(first, second, token, tokenStart);
+        final var lc = token.toLowerCase(Locale.ROOT);
+        if (third.toLowerCase(Locale.ROOT).contains(lc)) {
+            final var items = new ArrayList<String>(a.items());
+            if (!items.contains(third)) {
+                items.add(third);
+            }
+            return items.isEmpty() ? Suggestion.none()
+                    : new Suggestion(items, a.replaceStart(), a.replaceStart() + token.length(), "option");
+        }
+        return a;
     }
 
     /** Substring + contains fuzzy match, lower-cased, stable sorted. */

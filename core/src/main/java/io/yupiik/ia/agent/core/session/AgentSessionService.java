@@ -6,6 +6,7 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
@@ -169,6 +170,21 @@ public class AgentSessionService {
             return false;
         }
         return null;
+    }
+
+    public record PermissionsInfo(boolean permitAll, AgentMode agentMode, PermissionMode permissionMode,
+                                  List<String> sessionGrants) {
+    }
+
+    /**
+     * Returns the current permission state for the {@code /permissions show} command.
+     * Session grants are explicitly session-scoped (in-memory, lost on restart).
+     */
+    public PermissionsInfo permissionsInfo() {
+        final var configured = configuration.permissions();
+        final var mode = configured == null ? null : configured.mode();
+        return new PermissionsInfo(permissionService.isPermitAll(), permissionService.mode(), mode,
+                permissionService.sessionGrants());
     }
 
     /**

@@ -60,10 +60,12 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 @DefaultScoped
 @Command(name = "tui", description = "Interactive terminal UI session with the yca coding agent.")
@@ -280,11 +282,10 @@ public class TuiCommand implements Runnable {
     }
 
     private ApprovalGate gate(final TuiRunner tui, final UiState state) {
-        return (title, detail) -> {
+        return (title, detail, toolName, args) -> {
             final var latch = new CountDownLatch(1);
-            final var approved = new AtomicBoolean(false);
-            final var toolName = toolNameOf(detail);
-            tui.runLater(() -> state.approval = new Approval(title, detail, toolName, latch, approved));
+            final var outcome = new AtomicReference<ApprovalGate.Result>();
+            tui.runLater(() -> state.approval = new Approval(title, detail, latch, outcome));
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
                     if (state.interrupted) {
@@ -293,25 +294,16 @@ public class TuiCommand implements Runnable {
                                 state.approval = null;
                             }
                         });
-                        return false;
+                        return ApprovalGate.Result.DENY;
                     }
                 }
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return false;
+                return ApprovalGate.Result.DENY;
             }
-            return approved.get();
+            final var r = outcome.get();
+            return r == null ? ApprovalGate.Result.DENY : r;
         };
-    }
-
-    /** Extracts the tool name from the gate detail ("Tool <name>\\n..."). */
-    private static String toolNameOf(final String detail) {
-        if (detail == null || detail.isBlank()) {
-            return "";
-        }
-        final var first = detail.strip().lines().findFirst().orElse("");
-        final var prefix = "Tool ";
-        return first.startsWith(prefix) ? first.substring(prefix.length()).strip() : first;
     }
 
     private FeedbackGate feedbackGate(final TuiRunner tui, final UiState state) {
@@ -634,11 +626,11 @@ public class TuiCommand implements Runnable {
         if (state.approval != null) {
             final var approval = state.approval;
             if (key.isConfirm()) {
-                final var ok = approval.perform(permissionService);
+                final var ok = approval.perform();
                 state.approval = null;
                 state.model.status(ok ? "approved" : "denied");
             } else if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
-                approval.perform(permissionService);
+                approval.perform();
                 state.approval = null;
                 state.model.status("denied");
             } else if (key.isKey(KeyCode.LEFT)) {
@@ -1078,9 +1070,29 @@ public class TuiCommand implements Runnable {
     }
 
     private void permissions(final String value, final UiState state) {
-        final var permitAll = agentSessionService.setPermissions(value);
+        final var v = value == null ? "" : value.strip();
+        if (v.equals("show") || v.equals("list")) {
+            final var info = agentSessionService.permissionsInfo();
+            final var text = new StringBuilder("permissions status (session-scoped)\n")
+                    .append("permit all: ").append(info.permitAll() ? "on" : "off").append('\n')
+                    .append("agent mode: ").append(info.agentMode().name().toLowerCase(Locale.ROOT))
+                    .append(", permission mode: ")
+                    .append(info.permissionMode() == null ? "?" : info.permissionMode().toString().toLowerCase(Locale.ROOT))
+                    .append('\n');
+            if (info.sessionGrants().isEmpty()) {
+                text.append("session grants: none (use 'a' in the approval prompt to add one)");
+            } else {
+                text.append("session grants (in-memory, lost on restart):");
+                for (final var grant : info.sessionGrants()) {
+                    text.append("\n  - ").append(grant);
+                }
+            }
+            state.model.status(text.toString());
+            return;
+        }
+        final var permitAll = agentSessionService.setPermissions(v);
         if (permitAll == null) {
-            state.model.status("usage: /permissions all|none");
+            state.model.status("usage: /permissions all|none|show");
         } else if (permitAll) {
             state.model.status("permissions: all tools allowed");
         } else {
@@ -2579,7 +2591,7 @@ public class TuiCommand implements Runnable {
         enum Action {
             DENY("Deny  [Esc]"),
             ALLOW("Allow  [Enter]"),
-            ALWAYS("Always allow");
+            ALWAYS("Always (session)");
 
             private final String label;
 
@@ -2594,19 +2606,17 @@ public class TuiCommand implements Runnable {
 
         private final String title;
         private final String detail;
-        private final String toolName;
         private final CountDownLatch latch;
-        private final AtomicBoolean approved;
+        private final AtomicReference<ApprovalGate.Result> outcome;
         private int action;
         private int detailScroll;
 
-        private Approval(final String title, final String detail, final String toolName,
-                         final CountDownLatch latch, final AtomicBoolean approved) {
+        private Approval(final String title, final String detail,
+                         final CountDownLatch latch, final AtomicReference<ApprovalGate.Result> outcome) {
             this.title = title;
             this.detail = detail;
-            this.toolName = toolName;
             this.latch = latch;
-            this.approved = approved;
+            this.outcome = outcome;
             this.action = 0; // default-deny: focus Deny first
         }
 
@@ -2616,10 +2626,6 @@ public class TuiCommand implements Runnable {
 
         private String detail() {
             return detail;
-        }
-
-        private String toolName() {
-            return toolName;
         }
 
         private CountDownLatch latch() {
@@ -2642,23 +2648,16 @@ public class TuiCommand implements Runnable {
             this.detailScroll = Math.max(0, detailScroll);
         }
 
-        /** Resolves and performs the currently focused action against the permission service. */
-        private boolean perform(final PermissionService permissions) {
-            final var a = Action.values()[action];
-            if (a == Action.ALWAYS && !toolName.isBlank() && permissions != null) {
-                permissions.grantSession(toolName);
-            }
-            switch (a) {
-                case ALLOW, ALWAYS -> {
-                    approved.set(true);
-                    latch.countDown();
-                    return true;
-                }
-                default -> {
-                    latch.countDown();
-                    return false;
-                }
-            }
+        /** Resolves and performs the currently focused action, releasing the gate latch. Returns true when the call is allowed. */
+        private boolean perform() {
+            final var result = switch (Action.values()[action]) {
+                case ALLOW -> ApprovalGate.Result.ALLOW_ONCE;
+                case ALWAYS -> ApprovalGate.Result.ALLOW_SESSION;
+                default -> ApprovalGate.Result.DENY;
+            };
+            outcome.set(result);
+            latch.countDown();
+            return result != ApprovalGate.Result.DENY;
         }
     }
 

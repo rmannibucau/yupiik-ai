@@ -6,6 +6,8 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,7 +41,16 @@ public class PermissionService {
     }
 
     public void grantSession(final String toolName) {
-        sessionGrants.add(toolName);
+        grantSession(toolName, Map.of());
+    }
+
+    public void grantSession(final String toolName, final Map<String, Object> args) {
+        sessionGrants.add(grantKey(toolName, args));
+    }
+
+    /** Current session-scoped grants as human readable entries (project|tool:prefix), for the /permissions show command. */
+    public List<String> sessionGrants() {
+        return new ArrayList<>(sessionGrants);
     }
 
     public void setMode(final AgentMode mode) {
@@ -87,7 +98,7 @@ public class PermissionService {
                     && permissions.isPlanBash(command)) {
                 return Decision.allow();
             }
-            return Decision.deny("plan mode allows read-only tools only");
+            return approve(toolName, args);
         }
         if (permissions.isDenied(toolName)) {
             return Decision.deny("tool " + toolName + " is denied by configuration");
@@ -98,7 +109,7 @@ public class PermissionService {
         if (category == ToolCategory.READ || category == ToolCategory.AGENT) {
             return Decision.allow();
         }
-        if (sessionGrants.contains(toolName)) {
+        if (matchesSessionGrant(toolName, args)) {
             return Decision.allow();
         }
         final var mode = permissions.mode();
@@ -108,12 +119,66 @@ public class PermissionService {
         if (mode == PermissionMode.AUTO_EDIT && category == ToolCategory.EDIT) {
             return Decision.allow();
         }
+        return approve(toolName, args);
+    }
+
+    private Decision approve(final String toolName, final Map<String, Object> args) {
         final var g = gate;
         if (g == null) {
             return Decision.deny("permission required but no interactive gate available (use yolo/auto_edit mode or run in the TUI)");
         }
-        return g.approve(describe(toolName, args), detail(toolName, args))
-                ? Decision.allow() : Decision.deny("refused by the user");
+        final var result = g.approve(describe(toolName, args), detail(toolName, args), toolName, args);
+        return switch (result) {
+            case ALLOW_ONCE -> Decision.allow();
+            case ALLOW_SESSION -> {
+                grantSession(toolName, args);
+                yield Decision.allow();
+            }
+            default -> Decision.deny("refused by the user");
+        };
+    }
+
+    private String grantKey(final String toolName, final Map<String, Object> args) {
+        return projectDir() + "|" + toolName + ":" + prefixOf(args);
+    }
+
+    private boolean matchesSessionGrant(final String toolName, final Map<String, Object> args) {
+        final var project = projectDir();
+        final var requestedPrefix = prefixOf(args);
+        for (final var grant : sessionGrants) {
+            // format: <project>|<tool>:<prefix>
+            final var sep = grant.indexOf('|');
+            final var colon = grant.indexOf(':', sep + 1);
+            if (sep <= 0 || colon < 0) {
+                continue;
+            }
+            final var grantProject = grant.substring(0, sep);
+            final var grantTool = grant.substring(sep + 1, colon);
+            final var grantPrefix = grant.substring(colon + 1);
+            if (!grantProject.equals(project) || !grantTool.equals(toolName)) {
+                continue;
+            }
+            if (grantPrefix.isEmpty() || requestedPrefix.startsWith(grantPrefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String prefixOf(final Map<String, Object> args) {
+        if (args.get("command") instanceof final String command) {
+            final var trimmed = command.strip();
+            final var space = trimmed.indexOf(' ');
+            return space < 0 ? trimmed : trimmed.substring(0, space);
+        }
+        if (args.get("path") instanceof final String path) {
+            return path;
+        }
+        return "";
+    }
+
+    private String projectDir() {
+        return configuration.resolveProjectDir().normalize().toString();
     }
 
     private static String describe(final String toolName, final Map<String, Object> args) {
