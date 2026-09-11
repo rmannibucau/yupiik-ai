@@ -4,13 +4,14 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
-import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.session.SessionStore;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Logger;
 
 /**
@@ -65,20 +66,61 @@ public class PlanTodoSeeder {
 
     private List<TodoItem> extract(final String plan) {
         try {
-            final ChatResult res = chatClient.chat(new ChatCompletionRequest(null, List.of(
-                    Message.system("Convert this implementation plan into a todo list. Reply with a JSON array of "
-                            + "{\"content\": string, \"status\": \"pending\"} objects, one per concrete implementation step, "
-                            + "in execution order, max 10 items. Reply with [] if the text contains no implementation plan. "
-                            + "Reply only with the JSON array."),
-                    Message.user(plan)), null, false, null, null, null, null, null));
-            final var content = res.message() == null || res.message().content() == null
-                    ? "" : String.valueOf(res.message().content());
+            final var request = new ChatCompletionRequest(null, List.of(
+                    Message.system("Convert this implementation plan into a todo list. The response is constrained to a "
+                            + "JSON object {\"steps\":[{\"content\": string, \"status\": \"pending\"} ...]} by the output schema, "
+                            + "one concrete implementation step in execution order, max 10 items. Use an empty steps array when the "
+                            + "text contains no implementation plan."),
+                    Message.user(plan)), null, false, null, null, null, null, null);
+            final var res = chatClient.chatStructured(request, "todo_steps", stepsSchema());
+            final var content = res.result().message() == null || res.result().message().content() == null
+                    ? "" : String.valueOf(res.result().message().content());
+            if (res.structured()) {
+                return parseSteps(content);
+            }
             return parse(content);
         } catch (final IOException | InterruptedException | RuntimeException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             LOGGER.warning("Plan todo seeding failed: " + e.getMessage());
+            return List.of();
+        }
+    }
+
+    private static Map<String, Object> stepsSchema() {
+        final var step = new LinkedHashMap<String, Object>();
+        step.put("type", "object");
+        step.put("properties", Map.of(
+                "content", Map.of("type", "string"),
+                "status", Map.of("type", "string", "enum", List.of("pending"))));
+        step.put("required", List.of("content", "status"));
+        step.put("additionalProperties", false);
+        return Map.of(
+                "type", "object",
+                "properties", Map.of("steps", Map.of(
+                        "type", "array",
+                        "items", step,
+                        "additionalProperties", false)),
+                "required", List.of("steps"),
+                "additionalProperties", false);
+    }
+
+    private List<TodoItem> parseSteps(final String content) {
+        try {
+            final var root = mapper.fromString(Object.class, content);
+            if (!(root instanceof Map<?, ?> map) || !(map.get("steps") instanceof List<?> raw)) {
+                return List.of();
+            }
+            final var out = new ArrayList<TodoItem>();
+            for (final var t : todoStore.from(raw)) {
+                if (t.isValid()) {
+                    out.add(t);
+                }
+            }
+            return out;
+        } catch (final RuntimeException e) {
+            LOGGER.warning("Plan todo structured parse failed: " + e.getMessage());
             return List.of();
         }
     }

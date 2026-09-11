@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 
 import java.util.List;
+import java.util.Map;
 
 public record ProviderConfiguration(
         @Property(defaultValue = "\"default\"", documentation = "Unique identifier of this provider, referenced in model properties as $<id>/<model>.") String id,
@@ -17,6 +18,7 @@ public record ProviderConfiguration(
         @Property(defaultValue = "java.util.List.of()", documentation = "Per-model output token budget overrides for this provider. Each entry applies to a model id matched exactly or, when the model starts with a glob like claude-*, by pattern. The strongest override is an exact id match, then the first matching glob, then the provider outputTokens default. This lets a provider serve models with different output budgets (eg. claude-sonnet-5 with 128000 and claude-haiku-4-5 with 64000).") List<OutputLimit> outputs,
         @Property(defaultValue = "120", documentation = "HTTP request timeout in seconds.") int timeoutSeconds,
         @Property(defaultValue = "\"\"", documentation = "Optional JSON object merged into the payload of every API call for this provider (eg. {\"reasoning_effort\":\"high\"} or a variant). Empty is ignored.") String providerSpecificOptions,
+        @Property(defaultValue = "java.util.Map.of()", documentation = "Extra HTTP headers added to every request to this provider (eg. beta headers, org identifiers or service tiers). Values are empty-string ignored.") Map<String, String> headers,
         @Property(documentation = "Provider-tunable system prompt sections (todo/plan guidance).") PromptConfiguration prompt) {
 
     public String resolveApiKey() {

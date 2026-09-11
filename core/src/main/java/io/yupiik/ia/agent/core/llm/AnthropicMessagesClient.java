@@ -35,6 +35,7 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
     protected void authenticate(final ProviderConfiguration provider, final HttpRequest.Builder builder) {
         builder.header("x-api-key", provider.resolveApiKey());
         builder.header("anthropic-version", ANTHROPIC_VERSION);
+        addHeaders(provider, builder);
     }
 
     @Override

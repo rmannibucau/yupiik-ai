@@ -12,6 +12,7 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -77,14 +78,24 @@ public class MemoryExtractor {
             final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
             sb.insert(0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');
         }
+        final var excerpt = sb.toString();
         try {
-            final var res = chatClient.chat(new ChatCompletionRequest(null, List.of(
-                    Message.system("Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. Reply with a JSON array of short sentences (max 5). Reply with [] when nothing is worth remembering. Do not include transient task state."),
-                    Message.user(sb.toString())), null, false, null, null, null, null, null));
-            final var content = res.message() == null || res.message().content() == null ? "" : String.valueOf(res.message().content());
-            final var facts = extractFacts(content);
-            if (!facts.isEmpty()) {
-                memoryStore.append(false, facts);
+            final var request = new ChatCompletionRequest(null, List.of(
+                    Message.system("Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [short sentence strings]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state."),
+                    Message.user(excerpt)), null, false, null, null, null, null, null);
+            final var res = chatClient.chatStructured(request, "memory_facts", factsSchema());
+            if (res.structured()) {
+                final var content = res.result().message() == null || res.result().message().content() == null
+                        ? "" : String.valueOf(res.result().message().content());
+                final var facts = parseFacts(content);
+                if (!facts.isEmpty()) {
+                    memoryStore.append(false, facts);
+                }
+                return;
+            }
+            final var snippet = compressExcerpt(excerpt);
+            if (snippet != null && !snippet.isBlank()) {
+                memoryStore.appendText(false, snippet);
             }
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
@@ -93,39 +104,44 @@ public class MemoryExtractor {
         }
     }
 
-    private List<String> extractFacts(final String content) {
-        final var json = sliceJsonArray(content);
-        if (json == null) {
-            return List.of();
-        }
+    private static Map<String, Object> factsSchema() {
+        return Map.of(
+                "type", "object",
+                "properties", Map.of("facts", Map.of(
+                        "type", "array",
+                        "items", Map.of("type", "string"),
+                        "additionalProperties", false)),
+                "required", List.of("facts"),
+                "additionalProperties", false);
+    }
+
+    private List<String> parseFacts(final String content) {
         try {
-            final var array = mapper.fromString(List.class, json);
-            return array.stream().map(String::valueOf).toList();
+            final var root = mapper.fromString(Object.class, content);
+            if (!(root instanceof Map<?, ?> map) || !(map.get("facts") instanceof List<?> facts)) {
+                return List.of();
+            }
+            return facts.stream().map(String::valueOf).toList();
         } catch (final RuntimeException e) {
-            LOGGER.log(Level.FINEST, "Skipping unparsable memory facts: " + json, e);
+            LOGGER.log(Level.FINEST, "Unparsable structured memory facts: " + content, e);
             return List.of();
         }
     }
 
-    private static String sliceJsonArray(final String content) {
-        var text = content.strip();
-        if (text.startsWith("```")) {
-            final var firstNewLine = text.indexOf('\n');
-            text = (firstNewLine >= 0 ? text.substring(firstNewLine + 1) : text).strip();
-            final var lastFence = text.lastIndexOf("```");
-            if (lastFence >= 0) {
-                text = text.substring(0, lastFence).strip();
-            }
-        }
-        final var start = text.indexOf('[');
-        final var end = text.lastIndexOf(']');
-        if (start < 0 || end <= start) {
-            return null;
-        }
-        final var candidate = text.substring(start, end + 1).strip();
-        if (!candidate.startsWith("[") || !candidate.endsWith("]") || candidate.length() <= 2) {
-            return null;
-        }
-        return candidate;
+    /**
+     * Fallback when the provider does not support structured output: ask a plain completion to
+     * compress the excerpt into a concise, standalone memory snippet and return it as raw text.
+     * Returns {@code null} when the compression call fails.
+     */
+    private String compressExcerpt(final String excerpt) throws IOException, InterruptedException {
+        final var res = chatClient.chat(new ChatCompletionRequest(null, List.of(
+                Message.system("Compress the following conversation excerpt into a concise, standalone memory snippet "
+                        + "capturing durable facts, decisions and user preferences. Keep long-lived knowledge only, "
+                        + "drop transient task state. Reply with only the snippet text, a few short sentences, no preamble."),
+                Message.user(excerpt)), null, false, null, null, null, null, null));
+        final var content = res.message() == null || res.message().content() == null
+                ? "" : String.valueOf(res.message().content());
+        final var snippet = content.strip();
+        return snippet.isEmpty() ? null : snippet;
     }
 }

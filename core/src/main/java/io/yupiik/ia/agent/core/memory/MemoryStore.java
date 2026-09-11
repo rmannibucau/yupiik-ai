@@ -80,14 +80,26 @@ public class MemoryStore {
                 }
             }
             if (!added.isEmpty()) {
-                final var content = new StringBuilder(HEADER);
-                existing.forEach(l -> content.append(l).append('\n'));
-                Files.writeString(file, content.toString());
+                write(file, existing);
             }
             return added;
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /** Stores a free-text memory block (eg. a compressed conversation snippet), split into bullet lines. */
+    public synchronized List<String> appendText(final boolean global, final String text) {
+        if (text == null || text.isBlank()) {
+            return List.of();
+        }
+        return append(global, text.lines().map(String::strip).filter(l -> !l.isEmpty()).toList());
+    }
+
+    private void write(final Path file, final LinkedHashSet<String> lines) throws IOException {
+        final var content = new StringBuilder(HEADER);
+        lines.forEach(l -> content.append(l).append('\n'));
+        Files.writeString(file, content.toString());
     }
 
     private List<String> existingLines(final Path file) {

@@ -44,6 +44,7 @@ public class ChatClient implements AutoCloseable {
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
     private volatile ProviderConfiguration targetProvider;
+    private volatile boolean structuredOutputUnsupported = false;
     private volatile Consumer<PauseEvent> pauses = event -> {
     };
 
@@ -113,6 +114,7 @@ public class ChatClient implements AutoCloseable {
         providerManager.setProvider(id);
         this.modelOverride = null;
         this.resolved = ApiFlavor.AUTO;
+        this.structuredOutputUnsupported = false;
     }
 
     /** Registers a listener notified whenever the resilience layer delays a request (throttle or retry backoff). */
@@ -214,6 +216,93 @@ public class ChatClient implements AutoCloseable {
         } finally {
             permits.release();
         }
+    }
+
+    /**
+     * Result of a structured-output call. {@code structured} is true when the provider honoured the
+     * JSON Schema and the response is expected to be a conformant JSON object; false when the schema
+     * was unsupported (or rejected twice) and the caller must fall back to its own parsing.
+     */
+    public record StructuredResult(ChatResult result, boolean structured) {
+    }
+
+    /**
+     * Run a non-streaming completion asking the provider for structured output matching the given JSON
+     * Schema. The flavor-specific request field is composed here (response_format for completions,
+     * text.format for the responses API, output_config for Anthropic) and carried to the wire through
+     * the request extras. If the provider rejects the schema with a 400 it is retried once without it;
+     * a second 400 marks the provider as not supporting structured output for the rest of the session,
+     * so subsequent calls go straight to the plain path.
+     */
+    public StructuredResult chatStructured(final ChatCompletionRequest request, final String schemaName,
+                                           final Map<String, Object> schema) throws IOException, InterruptedException {
+        final var model = resolveModel();
+        final var flavor = effectiveFlavor();
+        final var base = new LinkedHashMap<String, Object>();
+        if (request.others() != null) {
+            base.putAll(request.others());
+        }
+        base.putAll(mergeOptions(null));
+        final var plainReq = new ChatCompletionRequest(model, request.messages(), request.temperature(), false,
+                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), base);
+        final var structuredReq = new ChatCompletionRequest(model, request.messages(), request.temperature(), false,
+                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(),
+                withStructuredField(base, flavor, schemaName, schema));
+        throttle();
+        permits.acquire();
+        try {
+            if (structuredOutputUnsupported) {
+                return new StructuredResult(chatInternal(plainReq), false);
+            }
+            try {
+                return new StructuredResult(chatInternal(structuredReq), true);
+            } catch (final IOException first) {
+                if (!isStatus400(first)) {
+                    throw first;
+                }
+                try {
+                    return new StructuredResult(chatInternal(plainReq), false);
+                } catch (final IOException second) {
+                    if (!isStatus400(second)) {
+                        throw second;
+                    }
+                    structuredOutputUnsupported = true;
+                    return new StructuredResult(chatInternal(plainReq), false);
+                }
+            }
+        } finally {
+            permits.release();
+        }
+    }
+
+    private static boolean isStatus400(final IOException e) {
+        final var m = e.getMessage();
+        return m != null && m.startsWith("LLM request failed (400)");
+    }
+
+    /** Compose the flavor-specific JSON Schema field into a copy of {@code others}. */
+    private static Map<String, Object> withStructuredField(final Map<String, Object> others, final ApiFlavor flavor,
+                                                           final String schemaName, final Map<String, Object> schema) {
+        final var out = new LinkedHashMap<String, Object>(others);
+        switch (flavor) {
+            case ANTHROPIC -> out.put("output_config", Map.of("format",
+                    Map.of("type", "json_schema", "schema", schema)));
+            case RESPONSES -> out.put("text", Map.of("format",
+                    Map.of("type", "json_schema", "name", schemaName, "schema", schema, "strict", true)));
+            case COMPLETIONS -> out.put("response_format", Map.of("type", "json_schema",
+                    "json_schema", Map.of("name", schemaName, "schema", schema, "strict", true)));
+            default -> {
+                // AUTO already resolved to a concrete flavor by the caller; treat as completions fallback
+                out.put("response_format", Map.of("type", "json_schema",
+                        "json_schema", Map.of("name", schemaName, "schema", schema, "strict", true)));
+            }
+        }
+        return out;
+    }
+
+    /** Route a request through the current flavor with retries, reusing the shared dispatch logic. */
+    private ChatResult chatInternal(final ChatCompletionRequest request) throws IOException, InterruptedException {
+        return doWithFallback(request, () -> false, false, null);
     }
 
     public Message stream(final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta)

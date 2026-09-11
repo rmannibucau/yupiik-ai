@@ -40,7 +40,7 @@ class AnthropicMessagesLiveTest {
 
         final var provider = new ProviderConfiguration(
                 "default", BASE, key, MODEL, ApiFlavor.ANTHROPIC, null,
-                1000000, -1, List.of(), 30, "", null);
+                1000000, -1, List.of(), 30, "", Map.of(), null);
         final var cfg = new CodingAgentConfiguration("/tmp/yca-live", null, null,
                 new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 1000000, -1, List.of(), 30),
                 null, new LlmConfiguration(2, 500, 0, 1, true, 250),

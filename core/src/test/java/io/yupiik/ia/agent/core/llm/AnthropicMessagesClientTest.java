@@ -41,7 +41,7 @@ class AnthropicMessagesClientTest {
     private ProviderConfiguration provider(final String baseUrl) {
         return new ProviderConfiguration(
                 "default", baseUrl, "sk-test", "deepseek-v4-flash",
-                ApiFlavor.ANTHROPIC, null, 1000000, -1, List.of(), 30, "", null);
+                ApiFlavor.ANTHROPIC, null, 1000000, -1, List.of(), 30, "", java.util.Map.of(), null);
     }
 
     private AnthropicMessagesClient client() {

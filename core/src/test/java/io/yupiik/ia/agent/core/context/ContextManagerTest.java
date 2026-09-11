@@ -21,7 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 class ContextManagerTest {
 
     private static CodingAgentConfiguration config(final int keepRecent) {
-        final var provider = new ProviderConfiguration("default", "https://api.openai.com/v1", "", "m", null, null, 128000, -1, List.of(), 120, "", null);
+        final var provider = new ProviderConfiguration("default", "https://api.openai.com/v1", "", "m", null, null, 128000, -1, List.of(), 120, "", java.util.Map.of(), null);
         return new CodingAgentConfiguration("x", ".", null,
                 new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, -1, List.of(), 120),
                 new ModelConfiguration("", ""),

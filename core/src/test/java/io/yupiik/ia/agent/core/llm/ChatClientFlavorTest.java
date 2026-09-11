@@ -72,7 +72,7 @@ class ChatClientFlavorTest {
         final var provider = new ProviderConfiguration(
                 "default",
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
-                ApiFlavor.AUTO, ReasoningField.AUTO, 128000, -1, List.of(), 5, "", null);
+                ApiFlavor.AUTO, ReasoningField.AUTO, 128000, -1, List.of(), 5, "", java.util.Map.of(), null);
         final var llm = new LlmConfiguration(1, 1L, 0, 1, true, 250);
         return new CodingAgentConfiguration("/tmp/yca-test", null, null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, -1, List.of(), 120),
                 null, llm, null, null, null, null, null, null, null, null, null, null, null,
@@ -161,7 +161,7 @@ class ChatClientFlavorTest {
         final var provider = new ProviderConfiguration(
                 "default",
                 "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
-                ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, -1, List.of(), 5, "", null);
+                ApiFlavor.COMPLETIONS, ReasoningField.AUTO, 128000, -1, List.of(), 5, "", java.util.Map.of(), null);
         final var cfg = new CodingAgentConfiguration("/tmp/yca-test", null, null, new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, -1, List.of(), 120), null,
                 new LlmConfiguration(1, 1L, 0, 1, true, 250), null, null, null, null, null, null, null, null, null, null, null,
                 io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),

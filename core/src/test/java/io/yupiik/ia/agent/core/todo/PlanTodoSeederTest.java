@@ -147,5 +147,11 @@ class PlanTodoSeederTest {
         public ChatResult chat(final ChatCompletionRequest request) {
             return new ChatResult(Message.assistant(response, null), Usage.EMPTY);
         }
+
+        @Override
+        public StructuredResult chatStructured(final ChatCompletionRequest request, final String schemaName,
+                                               final java.util.Map<String, Object> schema) {
+            return new StructuredResult(new ChatResult(Message.assistant(response, null), Usage.EMPTY), false);
+        }
     }
 }

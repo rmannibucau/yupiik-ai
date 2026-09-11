@@ -4,6 +4,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 
 import java.util.List;
+import java.util.Map;
 
 public record ProviderListConfiguration(
         @Property(defaultValue = "java.util.List.of()", documentation = "List of OpenAI compatible providers. Each provider has an id used to reference it as $<id>/<model> in model properties.") List<ProviderConfiguration> providers,
@@ -41,6 +42,6 @@ public record ProviderListConfiguration(
                 apiKey == null ? "" : apiKey, model == null ? "" : model,
                 api, reasoningField, contextWindow, outputTokens,
                 outputs == null ? List.of() : outputs,
-                timeoutSeconds, "", new PromptConfiguration("auto"));
+                timeoutSeconds, "", Map.of(), new PromptConfiguration("auto"));
     }
 }

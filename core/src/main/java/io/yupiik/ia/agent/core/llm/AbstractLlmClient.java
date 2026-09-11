@@ -97,6 +97,19 @@ abstract sealed class AbstractLlmClient implements LlmClient
     /** Provider-specific authentication headers; default adds the OpenAI Bearer authorization. */
     protected void authenticate(final ProviderConfiguration provider, final HttpRequest.Builder builder) {
         builder.header("authorization", "Bearer " + provider.resolveApiKey());
+        addHeaders(provider, builder);
+    }
+
+    /** Merges the provider {@code headers} map into the request, ignoring null/blank keys and values. */
+    protected void addHeaders(final ProviderConfiguration provider, final HttpRequest.Builder builder) {
+        if (provider == null || provider.headers() == null) {
+            return;
+        }
+        provider.headers().forEach((k, v) -> {
+            if (k != null && !k.isBlank() && v != null && !v.isBlank()) {
+                builder.header(k, v);
+            }
+        });
     }
 
     protected <A> A parse(final Class<A> type, final String json) {
