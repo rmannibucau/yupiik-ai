@@ -234,7 +234,7 @@ public class CliCommand implements Runnable {
             sb.append('[').append(modeColor(mode));
             final var model = chatClient.model();
             if (model != null && !model.isBlank()) {
-                sb.append(MarkdownColorizer.dim("·")).append(MarkdownColorizer.dim(model));
+                sb.append(MarkdownColorizer.dim("@")).append(MarkdownColorizer.bold(model));
             }
             sb.append(']');
             if (permissionLabel != null) {
