@@ -12,6 +12,7 @@ import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
@@ -217,22 +218,77 @@ public class CliCommand implements Runnable {
 
     /**
      * Context-rich prompt line: reveals the agent mode (critical for a code
-     * writing agent - plan vs build) and the active model.
+     * writing agent - plan vs build), the active model and the effective
+     * permission posture (ask / auto / yolo / all). When ANSI color is enabled
+     * the mode and the permission badge are colour-coded so the safety state is
+     * readable at a glance; otherwise they fall back to plain text.
      */
     private String promptLine() {
         final var mode = permissionService.mode().name().toLowerCase(Locale.ROOT);
+        final var info = agentSessionService.permissionsInfo();
+        final var permissionLabel = permissionLabel(info.permitAll(), info.permissionMode());
         final var sb = new StringBuilder("yca");
         if (colorizer.isEnabled()) {
-            sb.append('[').append(MarkdownColorizer.dim(mode));
+            sb.append('[').append(modeColor(mode));
             final var model = chatClient.model();
             if (model != null && !model.isBlank()) {
                 sb.append(MarkdownColorizer.dim("·")).append(MarkdownColorizer.dim(model));
             }
             sb.append(']');
+            if (permissionLabel != null) {
+                sb.append(' ').append(permissionColor(info.permitAll(), info.permissionMode()).apply(permissionLine(permissionLabel)));
+            }
         } else {
-            sb.append('[').append(mode).append(']');
+            sb.append('[').append(mode);
+            final var model = chatClient.model();
+            if (model != null && !model.isBlank()) {
+                sb.append('·').append(model);
+            }
+            sb.append(']');
+            if (permissionLabel != null) {
+                sb.append(' ').append(permissionLine(permissionLabel));
+            }
         }
         return sb.append("> ").toString();
+    }
+
+    private String modeColor(final String mode) {
+        if (mode.equals("plan")) {
+            return MarkdownColorizer.accent(mode);
+        }
+        return MarkdownColorizer.success(mode);
+    }
+
+    private Function<String, String> permissionColor(final boolean permitAll, final PermissionMode mode) {
+        if (permitAll) {
+            return MarkdownColorizer::error;
+        }
+        if (mode == null) {
+            return MarkdownColorizer::status;
+        }
+        return switch (mode) {
+            case YOLO -> MarkdownColorizer::error;
+            case AUTO_EDIT -> MarkdownColorizer::warning;
+            default -> MarkdownColorizer::status;
+        };
+    }
+
+    private static String permissionLine(final String label) {
+        return "(" + label + ")";
+    }
+
+    private String permissionLabel(final boolean permitAll, final PermissionMode mode) {
+        if (permitAll) {
+            return "all";
+        }
+        if (mode == null) {
+            return null;
+        }
+        return switch (mode) {
+            case YOLO -> "yolo";
+            case AUTO_EDIT -> "auto";
+            default -> "ask";
+        };
     }
 
     private void printBanner() {
