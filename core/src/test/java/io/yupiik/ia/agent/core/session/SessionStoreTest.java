@@ -199,4 +199,51 @@ class SessionStoreTest {
         store.append(noUser, SessionEntry.of(1, "assistant", "only assistant", null, null));
         assertEquals("", store.summary(noUser));
     }
+
+    @Test
+    void isEmptyDetectsInitialPromptOnly() {
+        final var store = newStore();
+        final var empty = store.create();
+        assertTrue(store.isEmpty(empty), "an empty file is empty");
+
+        final var onlyPrompt = store.create();
+        store.append(onlyPrompt, SessionEntry.of(1, "user", "hi", null, null));
+        assertTrue(store.isEmpty(onlyPrompt), "only the initial user prompt is empty");
+
+        final var hasReply = store.create();
+        store.append(hasReply, SessionEntry.of(1, "user", "hi", null, null));
+        store.append(hasReply, SessionEntry.of(2, "assistant", "hello", null, null));
+        assertFalse(store.isEmpty(hasReply));
+
+        final var toolWithoutAudio = store.create();
+        store.append(toolWithoutAudio, SessionEntry.of(1, "user", "hi", null, null));
+        store.append(toolWithoutAudio, SessionEntry.of(2, "tool", "out", null, "ls"));
+        assertFalse(store.isEmpty(toolWithoutAudio));
+
+        final var missing = store.create();
+        store.delete(missing);
+        assertTrue(store.isEmpty("missing"), "a missing session is empty");
+    }
+
+    @Test
+    void housekeepingDeletesEmptySessions() throws Exception {
+        final var store = newStore(new SessionConfiguration(0, 0));
+        final var onlyPrompt = store.create();
+        store.append(onlyPrompt, SessionEntry.of(1, "user", "hi", null, null));
+
+        final var withReply = store.create();
+        store.append(withReply, SessionEntry.of(1, "user", "hi", null, null));
+        store.append(withReply, SessionEntry.of(2, "assistant", "hello", null, null));
+
+        final var report = store.housekeeping(true);
+
+        assertFalse(Files.exists(store.path(onlyPrompt)), "empty session removed");
+        assertTrue(Files.exists(store.path(withReply)), "non-empty session kept");
+        assertEquals(1, report.deleted());
+        assertEquals(1, report.kept());
+
+        final var withoutEmptyDeletion = store.housekeeping(false);
+        assertTrue(Files.exists(store.path(withReply)));
+        assertEquals(0, withoutEmptyDeletion.deleted());
+    }
 }

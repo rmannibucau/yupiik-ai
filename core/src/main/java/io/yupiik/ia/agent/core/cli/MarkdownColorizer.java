@@ -22,6 +22,7 @@ public class MarkdownColorizer {
     private static final String DIM = "\u001b[2m";
 
     // palette (fixed, default-theme-ish)
+    private static final String THINK = "\u001b[38;5;240m";    // ~ #585858, lower-opacity grey
     private static final String ACCENT = "\u001b[38;5;141m";   // ~ #9d7cd8
     private static final String TEXT = "\u001b[38;5;253m";     // ~ #d9d9d9
     private static final String MUTED = "\u001b[38;5;244m";    // ~ #808080
@@ -275,6 +276,14 @@ public class MarkdownColorizer {
      */
     public static String dim(final String text) {
         return DIM + text + RESET;
+    }
+
+    /**
+     * Renders reasoning/thinking with a lower-opacity grey so the stream is
+     * visible but clearly subordinate to the final answer.
+     */
+    public static String thinking(final String text) {
+        return THINK + text + RESET;
     }
 
     public static String status(final String text) {

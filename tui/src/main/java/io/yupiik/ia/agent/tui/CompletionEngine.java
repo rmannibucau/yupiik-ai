@@ -19,7 +19,8 @@ public final class CompletionEngine {
     private static final List<String> SLASH_NAMES = List.of(
             "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode",
             "/editplan", "/memory", "/context", "/permissions", "/thinking", "/tool-output", "/tools",
-            "/agent", "/theme", "/structural-code-graph", "/clear", "/quit", "/exit");
+            "/agent", "/theme", "/structural-code-graph", "/clear", "/quit", "/exit",
+            "/session-id", "/session-flush", "/session-housekeeping");
 
     /** A completion candidate: the range of text to replace and the matches. */
     public record Suggestion(List<String> items, int replaceStart, int replaceEnd, String label) {

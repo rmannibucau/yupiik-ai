@@ -49,6 +49,8 @@ class MarkdownColorizerTest {
         assertTrue(MarkdownColorizer.diffAdd("+ x").startsWith("\u001b["));
         assertTrue(MarkdownColorizer.diffDel("- x").startsWith("\u001b["));
         assertTrue(MarkdownColorizer.dim("x").startsWith("\u001b[2m"));
+        assertTrue(MarkdownColorizer.thinking("x").startsWith("\u001b[38;5;240m"));
+        assertTrue(MarkdownColorizer.thinking("x").endsWith("\u001b[0m"));
     }
 
     @Test

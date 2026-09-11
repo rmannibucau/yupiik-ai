@@ -2,29 +2,41 @@ package io.yupiik.ia.agent.core.cli.slash;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SlashCommandsTest {
 
+    private static Map<String, SlashCommandSpec> byDisplay(final List<SlashCommandSpec> commands) {
+        return commands.stream().collect(Collectors.toMap(SlashCommandSpec::display, Function.identity()));
+    }
+
     @Test
     void baseCommonCommands() {
-        final var common = new BaseSlashCommands() {
-        }.commands();
-        assertEquals(19, common.size());
-        assertEquals("/help", common.get(0).display());
-        assertEquals("/clear", common.get(common.size() - 1).display());
-        assertTrue(common.stream().anyMatch(c -> c.display().equals("/thinking show|hide")));
-        assertTrue(common.stream().anyMatch(c -> c.display().equals("/tool-output show|hide")));
+        final var common = byDisplay(new BaseSlashCommands() {
+        }.commands());
+        assertEquals(22, common.size());
+        assertTrue(common.containsKey("/help"));
+        assertTrue(common.containsKey("/clear"));
+        assertTrue(common.containsKey("/thinking show|hide"));
+        assertTrue(common.containsKey("/tool-output show|hide"));
+        assertTrue(common.containsKey("/session-id"));
+        assertTrue(common.containsKey("/session-flush"));
+        assertTrue(common.containsKey("/session-housekeeping"));
     }
 
     @Test
     void replAddsTodosOnTopOfCommon() {
-        final var commands = new ReplSlashCommands().commands();
-        assertEquals(20, commands.size());
-        assertEquals("/todos", commands.get(commands.size() - 1).display());
-        assertTrue(commands.stream().anyMatch(c -> c.display().equals("/help")));
-        assertFalse(commands.stream().anyMatch(c -> c.display().equals("/theme")));
+        final var commands = byDisplay(new ReplSlashCommands().commands());
+        assertEquals(23, commands.size());
+        assertTrue(commands.containsKey("/todos"));
+        assertTrue(commands.containsKey("/help"));
+        assertFalse(commands.containsKey("/theme"));
     }
 }

@@ -62,6 +62,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -272,10 +273,15 @@ public class TuiCommand implements Runnable {
             try {
                 tui.run((event, runner) -> onKey(event, runner, state), frame -> render(frame, state));
             } finally {
+                awaitInFlight(state);
                 bridge.sink(null);
                 permissionService.setGate(null);
                 userFeedbackService.setGate(null);
                 permissionService.setPermitAll(false);
+                executor.shutdown();
+                if (state.sessionId != null && sessionStore.isEmpty(state.sessionId)) {
+                    sessionStore.delete(state.sessionId);
+                }
             }
         } catch (final RuntimeException e) {
             throw e;
@@ -672,6 +678,7 @@ public class TuiCommand implements Runnable {
             if (state.quitArmed) {
                 state.quitArmed = false;
             }
+            awaitInFlight(state);
             runner.quit();
             return true;
         }
@@ -892,7 +899,33 @@ public class TuiCommand implements Runnable {
         final var agentName = override.agentName() != null ? override.agentName() : state.activeAgent;
         final var prompt = override.prompt();
         final var history = sessionStore.load(state.sessionId);
-        executor.execute(() -> agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted));
+        final var inFlight = new CompletableFuture<Void>();
+        state.inFlight = inFlight;
+        executor.execute(() -> {
+            try {
+                agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted);
+            } finally {
+                inFlight.complete(null);
+            }
+        });
+    }
+
+    /**
+     * Awaits an in-flight turn so it can finish flushing its session entries
+     * before the UI quits. Returns quickly when nothing is running or the run
+     * is already complete.
+     */
+    private static void awaitInFlight(final UiState state) {
+        final var inFlight = state.inFlight;
+        if (inFlight == null || inFlight.isDone()) {
+            return;
+        }
+        state.interrupted = true;
+        try {
+            inFlight.get(1, TimeUnit.SECONDS);
+        } catch (final Exception e) {
+            // best-effort: interrupt is set and the turn unwinds on its own
+        }
     }
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
@@ -909,6 +942,9 @@ public class TuiCommand implements Runnable {
             case "/resume" -> resume(state);
             case "/editplan" -> editPlan("", runner, state);
             case "/compact" -> compact(runner, state);
+            case "/session-id" -> sessionIdInfo(state);
+            case "/session-flush" -> sessionFlush(state);
+            case "/session-housekeeping" -> sessionHousekeeping(runner, state);
             case "/model" -> modelCommand(text, runner, state);
             case "/provider" -> providerCommand(text, runner, state);
             case "/agent" -> agentCommand(text, runner, state);
@@ -935,7 +971,10 @@ public class TuiCommand implements Runnable {
             case "/thinking" -> thinkingCommand("", state);
             case "/tool-output" -> toolOutputCommand("", state);
             case "/clear" -> state.model.clearConversation();
-            case "/quit", "/exit" -> runner.quit();
+            case "/quit", "/exit" -> {
+                awaitInFlight(state);
+                runner.quit();
+            }
             default -> {
                 if (text.startsWith("/model ")) {
                     modelCommand(text, runner, state);
@@ -1653,6 +1692,35 @@ public class TuiCommand implements Runnable {
                 });
             } catch (final RuntimeException e) {
                 runner.runLater(() -> modelError(state, "compaction failed: " + e.getMessage()));
+            }
+        });
+    }
+
+    private void sessionIdInfo(final UiState state) {
+        final var info = agentSessionService.sessionInfo(state.sessionId);
+        state.model.status("session " + info.id() + " -> " + info.path());
+        state.model.transcript().append("\n\n> session `" + info.id() + "` at `" + info.path() + "`\n");
+    }
+
+    private void sessionFlush(final UiState state) {
+        final var result = agentSessionService.flush(state.sessionId);
+        state.model.status(result);
+        state.model.transcript().append("\n\n> ").append(result).append('\n');
+    }
+
+    private void sessionHousekeeping(final TuiRunner runner, final UiState state) {
+        waiting(state, "housekeeping...", SpinnerStyle.BOUNCING_BALL);
+        executor.execute(() -> {
+            try {
+                final var report = agentSessionService.housekeeping();
+                runner.runLater(() -> {
+                    final var message = "housekeeping done - " + report.compressed() + " compressed, "
+                            + report.deleted() + " deleted, " + report.kept() + " kept";
+                    state.model.status(message);
+                    state.model.transcript().append("\n\n> ").append(message).append('\n');
+                });
+            } catch (final RuntimeException e) {
+                runner.runLater(() -> modelError(state, "housekeeping failed: " + e.getMessage()));
             }
         });
     }
@@ -2986,6 +3054,7 @@ public class TuiCommand implements Runnable {
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;
         private volatile boolean quitArmed;
+        private volatile CompletableFuture<Void> inFlight;
         private volatile boolean historyActive;
         private volatile String historyDraft = "";
         private volatile Approval approval;

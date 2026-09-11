@@ -68,6 +68,7 @@ public class CliCommand implements Runnable {
     private final Clock clock;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
+    private static final long CLEANUP_AWAIT_NANOS = 1_000_000_000L;
     private static final int DIFF_MAX_LINES = 5;
     private static final int MAX_RESUME_LIST = 25;
     private static final int RESUME_SUMMARY_WIDTH = 80;
@@ -199,6 +200,9 @@ public class CliCommand implements Runnable {
         permissionService.setGate(null);
         permissionService.setPermitAll(false);
         userFeedbackService.setGate(null);
+        if (sessionId != null && sessionStore.isEmpty(sessionId)) {
+            sessionStore.delete(sessionId);
+        }
         System.out.flush();
         System.err.flush();
         println(MarkdownColorizer.status("session " + sessionId + " - context file: " + contextPath));
@@ -210,6 +214,19 @@ public class CliCommand implements Runnable {
      */
     private void shutdownCleanup() {
         cancelled.set(true);
+        if (busy.get()) {
+            // give the in-flight turn a short window to unwind and flush its
+            // session entries before we tear the gates down
+            final var deadline = System.nanoTime() + CLEANUP_AWAIT_NANOS;
+            while (busy.get() && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(25);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
         quitRequested = true;
         cleanup();
     }
@@ -309,6 +326,7 @@ public class CliCommand implements Runnable {
     private void repLoop() {
         try {
             while (true) {
+                println(dividingRule());
                 print(promptLine());
                 final var line = stdin.readLine();
                 if (line == null || quitRequested) {
@@ -328,7 +346,6 @@ public class CliCommand implements Runnable {
                     }
                     continue;
                 }
-                println();
                 runTurn(text);
                 println();
             }
@@ -438,7 +455,7 @@ public class CliCommand implements Runnable {
         } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
             if (showThinking) {
                 if (verbosity == CliVerbosity.RAW) {
-                    System.err.print(MarkdownColorizer.dim(delta));
+                    System.err.print(MarkdownColorizer.thinking(delta));
                 } else {
                     beginSpinner("thinking");
                 }
@@ -640,6 +657,18 @@ public class CliCommand implements Runnable {
                 }),
                 Map.entry("editplan", arg -> {
                     editPlan(arg);
+                    return false;
+                }),
+                Map.entry("session-id", arg -> {
+                    sessionIdInfo();
+                    return false;
+                }),
+                Map.entry("session-flush", arg -> {
+                    sessionFlush();
+                    return false;
+                }),
+                Map.entry("session-housekeeping", arg -> {
+                    sessionHousekeeping();
                     return false;
                 }));
     }
@@ -907,6 +936,21 @@ public class CliCommand implements Runnable {
     private void compact() {
         final var result = agentSessionService.compact(sessionId);
         println(MarkdownColorizer.status(result == null ? "nothing to compact" : result));
+    }
+
+    private void sessionIdInfo() {
+        final var info = agentSessionService.sessionInfo(sessionId);
+        println(MarkdownColorizer.status("session " + info.id() + " -> " + info.path()));
+    }
+
+    private void sessionFlush() {
+        println(MarkdownColorizer.status(agentSessionService.flush(sessionId)));
+    }
+
+    private void sessionHousekeeping() {
+        final var report = agentSessionService.housekeeping();
+        println(MarkdownColorizer.status("housekeeping done - " + report.compressed() + " compressed, "
+                + report.deleted() + " deleted, " + report.kept() + " kept"));
     }
 
     private void editPlan(final String arg) {
@@ -1227,6 +1271,14 @@ public class CliCommand implements Runnable {
     private void print(final String text) {
         System.out.print(text);
         System.out.flush();
+    }
+
+    /**
+     * A thin divider rule printed before each user prompt so consecutive
+     * turns remain visually separated across the scrolling stdout output.
+     */
+    private String dividingRule() {
+        return MarkdownColorizer.dim(symbols.boxHorizontal().repeat(80));
     }
 
     private void println() {

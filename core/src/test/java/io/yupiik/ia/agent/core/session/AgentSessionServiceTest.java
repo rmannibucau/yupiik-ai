@@ -310,6 +310,68 @@ class AgentSessionServiceTest {
     }
 
     @Test
+    void sessionInfoReportsIdAndPath() {
+        final var service = service(new SessionStore() {
+            @Override
+            public Path path(final String id) {
+                return Path.of("/sessions/" + id + ".jsonl");
+            }
+        });
+
+        final var info = service.sessionInfo("s1");
+        assertEquals("s1", info.id());
+        assertEquals(Path.of("/sessions/s1.jsonl"), info.path());
+    }
+
+    @Test
+    void flushRewritesLoadedTranscript() {
+        final var rewritten = new boolean[1];
+        final var store = new SessionStore() {
+            @Override
+            public List<Message> load(final String id) {
+                return List.of(Message.user("hi"));
+            }
+
+            @Override
+            public void replace(final String id, final List<Message> messages) {
+                rewritten[0] = true;
+            }
+        };
+        final var service = service(store);
+
+        assertEquals("session flushed", service.flush("s1"));
+        assertTrue(rewritten[0]);
+    }
+
+    @Test
+    void flushReportsNothingForEmptyHistory() {
+        final var service = service(new SessionStore() {
+            @Override
+            public List<Message> load(final String id) {
+                return List.of();
+            }
+        });
+
+        assertEquals("nothing to flush", service.flush("s1"));
+    }
+
+    @Test
+    void housekeepingDelegatesToStoreWithEmptyDeletion() {
+        final var store = new SessionStore() {
+            @Override
+            public SessionStore.HousekeepingReport housekeeping(final boolean deleteEmpty) {
+                return new SessionStore.HousekeepingReport(2, 3, 4);
+            }
+        };
+        final var service = service(store);
+
+        final var report = service.housekeeping();
+        assertEquals(2, report.compressed());
+        assertEquals(3, report.deleted());
+        assertEquals(4, report.kept());
+    }
+
+    @Test
     void resyncGraphPropagatesFailure() {
         final var graph = new StructuralCodeGraph() {
             @Override

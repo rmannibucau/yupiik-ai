@@ -10,7 +10,8 @@ import java.util.List;
 public final class TuiInputSupport {
     public static final List<String> SLASH_COMMANDS = List.of(
             "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode", "/memory", "/context",
-            "/permissions", "/thinking", "/tool-output", "/structural-code-graph", "/tools", "/agent", "/clear", "/quit", "/exit");
+            "/permissions", "/thinking", "/tool-output", "/structural-code-graph", "/tools", "/agent", "/clear", "/quit", "/exit",
+            "/session-id", "/session-flush", "/session-housekeeping");
 
     private TuiInputSupport() {
     }

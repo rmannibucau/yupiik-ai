@@ -45,29 +45,61 @@ public class SessionStore {
     }
 
     public void cleanup() {
+        housekeeping(false);
+    }
+
+    /**
+     * Cleans the session directory: deletes sessions older than the retention
+     * window, compresses sessions older than the compress window, and, when
+     * {@code deleteEmpty}, removes sessions that hold nothing beyond the
+     * initial prompt. Returns a report of what was done.
+     */
+    public HousekeepingReport housekeeping(final boolean deleteEmpty) {
         final var conf = configuration.sessions();
         if (conf == null) {
-            return;
+            return new HousekeepingReport(0, 0, 0);
         }
         final var now = now();
         final var retention = conf.retentionDays() > 0 ? conf.retentionDays() * MILLIS_PER_DAY : -1L;
         final var compress = conf.compressDays() > 0 ? conf.compressDays() * MILLIS_PER_DAY : -1L;
+        var compressed = 0;
+        var deleted = 0;
+        var kept = 0;
         try (final Stream<Path> files = storedSessions()) {
-            files.forEach(f -> {
+            final var paths = files.toList();
+            for (final var f : paths) {
                 try {
+                    final var name = f.getFileName().toString();
+                    final var id = name.endsWith(JSONL_SUFFIX)
+                            ? name.substring(0, name.length() - JSONL_SUFFIX.length())
+                            : name.endsWith(GZ_SUFFIX)
+                            ? name.substring(0, name.length() - GZ_SUFFIX.length())
+                            : name;
                     final var age = now - Files.getLastModifiedTime(f).toMillis();
+                    final var isCompressed = name.endsWith(GZ_SUFFIX);
                     if (retention >= 0 && age > retention) {
-                        Files.deleteIfExists(f);
-                    } else if (compress >= 0 && age > compress && !f.getFileName().toString().endsWith(GZ_SUFFIX)) {
+                        delete(id);
+                        deleted++;
+                    } else if (deleteEmpty && !isCompressed && isEmpty(id)) {
+                        delete(id);
+                        deleted++;
+                    } else if (compress >= 0 && age > compress && !isCompressed) {
                         gzip(f);
+                        compressed++;
+                    } else {
+                        kept++;
                     }
                 } catch (final IOException e) {
                     throw new UncheckedIOException(e);
                 }
-            });
+            }
+            return new HousekeepingReport(compressed, deleted, kept);
         } catch (final IOException e) {
             throw new UncheckedIOException("Cannot clean up the session directory " + dir(), e);
         }
+    }
+
+    public record HousekeepingReport(int compressed, int deleted, int kept) {
     }
 
     private static void gzip(final Path jsonl) {
@@ -191,6 +223,27 @@ public class SessionStore {
         writableDir();
         try {
             Files.writeString(path(id), sb.toString());
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
+     * A session is considered empty when its persisted content holds nothing
+     * more than the single initial user prompt (or nothing at all).
+     */
+    public boolean isEmpty(final String id) {
+        final var messages = load(id);
+        if (messages.isEmpty()) {
+            return true;
+        }
+        return messages.size() == 1 && "user".equals(messages.get(0).role());
+    }
+
+    public void delete(final String id) {
+        try {
+            Files.deleteIfExists(path(id));
+            Files.deleteIfExists(dir().resolve(id + GZ_SUFFIX));
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }

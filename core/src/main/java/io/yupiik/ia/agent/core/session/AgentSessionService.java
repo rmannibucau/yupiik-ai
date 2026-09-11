@@ -250,6 +250,42 @@ public class AgentSessionService {
         return "context compacted";
     }
 
+    public record SessionInfo(String id, Path path) {
+    }
+
+    /**
+     * Returns the current session identifier and its on-disk location.
+     */
+    public SessionInfo sessionInfo(final String sessionId) {
+        return new SessionInfo(sessionId, sessionStore.path(sessionId));
+    }
+
+    /**
+     * Rewrites the current session to disk from its persisted transcript. Every
+     * append is already synchronous, so this is mostly a defensive flush that
+     * guarantees a clean, fully-written session file.
+     */
+    public String flush(final String sessionId) {
+        final var history = sessionStore.load(sessionId);
+        if (history.isEmpty()) {
+            return "nothing to flush";
+        }
+        sessionStore.replace(sessionId, history);
+        return "session flushed";
+    }
+
+    public record HousekeepingReport(int compressed, int deleted, int kept) {
+    }
+
+    /**
+     * Runs the session housekeeping (retention cleanup, compression, empty
+     * session removal) and returns the resulting report.
+     */
+    public HousekeepingReport housekeeping() {
+        final var report = sessionStore.housekeeping(true);
+        return new HousekeepingReport(report.compressed(), report.deleted(), report.kept());
+    }
+
     /**
      * Resyncs the structural code graph index. Throws when the resync fails so
      * the caller can surface the error.
