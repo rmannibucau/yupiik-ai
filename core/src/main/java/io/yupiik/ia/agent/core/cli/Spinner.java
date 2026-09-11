@@ -26,11 +26,10 @@ public final class Spinner {
     }
 
     public void start(final String label) {
-        if (!active) {
+        if (!active || !running.compareAndSet(false, true)) {
             return;
         }
         this.label = label;
-        running.set(true);
         thread = Thread.ofVirtual().name("cli-spinner").start(() -> {
             final var frames = symbols.spinner();
             int i = 0;

@@ -937,6 +937,8 @@ public class TuiCommand implements Runnable {
             case "/tools" -> toolsCommand(text, runner, state);
             case "/structural-code-graph" -> resyncGraph(runner, state);
             case "/theme" -> themeCommand("", state);
+            case "/thinking" -> thinkingCommand("", state);
+            case "/tool-output" -> toolOutputCommand("", state);
             case "/clear" -> state.model.clearConversation();
             case "/quit", "/exit" -> runner.quit();
             default -> {
@@ -952,6 +954,10 @@ public class TuiCommand implements Runnable {
                     context(text.substring("/context ".length()).strip(), state);
                 } else if (text.startsWith("/permissions ")) {
                     permissions(text.substring("/permissions ".length()).strip(), state);
+                } else if (text.startsWith("/thinking ")) {
+                    thinkingCommand(text.substring("/thinking ".length()).strip(), state);
+                } else if (text.startsWith("/tool-output ")) {
+                    toolOutputCommand(text.substring("/tool-output ".length()).strip(), state);
                 } else if (text.startsWith("/theme")) {
                     themeCommand(text.substring("/theme".length()).strip(), state);
                 } else if (text.startsWith("/agent ")) {
@@ -979,6 +985,34 @@ public class TuiCommand implements Runnable {
         applyTheme(next);
         persistTheme(next);
         state.model.status("theme: " + next);
+    }
+
+    private void thinkingCommand(final String arg, final UiState state) {
+        if (arg.isBlank()) {
+            state.model.status("thinking blocks " + (state.showThinking ? "shown" : "hidden")
+                    + " (/thinking show|hide to switch)");
+            return;
+        }
+        if (!"show".equalsIgnoreCase(arg) && !"hide".equalsIgnoreCase(arg)) {
+            state.model.status("usage: /thinking show|hide");
+            return;
+        }
+        state.showThinking = arg.equalsIgnoreCase("show");
+        state.model.status("thinking blocks " + (state.showThinking ? "shown" : "hidden"));
+    }
+
+    private void toolOutputCommand(final String arg, final UiState state) {
+        if (arg.isBlank()) {
+            state.model.status("tool blocks " + (state.showToolActions ? "shown" : "hidden")
+                    + " (/tool-output show|hide to switch)");
+            return;
+        }
+        if (!"show".equalsIgnoreCase(arg) && !"hide".equalsIgnoreCase(arg)) {
+            state.model.status("usage: /tool-output show|hide");
+            return;
+        }
+        state.showToolActions = arg.equalsIgnoreCase("show");
+        state.model.status("tool blocks " + (state.showToolActions ? "shown" : "hidden"));
     }
 
     private boolean isPaletteLight() {

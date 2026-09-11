@@ -1,7 +1,6 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
-import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 
 import java.io.IOException;
@@ -28,15 +27,14 @@ class HttpMcpClient implements McpClient {
     private volatile String protocolVersion;
 
     HttpMcpClient(final String name, final String url, final String apiKey, final List<String> headers,
-                  final long timeoutSeconds, final JsonMapper mapper) {
+                  final long timeoutSeconds, final JsonMapper mapper, final ExtendedHttpClient client) {
         this.name = name;
         this.url = url;
         this.apiKey = apiKey;
         this.headers = headers;
         this.timeoutSeconds = timeoutSeconds;
         this.mapper = mapper;
-        this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
-                .setDelegate(java.net.http.HttpClient.newHttpClient()));
+        this.client = client;
     }
 
     @Override
@@ -214,6 +212,6 @@ class HttpMcpClient implements McpClient {
 
     @Override
     public void close() {
-        client.close();
+        // the ExtendedHttpClient is a shared application-scoped bean, do not close it here
     }
 }

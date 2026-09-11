@@ -54,6 +54,19 @@ class CompletionEngineTest {
     }
 
     @Test
+    void completesThinkingParam() {
+        final var s = engine().suggest("/thinking h", 11);
+        assertTrue(s.items().contains("hide"));
+    }
+
+    @Test
+    void completesToolOutputParam() {
+        final var s = engine().suggest("/tool-output ", 13);
+        assertTrue(s.items().contains("show"));
+        assertTrue(s.items().contains("hide"));
+    }
+
+    @Test
     void completesAgentNameOverPrefix() {
         final var s = engine().suggest("@cod", 4);
         assertTrue(s.items().contains("coder"));

@@ -55,7 +55,9 @@ class GenericOutputProcessorTest {
     private GenericOutputProcessor processor(final int maxLines) {
         final var optimize = new OptimizeConfiguration(true, maxLines, 20, List.of());
         final var configuration = new CodingAgentConfiguration("x", ".", null,
-                null, null, null, null, null, null, optimize, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, optimize, null, null, null, null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
         return new GenericOutputProcessor(configuration);
     }
 }

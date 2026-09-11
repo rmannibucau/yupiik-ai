@@ -22,7 +22,9 @@ class PermissionServiceTest {
     private PermissionService service(final PermissionMode mode, final List<String> allow, final List<String> deny,
                                       final List<String> planBash) {
         final var permissions = new PermissionsConfiguration(mode, allow, deny, planBash);
-        final var configuration = new CodingAgentConfiguration("/tmp/yca-test", null, null, null, null, null, null, null, null, null, permissions, null, null, null, null, null, null);
+        final var configuration = new CodingAgentConfiguration("/tmp/yca-test", null, null, null, null, null, null, null, null, null, permissions, null, null, null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
         return new PermissionService(configuration);
     }
 

@@ -38,7 +38,9 @@ class SessionStoreTest {
                 new io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec(),
                 new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
                 new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec()), key -> Optional.empty());
-        return new SessionStore(new CodingAgentConfiguration(dir.toString(), null, null, null, null, null, null, null, null, null, null, null, null, sessions, null, null, null), mapper, Clock.systemUTC());
+        return new SessionStore(new CodingAgentConfiguration(dir.toString(), null, null, null, null, null, null, null, null, null, null, null, null, sessions, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig()), mapper, Clock.systemUTC());
     }
 
     private static void setAge(final Path file, final long daysOld) throws Exception {

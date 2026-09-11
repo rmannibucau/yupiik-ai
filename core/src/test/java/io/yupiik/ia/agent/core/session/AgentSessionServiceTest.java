@@ -357,7 +357,9 @@ class AgentSessionServiceTest {
 
     private static CodingAgentConfiguration config(final String storageHome, final AgentMode mode) {
         return new CodingAgentConfiguration(
-                storageHome, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, mode);
+                storageHome, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, mode,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
     }
 
     private static CodingAgentConfiguration agentsConfig(final String... names) {
@@ -365,7 +367,9 @@ class AgentSessionServiceTest {
                 .map(n -> new AgentConfiguration(n, "<prompt>"))
                 .toList();
         return new CodingAgentConfiguration(
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, agents, null);
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, agents, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
     }
 
     private static AgentProvider agentProvider(final String... names) {

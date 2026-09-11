@@ -174,7 +174,9 @@ class TuiCommandRenderTest {
         };
         final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
         final var todoStore = new TodoStore(configuration, mapper);
-        final var mcpManager = new McpManager(configuration, mapper, List.of());
+        final var mcpManager = new McpManager(configuration, mapper, List.of(),
+                new io.yupiik.fusion.httpclient.core.ExtendedHttpClient(new io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration()
+                        .setDelegate(java.net.http.HttpClient.newHttpClient())));
         final var factory = new TuiRunnerFactory() {
             @Override
             public TuiRunner create(final TuiCommand.TuiConf tuiConf) throws Exception {

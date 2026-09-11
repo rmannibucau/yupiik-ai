@@ -28,7 +28,9 @@ class ContextManagerTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250),
                 new CompactionConfiguration(true, 80),
                 new PruningConfiguration(true, 65, keepRecent, 80),
-                null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
     }
 
     @Test

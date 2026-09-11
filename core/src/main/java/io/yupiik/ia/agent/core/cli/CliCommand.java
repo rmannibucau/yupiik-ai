@@ -77,6 +77,8 @@ public class CliCommand implements Runnable {
     private final ToolPresenter presenter;
     private final CliVerbosity verbosity;
     private final boolean tty;
+    private volatile boolean showThinking;
+    private volatile boolean showToolOutput;
     private Spinner spinner;
     private volatile long lastInterruptAt;
     private volatile boolean quitRequested;
@@ -119,6 +121,8 @@ public class CliCommand implements Runnable {
         this.presenter = new ToolPresenter(mapper);
         this.verbosity = CliVerbosity.parse(conf.presentation());
         this.tty = System.console() != null;
+        this.showThinking = conf.showThinking();
+        this.showToolOutput = conf.showToolOutput();
     }
 
     @RootConfiguration("cli")
@@ -374,7 +378,7 @@ public class CliCommand implements Runnable {
             stopSpinner();
             print(textBuffer.append(delta));
         } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
-            if (conf.showThinking()) {
+            if (showThinking) {
                 if (verbosity == CliVerbosity.RAW) {
                     System.err.print(MarkdownColorizer.dim(delta));
                 } else {
@@ -393,7 +397,7 @@ public class CliCommand implements Runnable {
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             toolsRun++;
             stopSpinner();
-            if (conf.showToolOutput()) {
+            if (showToolOutput) {
                 onToolFinished(t);
             }
             beginSpinner("thinking");
@@ -412,7 +416,7 @@ public class CliCommand implements Runnable {
     }
 
     private void onToolStarted(final AgentEvent.ToolStarted t) {
-        if (!conf.showToolOutput()) {
+        if (!showToolOutput) {
             return;
         }
         if (verbosity == CliVerbosity.RAW) {
@@ -456,8 +460,13 @@ public class CliCommand implements Runnable {
                 : MarkdownColorizer.diffAdd(marker + rest));
     }
 
+    /**
+     * Starts the spinner when none is running; a thinking stream can call this
+     * once per token, so reusing the active spinner avoids leaking one thread
+     * (and one elapsed timer) per delta.
+     */
     private void beginSpinner(final String label) {
-        if (!tty) {
+        if (!tty || spinner != null) {
             return;
         }
         spinner = new Spinner(symbols, System.err, tty);
@@ -554,6 +563,14 @@ public class CliCommand implements Runnable {
                 }),
                 Map.entry("permissions", arg -> {
                     permissions(arg);
+                    return false;
+                }),
+                Map.entry("thinking", arg -> {
+                    thinking(arg);
+                    return false;
+                }),
+                Map.entry("tool-output", arg -> {
+                    toolOutput(arg);
                     return false;
                 }),
                 Map.entry("structural-code-graph", arg -> {
@@ -724,6 +741,37 @@ public class CliCommand implements Runnable {
         } else {
             println(MarkdownColorizer.status("permissions: asking for approval"));
         }
+    }
+
+    private void thinking(final String arg) {
+        final var parsed = parseShowHide(arg);
+        if (parsed == null) {
+            println(MarkdownColorizer.status("thinking " + (showThinking ? "shown" : "hidden") + " - usage: /thinking show|hide"));
+            return;
+        }
+        showThinking = parsed;
+        println(MarkdownColorizer.status("thinking " + (showThinking ? "shown" : "hidden")));
+    }
+
+    private void toolOutput(final String arg) {
+        final var parsed = parseShowHide(arg);
+        if (parsed == null) {
+            println(MarkdownColorizer.status("tool output " + (showToolOutput ? "shown" : "hidden") + " - usage: /tool-output show|hide"));
+            return;
+        }
+        showToolOutput = parsed;
+        println(MarkdownColorizer.status("tool output " + (showToolOutput ? "shown" : "hidden")));
+    }
+
+    private Boolean parseShowHide(final String arg) {
+        final var value = arg.strip().toLowerCase(Locale.ROOT);
+        if (value.equals("show")) {
+            return true;
+        }
+        if (value.equals("hide")) {
+            return false;
+        }
+        return null;
     }
 
     private void resyncGraph() {

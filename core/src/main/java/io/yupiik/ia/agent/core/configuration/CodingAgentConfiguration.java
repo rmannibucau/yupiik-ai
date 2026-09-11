@@ -24,7 +24,17 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Session retention settings (age based cleanup and compression).") SessionConfiguration sessions,
         @Property(documentation = "Skills loading settings.") SkillsConfiguration skills,
         @Property(defaultValue = "java.util.List.of()", documentation = "Custom agents. Each agent is mainly a prompt: inline text, or a file path whose content is used. Select one with --agent on run, /agent in the TUI, or a @<name> prompt prefix.") List<AgentConfiguration> agents,
-        @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.AgentMode.BUILD", documentation = "Agent access mode: build (all tools, any action) or plan (read-only tools only). Can be switched at runtime with /mode.") AgentMode mode) {
+        @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.AgentMode.BUILD", documentation = "Agent access mode: build (all tools, any action) or plan (read-only tools only). Can be switched at runtime with /mode.") AgentMode mode,
+        @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig()", documentation = "Shared HTTP client settings used by webfetch, websearch and MCP servers over HTTP.") HttpClientConfiguration httpClient,
+        @Property(defaultValue = "io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig()", documentation = "Agent tool settings (built-in tool server and web search).") ToolsConfiguration tools) {
+
+    public ToolsConfiguration tools() {
+        return tools == null ? ToolsConfiguration.defaultConfig() : tools;
+    }
+
+    public HttpClientConfiguration httpClient() {
+        return httpClient == null ? HttpClientConfiguration.defaultConfig() : httpClient;
+    }
 
     public String resolveStorageHome() {
         var home = storageHome == null || storageHome.isBlank() ? "~/.yupiik/coding-agent" : storageHome;

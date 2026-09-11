@@ -1,6 +1,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -21,24 +22,27 @@ public class McpManager {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final List<EmbeddedTool> localTools;
+    private final ExtendedHttpClient httpClient;
     private final Map<String, McpClient> clients = new ConcurrentHashMap<>();
     private final Map<String, List<EmbeddedTool>> toolsByServer = new ConcurrentHashMap<>();
 
     public McpManager(final CodingAgentConfiguration configuration, final JsonMapper mapper,
-                      final List<EmbeddedTool> localTools) {
+                      final List<EmbeddedTool> localTools, final ExtendedHttpClient httpClient) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.localTools = localTools;
+        this.httpClient = httpClient;
     }
 
     protected McpManager() {
         this.configuration = null;
         this.mapper = null;
         this.localTools = null;
+        this.httpClient = null;
     }
 
     public void start() {
-        if (configuration.mcp().enabled()) {
+        if (configuration.tools().builtin().enabled()) {
             final var local = new LocalMcpServer(localTools);
             try {
                 local.initialize();
@@ -63,7 +67,7 @@ public class McpManager {
                 final McpClient client;
                 if (server.url() != null && !server.url().isBlank()) {
                     client = new HttpMcpClient(server.name(), server.url(), server.apiKey(), server.headers(),
-                            configuration.mcp().callTimeoutSeconds(), mapper);
+                            configuration.mcp().callTimeoutSeconds(), mapper, httpClient);
                 } else if (server.command() != null && !server.command().isBlank()) {
                     final var command = new ArrayList<String>();
                     command.add(server.command());
@@ -127,7 +131,7 @@ public class McpManager {
     public List<ServerStatus> serverStatuses() {
         final var out = new ArrayList<ServerStatus>();
         final var mcp = configuration.mcp();
-        if (mcp != null && mcp.enabled()) {
+        if (configuration.tools().builtin().enabled()) {
             if (clients.containsKey("yca")) {
                 out.add(new ServerStatus("yca", ServerState.ENABLED));
             } else {

@@ -1,5 +1,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import org.junit.jupiter.api.AfterEach;
@@ -54,7 +56,7 @@ class HttpMcpClientTest {
         });
         server.start();
         client = new HttpMcpClient("test", "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                "key", List.of(), 10, mapper());
+                "key", List.of(), 10, mapper(), httpClient());
         client.initialize();
     }
 
@@ -87,7 +89,7 @@ class HttpMcpClientTest {
         });
         server.start();
         final var failing = new HttpMcpClient("test", "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                "key", List.of(), 10, mapper());
+                "key", List.of(), 10, mapper(), httpClient());
         final var error = assertThrows(IOException.class, failing::initialize);
         assertEquals(true, error.getMessage().contains("500"));
     }
@@ -110,7 +112,7 @@ class HttpMcpClientTest {
         });
         server.start();
         final var negotiating = new HttpMcpClient("test", "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                "key", List.of(), 10, mapper());
+                "key", List.of(), 10, mapper(), httpClient());
         negotiating.initialize();
     }
 
@@ -120,6 +122,11 @@ class HttpMcpClientTest {
 
     private JsonMapper mapper() {
         return new JsonMapperImpl(List.of(), key -> Optional.empty());
+    }
+
+    private static ExtendedHttpClient httpClient() {
+        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
+                .setDelegate(java.net.http.HttpClient.newHttpClient()));
     }
 
     private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status,

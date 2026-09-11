@@ -123,7 +123,9 @@ class UsageTrackerTest {
         return new CodingAgentConfiguration(storageHome.toString(), null, null,
                 new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, contextWindow, -1, List.of(), 120),
                 null, new LlmConfiguration(1, 1L, 0, 1, true, 250),
-                null, null, null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
     }
 
     private static void respond(final HttpExchange exchange, final int status, final String body) {

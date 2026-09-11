@@ -142,7 +142,9 @@ public final class MockLlmServer implements AutoCloseable {
         return new CodingAgentConfiguration(storageHome, null, null,
                 new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, 128000, -1, List.of(), 120),
                 null, new LlmConfiguration(1, 1L, 0, 1, true, 250),
-                null, null, null, null, permissions, null, codeGraph, null, null, null, null);
+                null, null, null, null, permissions, null, codeGraph, null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
     }
 
     private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status,

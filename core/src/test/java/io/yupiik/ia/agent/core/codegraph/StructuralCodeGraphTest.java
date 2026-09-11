@@ -57,7 +57,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
 
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
@@ -144,7 +146,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
                 new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
@@ -174,7 +178,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
                 new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
@@ -190,7 +196,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
                 new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
@@ -208,7 +216,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
         final JsonMapper mapper = newMapper();
         final var graph = new StructuralCodeGraph(config, List.of(new JavaGraphParser()), mapper,
                 new StatusReporter(), new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()), providerManager(config, mapper), Clock.systemUTC());
@@ -265,7 +275,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, false, null, null, null, 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", false, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
 
         // Bootstrap the JSON wiring exactly like production: JsonModule's JsonMapperBean collects
         // every JsonCodec bean registered by YcaCoreModule, which includes the generated Kind/EdgeType
@@ -319,7 +331,9 @@ class StructuralCodeGraphTest {
                 new LlmConfiguration(3, 500L, 0, 4, true, 250), null, null, null, null, null, null,
                 new StructuralCodeGraphConfiguration(true, true, null, null, "test-model", 10_000_000,
                         List.of("java"), ".yca/generated/graph", true, "docs", true, false),
-                null, null, null, null);
+                null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
 
         final JsonMapper mapper = newMapper();
         final var storeRoot = Path.of(config.structuralCodeGraph()

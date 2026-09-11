@@ -120,7 +120,9 @@ class PlanTodoSeederTest {
 
     private CodingAgentConfiguration configuration() {
         return new CodingAgentConfiguration(dir.toString(), null, null, null, null, null, null, null,
-                null, null, null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null, null,
+                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
+                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
     }
 
     private JsonMapper mapper() {

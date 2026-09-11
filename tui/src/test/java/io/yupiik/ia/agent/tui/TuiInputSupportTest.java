@@ -9,10 +9,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class TuiInputSupportTest {
     @Test
     void slashCommandsAreComplete() {
-        assertEquals(17, TuiInputSupport.SLASH_COMMANDS.size());
+        assertEquals(19, TuiInputSupport.SLASH_COMMANDS.size());
         assertEquals("/help", TuiInputSupport.SLASH_COMMANDS.get(0));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/quit"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/exit"));
+        assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/thinking"));
+        assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/tool-output"));
         assertThrows(UnsupportedOperationException.class, () -> TuiInputSupport.SLASH_COMMANDS.add("/nope"));
     }
 

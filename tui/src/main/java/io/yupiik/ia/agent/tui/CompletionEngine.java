@@ -18,8 +18,8 @@ import java.util.function.Supplier;
 public final class CompletionEngine {
     private static final List<String> SLASH_NAMES = List.of(
             "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode",
-            "/editplan", "/memory", "/context", "/permissions", "/tools", "/agent", "/theme",
-            "/structural-code-graph", "/clear", "/quit", "/exit");
+            "/editplan", "/memory", "/context", "/permissions", "/thinking", "/tool-output", "/tools",
+            "/agent", "/theme", "/structural-code-graph", "/clear", "/quit", "/exit");
 
     /** A completion candidate: the range of text to replace and the matches. */
     public record Suggestion(List<String> items, int replaceStart, int replaceEnd, String label) {
@@ -102,6 +102,7 @@ public final class CompletionEngine {
             case "tools" -> complete(prefixInner, tokenStart, tools.get(), "tool");
             case "mode" -> suggestionsWithHint("build", "plan", prefixInner, tokenStart);
             case "permissions" -> suggestionsWithHint("all", "none", prefixInner, tokenStart);
+            case "thinking", "tool-output" -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
             case "context", "editplan" -> {
                 final var items = pathCandidates(prefixInner);
                 yield items.isEmpty() ? Suggestion.none()
