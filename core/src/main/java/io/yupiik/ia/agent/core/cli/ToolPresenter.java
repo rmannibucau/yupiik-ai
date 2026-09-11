@@ -137,7 +137,7 @@ public final class ToolPresenter {
         if (oldString != null && !oldString.isBlank()) {
             for (final var line : oldString.split("\n", -1)) {
                 if (out.size() >= maxLines) {
-                    out.add("â¦ more");
+                    out.add("... more");
                     return out;
                 }
                 out.add("- " + line);
@@ -146,7 +146,7 @@ public final class ToolPresenter {
         if (newString != null && !newString.isBlank()) {
             for (final var line : newString.split("\n", -1)) {
                 if (out.size() >= maxLines) {
-                    out.add("â¦ more");
+                    out.add("... more");
                     return out;
                 }
                 out.add("+ " + line);
@@ -167,7 +167,7 @@ public final class ToolPresenter {
             out.add("+ " + lines[i]);
         }
         if (lines.length > shown) {
-            out.add("â¦ +" + (lines.length - shown) + " more");
+            out.add("... +" + (lines.length - shown) + " more");
         }
         return out;
     }
@@ -190,7 +190,7 @@ public final class ToolPresenter {
         if (t.length() <= RAW_TRUNCATE) {
             return t;
         }
-        return t.substring(0, RAW_TRUNCATE) + "â¦";
+        return t.substring(0, RAW_TRUNCATE) + "...";
     }
 
     private static String compact(final String s) {
@@ -201,7 +201,7 @@ public final class ToolPresenter {
         if (t.length() <= 60) {
             return t;
         }
-        return t.substring(0, 60) + "â¦";
+        return t.substring(0, 60) + "...";
     }
 
     private static String shortString(final String s) {
@@ -212,7 +212,7 @@ public final class ToolPresenter {
         if (t.length() <= 24) {
             return t;
         }
-        return t.substring(0, 24) + "â¦";
+        return t.substring(0, 24) + "...";
     }
 
     private static String lastMeaningfulLine(final String output) {

@@ -66,7 +66,7 @@ public final class LlmEndpoints {
                 : flavor == ApiFlavor.RESPONSES ? "OpenAIResponsesClient" : "OpenAICompletionClient";
         LOGGER.warning("Cannot reliably derive the chat endpoint from baseUrl '" + baseUrl
                 + "', assuming it is '" + url + route + "' for " + impl
-                + ". Set the base URL to include the route (…/chat/completions, …/responses or …/messages) to remove ambiguity.");
+                + ". Set the base URL to include the route (.../chat/completions, .../responses or .../messages) to remove ambiguity.");
         return new Endpoints(url + route, url + "/models");
     }
 

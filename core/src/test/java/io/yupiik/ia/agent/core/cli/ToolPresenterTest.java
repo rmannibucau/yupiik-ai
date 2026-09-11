@@ -65,7 +65,7 @@ class ToolPresenterTest {
     @Test
     void writeDiffCapsAtMaxLines() {
         final var diff = presenter.diff("write_file", "{\"path\":\"a\",\"content\":\"1\\n2\\n3\\n4\\n5\\n6\\n7\"}", 3);
-        assertEquals(List.of("+ 1", "+ 2", "+ 3", "â¦ +4 more"), diff);
+        assertEquals(List.of("+ 1", "+ 2", "+ 3", "... +4 more"), diff);
     }
 
     @Test

@@ -965,7 +965,7 @@ public class CliCommand implements Runnable {
 
     private static String padTo(final String text, final int width) {
         if (text.length() > width) {
-            return text.substring(0, Math.max(0, width - 1)) + "…";
+            return text.substring(0, Math.max(0, width - 1)) + "...";
         }
         final var sb = new StringBuilder(text);
         while (sb.length() < width) {
