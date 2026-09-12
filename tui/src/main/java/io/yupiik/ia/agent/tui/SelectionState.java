@@ -1,9 +1,23 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.buffer.Buffer;
 import dev.tamboui.layout.Rect;
 import dev.tamboui.style.Style;
-
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -164,8 +178,10 @@ final class SelectionState {
     private Bounds bounds(final int width) {
         final var topIsAnchor = anchorY <= focusY;
         return new Bounds(
-                topIsAnchor ? anchorY : focusY, topIsAnchor ? focusY : anchorY,
-                topIsAnchor ? anchorX : focusX, topIsAnchor ? focusX : anchorX,
+                topIsAnchor ? anchorY : focusY,
+                topIsAnchor ? focusY : anchorY,
+                topIsAnchor ? anchorX : focusX,
+                topIsAnchor ? focusX : anchorX,
                 width - 1);
     }
 
@@ -259,7 +275,9 @@ final class SelectionState {
         return rows.stream()
                 .map(row -> {
                     final var padded = String.format("%-" + width + "s", row);
-                    return padded.chars().mapToObj(c -> String.valueOf((char) c)).toArray(String[]::new);
+                    return padded.chars()
+                            .mapToObj(c -> String.valueOf((char) c))
+                            .toArray(String[]::new);
                 })
                 .toArray(String[][]::new);
     }

@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -5,7 +20,6 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -47,11 +61,17 @@ public class CodeTraceCallsTool implements EmbeddedTool {
 
     @Override
     public Map<String, Object> schema() {
-        return Schemas.object(Map.of(
-                "symbol", Schemas.str("Symbol to trace, eg. `io.yupiik.ia.agent.core.tools.ToolExecutionService`."),
-                "direction", Schemas.str("`callers` (who calls it), `callees` (what it calls) or `both`, default `both`."),
-                "depth", Schemas.intProp("Maximum traversal depth, default 3."),
-                "max", Schemas.intProp("Maximum number of edges to report, default 80.")), "symbol");
+        return Schemas.object(
+                Map.of(
+                        "symbol",
+                                Schemas.str(
+                                        "Symbol to trace, eg. `io.yupiik.ia.agent.core.tools.ToolExecutionService`."),
+                        "direction",
+                                Schemas.str(
+                                        "`callers` (who calls it), `callees` (what it calls) or `both`, default `both`."),
+                        "depth", Schemas.intProp("Maximum traversal depth, default 3."),
+                        "max", Schemas.intProp("Maximum number of edges to report, default 80.")),
+                "symbol");
     }
 
     @Override
@@ -69,14 +89,15 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         }
         final var target = resolveExact(symbol, g);
         if (target == null) {
-            return ToolResult.error("Symbol not found: " + symbol + ". Grep the graph docs with the grep tool (path=" + codeGraph.storeRoot().resolve("docs") + ") to locate a symbol.");
+            return ToolResult.error("Symbol not found: " + symbol + ". Grep the graph docs with the grep tool (path="
+                    + codeGraph.storeRoot().resolve("docs") + ") to locate a symbol.");
         }
 
         final var sb = new StringBuilder();
         var count = 0;
         final var visited = new HashSet<String>();
         final Deque<String[]> queue = new ArrayDeque<>();
-        queue.add(new String[]{target, "0"});
+        queue.add(new String[] {target, "0"});
         visited.add(target);
         while (!queue.isEmpty() && count < max) {
             final var cur = queue.poll();
@@ -95,7 +116,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             final var neighbors = neighbors(name, direction, g);
             for (final var n : neighbors) {
                 if (visited.add(n)) {
-                    queue.add(new String[]{n, Integer.toString(level + 1)});
+                    queue.add(new String[] {n, Integer.toString(level + 1)});
                 }
             }
         }

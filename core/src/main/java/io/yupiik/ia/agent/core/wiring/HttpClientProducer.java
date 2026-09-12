@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.wiring;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -9,10 +24,6 @@ import io.yupiik.fusion.httpclient.core.listener.RequestListener;
 import io.yupiik.fusion.httpclient.core.listener.impl.SetUserAgent;
 import io.yupiik.fusion.httpclient.core.request.UnlockedHttpRequest;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.X509TrustManager;
 import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
@@ -23,6 +34,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 
 @DefaultScoped
 public class HttpClientProducer {
@@ -39,9 +53,11 @@ public class HttpClientProducer {
                 .followRedirects(HttpClient.Redirect.NORMAL);
         if (cfg.disableTlsCheck()) {
             builder.sslContext(trustAllSslContext());
-            builder.sslParameters(new javax.net.ssl.SSLParameters() {{
-                setEndpointIdentificationAlgorithm(null);
-            }});
+            builder.sslParameters(new javax.net.ssl.SSLParameters() {
+                {
+                    setEndpointIdentificationAlgorithm(null);
+                }
+            });
         }
         final var listeners = new ArrayList<RequestListener<?>>();
         if (cfg.headers() != null && !cfg.headers().isEmpty()) {
@@ -63,12 +79,10 @@ public class HttpClientProducer {
     private static SSLContext trustAllSslContext() {
         final var tm = new X509TrustManager() {
             @Override
-            public void checkClientTrusted(final X509Certificate[] chain, final String authType) {
-            }
+            public void checkClientTrusted(final X509Certificate[] chain, final String authType) {}
 
             @Override
-            public void checkServerTrusted(final X509Certificate[] chain, final String authType) {
-            }
+            public void checkServerTrusted(final X509Certificate[] chain, final String authType) {}
 
             @Override
             public X509Certificate[] getAcceptedIssuers() {
@@ -77,7 +91,7 @@ public class HttpClientProducer {
         };
         try {
             final var ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, new TrustManager[]{tm}, new SecureRandom());
+            ctx.init(null, new TrustManager[] {tm}, new SecureRandom());
             return ctx;
         } catch (final Exception e) {
             throw new IllegalStateException("Cannot build trust-all SSL context", e);

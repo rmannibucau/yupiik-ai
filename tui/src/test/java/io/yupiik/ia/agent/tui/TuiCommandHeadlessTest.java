@@ -1,4 +1,23 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
+
+import static java.time.Duration.ofMillis;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
@@ -15,11 +34,7 @@ import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegis
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
+import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
@@ -29,10 +44,10 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
-
-import static java.time.Duration.ofMillis;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Boots the real fusion bean graph through autodiscovery (core + json + tui modules)
@@ -81,14 +96,30 @@ class TuiCommandHeadlessTest {
 
     @Test
     void answersThroughRealAgentLoop() throws Exception {
-        try (final var container = container(); final var deps = container.lookup(TuiDeps.class)) {
+        try (final var container = container();
+                final var deps = container.lookup(TuiDeps.class)) {
             final var d = deps.instance();
-            final var command = new TuiCommand(new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
-                    d.tuiConfiguration(), d.configuration(), d.agentLoop(), d.bridge(), d.permissionService(),
-                    d.userFeedbackService(), d.sessionStore(), d.todoStore(),
-                    d.chatClient(), d.mcpManager(), d.executor(), d.providerManager(),
-                    d.agentProvider(), d.agentSessionService(), d.model(), headlessFactory(),
-                    new TuiSlashCommands(), Clock.systemUTC());
+            final var command = new TuiCommand(
+                    new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
+                    d.tuiConfiguration(),
+                    d.configuration(),
+                    d.agentLoop(),
+                    d.bridge(),
+                    d.permissionService(),
+                    d.userFeedbackService(),
+                    d.sessionStore(),
+                    d.todoStore(),
+                    d.chatClient(),
+                    d.mcpManager(),
+                    d.executor(),
+                    d.providerManager(),
+                    d.agentProvider(),
+                    d.agentSessionService(),
+                    new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
+                    d.model(),
+                    headlessFactory(),
+                    new TuiSlashCommands(),
+                    Clock.systemUTC());
 
             uiThread = new Thread(command::run, "tui-headless-test");
             uiThread.setDaemon(true);
@@ -106,16 +137,15 @@ class TuiCommandHeadlessTest {
             final long sessionDeadline = System.currentTimeMillis() + TIMEOUT_MS;
             var sessionCount = -1L;
             while (System.currentTimeMillis() < sessionDeadline) {
-                sessionCount = Files.exists(sessions)
-                        ? Files.list(sessions).count()
-                        : 0;
+                sessionCount = Files.exists(sessions) ? Files.list(sessions).count() : 0;
                 if (sessionCount >= 1) {
                     break;
                 }
                 Thread.sleep(25);
             }
             assertTrue(sessionCount >= 1, "expected a session file under " + sessions);
-            assertTrue(llm.requests().stream().anyMatch(r -> r.contains("say hi to the mock")),
+            assertTrue(
+                    llm.requests().stream().anyMatch(r -> r.contains("say hi to the mock")),
                     "expected the prompt to reach the mock LLM");
 
             tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
@@ -125,7 +155,9 @@ class TuiCommandHeadlessTest {
 
     private RuntimeContainer container() {
         return ConfiguringContainer.of()
-                .register(new ProvidedInstanceBean<>(DefaultScoped.class, ArgsConfigSource.class,
+                .register(new ProvidedInstanceBean<>(
+                        DefaultScoped.class,
+                        ArgsConfigSource.class,
                         () -> new ArgsConfigSource(List.of("--run-prompt", "wiring"))))
                 .register(new FusionListener<ConfigurationRegistration>() {
                     @Override
@@ -134,13 +166,16 @@ class TuiCommandHeadlessTest {
                     }
 
                     @Override
-                    public void onEvent(final RuntimeContainer container, final ConfigurationRegistration registration) {
-                        registration.addSource().accept(new MapConfigSource(Map.of(
-                                "yca.storageHome", temp.resolve("home").toString(),
-                                "yca.provider.baseUrl", llm.baseUrl(),
-                                "yca.provider.apiKey", "test-key",
-                                "yca.provider.model", "test-model",
-                                "yca.structuralCodeGraph.enabled", "false")));
+                    public void onEvent(
+                            final RuntimeContainer container, final ConfigurationRegistration registration) {
+                        registration
+                                .addSource()
+                                .accept(new MapConfigSource(Map.of(
+                                        "yca.storageHome", temp.resolve("home").toString(),
+                                        "yca.provider.baseUrl", llm.baseUrl(),
+                                        "yca.provider.apiKey", "test-key",
+                                        "yca.provider.model", "test-model",
+                                        "yca.structuralCodeGraph.enabled", "false")));
                     }
                 })
                 .start();

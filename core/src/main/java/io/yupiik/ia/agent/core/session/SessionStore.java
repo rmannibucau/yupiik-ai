@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.session;
 
 import io.yupiik.fusion.framework.api.lifecycle.Start;
@@ -6,7 +21,6 @@ import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -80,9 +94,7 @@ public class SessionStore {
                     final var name = f.getFileName().toString();
                     final var id = name.endsWith(JSONL_SUFFIX)
                             ? name.substring(0, name.length() - JSONL_SUFFIX.length())
-                            : name.endsWith(GZ_SUFFIX)
-                            ? name.substring(0, name.length() - GZ_SUFFIX.length())
-                            : name;
+                            : name.endsWith(GZ_SUFFIX) ? name.substring(0, name.length() - GZ_SUFFIX.length()) : name;
                     final var age = now - Files.getLastModifiedTime(f).toMillis();
                     final var isCompressed = name.endsWith(GZ_SUFFIX);
                     if (retention >= 0 && age > retention) {
@@ -107,13 +119,12 @@ public class SessionStore {
         }
     }
 
-    public record HousekeepingReport(int compressed, int deleted, int kept) {
-    }
+    public record HousekeepingReport(int compressed, int deleted, int kept) {}
 
     private static void gzip(final Path jsonl) {
         final var gz = jsonl.resolveSibling(jsonl.getFileName().toString() + ".gz");
         try (final var in = new BufferedInputStream(Files.newInputStream(jsonl));
-             final var out = new GZIPOutputStream(new BufferedOutputStream(Files.newOutputStream(gz)))) {
+                final var out = new GZIPOutputStream(new BufferedOutputStream(Files.newOutputStream(gz)))) {
             in.transferTo(out);
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
@@ -127,7 +138,7 @@ public class SessionStore {
 
     private static void gunzip(final Path gz, final Path target) throws IOException {
         try (final var in = new GZIPInputStream(new BufferedInputStream(Files.newInputStream(gz)));
-             final var out = new BufferedOutputStream(Files.newOutputStream(target))) {
+                final var out = new BufferedOutputStream(Files.newOutputStream(target))) {
             in.transferTo(out);
         }
         Files.deleteIfExists(gz);
@@ -180,7 +191,8 @@ public class SessionStore {
         synchronized (fileLock) {
             writableDir();
             try {
-                Files.writeString(path(id), mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                Files.writeString(
+                        path(id), mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (final IOException e) {
                 throw new UncheckedIOException(e);
             }
@@ -229,11 +241,13 @@ public class SessionStore {
         synchronized (fileLock) {
             final var sb = new StringBuilder();
             for (final var m : messages) {
-                sb.append(mapper.toString(SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId()))).append('\n');
+                sb.append(mapper.toString(SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId())))
+                        .append('\n');
             }
             final var target = path(id);
             writableDir();
-            final var tmp = target.resolveSibling(target.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
+            final var tmp = target.resolveSibling(
+                    target.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
             try {
                 Files.writeString(tmp, sb.toString());
                 Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
@@ -271,8 +285,7 @@ public class SessionStore {
         }
     }
 
-    public record SessionInfo(String id, long modifiedAt, long sizeBytes) {
-    }
+    public record SessionInfo(String id, long modifiedAt, long sizeBytes) {}
 
     public String summary(final String id) {
         return load(id).stream()
@@ -291,8 +304,8 @@ public class SessionStore {
                                 ? name.substring(0, name.length() - JSONL_SUFFIX.length())
                                 : name.substring(0, name.length() - GZ_SUFFIX.length());
                         try {
-                            return new SessionInfo(id,
-                                    Files.getLastModifiedTime(f).toMillis(), Files.size(f));
+                            return new SessionInfo(
+                                    id, Files.getLastModifiedTime(f).toMillis(), Files.size(f));
                         } catch (final IOException e) {
                             return new SessionInfo(name, 0, 0);
                         }

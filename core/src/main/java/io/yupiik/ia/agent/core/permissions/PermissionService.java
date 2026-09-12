@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.permissions;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -5,7 +20,6 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
-
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -81,8 +95,11 @@ public class PermissionService {
         return check(toolName, category, args, false);
     }
 
-    public Decision check(final String toolName, final ToolCategory category, final Map<String, Object> args,
-                          final boolean readOnly) {
+    public Decision check(
+            final String toolName,
+            final ToolCategory category,
+            final Map<String, Object> args,
+            final boolean readOnly) {
         final var permissions = configuration.permissions();
         if (permitAll) {
             return Decision.allow();
@@ -126,7 +143,8 @@ public class PermissionService {
     private Decision approve(final String toolName, final Map<String, Object> args) {
         final var g = gate;
         if (g == null) {
-            return Decision.deny("permission required but no interactive gate available (use yolo/auto_edit mode or run in the TUI)");
+            return Decision.deny(
+                    "permission required but no interactive gate available (use yolo/auto_edit mode or run in the TUI)");
         }
         final var result = g.approve(describe(toolName, args), detail(toolName, args), toolName, args);
         return switch (result) {

@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
@@ -12,7 +27,6 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
-
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -27,10 +41,14 @@ public class RunCommand implements Runnable {
     private final SessionStore sessionStore;
     private final AgentProvider agentProvider;
 
-    public RunCommand(final RunConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
-                      final PermissionService permissionService, final UserFeedbackService userFeedbackService,
-                      final SessionStore sessionStore,
-                      final AgentProvider agentProvider) {
+    public RunCommand(
+            final RunConf conf,
+            final AgentLoop agentLoop,
+            final AgentEventBridge bridge,
+            final PermissionService permissionService,
+            final UserFeedbackService userFeedbackService,
+            final SessionStore sessionStore,
+            final AgentProvider agentProvider) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -42,17 +60,30 @@ public class RunCommand implements Runnable {
 
     @RootConfiguration("run")
     public record RunConf(
-            @Property(required = true, documentation = "Prompt to send to the agent.") String prompt,
-            @Property(defaultValue = "\"\"", documentation = "Session id to append to; a new session is created when empty.") String session,
-            @Property(defaultValue = "\"\"", documentation = "Name of a custom agent (from yca.agents) to use for this run. Its prompt is injected on top of the base system prompt.") String agent,
-            @Property(defaultValue = "false", documentation = "Print reasoning deltas on stderr.") boolean showThinking,
-            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.") boolean permitAll) {
-    }
+            @Property(required = true, documentation = "Prompt to send to the agent.")
+            String prompt,
+
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation = "Session id to append to; a new session is created when empty.")
+            String session,
+
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Name of a custom agent (from yca.agents) to use for this run. Its prompt is injected on top of the base system prompt.")
+            String agent,
+
+            @Property(defaultValue = "false", documentation = "Print reasoning deltas on stderr.")
+            boolean showThinking,
+
+            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.")
+            boolean permitAll) {}
 
     @Override
     public void run() {
-        final var sessionId = conf.session() == null || conf.session().isBlank()
-                ? sessionStore.create() : conf.session();
+        final var sessionId =
+                conf.session() == null || conf.session().isBlank() ? sessionStore.create() : conf.session();
         final var failed = new AtomicBoolean();
         final var lastError = new AtomicReference<String>();
         bridge.sink(event -> {
@@ -68,7 +99,8 @@ public class RunCommand implements Runnable {
             return ApprovalGate.Result.DENY;
         });
         userFeedbackService.setGate(questions -> {
-            System.err.println("[ask_user] not available in headless mode; provide the required input in your prompt and retry.");
+            System.err.println(
+                    "[ask_user] not available in headless mode; provide the required input in your prompt and retry.");
             return null;
         });
         permissionService.setPermitAll(conf.permitAll());
@@ -106,13 +138,15 @@ public class RunCommand implements Runnable {
                 System.err.println("[tool failed] " + t.name());
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
-            System.err.println("[context] " + c.kind() + " applied (" + c.mode().toLowerCase(java.util.Locale.ROOT) + ")");
+            System.err.println(
+                    "[context] " + c.kind() + " applied (" + c.mode().toLowerCase(java.util.Locale.ROOT) + ")");
         } else if (event instanceof final AgentEvent.Notice n) {
-            final var prefix = switch (n.level()) {
-                case ERROR -> "[error]";
-                case WARN -> "[warning]";
-                case INFO -> "[yca]";
-            };
+            final var prefix =
+                    switch (n.level()) {
+                        case ERROR -> "[error]";
+                        case WARN -> "[warning]";
+                        case INFO -> "[yca]";
+                    };
             System.err.println(prefix + " " + n.message());
         } else if (event instanceof final AgentEvent.Status s) {
             System.err.println("[yca] " + s.message());

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ia.agent</groupId>
+    <artifactId>maven-repository-indexer-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>maven-repository-knowledge-mcp</artifactId>
+  <packaging>jar</packaging>
+  <name>YCA :: Maven Repository Knowledge :: MCP</name>
+  <description>Reusable fusion-mcp-server presentation exposing the maven-repository-knowledge pipeline as MCP tools for any MCP client.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>maven-repository-knowledge</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion.mcp</groupId>
+      <artifactId>fusion-mcp-server-impl</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-api</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-build-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-processor</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-json</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-httpclient</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <compilerArgs>
+            <compilerArg>-Afusion.moduleFqn=io.yupiik.maven.knowledge.mcp.MavenKnowledgeMcpModule</compilerArg>
+          </compilerArgs>
+        </configuration>
+        <executions>
+          <execution>
+            <id>default-testCompile</id>
+            <configuration>
+              <compilerArgs combine.self="override">
+                <compilerArg>-Xlint:all,-serial,-this-escape,-missing-explicit-ctor,-processing</compilerArg>
+                <compilerArg>-Werror</compilerArg>
+              </compilerArgs>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

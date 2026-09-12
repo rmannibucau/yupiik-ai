@@ -1,8 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-
 import java.util.ArrayList;
 import java.util.List;
 
@@ -66,33 +80,57 @@ public class TuiTranscriptModel {
                 final var header = command == null || command.isBlank()
                         ? "*streaming `" + running + "`* (" + elapsedMs + " ms)"
                         : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (" + elapsedMs + " ms)";
-                transcript.append("\n\n").append(TOOL_BEGIN).append('\n').append(header).append("\n\n```text\n")
-                        .append(toolStream.toString().stripTrailing()).append("\n```\n")
-                        .append(TOOL_END).append('\n');
+                transcript
+                        .append("\n\n")
+                        .append(TOOL_BEGIN)
+                        .append('\n')
+                        .append(header)
+                        .append("\n\n```text\n")
+                        .append(toolStream.toString().stripTrailing())
+                        .append("\n```\n")
+                        .append(TOOL_END)
+                        .append('\n');
             }
             toolStream.setLength(0);
             if (!success) {
-                transcript.append("\n\n").append(TOOL_BEGIN).append("\n> tool `").append(name).append("` failed: ")
-                        .append(TuiInputSupport.firstLine(output)).append(" (").append(elapsedMs).append(" ms)\n")
-                        .append(TOOL_END).append('\n');
+                transcript
+                        .append("\n\n")
+                        .append(TOOL_BEGIN)
+                        .append("\n> tool `")
+                        .append(name)
+                        .append("` failed: ")
+                        .append(TuiInputSupport.firstLine(output))
+                        .append(" (")
+                        .append(elapsedMs)
+                        .append(" ms)\n")
+                        .append(TOOL_END)
+                        .append('\n');
             }
-        } else if (event instanceof AgentEvent.UsageUpdated(
-                io.yupiik.ia.agent.core.llm.Usage usage, int estimatedContextTokens, double percent
-        )) {
+        } else if (event
+                instanceof
+                AgentEvent.UsageUpdated(
+                        io.yupiik.ia.agent.core.llm.Usage usage,
+                        int estimatedContextTokens,
+                        double percent)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
             estimatedContext = estimatedContextTokens;
             contextPercent = (int) Math.round(percent);
         } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
             status = "context " + kind + " done (" + mode.toLowerCase(java.util.Locale.ROOT) + ")";
-            transcript.append("\n\n> context ").append(kind).append(" applied (")
-                    .append(mode.toLowerCase(java.util.Locale.ROOT)).append(")\n");
+            transcript
+                    .append("\n\n> context ")
+                    .append(kind)
+                    .append(" applied (")
+                    .append(mode.toLowerCase(java.util.Locale.ROOT))
+                    .append(")\n");
         } else if (event instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message)) {
-            final var tag = switch (level) {
-                case ERROR -> "⚠ error";
-                case WARN -> "⚠ warning";
-                case INFO -> "ⓘ";
-            };
+            final var tag =
+                    switch (level) {
+                        case ERROR -> "⚠ error";
+                        case WARN -> "⚠ warning";
+                        case INFO -> "ⓘ";
+                    };
             transcript.append("\n\n> ").append(tag).append(": ").append(message).append("\n");
             if (level == AgentEvent.Notice.Level.ERROR) {
                 status = "error: " + message;
@@ -135,8 +173,14 @@ public class TuiTranscriptModel {
         if (thought.isBlank()) {
             return;
         }
-        transcript.append("\n\n").append(THOUGHT_BEGIN).append("\n**Thinking**\n\n")
-                .append(thought).append('\n').append(THOUGHT_END).append('\n');
+        transcript
+                .append("\n\n")
+                .append(THOUGHT_BEGIN)
+                .append("\n**Thinking**\n\n")
+                .append(thought)
+                .append('\n')
+                .append(THOUGHT_END)
+                .append('\n');
     }
 
     public synchronized String markdown(final String spinner, final String fallback) {
@@ -145,19 +189,25 @@ public class TuiTranscriptModel {
             sb.append("\n\n**Assistant**\n\n").append(pending);
         }
         if (runningTool != null) {
-            sb.append("\n\n`").append(spinner).append(" running ")
-                    .append(runningToolCommand == null || runningToolCommand.isBlank()
-                            ? runningTool : runningToolCommand).append("`");
+            sb.append("\n\n`")
+                    .append(spinner)
+                    .append(" running ")
+                    .append(
+                            runningToolCommand == null || runningToolCommand.isBlank()
+                                    ? runningTool
+                                    : runningToolCommand)
+                    .append("`");
             if (!toolStream.isEmpty()) {
-                sb.append("\n\n```text\n").append(toolStream.toString().stripTrailing()).append("```\n");
+                sb.append("\n\n```text\n")
+                        .append(toolStream.toString().stripTrailing())
+                        .append("```\n");
             }
         }
         final var md = sb.toString().strip();
         return md.isBlank() ? fallback : md;
     }
 
-    public record Region(String text, boolean thought, boolean tool) {
-    }
+    public record Region(String text, boolean thought, boolean tool) {}
 
     /**
      * Splits the transcript markdown into typed regions based on the

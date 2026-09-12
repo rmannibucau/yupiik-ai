@@ -1,21 +1,35 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
+
+import static io.yupiik.ia.agent.core.tools.Schemas.bool;
+import static io.yupiik.ia.agent.core.tools.Schemas.str;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optBool;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-
-import static io.yupiik.ia.agent.core.tools.Schemas.bool;
-import static io.yupiik.ia.agent.core.tools.Schemas.str;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optBool;
 
 @ApplicationScoped
 public class EditFileTool implements EmbeddedTool {
@@ -37,12 +51,15 @@ public class EditFileTool implements EmbeddedTool {
 
     @Override
     public Map<String, Object> schema() {
-        return Schemas.object(Map.of(
-                "path", str("File path, absolute or relative to the working directory."),
-                "oldString", str("Exact text to replace."),
-                "newString", str("Replacement text."),
-                "replaceAll", bool("Replace every occurrence instead of requiring an unique match.")),
-                "path", "oldString", "newString");
+        return Schemas.object(
+                Map.of(
+                        "path", str("File path, absolute or relative to the working directory."),
+                        "oldString", str("Exact text to replace."),
+                        "newString", str("Replacement text."),
+                        "replaceAll", bool("Replace every occurrence instead of requiring an unique match.")),
+                "path",
+                "oldString",
+                "newString");
     }
 
     @Override
@@ -67,7 +84,8 @@ public class EditFileTool implements EmbeddedTool {
                 count++;
                 idx += oldString.length();
                 if (count > 1 && !optBool(args, "replaceAll", false)) {
-                    return ToolResult.error("oldString matches " + count + "+ times in " + path + ", provide more context or use replaceAll");
+                    return ToolResult.error("oldString matches " + count + "+ times in " + path
+                            + ", provide more context or use replaceAll");
                 }
             }
             if (count == 0) {
@@ -76,10 +94,15 @@ public class EditFileTool implements EmbeddedTool {
                         + "Re-read the file for current content. File starts with: "
                         + snippet(content) + ".");
             }
-            Files.writeString(path, optBool(args, "replaceAll", false)
-                    ? content.replace(oldString, newString)
-                    : content.replaceFirst(java.util.regex.Pattern.quote(oldString), java.util.regex.Matcher.quoteReplacement(newString)));
-            return ToolResult.ok("Replaced " + (optBool(args, "replaceAll", false) ? count : 1) + " occurrence(s) in " + path);
+            Files.writeString(
+                    path,
+                    optBool(args, "replaceAll", false)
+                            ? content.replace(oldString, newString)
+                            : content.replaceFirst(
+                                    java.util.regex.Pattern.quote(oldString),
+                                    java.util.regex.Matcher.quoteReplacement(newString)));
+            return ToolResult.ok(
+                    "Replaced " + (optBool(args, "replaceAll", false) ? count : 1) + " occurrence(s) in " + path);
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot edit " + path + ": " + e.getMessage());
         }

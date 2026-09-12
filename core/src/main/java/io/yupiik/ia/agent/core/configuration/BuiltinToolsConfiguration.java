@@ -1,11 +1,25 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 
 public record BuiltinToolsConfiguration(
-        @Property(defaultValue = "true", documentation = "Register the embedded local tool server (bash, read_file, write_file, edit_file, glob, grep, list_dir, todo_write, ask_user, memory_write, webfetch, websearch, apply_patch, skill, ...). Set to false to expose tools only through configured MCP servers.") boolean enabled) {
-
-    public static BuiltinToolsConfiguration defaultConfig() {
-        return new BuiltinToolsConfiguration(true);
-    }
-}
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Register the embedded local tool server (bash, read_file, write_file, edit_file, glob, grep, list_dir, todo_write, ask_user, memory_write, webfetch, websearch, apply_patch, skill, ...). Set to false to expose tools only through configured MCP servers.")
+        boolean enabled) {}

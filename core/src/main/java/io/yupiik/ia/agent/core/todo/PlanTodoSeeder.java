@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.todo;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -6,7 +21,6 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.session.SessionStore;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,8 +43,11 @@ public class PlanTodoSeeder {
     private final SessionStore sessionStore;
     private final JsonMapper mapper;
 
-    public PlanTodoSeeder(final ChatClient chatClient, final TodoStore todoStore,
-                          final SessionStore sessionStore, final JsonMapper mapper) {
+    public PlanTodoSeeder(
+            final ChatClient chatClient,
+            final TodoStore todoStore,
+            final SessionStore sessionStore,
+            final JsonMapper mapper) {
         this.chatClient = chatClient;
         this.todoStore = todoStore;
         this.sessionStore = sessionStore;
@@ -66,15 +83,27 @@ public class PlanTodoSeeder {
 
     private List<TodoItem> extract(final String plan) {
         try {
-            final var request = new ChatCompletionRequest(null, List.of(
-                    Message.system("Convert this implementation plan into a todo list. The response is constrained to a "
-                            + "JSON object {\"steps\":[{\"content\": string, \"status\": \"pending\"} ...]} by the output schema, "
-                            + "one concrete implementation step in execution order, max 10 items. Use an empty steps array when the "
-                            + "text contains no implementation plan."),
-                    Message.user(plan)), null, false, null, null, null, null, null);
+            final var request = new ChatCompletionRequest(
+                    null,
+                    List.of(
+                            Message.system(
+                                    "Convert this implementation plan into a todo list. The response is constrained to a "
+                                            + "JSON object {\"steps\":[{\"content\": string, \"status\": \"pending\"} ...]} by the output schema, "
+                                            + "one concrete implementation step in execution order, max 10 items. Use an empty steps array when the "
+                                            + "text contains no implementation plan."),
+                            Message.user(plan)),
+                    null,
+                    false,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null);
             final var res = chatClient.chatStructured(request, "todo_steps", stepsSchema());
-            final var content = res.result().message() == null || res.result().message().content() == null
-                    ? "" : String.valueOf(res.result().message().content());
+            final var content =
+                    res.result().message() == null || res.result().message().content() == null
+                            ? ""
+                            : String.valueOf(res.result().message().content());
             if (res.structured()) {
                 return parseSteps(content);
             }
@@ -91,19 +120,22 @@ public class PlanTodoSeeder {
     private static Map<String, Object> stepsSchema() {
         final var step = new LinkedHashMap<String, Object>();
         step.put("type", "object");
-        step.put("properties", Map.of(
-                "content", Map.of("type", "string"),
-                "status", Map.of("type", "string", "enum", List.of("pending"))));
+        step.put(
+                "properties",
+                Map.of(
+                        "content", Map.of("type", "string"),
+                        "status", Map.of("type", "string", "enum", List.of("pending"))));
         step.put("required", List.of("content", "status"));
         step.put("additionalProperties", false);
         return Map.of(
-                "type", "object",
-                "properties", Map.of("steps", Map.of(
-                        "type", "array",
-                        "items", step,
-                        "additionalProperties", false)),
-                "required", List.of("steps"),
-                "additionalProperties", false);
+                "type",
+                "object",
+                "properties",
+                Map.of("steps", Map.of("type", "array", "items", step, "additionalProperties", false)),
+                "required",
+                List.of("steps"),
+                "additionalProperties",
+                false);
     }
 
     private List<TodoItem> parseSteps(final String content) {

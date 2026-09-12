@@ -1,30 +1,38 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.context;
-
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.CompactionConfiguration;
-import io.yupiik.ia.agent.core.configuration.LlmConfiguration;
-import io.yupiik.ia.agent.core.configuration.ModelConfiguration;
-import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.ProviderListConfiguration;
-import io.yupiik.ia.agent.core.configuration.PruningConfiguration;
-import io.yupiik.ia.agent.core.configuration.ToolsConfiguration;
-import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
-import io.yupiik.ia.agent.core.llm.ChatResult;
-import io.yupiik.ia.agent.core.llm.Usage;
-import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.wiring.ProviderManager;
-import org.junit.jupiter.api.Test;
-
-import java.time.Clock;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatResult;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.time.Clock;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
 
 class ContextManagerTest {
 
@@ -33,32 +41,39 @@ class ContextManagerTest {
     }
 
     private static CodingAgentConfiguration config(final int keepRecent, final int window) {
-        final var provider = new ProviderConfiguration("default", "https://api.openai.com/v1", "", "m", null, null, window, -1, List.of(), 120, "", java.util.Map.of(), null);
-        return new CodingAgentConfiguration("x", ".", null,
-                new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, window, -1, List.of(), 120),
-                new ModelConfiguration("", ""),
-                new LlmConfiguration(3, 500L, 0, 4, true, 250),
-                new CompactionConfiguration(true, 80),
-                new PruningConfiguration(true, 65, keepRecent, 80),
-                null, null, null, null, null, null, null, null, null,
-                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
+        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", "x"),
+                Map.entry("yca.workingDir", "."),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry("yca.provider.providers.0.baseUrl", "https://api.openai.com/v1"),
+                Map.entry("yca.provider.providers.0.apiKey", ""),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.api", "auto"),
+                Map.entry("yca.provider.providers.0.contextWindow", String.valueOf(window)),
+                Map.entry("yca.provider.providers.0.timeoutSeconds", "120"),
+                Map.entry("yca.pruning.keepRecent", String.valueOf(keepRecent))));
     }
 
     @Test
     void compactForOverflowIsNoOpOnSmallConversations() {
         final var cfg = config(6);
-        final var manager = new ContextManager(cfg, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
-                new CompactionCoordinator(cfg, null, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
-                        providerManager(cfg), null));
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        null,
+                        new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
             messages.add(Message.user("step " + i));
         }
         final var result = manager.compactForOverflow(messages);
-        assertSame(messages, result.messages(),
-                "a conversation that already fits the keep window must stay untouched");
+        assertSame(messages, result.messages(), "a conversation that already fits the keep window must stay untouched");
         assertEquals(CompactionResult.Mode.NONE, result.mode());
     }
 
@@ -72,9 +87,15 @@ class ContextManagerTest {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
         };
-        final var manager = new ContextManager(cfg, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
-                new CompactionCoordinator(cfg, chat, new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
-                        providerManager(cfg), null));
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 7; i++) {
@@ -85,12 +106,15 @@ class ContextManagerTest {
         assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
         final var summary = result.messages().stream()
                 .filter(m -> m.content() instanceof String s && s.contains("<compacted-context>"))
-                .findFirst().orElseThrow();
-        assertTrue(summary.content() instanceof String s && s.contains(digest),
+                .findFirst()
+                .orElseThrow();
+        assertTrue(
+                summary.content() instanceof String s && s.contains(digest),
                 "the generated digest must survive overflow shrinking intact");
         for (final var m : result.messages()) {
             if (m.content() instanceof String s && s.contains("a tool output")) {
-                assertTrue(s.length() < 20_000 && s.contains("elided"),
+                assertTrue(
+                        s.length() < 20_000 && s.contains("elided"),
                         "the overflowing tail tool output must be spliced down");
             }
         }
@@ -102,23 +126,32 @@ class ContextManagerTest {
     @Test
     void toolSchemasCountTowardTheTriggers() {
         final var cfg = config(6);
-        final var manager = new ContextManager(cfg, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
-                new CompactionCoordinator(cfg, null, new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
-                        providerManager(cfg), null));
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        null,
+                        new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
             messages.add(Message.user("step " + i));
         }
-        assertFalse(manager.pruneNeeded(messages),
+        assertFalse(
+                manager.pruneNeeded(messages),
                 "a tiny conversation is far below the pruning threshold without tool schemas");
-        assertTrue(manager.pruneNeeded(messages, 150_000),
-                "the tool-schema tokens must count toward the pruning trigger");
-        assertTrue(manager.compactNeeded(messages, 150_000),
+        assertTrue(
+                manager.pruneNeeded(messages, 150_000), "the tool-schema tokens must count toward the pruning trigger");
+        assertTrue(
+                manager.compactNeeded(messages, 150_000),
                 "the tool-schema tokens must count toward the compaction trigger");
     }
 
     private static ProviderManager providerManager(final CodingAgentConfiguration cfg) {
-        return new ProviderManager(cfg, new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> Optional.empty()));
+        return new ProviderManager(
+                cfg, new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> Optional.empty()));
     }
 }

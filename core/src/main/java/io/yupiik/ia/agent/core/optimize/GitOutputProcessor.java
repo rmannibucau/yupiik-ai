@@ -1,13 +1,27 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.optimize;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
-
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
 @ApplicationScoped
 public class GitOutputProcessor implements OutputProcessor {
@@ -34,12 +48,36 @@ public class GitOutputProcessor implements OutputProcessor {
     public Stream<String> process(final String command, final Stream<String> lines) {
         final var sub = subCommand(command);
         return switch (sub) {
-            case "diff" -> Optimizers.containsFlag(command, "-p", "-u", "--patch", "--stat", "--numstat", "--word-diff", "--name-only", "--name-status")
-                    ? lines : processDiff(lines);
-            case "log" -> Optimizers.containsFlag(command, "-p", "-u", "--patch", "--stat", "--format", "--pretty", "--oneline", "--graph")
-                    ? lines : processLog(lines, false);
-            case "show" -> Optimizers.containsFlag(command, "--stat", "--format", "--pretty", "--name-only", "--name-status")
-                    ? lines : processShow(lines);
+            case "diff" ->
+                Optimizers.containsFlag(
+                                command,
+                                "-p",
+                                "-u",
+                                "--patch",
+                                "--stat",
+                                "--numstat",
+                                "--word-diff",
+                                "--name-only",
+                                "--name-status")
+                        ? lines
+                        : processDiff(lines);
+            case "log" ->
+                Optimizers.containsFlag(
+                                command,
+                                "-p",
+                                "-u",
+                                "--patch",
+                                "--stat",
+                                "--format",
+                                "--pretty",
+                                "--oneline",
+                                "--graph")
+                        ? lines
+                        : processLog(lines, false);
+            case "show" ->
+                Optimizers.containsFlag(command, "--stat", "--format", "--pretty", "--name-only", "--name-status")
+                        ? lines
+                        : processShow(lines);
             case "status" -> Optimizers.containsFlag(command, "--porcelain") ? lines : processStatus(lines);
             default -> lines;
         };
@@ -73,8 +111,11 @@ public class GitOutputProcessor implements OutputProcessor {
                 out.add(line);
                 continue;
             }
-            if (line.startsWith("index ") || line.startsWith("new file mode") || line.startsWith("deleted file mode")
-                    || line.startsWith("similarity index") || line.startsWith("rename ")) {
+            if (line.startsWith("index ")
+                    || line.startsWith("new file mode")
+                    || line.startsWith("deleted file mode")
+                    || line.startsWith("similarity index")
+                    || line.startsWith("rename ")) {
                 dropped++;
                 continue;
             }
@@ -101,7 +142,8 @@ public class GitOutputProcessor implements OutputProcessor {
             out.add("... +" + hunkSkipped + " more lines in last hunk");
         }
         if (files > 0 && dropped > 0) {
-            out.add("[processed diff of " + files + " file(s); run the command with --no-pager and without the optimizer for the full output]");
+            out.add("[processed diff of " + files
+                    + " file(s); run the command with --no-pager and without the optimizer for the full output]");
         }
         return out.stream();
     }

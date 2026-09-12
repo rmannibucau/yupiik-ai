@@ -1,8 +1,29 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.session;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
-import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -17,19 +38,12 @@ import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-import org.junit.jupiter.api.Test;
-
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
 
 class AgentSessionServiceTest {
 
@@ -39,7 +53,10 @@ class AgentSessionServiceTest {
             @Override
             public Map<String, List<EmbeddedTool>> toolsByServer() {
                 return Map.of(
-                        "fs", List.of(tool("read_file", "[fs] Read a file\n\nlong"), tool("write_file", "[fs] Write a file")),
+                        "fs",
+                                List.of(
+                                        tool("read_file", "[fs] Read a file\n\nlong"),
+                                        tool("write_file", "[fs] Write a file")),
                         "code", List.of(tool("find_symbol", "[code] Find a symbol")));
             }
         });
@@ -48,9 +65,18 @@ class AgentSessionServiceTest {
 
         assertTrue(listing.anyTool());
         assertEquals(3, listing.matches());
-        assertEquals(List.of("code", "fs"), listing.servers().stream().map(AgentSessionService.ServerTools::server).toList());
-        final var fs = listing.servers().stream().filter(s -> s.server().equals("fs")).findFirst().orElseThrow();
-        assertEquals(List.of("read_file", "write_file"), fs.tools().stream().map(AgentSessionService.ToolInfo::name).toList());
+        assertEquals(
+                List.of("code", "fs"),
+                listing.servers().stream()
+                        .map(AgentSessionService.ServerTools::server)
+                        .toList());
+        final var fs = listing.servers().stream()
+                .filter(s -> s.server().equals("fs"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(
+                List.of("read_file", "write_file"),
+                fs.tools().stream().map(AgentSessionService.ToolInfo::name).toList());
         assertEquals("Read a file", fs.tools().get(0).description());
     }
 
@@ -388,41 +414,68 @@ class AgentSessionServiceTest {
     }
 
     private static AgentSessionService service(final PermissionService permissions) {
-        return new AgentSessionService(permissions, null, null, null, null, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(
+                permissions, null, null, null, null, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final McpManager mcpManager) {
-        return new AgentSessionService(null, null, mcpManager, null, null, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(
+                null, null, mcpManager, null, null, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final ChatClient chatClient) {
-        return new AgentSessionService(null, chatClient, null, null, null, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(
+                null, chatClient, null, null, null, null, null, null, null, null, null, null, cfg(), null);
     }
 
-    private static AgentSessionService service(final AgentProvider agentProvider, final CodingAgentConfiguration config) {
-        return new AgentSessionService(null, null, null, agentProvider, null, null, null, null, null, null, null, null, config, null);
+    private static AgentSessionService service(
+            final AgentProvider agentProvider, final CodingAgentConfiguration config) {
+        return new AgentSessionService(
+                null, null, null, agentProvider, null, null, null, null, null, null, null, null, config, null);
     }
 
     private static AgentSessionService service(final SessionStore store) {
-        return new AgentSessionService(null, null, null, null, store, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(
+                null, null, null, null, store, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final MemoryStore memoryStore) {
-        return new AgentSessionService(null, null, null, null, null, null, null, memoryStore, null, null, null, null, cfg(), null);
+        return new AgentSessionService(
+                null, null, null, null, null, null, null, memoryStore, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final StructuralCodeGraph graph) {
-        return new AgentSessionService(null, null, null, null, null, null, null, null, graph, null, null, null, cfg(), null);
+        return new AgentSessionService(
+                null, null, null, null, null, null, null, null, graph, null, null, null, cfg(), null);
     }
 
-    private static AgentSessionService service(final PlanFileService planFileService, final CodingAgentConfiguration config) {
-        return new AgentSessionService(null, null, null, null, null, null, null, null, null, planFileService, null, null, config, null);
+    private static AgentSessionService service(
+            final PlanFileService planFileService, final CodingAgentConfiguration config) {
+        return new AgentSessionService(
+                null, null, null, null, null, null, null, null, null, planFileService, null, null, config, null);
     }
 
-    private static AgentSessionService service(final PermissionService permissions, final PlanTodoSeeder seeder,
-                                               final PlanFileService planFileService, final TodoStore todoStore,
-                                               final CodingAgentConfiguration config) {
-        return new AgentSessionService(permissions, null, null, null, null, null, null, null, null, planFileService, seeder, todoStore, config, null);
+    private static AgentSessionService service(
+            final PermissionService permissions,
+            final PlanTodoSeeder seeder,
+            final PlanFileService planFileService,
+            final TodoStore todoStore,
+            final CodingAgentConfiguration config) {
+        return new AgentSessionService(
+                permissions,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                planFileService,
+                seeder,
+                todoStore,
+                config,
+                null);
     }
 
     private static CodingAgentConfiguration cfg() {
@@ -434,20 +487,24 @@ class AgentSessionServiceTest {
     }
 
     private static CodingAgentConfiguration config(final String storageHome, final AgentMode mode) {
-        return new CodingAgentConfiguration(
-                storageHome, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, mode,
-                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
+        final var map = new HashMap<String, String>();
+        if (storageHome != null) {
+            map.put("yca.storageHome", storageHome);
+        }
+        if (mode != null) {
+            map.put("yca.mode", mode.name().toLowerCase());
+        }
+        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
     }
 
     private static CodingAgentConfiguration agentsConfig(final String... names) {
-        final var agents = java.util.Arrays.stream(names)
-                .map(n -> new AgentConfiguration(n, "<prompt>"))
-                .toList();
-        return new CodingAgentConfiguration(
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, agents, null,
-                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
+        final var map = new HashMap<String, String>();
+        map.put("yca.agents.length", String.valueOf(names.length));
+        for (int i = 0; i < names.length; i++) {
+            map.put("yca.agents." + i + ".name", names[i]);
+            map.put("yca.agents." + i + ".prompt", "<prompt>");
+        }
+        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
     }
 
     private static AgentProvider agentProvider(final String... names) {

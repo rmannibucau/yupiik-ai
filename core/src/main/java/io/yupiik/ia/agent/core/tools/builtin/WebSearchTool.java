@@ -1,4 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
+
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
@@ -9,7 +27,6 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -20,9 +37,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
-
 @ApplicationScoped
 public class WebSearchTool implements EmbeddedTool {
     private static final int TIMEOUT_SECONDS = 60;
@@ -31,8 +45,8 @@ public class WebSearchTool implements EmbeddedTool {
     private final JsonMapper mapper;
     private final CodingAgentConfiguration configuration;
 
-    public WebSearchTool(final ExtendedHttpClient client, final JsonMapper mapper,
-                         final CodingAgentConfiguration configuration) {
+    public WebSearchTool(
+            final ExtendedHttpClient client, final JsonMapper mapper, final CodingAgentConfiguration configuration) {
         this.client = client;
         this.mapper = mapper;
         this.configuration = configuration;
@@ -66,9 +80,11 @@ public class WebSearchTool implements EmbeddedTool {
 
     @Override
     public Map<String, Object> schema() {
-        return Schemas.object(Map.of(
-                "query", Schemas.str("The search query."),
-                "num_results", Schemas.intProp("Number of results to return, default 8.")), "query");
+        return Schemas.object(
+                Map.of(
+                        "query", Schemas.str("The search query."),
+                        "num_results", Schemas.intProp("Number of results to return, default 8.")),
+                "query");
     }
 
     @Override
@@ -97,10 +113,7 @@ public class WebSearchTool implements EmbeddedTool {
             url = config.parallelUrl();
             tool = "web_search";
             apiKey = key(config.apiKey(), "PARALLEL_API_KEY");
-            arguments = Map.of(
-                    "objective", query,
-                    "search_queries", List.of(query),
-                    "model_name", "opencode");
+            arguments = Map.of("objective", query, "search_queries", List.of(query), "model_name", "opencode");
         } else {
             url = config.exaUrl();
             tool = "web_search_exa";

@@ -1,7 +1,24 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import static io.yupiik.ia.agent.core.codegraph.GraphModel.Edge;
+import static io.yupiik.ia.agent.core.codegraph.GraphModel.Symbol;
 
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -15,9 +32,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-
-import static io.yupiik.ia.agent.core.codegraph.GraphModel.Edge;
-import static io.yupiik.ia.agent.core.codegraph.GraphModel.Symbol;
 
 /**
  * Writes the agent-readable per-source-file markdown cards under the graph store, mirroring the project source
@@ -136,7 +150,11 @@ public class DocTreeWriter {
             final var sorted = new ArrayList<>(concepts);
             sorted.sort(Comparator.comparing(ConceptNode::slug));
             for (final var node : sorted) {
-                sb.append("- [[").append(node.slug()).append("]]: ").append(oneLine(node.summary())).append('\n');
+                sb.append("- [[")
+                        .append(node.slug())
+                        .append("]]: ")
+                        .append(oneLine(node.summary()))
+                        .append('\n');
             }
             if (sorted.isEmpty()) {
                 sb.append("_(no concept nodes yet — enable 'enrich' for the curated layer)_\n");
@@ -186,15 +204,31 @@ public class DocTreeWriter {
     public static String structuralDigest(final GraphModel model) {
         final var sb = new StringBuilder();
         final var symbols = new ArrayList<>(model.symbols());
-        symbols.sort(Comparator.comparing(Symbol::fqn).thenComparing(Symbol::kind).thenComparing(Symbol::startLine));
+        symbols.sort(
+                Comparator.comparing(Symbol::fqn).thenComparing(Symbol::kind).thenComparing(Symbol::startLine));
         for (final var s : symbols) {
-            sb.append(s.fqn()).append(':').append(s.kind()).append(':').append(s.file()).append(':')
-                    .append(s.startLine()).append(':').append(s.endLine()).append(':').append(s.signature()).append('\n');
+            sb.append(s.fqn())
+                    .append(':')
+                    .append(s.kind())
+                    .append(':')
+                    .append(s.file())
+                    .append(':')
+                    .append(s.startLine())
+                    .append(':')
+                    .append(s.endLine())
+                    .append(':')
+                    .append(s.signature())
+                    .append('\n');
         }
         final var edges = new ArrayList<>(model.edges());
         edges.sort(Comparator.comparing(Edge::from).thenComparing(Edge::type).thenComparing(Edge::to));
         for (final var e : edges) {
-            sb.append(e.from()).append(':').append(e.type()).append(':').append(e.to()).append('\n');
+            sb.append(e.from())
+                    .append(':')
+                    .append(e.type())
+                    .append(':')
+                    .append(e.to())
+                    .append('\n');
         }
         return sha256(sb.toString());
     }
@@ -247,18 +281,30 @@ public class DocTreeWriter {
         }
         sb.append("sources_digest:").append(node.sourcesDigest()).append('\n');
         for (final var link : node.links()) {
-            sb.append("links:").append(link.to()).append(':').append(link.relation()).append('\n');
+            sb.append("links:")
+                    .append(link.to())
+                    .append(':')
+                    .append(link.relation())
+                    .append('\n');
         }
         sb.append("generator:1\n");
         sb.append(FRONTMATTER_OPEN).append('\n');
         sb.append("## Summary\n\n");
-        sb.append(node.summary() == null || node.summary().isBlank() ? "_(no summary)_" : node.summary().strip()).append('\n');
+        sb.append(
+                        node.summary() == null || node.summary().isBlank()
+                                ? "_(no summary)_"
+                                : node.summary().strip())
+                .append('\n');
         if (!node.links().isEmpty()) {
             sb.append("\n## Related\n");
             final var links = new ArrayList<>(node.links());
             links.sort(Comparator.comparing(ConceptLink::to));
             for (final var link : links) {
-                sb.append("- ").append(link.relation().replace('_', ' ')).append(" [[").append(link.to()).append("]]");
+                sb.append("- ")
+                        .append(link.relation().replace('_', ' '))
+                        .append(" [[")
+                        .append(link.to())
+                        .append("]]");
                 if (link.description() != null && !link.description().isBlank()) {
                     sb.append(" — ").append(link.description());
                 }
@@ -401,10 +447,14 @@ public class DocTreeWriter {
      * A concept node grouping several source files (graft's curated node). Edges are typed links to other
      * concepts, referenced by slug.
      */
-    public record ConceptNode(String name, String slug, String type, String summary, List<String> sources,
-                              String sourcesDigest, List<ConceptLink> links) {
-    }
+    public record ConceptNode(
+            String name,
+            String slug,
+            String type,
+            String summary,
+            List<String> sources,
+            String sourcesDigest,
+            List<ConceptLink> links) {}
 
-    public record ConceptLink(String to, String relation, String description) {
-    }
+    public record ConceptLink(String to, String relation, String description) {}
 }

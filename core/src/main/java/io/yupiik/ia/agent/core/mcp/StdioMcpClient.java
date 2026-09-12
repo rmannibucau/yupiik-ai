@@ -1,7 +1,21 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -47,11 +61,14 @@ class StdioMcpClient implements McpClient {
         IOException last = null;
         for (final var candidate : SUPPORTED_PROTOCOL_VERSIONS) {
             try {
-                final var res = request("initialize", Map.of(
-                        "protocolVersion", candidate,
-                        "capabilities", Map.of(),
-                        "clientInfo", Map.of("name", "yca", "version", "1.0.0")));
-                if (res instanceof Map<?, ?> r && r.get("protocolVersion") instanceof String echoed
+                final var res = request(
+                        "initialize",
+                        Map.of(
+                                "protocolVersion", candidate,
+                                "capabilities", Map.of(),
+                                "clientInfo", Map.of("name", "yca", "version", "1.0.0")));
+                if (res instanceof Map<?, ?> r
+                        && r.get("protocolVersion") instanceof String echoed
                         && !echoed.isBlank()) {
                     protocolVersion = echoed;
                 } else {
@@ -110,7 +127,8 @@ class StdioMcpClient implements McpClient {
         return String.valueOf(res);
     }
 
-    private Object request(final String method, final Map<String, Object> params) throws IOException, InterruptedException {
+    private Object request(final String method, final Map<String, Object> params)
+            throws IOException, InterruptedException {
         final var id = ids.incrementAndGet();
         send(Map.of("jsonrpc", "2.0", "id", id, "method", method, "params", params));
         String line;

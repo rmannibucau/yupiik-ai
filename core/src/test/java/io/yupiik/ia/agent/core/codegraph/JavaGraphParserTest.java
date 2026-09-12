@@ -1,14 +1,28 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class JavaGraphParserTest {
 
@@ -47,9 +61,7 @@ class JavaGraphParserTest {
                 .toList();
         assertTrue(methodNames.contains("sample.A.run"), "expected method symbol, got " + methodNames);
 
-        final var edgeTypes = model.edges().stream()
-                .map(GraphModel.Edge::type)
-                .toList();
+        final var edgeTypes = model.edges().stream().map(GraphModel.Edge::type).toList();
         assertTrue(edgeTypes.contains(GraphModel.EdgeType.CALLS), "expected a CALLS edge, got " + edgeTypes);
     }
 
@@ -74,8 +86,7 @@ class JavaGraphParserTest {
         // Field, parameter and local variable types are receiver-typing hints only (graft's
         // collectBindings contract) - they must never become edges, so primitives and java.lang
         // types cannot leak as junk USES edges.
-        assertTrue(model.edges().isEmpty(),
-                "expected no edges from declaration types, got " + model.edges());
+        assertTrue(model.edges().isEmpty(), "expected no edges from declaration types, got " + model.edges());
     }
 
     @Test
@@ -92,11 +103,14 @@ class JavaGraphParserTest {
 
         // An unresolved/external base or interface keeps its raw qualified name as the target
         // (graft's 'external type' contract) instead of being dropped or fabricated.
-        assertTrue(model.edges().stream().anyMatch(e -> e.type() == GraphModel.EdgeType.EXTENDS
-                        && e.to().equals("java.awt.Frame")),
+        assertTrue(
+                model.edges().stream()
+                        .anyMatch(e -> e.type() == GraphModel.EdgeType.EXTENDS && e.to().equals("java.awt.Frame")),
                 "expected EXTENDS edge keeping the qualified external name, got " + model.edges());
-        assertTrue(model.edges().stream().anyMatch(e -> e.type() == GraphModel.EdgeType.IMPLEMENTS
-                        && e.to().equals("java.io.ExternalMarker")),
+        assertTrue(
+                model.edges().stream()
+                        .anyMatch(e ->
+                                e.type() == GraphModel.EdgeType.IMPLEMENTS && e.to().equals("java.io.ExternalMarker")),
                 "expected IMPLEMENTS edge keeping the qualified external name, got " + model.edges());
     }
 
@@ -118,11 +132,13 @@ class JavaGraphParserTest {
         final var model = parser.parse(src);
 
         // new Widget() (in-package type) is a CALLS edge; new String() (java.lang) is dropped.
-        assertTrue(model.edges().stream().anyMatch(e -> e.type() == GraphModel.EdgeType.CALLS
-                        && e.to().equals("sample.Widget")),
+        assertTrue(
+                model.edges().stream()
+                        .anyMatch(e -> e.type() == GraphModel.EdgeType.CALLS && e.to().equals("sample.Widget")),
                 "expected CALLS edge to the in-package constructed type, got " + model.edges());
-        assertTrue(model.edges().stream().noneMatch(e -> e.type() == GraphModel.EdgeType.CALLS
-                        && e.to().contains("String")),
+        assertTrue(
+                model.edges().stream()
+                        .noneMatch(e -> e.type() == GraphModel.EdgeType.CALLS && e.to().contains("String")),
                 "expected no CALLS edge for java.lang construction, got " + model.edges());
     }
 
@@ -144,13 +160,15 @@ class JavaGraphParserTest {
                 .filter(e -> e.type() == GraphModel.EdgeType.IMPORTS)
                 .map(GraphModel.Edge::to)
                 .toList();
-        assertTrue(importEdges.contains("not.existing.Service"),
+        assertTrue(
+                importEdges.contains("not.existing.Service"),
                 "expected the off-classpath type to be seen as imported, got " + importEdges);
 
         // new Service() is an off-classpath import - drop the construction edge (graft drops
         // unresolved construction); the IMPORTS edge already records the dependency.
-        assertTrue(model.edges().stream().noneMatch(e -> e.type() == GraphModel.EdgeType.CALLS
-                        && e.to().contains("Service")),
+        assertTrue(
+                model.edges().stream()
+                        .noneMatch(e -> e.type() == GraphModel.EdgeType.CALLS && e.to().contains("Service")),
                 "expected off-classpath construction to be dropped, got " + model.edges());
     }
 
@@ -177,7 +195,6 @@ class JavaGraphParserTest {
         final var callEdges = model.edges().stream()
                 .filter(e -> e.type() == GraphModel.EdgeType.CALLS)
                 .toList();
-        assertEquals(1, callEdges.size(),
-                "expected exactly one CALLS edge for repeated invocations, got " + callEdges);
+        assertEquals(1, callEdges.size(), "expected exactly one CALLS edge for repeated invocations, got " + callEdges);
     }
 }

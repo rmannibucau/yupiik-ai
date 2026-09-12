@@ -1,14 +1,29 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -37,11 +52,17 @@ public class SystemPromptBuilder {
     private final AgentProvider agentProvider;
     private final ProviderManager providerManager;
     private final TodoPromptResolver todoPromptResolver;
+    private final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
 
-    public SystemPromptBuilder(final CodingAgentConfiguration configuration, final MemoryStore memoryStore,
-                               final TodoStore todoStore, final PermissionService permissionService,
-                               final AgentProvider agentProvider, final ProviderManager providerManager,
-                               final TodoPromptResolver todoPromptResolver) {
+    public SystemPromptBuilder(
+            final CodingAgentConfiguration configuration,
+            final MemoryStore memoryStore,
+            final TodoStore todoStore,
+            final PermissionService permissionService,
+            final AgentProvider agentProvider,
+            final ProviderManager providerManager,
+            final TodoPromptResolver todoPromptResolver,
+            final MavenRepositoryKnowledgeService mavenRepositoryKnowledge) {
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.todoStore = todoStore;
@@ -49,6 +70,7 @@ public class SystemPromptBuilder {
         this.agentProvider = agentProvider;
         this.providerManager = providerManager;
         this.todoPromptResolver = todoPromptResolver;
+        this.mavenRepositoryKnowledge = mavenRepositoryKnowledge;
     }
 
     protected SystemPromptBuilder() {
@@ -59,6 +81,7 @@ public class SystemPromptBuilder {
         this.agentProvider = null;
         this.providerManager = null;
         this.todoPromptResolver = null;
+        this.mavenRepositoryKnowledge = null;
     }
 
     public String build() {
@@ -88,22 +111,28 @@ public class SystemPromptBuilder {
         final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
         if (plan) {
             sb.append("You are yca, a terminal coding agent, currently in PLAN mode.\n");
-            sb.append("You must NOT modify the repository: no file creation, edits or deletions, and no state-changing shell commands. Only read-only tools are available.\n");
-            sb.append("Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
-            sb.append("Use todo_write to record the plan: one pending item per concrete implementation step, in execution order. todo_write is the only state-changing tool allowed in this mode.\n");
+            sb.append(
+                    "You must NOT modify the repository: no file creation, edits or deletions, and no state-changing shell commands. Only read-only tools are available.\n");
+            sb.append(
+                    "Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
+            sb.append(
+                    "Use todo_write to record the plan: one pending item per concrete implementation step, in execution order. todo_write is the only state-changing tool allowed in this mode.\n");
             appendTodoGuidance(sb);
             sb.append('\n');
         } else {
             sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
-            sb.append("You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");
+            sb.append(
+                    "You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");
             sb.append("Rules:\n");
             sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
             sb.append("- Read files before editing them; keep edits minimal and focused.\n");
             sb.append("- Use todo_write to track multi-step work and keep it up to date.\n");
             sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
             sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
-            sb.append("- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
-            sb.append("- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n");
+            sb.append(
+                    "- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
+            sb.append(
+                    "- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n");
             appendTodoGuidance(sb);
             sb.append('\n');
         }
@@ -114,11 +143,16 @@ public class SystemPromptBuilder {
         if (!projectDir.equals(workingDir)) {
             sb.append("- Target project directory: ").append(projectDir).append('\n');
         }
-        sb.append("- Platform: ").append(System.getProperty("os.name")).append(' ')
-                .append(System.getProperty("os.version")).append('\n');
+        sb.append("- Platform: ")
+                .append(System.getProperty("os.name"))
+                .append(' ')
+                .append(System.getProperty("os.version"))
+                .append('\n');
         sb.append("- Java: ").append(System.getProperty("java.version")).append('\n');
         sb.append("- Date: ").append(LocalDate.now()).append('\n');
-        sb.append("- Current todo list:\n").append(todoStore == null ? "(empty)" : todoStore.render()).append('\n');
+        sb.append("- Current todo list:\n")
+                .append(todoStore == null ? "(empty)" : todoStore.render())
+                .append('\n');
         final var project = projectContext(projectDir);
         if (!project.isBlank()) {
             sb.append('\n').append(project).append('\n');
@@ -127,6 +161,15 @@ public class SystemPromptBuilder {
         if (!skills.isBlank()) {
             sb.append('\n').append(skills).append('\n');
         }
+        if (mavenRepositoryKnowledge != null) {
+            final var sessionSkills = mavenRepositoryKnowledge.sessionSkillBlocks();
+            if (!sessionSkills.isEmpty()) {
+                sb.append('\n');
+                for (final var block : sessionSkills) {
+                    sb.append(block).append('\n');
+                }
+            }
+        }
         final var memory = memoryStore == null ? "" : memoryStore.promptSection(prompt);
         if (!memory.isBlank()) {
             sb.append('\n').append(memory).append('\n');
@@ -134,7 +177,9 @@ public class SystemPromptBuilder {
         if (agent != null && agentProvider != null) {
             final var agentPrompt = agentProvider.resolvePrompt(agent);
             if (agentPrompt != null && !agentPrompt.isBlank()) {
-                sb.append("\n\n<agent name=\"").append(agent.name()).append("\">\n")
+                sb.append("\n\n<agent name=\"")
+                        .append(agent.name())
+                        .append("\">\n")
                         .append(agentPrompt)
                         .append("\n</agent>\n");
             }
@@ -192,8 +237,13 @@ public class SystemPromptBuilder {
             if (content.length() > FILE_CAP) {
                 content = splice(content, FILE_CAP);
             }
-            sb.append("<project-file name=\"").append(label).append("\" path=\"")
-                    .append(path.toAbsolutePath().normalize()).append("\">\n").append(content).append("\n</project-file>\n");
+            sb.append("<project-file name=\"")
+                    .append(label)
+                    .append("\" path=\"")
+                    .append(path.toAbsolutePath().normalize())
+                    .append("\">\n")
+                    .append(content)
+                    .append("\n</project-file>\n");
         } catch (final IOException e) {
             // skip unreadable
         }
@@ -272,9 +322,13 @@ public class SystemPromptBuilder {
                     }
                     try {
                         final var raw = Files.readString(skillFile);
-                        final var parsed = parseSkill(raw, skillDir.getFileName().toString());
-                        sb.append("<skill name=\"").append(parsed.name()).append("\">\n")
-                                .append(parsed.content()).append("\n</skill>\n");
+                        final var parsed =
+                                parseSkill(raw, skillDir.getFileName().toString());
+                        sb.append("<skill name=\"")
+                                .append(parsed.name())
+                                .append("\">\n")
+                                .append(parsed.content())
+                                .append("\n</skill>\n");
                         added = true;
                     } catch (final IOException e) {
                         // skip unreadable
@@ -302,7 +356,8 @@ public class SystemPromptBuilder {
             }
         }
         list.add(Path.of(configuration.resolveStorageHome(), "skills").toString());
-        list.add(Path.of(System.getProperty("user.home"), ".config", "opencode", "skills").toString());
+        list.add(Path.of(System.getProperty("user.home"), ".config", "opencode", "skills")
+                .toString());
         list.add(Path.of(System.getProperty("user.home"), ".claude", "skills").toString());
         return list;
     }
@@ -317,7 +372,10 @@ public class SystemPromptBuilder {
             final var end = content.indexOf('\n' + FRONTMATTER_END + "\n", FRONTMATTER_START.length());
             if (end > 0) {
                 final var front = content.substring(FRONTMATTER_START.length(), end);
-                final var nameLine = front.lines().filter(l -> l.startsWith("name:")).findFirst().orElse("");
+                final var nameLine = front.lines()
+                        .filter(l -> l.startsWith("name:"))
+                        .findFirst()
+                        .orElse("");
                 if (!nameLine.isBlank()) {
                     name = nameLine.substring("name:".length()).strip();
                 }
@@ -330,6 +388,5 @@ public class SystemPromptBuilder {
         return new Skill(name, content.strip());
     }
 
-    private record Skill(String name, String content) {
-    }
+    private record Skill(String name, String content) {}
 }

@@ -1,8 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -26,8 +40,14 @@ class HttpMcpClient implements McpClient {
     private volatile String sessionId;
     private volatile String protocolVersion;
 
-    HttpMcpClient(final String name, final String url, final String apiKey, final List<String> headers,
-                  final long timeoutSeconds, final JsonMapper mapper, final ExtendedHttpClient client) {
+    HttpMcpClient(
+            final String name,
+            final String url,
+            final String apiKey,
+            final List<String> headers,
+            final long timeoutSeconds,
+            final JsonMapper mapper,
+            final ExtendedHttpClient client) {
         this.name = name;
         this.url = url;
         this.apiKey = apiKey;
@@ -42,11 +62,14 @@ class HttpMcpClient implements McpClient {
         IOException last = null;
         for (final var candidate : SUPPORTED_PROTOCOL_VERSIONS) {
             try {
-                final var res = request("initialize", Map.of(
-                        "protocolVersion", candidate,
-                        "capabilities", Map.of(),
-                        "clientInfo", Map.of("name", "yca", "version", "1.0.0")));
-                if (res instanceof Map<?, ?> r && r.get("protocolVersion") instanceof String echoed
+                final var res = request(
+                        "initialize",
+                        Map.of(
+                                "protocolVersion", candidate,
+                                "capabilities", Map.of(),
+                                "clientInfo", Map.of("name", "yca", "version", "1.0.0")));
+                if (res instanceof Map<?, ?> r
+                        && r.get("protocolVersion") instanceof String echoed
                         && !echoed.isBlank()) {
                     protocolVersion = echoed;
                 } else {
@@ -82,7 +105,8 @@ class HttpMcpClient implements McpClient {
     }
 
     @Override
-    public String callTool(final String toolName, final Map<String, Object> arguments) throws IOException, InterruptedException {
+    public String callTool(final String toolName, final Map<String, Object> arguments)
+            throws IOException, InterruptedException {
         final var res = request("tools/call", Map.of("name", toolName, "arguments", arguments));
         if (res instanceof Map<?, ?> m) {
             if (Boolean.parseBoolean(String.valueOf(m.get("isError")))) {
@@ -104,7 +128,8 @@ class HttpMcpClient implements McpClient {
         return String.valueOf(res);
     }
 
-    private Object request(final String method, final Map<String, Object> params) throws IOException, InterruptedException {
+    private Object request(final String method, final Map<String, Object> params)
+            throws IOException, InterruptedException {
         final var notification = method.startsWith("notifications/");
         final var message = new java.util.LinkedHashMap<String, Object>();
         message.put("jsonrpc", "2.0");
@@ -141,7 +166,9 @@ class HttpMcpClient implements McpClient {
             throw new IOException(e);
         }
         response.headers().firstValue("mcp-session-id").ifPresent(s -> sessionId = s);
-        if (response.statusCode() == 202 || response.body() == null || response.body().isBlank()) {
+        if (response.statusCode() == 202
+                || response.body() == null
+                || response.body().isBlank()) {
             return null;
         }
         if (response.statusCode() >= 400) {
@@ -183,8 +210,7 @@ class HttpMcpClient implements McpClient {
             } catch (final RuntimeException e) {
                 continue;
             }
-            if (json instanceof Map<?, ?> m && m.get("id") != null
-                    && expectedId == numberOrMinusOne(m.get("id"))) {
+            if (json instanceof Map<?, ?> m && m.get("id") != null && expectedId == numberOrMinusOne(m.get("id"))) {
                 if (m.get("error") instanceof Map<?, ?> err) {
                     throw new IOException("MCP " + name + " error: " + err.get("message"));
                 }

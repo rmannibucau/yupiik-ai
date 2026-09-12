@@ -1,8 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.memory;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -18,7 +32,8 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class MemoryStore {
-    public static final String HEADER = "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n";
+    public static final String HEADER =
+            "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n";
 
     private final CodingAgentConfiguration configuration;
 
@@ -104,8 +119,13 @@ public class MemoryStore {
 
     private static final int MARKUP_OVERHEAD = 57;
 
-    private static ScopeSelection select(final String globalText, final String projectText, final String globalRaw,
-                                         final String projectRaw, final String prompt, final int max) {
+    private static ScopeSelection select(
+            final String globalText,
+            final String projectText,
+            final String globalRaw,
+            final String projectRaw,
+            final String prompt,
+            final int max) {
         // Global facts are durable high-value directives: keep their HEAD (top lines), never tail.
         final var global = globalText.isBlank() ? globalText : bounded(globalText, max / 2, false);
         final var total = global.length() + (projectText.isBlank() ? 0 : Math.min(projectText.length(), max / 2));
@@ -127,7 +147,9 @@ public class MemoryStore {
         var remaining = max - g.length() - MARKUP_OVERHEAD;
         final var projectSb = new StringBuilder();
         for (final var entry : ranked) {
-            final var wouldAdd = projectSb.length() + (projectSb.isEmpty() ? 0 : 1) + entry.line().length();
+            final var wouldAdd = projectSb.length()
+                    + (projectSb.isEmpty() ? 0 : 1)
+                    + entry.line().length();
             if (wouldAdd > remaining) {
                 break;
             }
@@ -228,11 +250,9 @@ public class MemoryStore {
         return n;
     }
 
-    private record Entry(String line, double score) {
-    }
+    private record Entry(String line, double score) {}
 
-    private record ScopeSelection(String global, String project) {
-    }
+    private record ScopeSelection(String global, String project) {}
 
     public synchronized List<String> append(final boolean global, final List<String> facts) {
         if (facts == null || facts.isEmpty()) {
@@ -272,17 +292,23 @@ public class MemoryStore {
         if (text == null || text.isBlank()) {
             return List.of();
         }
-        return append(global, text.lines().map(String::strip).filter(l -> !l.isEmpty()).toList());
+        return append(
+                global,
+                text.lines().map(String::strip).filter(l -> !l.isEmpty()).toList());
     }
 
     private void write(final Path file, final LinkedHashSet<String> lines) throws IOException {
         final var content = new StringBuilder(HEADER);
         lines.forEach(l -> content.append(l).append('\n'));
-        final var tmp = file.resolveSibling(file.getFileName() + ".tmp-" + Thread.currentThread().getName().hashCode());
+        final var tmp = file.resolveSibling(
+                file.getFileName() + ".tmp-" + Thread.currentThread().getName().hashCode());
         Files.createDirectories(file.getParent());
         Files.writeString(tmp, content.toString());
         try {
-            Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+            Files.move(
+                    tmp,
+                    file,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                     java.nio.file.StandardCopyOption.ATOMIC_MOVE);
         } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
             Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);

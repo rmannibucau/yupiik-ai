@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.wiring;
 
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
@@ -7,7 +22,6 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.fusion.json.configuration.JsonConfigurationSource;
-
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -30,13 +44,13 @@ public class YcaConfigurationProducer {
         this.args = args;
     }
 
-    public void register(
-            @OnEvent @Order(Integer.MIN_VALUE + 1) final ConfigurationRegistration registration) {
+    public void register(@OnEvent @Order(Integer.MIN_VALUE + 1) final ConfigurationRegistration registration) {
         // first the CLI args (highest priority), wrapped so --provider-model etc. work as --yca-provider-model
         registration.addSource().accept(new YcaPrefixShortcutConfigurationSource(args));
 
         final var configuration = registration.configuration();
-        final var path = configuration.get(PREFIX + "configuration.json")
+        final var path = configuration
+                .get(PREFIX + "configuration.json")
                 .orElseGet(YcaConfigurationProducer::defaultConfigurationFile);
         loadJson(registration, Path.of(path));
     }

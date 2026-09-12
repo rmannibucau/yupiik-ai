@@ -1,16 +1,44 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.ia.agent.core.optimize.Optimizers;
-
 import java.util.Collection;
 import java.util.List;
 
 public record OptimizeConfiguration(
-        @Property(defaultValue = "true", documentation = "Enable the rtk style tool output optimization.") boolean enabled,
-        @Property(defaultValue = "400", documentation = "Maximum number of lines kept by the generic fallback processor.") int genericMaxLines,
-        @Property(defaultValue = "20", documentation = "Maximum number of file/test entries listed by the processors before truncation.") int maxEntries,
-        @Property(defaultValue = "java.util.List.of()", documentation = "Processor or tool names to disable. Processors: mvn, mvnd, mvnw, gradle, gradlew, git, gh, npm, pnpm, prettier, generic. Matched loosely: './' and path prefixes are dropped, only the file name is kept, known extensions (.cmd, .exe, .sh) are ignored and comparison is case insensitive.") List<String> disabled) {
+        @Property(defaultValue = "true", documentation = "Enable the rtk style tool output optimization.")
+        boolean enabled,
+
+        @Property(
+                defaultValue = "400",
+                documentation = "Maximum number of lines kept by the generic fallback processor.")
+        int genericMaxLines,
+
+        @Property(
+                defaultValue = "20",
+                documentation = "Maximum number of file/test entries listed by the processors before truncation.")
+        int maxEntries,
+
+        @Property(
+                defaultValue = "java.util.List.of()",
+                documentation =
+                        "Processor or tool names to disable. Processors: mvn, mvnd, mvnw, gradle, gradlew, git, gh, npm, pnpm, prettier, generic. Matched loosely: './' and path prefixes are dropped, only the file name is kept, known extensions (.cmd, .exe, .sh) are ignored and comparison is case insensitive.")
+        List<String> disabled) {
 
     public boolean isDisabled(final Collection<String> names) {
         if (disabled == null || disabled.isEmpty()) {

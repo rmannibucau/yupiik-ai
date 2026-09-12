@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ia.agent</groupId>
+    <artifactId>yca</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>extensions</artifactId>
+  <packaging>pom</packaging>
+  <name>YCA :: Extensions</name>
+  <description>Aggregator for yca extensions. Each extension is a standalone tooling set composable with the core agent.</description>
+
+  <subprojects>
+    <subproject>maven-repository-indexer-parent</subproject>
+  </subprojects>
+</project>

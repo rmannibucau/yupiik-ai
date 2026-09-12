@@ -1,9 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.net.http.HttpRequest;
 import java.util.ArrayList;
@@ -45,22 +58,26 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
     }
 
     @Override
-    public ChatResult chat(final ProviderConfiguration provider, final ChatCompletionRequest request,
-                           final BooleanSupplier cancelled) throws IOException, InterruptedException {
+    public ChatResult chat(
+            final ProviderConfiguration provider, final ChatCompletionRequest request, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
         final var response = send(provider, http(provider, mapper.toBytes(toWire(request, false))));
         if (response.statusCode() >= 400) {
             if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
                 throw new ContextWindowExceededException();
             }
-            throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body()
-                    + retryAfter(response));
+            throw new IOException(
+                    "LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
         }
         return toResult(parse(AnthropicMessagesResponse.class, response.body()));
     }
 
     @Override
-    public Message stream(final ProviderConfiguration provider, final ChatCompletionRequest request,
-                          final Consumer<StreamDelta> onDelta, final BooleanSupplier cancelled)
+    public Message stream(
+            final ProviderConfiguration provider,
+            final ChatCompletionRequest request,
+            final Consumer<StreamDelta> onDelta,
+            final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var httpRequest = http(provider, mapper.toBytes(toWire(request, true)));
         try (final var reader = openStream(provider, httpRequest, cancelled)) {
@@ -83,14 +100,23 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
                     switch (e.type() == null ? "" : e.type()) {
                         case "message_start" -> {
                             if (e.message() != null && e.message().usage() != null) {
-                                onDelta.accept(StreamDelta.usage(toUsage(e.message().usage(), 0)));
+                                onDelta.accept(
+                                        StreamDelta.usage(toUsage(e.message().usage(), 0)));
                             }
                         }
                         case "content_block_start" -> {
-                            if (e.contentBlock() != null && "tool_use".equals(e.contentBlock().type())) {
-                                toolCalls.put(e.contentBlock().id(), new ToolCall(e.contentBlock().id(), "function",
-                                        new ToolCall.FunctionCall(e.contentBlock().name(), ""), null));
-                                onDelta.accept(StreamDelta.toolCall(toolCalls.get(e.contentBlock().id())));
+                            if (e.contentBlock() != null
+                                    && "tool_use".equals(e.contentBlock().type())) {
+                                toolCalls.put(
+                                        e.contentBlock().id(),
+                                        new ToolCall(
+                                                e.contentBlock().id(),
+                                                "function",
+                                                new ToolCall.FunctionCall(
+                                                        e.contentBlock().name(), ""),
+                                                null));
+                                onDelta.accept(StreamDelta.toolCall(
+                                        toolCalls.get(e.contentBlock().id())));
                             }
                         }
                         case "content_block_delta" -> {
@@ -107,12 +133,16 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
                             } else if ("input_json_delta".equals(d.type()) && d.partialJson() != null) {
                                 for (final var call : toolCalls.entrySet()) {
                                     if (call.getValue().function() != null) {
-                                        final var accumulated = partial.merge(call.getKey(), d.partialJson(), String::concat);
+                                        final var accumulated =
+                                                partial.merge(call.getKey(), d.partialJson(), String::concat);
                                         final var fn = call.getValue().function();
-                                        toolCalls.put(call.getKey(), new ToolCall(
-                                                call.getValue().id(), call.getValue().type(),
-                                                new ToolCall.FunctionCall(fn.name(), accumulated),
-                                                call.getValue().index()));
+                                        toolCalls.put(
+                                                call.getKey(),
+                                                new ToolCall(
+                                                        call.getValue().id(),
+                                                        call.getValue().type(),
+                                                        new ToolCall.FunctionCall(fn.name(), accumulated),
+                                                        call.getValue().index()));
                                         onDelta.accept(StreamDelta.toolCall(toolCalls.get(call.getKey())));
                                     }
                                 }
@@ -134,24 +164,36 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
                             }
                         }
                         case "error" -> {
-                            final var msg = e.extensions() == null ? null : e.extensions().get("message");
+                            final var msg = e.extensions() == null
+                                    ? null
+                                    : e.extensions().get("message");
                             throw new IOException("LLM messages stream failed: " + (msg == null ? event.data() : msg));
                         }
-                        default -> {
-                        }
+                        default -> {}
                     }
                 }
             }
             if (done[0] != null) {
                 return done[0];
             }
-            final var fn = toolCalls.values().isEmpty() ? null : toolCalls.values().iterator().next().function();
-            final var calls = toolCalls.isEmpty() ? null
-                    : List.copyOf(toolCalls.values().stream().map(c -> {
-                        final var f = c.function();
-                        return f == null ? c : new ToolCall(c.id(), c.type(),
-                                new ToolCall.FunctionCall(f.name(), f.arguments() == null ? "" : f.arguments()), c.index());
-                    }).toList());
+            final var fn = toolCalls.values().isEmpty()
+                    ? null
+                    : toolCalls.values().iterator().next().function();
+            final var calls = toolCalls.isEmpty()
+                    ? null
+                    : List.copyOf(toolCalls.values().stream()
+                            .map(c -> {
+                                final var f = c.function();
+                                return f == null
+                                        ? c
+                                        : new ToolCall(
+                                                c.id(),
+                                                c.type(),
+                                                new ToolCall.FunctionCall(
+                                                        f.name(), f.arguments() == null ? "" : f.arguments()),
+                                                c.index());
+                            })
+                            .toList());
             return new Message("assistant", text.length() == 0 ? null : text.toString(), null, calls, null, null);
         }
     }
@@ -166,7 +208,8 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
             throw new IOException("Models request failed (" + response.statusCode() + "): " + response.body());
         }
         final var parsed = parse(AnthropicModels.class, response.body());
-        final var data = parsed == null || parsed.data() == null ? List.<ModelsResponse.Model>of()
+        final var data = parsed == null || parsed.data() == null
+                ? List.<ModelsResponse.Model>of()
                 : parsed.data().stream()
                         .map(m -> new ModelsResponse.Model(m.id(), null, tokens(m)))
                         .toList();
@@ -213,7 +256,9 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
                                     block.put("type", "tool_use");
                                     block.put("id", call.id());
                                     block.put("name", call.function().name());
-                                    block.put("input", parseArguments(call.function().arguments()));
+                                    block.put(
+                                            "input",
+                                            parseArguments(call.function().arguments()));
                                     blocks.add(block);
                                 }
                             });
@@ -236,7 +281,10 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
                 request.tools() == null
                         ? null
                         : request.tools().stream()
-                                .map(t -> new AnthropicTool(t.function().name(), t.function().description(), t.function().parameters()))
+                                .map(t -> new AnthropicTool(
+                                        t.function().name(),
+                                        t.function().description(),
+                                        t.function().parameters()))
                                 .toList(),
                 toWireToolChoice(request.toolChoice()),
                 null,
@@ -285,31 +333,40 @@ final class AnthropicMessagesClient extends AbstractLlmClient {
                             text.append(block.text());
                         }
                     }
-                    case "tool_use" -> calls.add(new ToolCall(block.id(), "function",
-                            new ToolCall.FunctionCall(block.name(),
-                                    block.input() == null ? "{}" : mapper.toString(block.input())),
-                            null));
-                    default -> {
-                    }
+                    case "tool_use" ->
+                        calls.add(new ToolCall(
+                                block.id(),
+                                "function",
+                                new ToolCall.FunctionCall(
+                                        block.name(), block.input() == null ? "{}" : mapper.toString(block.input())),
+                                null));
+                    default -> {}
                 }
             }
         }
         final var usage = response.usage() == null ? Usage.EMPTY : toUsage(response.usage(), 0);
         return new ChatResult(
-                new Message("assistant", text.length() == 0 ? null : text.toString(),
-                        null, calls.isEmpty() ? null : List.copyOf(calls), null, null),
+                new Message(
+                        "assistant",
+                        text.length() == 0 ? null : text.toString(),
+                        null,
+                        calls.isEmpty() ? null : List.copyOf(calls),
+                        null,
+                        null),
                 usage);
     }
 
     private Usage toUsage(final AnthropicMessagesResponse.AnthropicUsage usage, final int ignored) {
-        final var in = usage.inputTokens() == null ? 0 : (int) usage.inputTokens().longValue();
-        final var out = usage.outputTokens() == null ? 0 : (int) usage.outputTokens().longValue();
+        final var in =
+                usage.inputTokens() == null ? 0 : (int) usage.inputTokens().longValue();
+        final var out =
+                usage.outputTokens() == null ? 0 : (int) usage.outputTokens().longValue();
         return new Usage(in, out, in + out);
     }
 
     // anthropic requires alternating roles so consecutive same-role messages are merged
-    private void appendBlocks(final List<AnthropicMessage> messages, final String role,
-                              final List<Map<String, Object>> blocks) {
+    private void appendBlocks(
+            final List<AnthropicMessage> messages, final String role, final List<Map<String, Object>> blocks) {
         if (blocks.isEmpty()) {
             return;
         }

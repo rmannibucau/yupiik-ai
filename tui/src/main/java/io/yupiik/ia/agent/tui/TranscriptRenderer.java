@@ -1,9 +1,23 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,12 +61,11 @@ final class TranscriptRenderer {
         final var prefix = source.substring(0, safe);
         final var suffix = source.substring(safe);
         List<Line> prefixLines;
-        if (prefix.equals(lastSource) && lastPrefixLines != null
-                && base.equals(lastBase) && styles == lastStyles) {
+        if (prefix.equals(lastSource) && lastPrefixLines != null && base.equals(lastBase) && styles == lastStyles) {
             prefixLines = lastPrefixLines;
         } else {
-            prefixLines = prefixCache.computeIfAbsent(new Key(prefix, width, base, styles),
-                    k -> renderToList(prefix, width, base, styles));
+            prefixLines = prefixCache.computeIfAbsent(
+                    new Key(prefix, width, base, styles), k -> renderToList(prefix, width, base, styles));
         }
         lastSource = prefix;
         lastPrefixLines = prefixLines;
@@ -67,7 +80,8 @@ final class TranscriptRenderer {
         return combined;
     }
 
-    private List<Line> renderToList(final String source, final int width, final Style base, final MarkdownStyles styles) {
+    private List<Line> renderToList(
+            final String source, final int width, final Style base, final MarkdownStyles styles) {
         if (source == null || source.isEmpty()) {
             return List.of();
         }
@@ -107,6 +121,5 @@ final class TranscriptRenderer {
         return safe;
     }
 
-    private record Key(String source, int width, Style base, MarkdownStyles styles) {
-    }
+    private record Key(String source, int width, Style base, MarkdownStyles styles) {}
 }

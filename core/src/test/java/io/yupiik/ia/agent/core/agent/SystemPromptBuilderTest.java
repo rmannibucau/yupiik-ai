@@ -1,23 +1,37 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.agent;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
-import java.util.Map;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
-
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SystemPromptBuilderTest {
 
@@ -34,10 +48,18 @@ class SystemPromptBuilderTest {
         final var nested = project.resolve("src").resolve("main");
         Files.writeString(nested.resolve("AGENTS.md"), "# Nested AGENTS\nnested rule");
         Files.writeString(storageHome.resolve("AGENTS.md"), "# Global AGENTS\nalways use tabs");
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", nested.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", nested.toString(),
+                        "yca.skills.enabled", "true")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("project rule"));
         assertTrue(prompt.contains("nested rule"));
@@ -49,10 +71,18 @@ class SystemPromptBuilderTest {
         final var skill = storageHome.resolve("skills").resolve("my-skill").resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: custom-name\ndescription: a skill\n---\nUse the skill body here.");
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", project.toString(),
+                        "yca.skills.enabled", "true")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("<skill name=\"custom-name\">"));
         assertTrue(prompt.contains("Use the skill body here."));
@@ -60,13 +90,24 @@ class SystemPromptBuilderTest {
 
     @Test
     void includesProjectSkillFromConventionalDir() throws Exception {
-        final var skill = project.resolve(".opencode").resolve("skills").resolve("proj-skill").resolve("SKILL.md");
+        final var skill = project.resolve(".opencode")
+                .resolve("skills")
+                .resolve("proj-skill")
+                .resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: proj-skill\n---\nproject skill body");
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", project.toString(),
+                        "yca.skills.enabled", "true")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("<skill name=\"proj-skill\">"));
         assertTrue(prompt.contains("project skill body"));
@@ -77,10 +118,18 @@ class SystemPromptBuilderTest {
         final var skill = storageHome.resolve("skills").resolve("my-skill").resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: my-skill\n---\nbody");
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "false")), null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", project.toString(),
+                        "yca.skills.enabled", "false")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
         final var prompt = builder.build();
         assertFalse(prompt.contains("<skill name=\"my-skill\">"));
     }
@@ -90,7 +139,8 @@ class SystemPromptBuilderTest {
         final var cfg = config(Map.of("yca.mode", "plan"));
         final var permissions = new PermissionService(cfg);
         permissions.setMode(AgentMode.PLAN);
-        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null);
+        final var builder =
+                new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null, null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("PLAN mode"));
         assertTrue(prompt.contains("must NOT modify the repository"));
@@ -104,46 +154,74 @@ class SystemPromptBuilderTest {
         Files.writeString(project.resolve("README.md"), "# unrelated framework README\ndashboard internals");
         Files.writeString(project.resolve("AGENTS.md"), "# unrelated framework rule\nframework-specific rule");
         final var target = Files.createDirectory(project.getParent().resolve(project.getFileName() + "-scaffold"));
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", project.toString(),
-                "yca.projectDir", target.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", project.toString(),
+                        "yca.projectDir", target.toString(),
+                        "yca.skills.enabled", "true")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
         final var prompt = builder.build();
-        assertTrue(prompt.contains("Target project directory: " + target.toAbsolutePath().normalize()),
+        assertTrue(
+                prompt.contains(
+                        "Target project directory: " + target.toAbsolutePath().normalize()),
                 "persona should name the separate target project dir");
-        assertFalse(prompt.contains("dashboard internals"),
+        assertFalse(
+                prompt.contains("dashboard internals"),
                 "unrelated workingDir README must not leak when projectDir points elsewhere");
-        assertFalse(prompt.contains("framework-specific rule"),
+        assertFalse(
+                prompt.contains("framework-specific rule"),
                 "unrelated workingDir AGENTS.md must not leak when projectDir points elsewhere");
     }
 
     @Test
     void promptDrivenTargetGuidanceIsEmittedForScaffoldRequests() throws Exception {
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null, null, null);
-        final var prompt = builder.build(
-                "generate in /tmp/foo a frontend landing page for the yupiik fusion project");
-        assertTrue(prompt.contains("Target directory: if the user names an explicit directory"),
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", project.toString(),
+                        "yca.skills.enabled", "true")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
+        final var prompt = builder.build("generate in /tmp/foo a frontend landing page for the yupiik fusion project");
+        assertTrue(
+                prompt.contains("Target directory: if the user names an explicit directory"),
                 "the opencode-style target guidance rule should be present so the model follows the named target");
-        assertFalse(prompt.contains("Target project directory:"),
+        assertFalse(
+                prompt.contains("Target project directory:"),
                 "no target persona is claimed from the prompt; the model infers the target from the instruction");
     }
 
     @Test
     void promptWithoutScaffoldTargetKeepsWorkingDirContext() throws Exception {
         Files.writeString(project.resolve("README.md"), "# my repo\nowner docs");
-        final var builder = new SystemPromptBuilder(config(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.workingDir", project.toString(),
-                "yca.skills.enabled", "true")), null, null, null, null, null, null);
+        final var builder = new SystemPromptBuilder(
+                config(Map.of(
+                        "yca.storageHome", storageHome.toString(),
+                        "yca.workingDir", project.toString(),
+                        "yca.skills.enabled", "true")),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null);
         final var prompt = builder.build("explain how the retry logic works");
-        assertTrue(prompt.contains("owner docs"),
-                "workingDir README stays when the prompt names no target dir");
-        assertFalse(prompt.contains("Target project directory:"),
-                "no target persona when the prompt names no target dir");
+        assertTrue(prompt.contains("owner docs"), "workingDir README stays when the prompt names no target dir");
+        assertFalse(
+                prompt.contains("Target project directory:"), "no target persona when the prompt names no target dir");
     }
 
     @Test
@@ -189,7 +267,8 @@ class SystemPromptBuilderTest {
         final var prompt = builder.build();
         assertTrue(prompt.contains("<todo-guidance>"));
         assertTrue(prompt.contains("custom guidance text"));
-        assertFalse(prompt.contains("Do not batch up several todos"), "verbatim override must replace the canned block");
+        assertFalse(
+                prompt.contains("Do not batch up several todos"), "verbatim override must replace the canned block");
     }
 
     @Test
@@ -215,9 +294,10 @@ class SystemPromptBuilderTest {
         return new ProviderManager(cfg, new JsonMapperImpl(List.of(), key -> Optional.empty()));
     }
 
-    private static SystemPromptBuilder builder(final CodingAgentConfiguration cfg, final TodoPromptResolver resolver,
-                                               final ProviderManager manager) {
-        return new SystemPromptBuilder(cfg, null, null, new PermissionService(cfg), new AgentProvider(cfg), manager, resolver);
+    private static SystemPromptBuilder builder(
+            final CodingAgentConfiguration cfg, final TodoPromptResolver resolver, final ProviderManager manager) {
+        return new SystemPromptBuilder(
+                cfg, null, null, new PermissionService(cfg), new AgentProvider(cfg), manager, resolver, null);
     }
 
     private static CodingAgentConfiguration config(final Map<String, String> overrides) {

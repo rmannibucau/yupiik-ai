@@ -1,7 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.agent;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -9,7 +24,6 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
-
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
@@ -34,9 +48,14 @@ public class MemoryExtractor {
     private final Emitter emitter;
     private final Clock clock;
 
-    public MemoryExtractor(final ChatClient chatClient, final CodingAgentConfiguration configuration,
-                           final MemoryStore memoryStore, final JsonMapper mapper, final VirtualThreadExecutor executor,
-                           final Emitter emitter, final Clock clock) {
+    public MemoryExtractor(
+            final ChatClient chatClient,
+            final CodingAgentConfiguration configuration,
+            final MemoryStore memoryStore,
+            final JsonMapper mapper,
+            final VirtualThreadExecutor executor,
+            final Emitter emitter,
+            final Clock clock) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
@@ -83,17 +102,30 @@ public class MemoryExtractor {
         for (var i = messages.size() - 1; i >= 0 && count < 20; i--, count++) {
             final var m = messages.get(i);
             final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
-            sb.insert(0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');
+            sb.insert(
+                    0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');
         }
         final var excerpt = sb.toString();
         try {
-            final var request = new ChatCompletionRequest(null, List.of(
-                    Message.system("Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
-                    Message.user(excerpt)), null, false, null, null, null, null, null);
+            final var request = new ChatCompletionRequest(
+                    null,
+                    List.of(
+                            Message.system(
+                                    "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
+                            Message.user(excerpt)),
+                    null,
+                    false,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null);
             final var res = chatClient.chatStructured(request, "memory_facts", factsSchema());
             if (res.structured()) {
-                final var content = res.result().message() == null || res.result().message().content() == null
-                        ? "" : String.valueOf(res.result().message().content());
+                final var content =
+                        res.result().message() == null || res.result().message().content() == null
+                                ? ""
+                                : String.valueOf(res.result().message().content());
                 final var facts = parseFacts(content);
                 if (!facts.isEmpty()) {
                     final var global = new java.util.ArrayList<String>();
@@ -144,23 +176,27 @@ public class MemoryExtractor {
                 "text", Map.of("type", "string"),
                 "scope", Map.of("type", "string"));
         final var item = Map.<String, Object>of(
-                "type", "object",
-                "properties", itemProperties,
-                "required", List.of("text", "scope"),
-                "additionalProperties", false);
-        final var facts = Map.<String, Object>of(
-                "type", "array",
-                "items", item,
-                "additionalProperties", false);
+                "type",
+                "object",
+                "properties",
+                itemProperties,
+                "required",
+                List.of("text", "scope"),
+                "additionalProperties",
+                false);
+        final var facts = Map.<String, Object>of("type", "array", "items", item, "additionalProperties", false);
         return Map.<String, Object>of(
-                "type", "object",
-                "properties", Map.of("facts", facts),
-                "required", List.of("facts"),
-                "additionalProperties", false);
+                "type",
+                "object",
+                "properties",
+                Map.of("facts", facts),
+                "required",
+                List.of("facts"),
+                "additionalProperties",
+                false);
     }
 
-    private record Fact(String text, String scope) {
-    }
+    private record Fact(String text, String scope) {}
 
     private List<Fact> parseFacts(final String content) {
         try {
@@ -191,13 +227,24 @@ public class MemoryExtractor {
      * Returns {@code null} when the compression call fails.
      */
     private String compressExcerpt(final String excerpt) throws IOException, InterruptedException {
-        final var res = chatClient.chat(new ChatCompletionRequest(null, List.of(
-                Message.system("Compress the following conversation excerpt into a concise, standalone memory snippet "
-                        + "capturing durable facts, decisions and user preferences. Keep long-lived knowledge only, "
-                        + "drop transient task state. Reply with only the snippet text, a few short sentences, no preamble."),
-                Message.user(excerpt)), null, false, null, null, null, null, null));
+        final var res = chatClient.chat(new ChatCompletionRequest(
+                null,
+                List.of(
+                        Message.system(
+                                "Compress the following conversation excerpt into a concise, standalone memory snippet "
+                                        + "capturing durable facts, decisions and user preferences. Keep long-lived knowledge only, "
+                                        + "drop transient task state. Reply with only the snippet text, a few short sentences, no preamble."),
+                        Message.user(excerpt)),
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null));
         final var content = res.message() == null || res.message().content() == null
-                ? "" : String.valueOf(res.message().content());
+                ? ""
+                : String.valueOf(res.message().content());
         final var snippet = content.strip();
         return snippet.isEmpty() ? null : snippet;
     }

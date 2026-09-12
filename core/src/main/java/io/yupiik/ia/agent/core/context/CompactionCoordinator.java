@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -9,12 +24,10 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -56,9 +69,12 @@ public class CompactionCoordinator {
     private final ProviderManager providerManager;
     private final Emitter emitter;
 
-    public CompactionCoordinator(final CodingAgentConfiguration configuration, final ChatClient chatClient,
-                                 final UsageTracker usageTracker, final ProviderManager providerManager,
-                                 final Emitter emitter) {
+    public CompactionCoordinator(
+            final CodingAgentConfiguration configuration,
+            final ChatClient chatClient,
+            final UsageTracker usageTracker,
+            final ProviderManager providerManager,
+            final Emitter emitter) {
         this.configuration = configuration;
         this.chatClient = chatClient;
         this.usageTracker = usageTracker;
@@ -92,7 +108,11 @@ public class CompactionCoordinator {
         }
         final var old = messages.subList(from, to);
         final var chunks = chunkPrune(old, p.toolOutputMaxChars());
-        final var outcome = summarizeRolling("prune", configSystemPrompt("prune"), chunks, configuration.model().prune());
+        final var outcome = summarizeRolling(
+                "prune",
+                configSystemPrompt("prune"),
+                chunks,
+                configuration.model().prune());
         if (!outcome.summary().isBlank()) {
             final var out = new ArrayList<Message>();
             if (system != null) {
@@ -122,13 +142,18 @@ public class CompactionCoordinator {
         final var from = system == null ? 0 : 1;
         final var to = Math.max(from, messages.size() - keep);
         final var chunks = chunkCompact(messages.subList(from, to));
-        final var outcome = summarizeRolling("compaction", configSystemPrompt("compact"), chunks, configuration.model().compact());
+        final var outcome = summarizeRolling(
+                "compaction",
+                configSystemPrompt("compact"),
+                chunks,
+                configuration.model().compact());
         if (!outcome.summary().isBlank()) {
             List<Message> out = new ArrayList<>();
             if (system != null) {
                 out.add(system);
             }
-            out.add(Message.user("<compacted-context>\n" + outcome.summary() + "\n</compacted-context>\n\nContinue from this summary."));
+            out.add(Message.user("<compacted-context>\n" + outcome.summary()
+                    + "\n</compacted-context>\n\nContinue from this summary."));
             out.addAll(messages.subList(to, messages.size()));
             final var digestIndex = system == null ? 0 : 1;
             out = ensureUnderWindow(out, overflow, digestIndex);
@@ -136,9 +161,15 @@ public class CompactionCoordinator {
         }
         final var truncated = localTruncate(messages, from, to);
         final var keptTruncated = ensureUnderWindow(truncated, overflow, -1);
-        LOGGER.warning(outcome.error() == null || outcome.error().isBlank() ? "compaction failed; truncated locally" : outcome.error());
-        emit(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN,
-                outcome.error() == null || outcome.error().isBlank() ? "Summary failed; context truncated locally." : outcome.error()));
+        LOGGER.warning(
+                outcome.error() == null || outcome.error().isBlank()
+                        ? "compaction failed; truncated locally"
+                        : outcome.error());
+        emit(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.WARN,
+                outcome.error() == null || outcome.error().isBlank()
+                        ? "Summary failed; context truncated locally."
+                        : outcome.error()));
         return new CompactionResult(keptTruncated, Mode.TRUNCATE, outcome.error());
     }
 
@@ -215,7 +246,8 @@ public class CompactionCoordinator {
         final var current = new StringBuilder();
         for (final var m : old) {
             final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
-            final var line = '[' + m.role() + "] " + (content.length() > 2000 ? content.substring(0, 2000) + " [...]" : content) + '\n';
+            final var line = '[' + m.role() + "] "
+                    + (content.length() > 2000 ? content.substring(0, 2000) + " [...]" : content) + '\n';
             if (line.length() > MAX_SUMMARY_INPUT_CHARS) {
                 if (!current.isEmpty()) {
                     chunks.add(current.toString());
@@ -260,7 +292,8 @@ public class CompactionCoordinator {
      * When multiple chunks must be summarized, each chunk (including the running digest) is passed
      * separately so no single call ever exceeds the compact model's input window.
      */
-    private Outcome summarizeRolling(final String label, final String systemPrompt, final List<String> chunks, final String modelOverride) {
+    private Outcome summarizeRolling(
+            final String label, final String systemPrompt, final List<String> chunks, final String modelOverride) {
         final var summary = new StringBuilder();
         for (var c = 0; c < chunks.size(); c++) {
             final var prompt = chunkPrompt(chunks, c, summary);
@@ -269,9 +302,16 @@ public class CompactionCoordinator {
             for (var attempt = 0; attempt < retries(); attempt++) {
                 final var model = resolveModel(modelOverride);
                 try {
-                    final var res = chatClient.chat(new ChatCompletionRequest(model, List.of(
-                            Message.system(systemPrompt),
-                            Message.user(prompt)), null, false, null, null, null, null, null));
+                    final var res = chatClient.chat(new ChatCompletionRequest(
+                            model,
+                            List.of(Message.system(systemPrompt), Message.user(prompt)),
+                            null,
+                            false,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null));
                     part = res.message() == null ? "" : str(res.message().content());
                     if (part != null && !part.isBlank()) {
                         break;
@@ -337,12 +377,19 @@ public class CompactionCoordinator {
             final var summaryText = rollingSummary.length() > MAX_ROLLING_SUMMARY_CHARS
                     ? rollingSummary.substring(rollingSummary.length() - MAX_ROLLING_SUMMARY_CHARS)
                     : rollingSummary.toString();
-            sb.append("Below is a summary of earlier context, followed by more conversation. Merge them into one concise, lossless summary. Preserve key decisions, file paths, commands, results, current state and next steps.\n\nEarlier context summary:\n")
-                    .append("<summary>").append(summaryText).append("</summary>");
+            sb.append(
+                            "Below is a summary of earlier context, followed by more conversation. Merge them into one concise, lossless summary. Preserve key decisions, file paths, commands, results, current state and next steps.\n\nEarlier context summary:\n")
+                    .append("<summary>")
+                    .append(summaryText)
+                    .append("</summary>");
         }
         sb.append(chunks.get(index));
         if (index + 1 < chunks.size()) {
-            sb.append("\n(this is part ").append(index + 1).append(" of ").append(chunks.size()).append("; continue merging)");
+            sb.append("\n(this is part ")
+                    .append(index + 1)
+                    .append(" of ")
+                    .append(chunks.size())
+                    .append("; continue merging)");
         }
         return sb.toString();
     }
@@ -354,8 +401,7 @@ public class CompactionCoordinator {
         return "Summarize this coding agent conversation: goal, decisions, files touched, commands run, current state and next steps. Max 60 lines.";
     }
 
-    private record Outcome(String summary, String error) {
-    }
+    private record Outcome(String summary, String error) {}
 
     private List<Message> localTruncate(final List<Message> messages, final int from, final int to) {
         final var out = new ArrayList<Message>();
@@ -365,8 +411,13 @@ public class CompactionCoordinator {
         final var cap = configuration.pruning().toolOutputMaxChars();
         for (final var m : messages.subList(from, to)) {
             final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
-            out.add(new Message(m.role(), content.length() > cap ? splice(content, cap) : content,
-                    m.name(), m.toolCalls(), m.toolCallId(), m.others()));
+            out.add(new Message(
+                    m.role(),
+                    content.length() > cap ? splice(content, cap) : content,
+                    m.name(),
+                    m.toolCalls(),
+                    m.toolCallId(),
+                    m.others()));
         }
         out.addAll(messages.subList(to, messages.size()));
         return out;

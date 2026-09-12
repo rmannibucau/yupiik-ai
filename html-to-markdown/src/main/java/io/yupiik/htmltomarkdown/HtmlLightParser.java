@@ -1,6 +1,19 @@
-package io.yupiik.ia.agent.core.html;
-
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.htmltomarkdown;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -13,17 +26,25 @@ import java.util.Set;
  * structural elements (headings, paragraphs, lists, links, images, pre/code, blockquote,
  * table) and skips script/style/template/svg content, decoding basic entities.
  */
-@ApplicationScoped
 public class HtmlLightParser {
     private static final Set<String> SKIP_CONTENT =
             Set.of("script", "style", "noscript", "template", "title", "head", "textarea", "svg", "iframe", "noframes");
-    private static final Set<String> VOID_ELEMENTS =
-            Set.of("area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param",
-                    "source", "track", "wbr");
+    private static final Set<String> VOID_ELEMENTS = Set.of(
+            "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track",
+            "wbr");
     private static final Map<String, String> ENTITIES = Map.ofEntries(
-            Map.entry("amp", "&"), Map.entry("lt", "<"), Map.entry("gt", ">"), Map.entry("quot", "\""),
-            Map.entry("apos", "'"), Map.entry("nbsp", " "), Map.entry("copy", "(c)"), Map.entry("reg", "(r)"),
-            Map.entry("trade", "(tm)"), Map.entry("hellip", "..."), Map.entry("mdash", "-"), Map.entry("ndash", "-"));
+            Map.entry("amp", "&"),
+            Map.entry("lt", "<"),
+            Map.entry("gt", ">"),
+            Map.entry("quot", "\""),
+            Map.entry("apos", "'"),
+            Map.entry("nbsp", " "),
+            Map.entry("copy", "(c)"),
+            Map.entry("reg", "(r)"),
+            Map.entry("trade", "(tm)"),
+            Map.entry("hellip", "..."),
+            Map.entry("mdash", "-"),
+            Map.entry("ndash", "-"));
 
     public String toMarkdown(final String html) {
         return parse(html, true);
@@ -129,8 +150,12 @@ public class HtmlLightParser {
         return normalize(sb);
     }
 
-    private void openTag(final StringBuilder sb, final String lower, final String attrs, final Deque<String> links,
-                         final boolean markdown) {
+    private void openTag(
+            final StringBuilder sb,
+            final String lower,
+            final String attrs,
+            final Deque<String> links,
+            final boolean markdown) {
         switch (lower) {
             case "h1", "h2", "h3", "h4", "h5", "h6" -> {
                 blockBreak(sb);
@@ -138,9 +163,31 @@ public class HtmlLightParser {
                     sb.append("#".repeat(lower.charAt(1) - '0')).append(' ');
                 }
             }
-            case "p", "div", "section", "article", "header", "footer", "main", "figure", "details",
-                    "table", "ul", "ol", "dl", "form", "aside", "nav", "address", "fieldset", "center",
-                    "caption", "figcaption", "dt", "dd", "summary", "legend" -> blockBreak(sb);
+            case "p",
+                    "div",
+                    "section",
+                    "article",
+                    "header",
+                    "footer",
+                    "main",
+                    "figure",
+                    "details",
+                    "table",
+                    "ul",
+                    "ol",
+                    "dl",
+                    "form",
+                    "aside",
+                    "nav",
+                    "address",
+                    "fieldset",
+                    "center",
+                    "caption",
+                    "figcaption",
+                    "dt",
+                    "dd",
+                    "summary",
+                    "legend" -> blockBreak(sb);
             case "option", "optgroup" -> blockBreak(sb);
             case "br" -> lineBreak(sb);
             case "hr" -> {
@@ -193,8 +240,12 @@ public class HtmlLightParser {
         }
     }
 
-    private void handleVoid(final StringBuilder sb, final String lower, final String attrs, final Deque<String> links,
-                            final boolean markdown) {
+    private void handleVoid(
+            final StringBuilder sb,
+            final String lower,
+            final String attrs,
+            final Deque<String> links,
+            final boolean markdown) {
         if (lower.equals("img")) {
             final var alt = attr(attrs, "alt");
             if (alt != null && !alt.isBlank()) {
@@ -266,7 +317,9 @@ public class HtmlLightParser {
 
     private static String normalize(final StringBuilder sb) {
         final var trimmed = sb.toString().strip();
-        return trimmed.replaceAll("(?m)[ \t]+\n", "\n").replaceAll("\n{3,}", "\n\n").replaceAll("(?m)\\s+\n$", "\n");
+        return trimmed.replaceAll("(?m)[ \t]+\n", "\n")
+                .replaceAll("\n{3,}", "\n\n")
+                .replaceAll("(?m)\\s+\n$", "\n");
     }
 
     private static int findClosingTag(final String html, final int from, final String name) {

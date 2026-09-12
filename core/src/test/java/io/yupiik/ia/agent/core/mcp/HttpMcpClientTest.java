@@ -1,12 +1,27 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.mcp;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -14,9 +29,8 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 
 class HttpMcpClientTest {
 
@@ -35,28 +49,50 @@ class HttpMcpClientTest {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             final var contentType = sse ? "text/event-stream" : "application/json";
             if (body.contains("\"method\":\"initialize\"")) {
-                respond(exchange, 200, wrap(sse,
-                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}"),
+                respond(
+                        exchange,
+                        200,
+                        wrap(
+                                sse,
+                                "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}"),
                         contentType);
             } else if (body.contains("\"method\":\"notifications/initialized\"")) {
                 exchange.getResponseHeaders().set("content-type", "application/json");
                 exchange.sendResponseHeaders(202, -1);
                 exchange.close();
             } else if (body.contains("\"method\":\"tools/list\"")) {
-                respond(exchange, 200, wrap(sse,
-                        "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}"),
+                respond(
+                        exchange,
+                        200,
+                        wrap(
+                                sse,
+                                "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\",\"properties\":{\"q\":{\"type\":\"string\"}}}}]},\"id\":2}"),
                         contentType);
             } else if (body.contains("\"method\":\"tools/call\"")) {
-                respond(exchange, 200, wrap(sse,
-                        "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}"),
+                respond(
+                        exchange,
+                        200,
+                        wrap(
+                                sse,
+                                "{\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from server\"}]},\"id\":3}"),
                         contentType);
             } else {
-                respond(exchange, 500, wrap(sse, "{\"error\":{\"code\":-32601,\"message\":\"method not found\"},\"id\":4}"), contentType);
+                respond(
+                        exchange,
+                        500,
+                        wrap(sse, "{\"error\":{\"code\":-32601,\"message\":\"method not found\"},\"id\":4}"),
+                        contentType);
             }
         });
         server.start();
-        client = new HttpMcpClient("test", "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                "key", List.of(), 10, mapper(), httpClient());
+        client = new HttpMcpClient(
+                "test",
+                "http://localhost:" + server.getAddress().getPort() + "/mcp",
+                "key",
+                List.of(),
+                10,
+                mapper(),
+                httpClient());
         client.initialize();
     }
 
@@ -67,7 +103,9 @@ class HttpMcpClientTest {
         assertEquals(1, tools.size());
         assertEquals("find_docs", tools.get(0).name());
         assertEquals("find docs", tools.get(0).description());
-        assertEquals("string", ((Map<?, ?>) ((Map<?, ?>) tools.get(0).inputSchema().get("properties")).get("q")).get("type"));
+        assertEquals(
+                "string",
+                ((Map<?, ?>) ((Map<?, ?>) tools.get(0).inputSchema().get("properties")).get("q")).get("type"));
         assertEquals("hello from server", client.callTool("find_docs", Map.of("q", "x")));
     }
 
@@ -88,8 +126,14 @@ class HttpMcpClientTest {
             respond(exchange, 500, "boom", "text/plain");
         });
         server.start();
-        final var failing = new HttpMcpClient("test", "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                "key", List.of(), 10, mapper(), httpClient());
+        final var failing = new HttpMcpClient(
+                "test",
+                "http://localhost:" + server.getAddress().getPort() + "/mcp",
+                "key",
+                List.of(),
+                10,
+                mapper(),
+                httpClient());
         final var error = assertThrows(IOException.class, failing::initialize);
         assertEquals(true, error.getMessage().contains("500"));
     }
@@ -105,14 +149,28 @@ class HttpMcpClientTest {
                 exchange.sendResponseHeaders(202, -1);
                 exchange.close();
             } else if (body.contains("\"protocolVersion\":\"2024-11-05\"")) {
-                respond(exchange, 200, "{\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}},\"id\":1}", contentType);
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"t\",\"version\":\"1\"}},\"id\":1}",
+                        contentType);
             } else {
-                respond(exchange, 400, "{\"error\":{\"code\":-32601,\"message\":\"unsupported protocol version\"},\"id\":1}", contentType);
+                respond(
+                        exchange,
+                        400,
+                        "{\"error\":{\"code\":-32601,\"message\":\"unsupported protocol version\"},\"id\":1}",
+                        contentType);
             }
         });
         server.start();
-        final var negotiating = new HttpMcpClient("test", "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                "key", List.of(), 10, mapper(), httpClient());
+        final var negotiating = new HttpMcpClient(
+                "test",
+                "http://localhost:" + server.getAddress().getPort() + "/mcp",
+                "key",
+                List.of(),
+                10,
+                mapper(),
+                httpClient());
         negotiating.initialize();
     }
 
@@ -125,12 +183,15 @@ class HttpMcpClientTest {
     }
 
     private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
-                .setDelegate(java.net.http.HttpClient.newHttpClient()));
+        return new ExtendedHttpClient(
+                new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
     }
 
-    private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status,
-                                final String body, final String contentType) {
+    private static void respond(
+            final com.sun.net.httpserver.HttpExchange exchange,
+            final int status,
+            final String body,
+            final String contentType) {
         try {
             exchange.getRequestBody().readAllBytes();
             final var bytes = body.getBytes(StandardCharsets.UTF_8);

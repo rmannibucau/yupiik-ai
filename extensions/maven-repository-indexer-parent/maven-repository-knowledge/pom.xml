@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent>
+    <groupId>io.yupiik.ia.agent</groupId>
+    <artifactId>maven-repository-indexer-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+  <artifactId>maven-repository-knowledge</artifactId>
+  <packaging>jar</packaging>
+  <name>YCA :: Maven Repository Knowledge</name>
+  <description>Shared core: Maven repository navigation, content fallback chain, LLM-backed skill synthesis and remote manifests. No yca or fusion dependency.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>html-to-markdown</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+    </dependency>
+  </dependencies>
+</project>

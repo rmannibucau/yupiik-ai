@@ -1,8 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.snapshot;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -43,7 +57,8 @@ public class SnapshotStore {
     /** Creates a checkpoint with the given label for a session. */
     public synchronized Checkpoint save(final String sessionId, final String label) {
         final var state = state(sessionId);
-        final var cp = new Checkpoint(label == null || label.isBlank() ? "checkpoint" : label, System.currentTimeMillis());
+        final var cp =
+                new Checkpoint(label == null || label.isBlank() ? "checkpoint" : label, System.currentTimeMillis());
         state.checkpoint(cp);
         persist(sessionId, state);
         return cp;
@@ -70,7 +85,9 @@ public class SnapshotStore {
     /** The active checkpoint label for a session, or null when none is set. */
     public String checkpointLabel(final String sessionId) {
         final var state = sessions.get(sessionId);
-        return state == null || state.checkpoint() == null ? null : state.checkpoint().label();
+        return state == null || state.checkpoint() == null
+                ? null
+                : state.checkpoint().label();
     }
 
     /** The retained summaries to inject into the system prompt for a session (most recent last). */
@@ -117,7 +134,8 @@ public class SnapshotStore {
             for (final var r : state.retained()) {
                 sb.append("SUMMARY ").append(r.summary().replace("\n", "\\n")).append('\n');
             }
-            final var tmp = file.resolveSibling(file.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
+            final var tmp = file.resolveSibling(
+                    file.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
             Files.writeString(tmp, sb.toString());
             Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
         } catch (final IOException e) {
@@ -143,11 +161,9 @@ public class SnapshotStore {
         return Path.of(configuration.resolveStorageHome(), "snapshots", sessionId + ".snap");
     }
 
-    public record Checkpoint(String label, long createdAt) {
-    }
+    public record Checkpoint(String label, long createdAt) {}
 
-    public record Retained(String summary) {
-    }
+    public record Retained(String summary) {}
 
     private static final class SessionState {
         private volatile Checkpoint checkpoint;

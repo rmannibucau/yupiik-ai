@@ -1,19 +1,33 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
+
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.Map;
-
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 @ApplicationScoped
 public class ListDirTool implements EmbeddedTool {
@@ -48,15 +62,13 @@ public class ListDirTool implements EmbeddedTool {
             return ToolResult.error("Not a directory: " + path);
         }
         final var sb = new StringBuilder();
-        final var count = new int[]{0};
+        final var count = new int[] {0};
         try (final var walk = Files.walk(path, depth)) {
-            walk.sorted(Comparator.comparing(Path::toString))
-                    .skip(1)
-                    .forEach(p -> {
-                        if (count[0]++ < 1000) {
-                            sb.append(p).append(Files.isDirectory(p) ? "/" : "").append('\n');
-                        }
-                    });
+            walk.sorted(Comparator.comparing(Path::toString)).skip(1).forEach(p -> {
+                if (count[0]++ < 1000) {
+                    sb.append(p).append(Files.isDirectory(p) ? "/" : "").append('\n');
+                }
+            });
         } catch (final IOException e) {
             return ToolResult.error("Cannot list " + path + ": " + e.getMessage());
         }

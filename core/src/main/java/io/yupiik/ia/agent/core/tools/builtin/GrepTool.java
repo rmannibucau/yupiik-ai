@@ -1,11 +1,29 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
+
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optBool;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
@@ -16,10 +34,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
-
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optBool;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 @ApplicationScoped
 public class GrepTool implements EmbeddedTool {
@@ -46,12 +60,14 @@ public class GrepTool implements EmbeddedTool {
 
     @Override
     public Map<String, Object> schema() {
-        return Schemas.object(Map.of(
-                "pattern", Schemas.str("Regular expression to search."),
-                "path", Schemas.str("Base directory or file, default `.`."),
-                "include", Schemas.str("Glob filter on file names, eg. `*.java`."),
-                "ignoreCase", Schemas.bool("Case insensitive search."),
-                "maxResults", Schemas.intProp("Maximum number of matches, default 80.")), "pattern");
+        return Schemas.object(
+                Map.of(
+                        "pattern", Schemas.str("Regular expression to search."),
+                        "path", Schemas.str("Base directory or file, default `.`."),
+                        "include", Schemas.str("Glob filter on file names, eg. `*.java`."),
+                        "ignoreCase", Schemas.bool("Case insensitive search."),
+                        "maxResults", Schemas.intProp("Maximum number of matches, default 80.")),
+                "pattern");
     }
 
     @Override
@@ -63,7 +79,8 @@ public class GrepTool implements EmbeddedTool {
         final var regex = Pattern.compile(pattern, optBool(args, "ignoreCase", false) ? Pattern.CASE_INSENSITIVE : 0);
         final var base = Path.of(arg(args, "path") == null ? "." : arg(args, "path"));
         final var include = arg(args, "include");
-        final var includeMatcher = include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);
+        final var includeMatcher =
+                include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);
         final var max = (int) Math.min(1000, Math.max(1, optInt(args, "maxResults", 80)));
         final var sb = new StringBuilder();
         final var count = new AtomicInteger();
@@ -86,8 +103,12 @@ public class GrepTool implements EmbeddedTool {
                                 if (regex.matcher(lines.get(i)).find()) {
                                     count.incrementAndGet();
                                     final var text = lines.get(i).strip();
-                                    sb.append(p).append(':').append(i + 1).append(": ")
-                                            .append(text.length() > 300 ? text.substring(0, 300) + "..." : text).append('\n');
+                                    sb.append(p)
+                                            .append(':')
+                                            .append(i + 1)
+                                            .append(": ")
+                                            .append(text.length() > 300 ? text.substring(0, 300) + "..." : text)
+                                            .append('\n');
                                 }
                             }
                         } catch (final IOException e) {

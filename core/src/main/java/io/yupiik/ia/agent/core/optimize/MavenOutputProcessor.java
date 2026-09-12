@@ -1,20 +1,35 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.optimize;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
-
 @ApplicationScoped
 public class MavenOutputProcessor implements OutputProcessor {
     private static final Pattern RUNNING = Pattern.compile("\\[INFO] Running ([\\w.,\\s]+)$");
-    private static final Pattern TESTS_RUN = Pattern.compile("Tests run: (\\d+), Failures: (\\d+), Errors: (\\d+), Skipped: (\\d+)");
-    private static final Pattern NOISE = Pattern.compile(
-            "^\\[INFO] ?(Scanning for projects|Detecting the operating system|Using the .* encoding|"
+    private static final Pattern TESTS_RUN =
+            Pattern.compile("Tests run: (\\d+), Failures: (\\d+), Errors: (\\d+), Skipped: (\\d+)");
+    private static final Pattern NOISE =
+            Pattern.compile("^\\[INFO] ?(Scanning for projects|Detecting the operating system|Using the .* encoding|"
                     + "Downloading from|Downloaded from|Progress \\(|--- [\\w-]+:[\\w.-]+:[\\w.-]+|"
                     + "<<<|>>>|Caching disabled|Remote snapshots).*|^\\[INFO] ?$");
 
@@ -58,7 +73,8 @@ public class MavenOutputProcessor implements OutputProcessor {
             if (tm.find()) {
                 final var failures = Integer.parseInt(tm.group(2)) + Integer.parseInt(tm.group(3));
                 if (failures > 0) {
-                    failingTests.add(currentTest != null ? "FAIL " + currentTest + "  (" + line.strip() + ")" : line.strip());
+                    failingTests.add(
+                            currentTest != null ? "FAIL " + currentTest + "  (" + line.strip() + ")" : line.strip());
                 } else if (currentTest != null) {
                     passingTests.add(currentTest);
                 }

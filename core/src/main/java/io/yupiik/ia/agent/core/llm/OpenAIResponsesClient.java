@@ -1,9 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -30,8 +43,9 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
     }
 
     @Override
-    public ChatResult chat(final ProviderConfiguration provider, final ChatCompletionRequest request,
-                           final BooleanSupplier cancelled) throws IOException, InterruptedException {
+    public ChatResult chat(
+            final ProviderConfiguration provider, final ChatCompletionRequest request, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
         final var payload = mapper.toBytes(toResponsesRequest(request, false));
         final var response = send(provider, http(provider, payload));
         if (response.statusCode() >= 400) {
@@ -41,15 +55,18 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
             if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
                 throw new ContextWindowExceededException();
             }
-            throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body()
-                    + retryAfter(response));
+            throw new IOException(
+                    "LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
         }
         return parseResponsesResponse(parse(response.body()));
     }
 
     @Override
-    public Message stream(final ProviderConfiguration provider, final ChatCompletionRequest request,
-                          final Consumer<StreamDelta> onDelta, final BooleanSupplier cancelled)
+    public Message stream(
+            final ProviderConfiguration provider,
+            final ChatCompletionRequest request,
+            final Consumer<StreamDelta> onDelta,
+            final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var payload = mapper.toBytes(toResponsesRequest(request, true));
         final var httpRequest = http(provider, payload);
@@ -67,7 +84,8 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                     if (!(json instanceof Map<?, ?> data)) {
                         continue;
                     }
-                    final var type = event.event() != null && !event.event().isBlank() ? event.event() : str(data.get("type"));
+                    final var type =
+                            event.event() != null && !event.event().isBlank() ? event.event() : str(data.get("type"));
                     switch (type == null ? "" : type) {
                         case "response.output_text.delta" -> {
                             final var d = str(data.get("delta"));
@@ -76,7 +94,9 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                                 onDelta.accept(StreamDelta.text(d));
                             }
                         }
-                        case "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.reasoning_summary_part.added" -> {
+                        case "response.reasoning_text.delta",
+                                "response.reasoning_summary_text.delta",
+                                "response.reasoning_summary_part.added" -> {
                             final var d = str(data.get("delta"));
                             if (d != null && !d.isEmpty()) {
                                 onDelta.accept(StreamDelta.reasoning(d));
@@ -91,8 +111,17 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                                     argsIndex.put(itemId, callId);
                                 }
                                 if (callId != null) {
-                                    calls.putIfAbsent(callId, new ToolCall(callId, "function",
-                                            new ToolCall.FunctionCall(str(m.get("name")), str(m.get("arguments")) == null ? "" : str(m.get("arguments"))), null));
+                                    calls.putIfAbsent(
+                                            callId,
+                                            new ToolCall(
+                                                    callId,
+                                                    "function",
+                                                    new ToolCall.FunctionCall(
+                                                            str(m.get("name")),
+                                                            str(m.get("arguments")) == null
+                                                                    ? ""
+                                                                    : str(m.get("arguments"))),
+                                                    null));
                                     onDelta.accept(StreamDelta.toolCall(calls.get(callId)));
                                 }
                             }
@@ -103,8 +132,14 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                             final var d = str(data.get("delta"));
                             if (call != null && d != null) {
                                 final var fn = call.function();
-                                calls.put(callId, new ToolCall(call.id(), call.type(),
-                                        new ToolCall.FunctionCall(fn.name(), (fn.arguments() == null ? "" : fn.arguments()) + d), null));
+                                calls.put(
+                                        callId,
+                                        new ToolCall(
+                                                call.id(),
+                                                call.type(),
+                                                new ToolCall.FunctionCall(
+                                                        fn.name(), (fn.arguments() == null ? "" : fn.arguments()) + d),
+                                                null));
                                 onDelta.accept(StreamDelta.toolCall(calls.get(callId)));
                             }
                         }
@@ -118,19 +153,25 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                             }
                         }
                         case "response.failed", "response.error", "error" -> {
-                            final var msg = data.get("response") instanceof Map<?, ?> r ? str(r.get("status_error")) : str(data.get("message"));
+                            final var msg = data.get("response") instanceof Map<?, ?> r
+                                    ? str(r.get("status_error"))
+                                    : str(data.get("message"));
                             throw new IOException("LLM responses stream failed: " + (msg == null ? event.data() : msg));
                         }
-                        default -> {
-                        }
+                        default -> {}
                     }
                 }
             }
             if (done[0] != null) {
                 return done[0];
             }
-            return new Message("assistant", content.toString(), null,
-                    calls.isEmpty() ? null : List.copyOf(calls.values()), null, null);
+            return new Message(
+                    "assistant",
+                    content.toString(),
+                    null,
+                    calls.isEmpty() ? null : List.copyOf(calls.values()),
+                    null,
+                    null);
         }
     }
 
@@ -180,18 +221,21 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                             content.append(s);
                         }
                     }
-                    case "function_call" -> calls.add(new ToolCall(
-                            str(item.get("call_id")) != null ? str(item.get("call_id")) : str(item.get("id")),
-                            "function",
-                            new ToolCall.FunctionCall(str(item.get("name")), str(item.get("arguments")) == null ? "" : str(item.get("arguments"))),
-                            null));
-                    default -> {
-                    }
+                    case "function_call" ->
+                        calls.add(new ToolCall(
+                                str(item.get("call_id")) != null ? str(item.get("call_id")) : str(item.get("id")),
+                                "function",
+                                new ToolCall.FunctionCall(
+                                        str(item.get("name")),
+                                        str(item.get("arguments")) == null ? "" : str(item.get("arguments"))),
+                                null));
+                    default -> {}
                 }
             }
         }
         return new ChatResult(
-                new Message("assistant", content.toString(), null, calls.isEmpty() ? null : List.copyOf(calls), null, null),
+                new Message(
+                        "assistant", content.toString(), null, calls.isEmpty() ? null : List.copyOf(calls), null, null),
                 parseUsage(map.get("usage")));
     }
 
@@ -220,7 +264,10 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                     if (m.toolCalls() != null) {
                         for (final var tc : m.toolCalls()) {
                             if (tc.function() != null) {
-                                input.add(ResponsesInput.functionCall(tc.id(), tc.function().name(), tc.function().arguments()));
+                                input.add(ResponsesInput.functionCall(
+                                        tc.id(),
+                                        tc.function().name(),
+                                        tc.function().arguments()));
                             }
                         }
                     }
@@ -229,12 +276,27 @@ final class OpenAIResponsesClient extends AbstractLlmClient {
                 default -> input.add(ResponsesInput.message(m.role(), text));
             }
         }
-        final var tools = request.tools() == null ? null : request.tools().stream()
-                .filter(t -> t.function() != null)
-                .map(t -> new ResponsesTool("function", t.function().name(), t.function().description(), t.function().parameters()))
-                .toList();
-        final var reasoning = request.reasoningEffort() == null ? null : Map.<String, Object>of("effort", request.reasoningEffort());
-        return new ResponsesRequest(request.model(), input, instructions, stream, false, tools,
-                request.toolChoice(), reasoning, request.others());
+        final var tools = request.tools() == null
+                ? null
+                : request.tools().stream()
+                        .filter(t -> t.function() != null)
+                        .map(t -> new ResponsesTool(
+                                "function",
+                                t.function().name(),
+                                t.function().description(),
+                                t.function().parameters()))
+                        .toList();
+        final var reasoning =
+                request.reasoningEffort() == null ? null : Map.<String, Object>of("effort", request.reasoningEffort());
+        return new ResponsesRequest(
+                request.model(),
+                input,
+                instructions,
+                stream,
+                false,
+                tools,
+                request.toolChoice(),
+                reasoning,
+                request.others());
     }
 }

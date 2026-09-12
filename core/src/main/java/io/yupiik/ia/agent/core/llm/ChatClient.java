@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -6,7 +21,6 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayDeque;
@@ -45,11 +59,13 @@ public class ChatClient implements AutoCloseable {
     private volatile String modelOverride;
     private volatile ProviderConfiguration targetProvider;
     private volatile boolean structuredOutputUnsupported = false;
-    private volatile Consumer<PauseEvent> pauses = event -> {
-    };
+    private volatile Consumer<PauseEvent> pauses = event -> {};
 
-    public ChatClient(final CodingAgentConfiguration configuration, final JsonMapper mapper,
-                      final ProviderManager providerManager, final Clock clock) {
+    public ChatClient(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager,
+            final Clock clock) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
@@ -119,12 +135,63 @@ public class ChatClient implements AutoCloseable {
 
     /** Registers a listener notified whenever the resilience layer delays a request (throttle or retry backoff). */
     public void setPauseListener(final Consumer<PauseEvent> listener) {
-        this.pauses = listener == null ? event -> {
-        } : listener;
+        this.pauses = listener == null ? event -> {} : listener;
     }
 
     public String providerId() {
         return providerManager.currentProviderId();
+    }
+
+    /**
+     * The resolved context window (tokens) for the current provider + model: an explicit per-provider
+     * {@code contextWindow} wins, then the value detected from {@code /v1/models}/cached; {@code 0} when
+     * unknown. Used by callers that must stay under the model input budget (e.g. batch sizing).
+     */
+    public int contextWindow() {
+        final var provider = target();
+        if (provider == null) {
+            return 0;
+        }
+        if (provider.contextWindow() > 0) {
+            return provider.contextWindow();
+        }
+        return contextWindowCache == null
+                ? 0
+                : contextWindowCache
+                        .get(providerManager.currentProviderId(), model())
+                        .orElse(0);
+    }
+
+    /**
+     * The resolved output token budget for the current provider + model, using the same rules as
+     * {@link #applyOutputBudget(ChatCompletionRequest, ApiFlavor)} but with no explicit request cap
+     * (per-model override, per-provider default, /v1/models-detected, then {@code 32000}).
+     */
+    public int outputTokens() {
+        final var provider = target();
+        if (provider == null) {
+            return OutputBudgetResolver.DEFAULT_MAX_TOKEN;
+        }
+        final var model = model();
+        final var detectedMax = contextWindowCache == null
+                ? null
+                : contextWindowCache
+                        .getMaxTokens(providerManager.currentProviderId(), model)
+                        .orElse(null);
+        final Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
+        final var resolvedWindow = contextWindow != null
+                ? contextWindow
+                : (contextWindowCache == null
+                        ? null
+                        : contextWindowCache
+                                .get(providerManager.currentProviderId(), model)
+                                .orElse(null));
+        return OutputBudgetResolver.resolve(
+                null,
+                providerManager.outputTokensOverride(provider, model),
+                provider.outputTokens(),
+                detectedMax,
+                resolvedWindow);
     }
 
     /** The provider currently targeted by the in-flight request (the current provider unless a $provider ref routed it). */
@@ -135,7 +202,9 @@ public class ChatClient implements AutoCloseable {
 
     private String resolveModel() throws IOException {
         final var override = modelOverride;
-        final var ref = override != null && !override.isBlank() ? override : providerManager.current().model();
+        final var ref = override != null && !override.isBlank()
+                ? override
+                : providerManager.current().model();
         final var resolvedModel = providerManager.resolve(ref);
         if (resolvedModel.provider() != null) {
             this.targetProvider = resolvedModel.provider();
@@ -168,8 +237,16 @@ public class ChatClient implements AutoCloseable {
         if (model.equals(request.model()) && others == request.others()) {
             return request;
         }
-        return new ChatCompletionRequest(model, request.messages(), request.temperature(), request.stream(),
-                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), others);
+        return new ChatCompletionRequest(
+                model,
+                request.messages(),
+                request.temperature(),
+                request.stream(),
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
+                others);
     }
 
     /**
@@ -183,10 +260,14 @@ public class ChatClient implements AutoCloseable {
         }
         final var provider = target();
         final var model = request.model();
-        final var detectedMaxTokens = contextWindowCache.getMaxTokens(providerManager.currentProviderId(), model).orElse(null);
+        final var detectedMaxTokens = contextWindowCache
+                .getMaxTokens(providerManager.currentProviderId(), model)
+                .orElse(null);
         Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         if (contextWindow == null) {
-            contextWindow = contextWindowCache.get(providerManager.currentProviderId(), model).orElse(null);
+            contextWindow = contextWindowCache
+                    .get(providerManager.currentProviderId(), model)
+                    .orElse(null);
         }
         final var budget = OutputBudgetResolver.resolve(
                 request.maxTokens(),
@@ -198,8 +279,16 @@ public class ChatClient implements AutoCloseable {
         if (maxTokens != null && budget == maxTokens) {
             return request;
         }
-        return new ChatCompletionRequest(model, request.messages(), request.temperature(), request.stream(),
-                request.tools(), request.toolChoice(), budget, request.reasoningEffort(), request.others());
+        return new ChatCompletionRequest(
+                model,
+                request.messages(),
+                request.temperature(),
+                request.stream(),
+                request.tools(),
+                request.toolChoice(),
+                budget,
+                request.reasoningEffort(),
+                request.others());
     }
 
     public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
@@ -223,8 +312,7 @@ public class ChatClient implements AutoCloseable {
      * JSON Schema and the response is expected to be a conformant JSON object; false when the schema
      * was unsupported (or rejected twice) and the caller must fall back to its own parsing.
      */
-    public record StructuredResult(ChatResult result, boolean structured) {
-    }
+    public record StructuredResult(ChatResult result, boolean structured) {}
 
     /**
      * Run a non-streaming completion asking the provider for structured output matching the given JSON
@@ -234,8 +322,9 @@ public class ChatClient implements AutoCloseable {
      * a second 400 marks the provider as not supporting structured output for the rest of the session,
      * so subsequent calls go straight to the plain path.
      */
-    public StructuredResult chatStructured(final ChatCompletionRequest request, final String schemaName,
-                                           final Map<String, Object> schema) throws IOException, InterruptedException {
+    public StructuredResult chatStructured(
+            final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+            throws IOException, InterruptedException {
         final var model = resolveModel();
         final var flavor = effectiveFlavor();
         final var base = new LinkedHashMap<String, Object>();
@@ -246,10 +335,25 @@ public class ChatClient implements AutoCloseable {
         if (otherOptions != null) {
             base.putAll(otherOptions);
         }
-        final var plainReq = new ChatCompletionRequest(model, request.messages(), request.temperature(), false,
-                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), base);
-        final var structuredReq = new ChatCompletionRequest(model, request.messages(), request.temperature(), false,
-                request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(),
+        final var plainReq = new ChatCompletionRequest(
+                model,
+                request.messages(),
+                request.temperature(),
+                false,
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
+                base);
+        final var structuredReq = new ChatCompletionRequest(
+                model,
+                request.messages(),
+                request.temperature(),
+                false,
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
                 withStructuredField(base, flavor, schemaName, schema));
         throttle();
         permits.acquire();
@@ -284,20 +388,38 @@ public class ChatClient implements AutoCloseable {
     }
 
     /** Compose the flavor-specific JSON Schema field into a copy of {@code others}. */
-    private static Map<String, Object> withStructuredField(final Map<String, Object> others, final ApiFlavor flavor,
-                                                           final String schemaName, final Map<String, Object> schema) {
+    private static Map<String, Object> withStructuredField(
+            final Map<String, Object> others,
+            final ApiFlavor flavor,
+            final String schemaName,
+            final Map<String, Object> schema) {
         final var out = new LinkedHashMap<String, Object>(others);
         switch (flavor) {
-            case ANTHROPIC -> out.put("output_config", Map.of("format",
-                    Map.of("type", "json_schema", "schema", schema)));
-            case RESPONSES -> out.put("text", Map.of("format",
-                    Map.of("type", "json_schema", "name", schemaName, "schema", schema, "strict", true)));
-            case COMPLETIONS -> out.put("response_format", Map.of("type", "json_schema",
-                    "json_schema", Map.of("name", schemaName, "schema", schema, "strict", true)));
+            case ANTHROPIC ->
+                out.put("output_config", Map.of("format", Map.of("type", "json_schema", "schema", schema)));
+            case RESPONSES ->
+                out.put(
+                        "text",
+                        Map.of(
+                                "format",
+                                Map.of("type", "json_schema", "name", schemaName, "schema", schema, "strict", true)));
+            case COMPLETIONS ->
+                out.put(
+                        "response_format",
+                        Map.of(
+                                "type",
+                                "json_schema",
+                                "json_schema",
+                                Map.of("name", schemaName, "schema", schema, "strict", true)));
             default -> {
                 // AUTO already resolved to a concrete flavor by the caller; treat as completions fallback
-                out.put("response_format", Map.of("type", "json_schema",
-                        "json_schema", Map.of("name", schemaName, "schema", schema, "strict", true)));
+                out.put(
+                        "response_format",
+                        Map.of(
+                                "type",
+                                "json_schema",
+                                "json_schema",
+                                Map.of("name", schemaName, "schema", schema, "strict", true)));
             }
         }
         return out;
@@ -313,11 +435,20 @@ public class ChatClient implements AutoCloseable {
         return stream(request, onDelta, () -> false);
     }
 
-    public Message stream(final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta,
-                          final BooleanSupplier cancelled) throws IOException, InterruptedException {
+    public Message stream(
+            final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
         final var model = resolveModel();
-        final var effective = new ChatCompletionRequest(model, request.messages(), request.temperature(),
-                true, request.tools(), request.toolChoice(), request.maxTokens(), request.reasoningEffort(), mergeOptions(request.others()));
+        final var effective = new ChatCompletionRequest(
+                model,
+                request.messages(),
+                request.temperature(),
+                true,
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
+                mergeOptions(request.others()));
         throttle();
         permits.acquire();
         try {
@@ -328,43 +459,61 @@ public class ChatClient implements AutoCloseable {
     }
 
     @SuppressWarnings("unchecked")
-    private <A> A doWithFallback(final ChatCompletionRequest request, final BooleanSupplier cancelled,
-                                 final boolean stream, final Consumer<StreamDelta> onDelta)
+    private <A> A doWithFallback(
+            final ChatCompletionRequest request,
+            final BooleanSupplier cancelled,
+            final boolean stream,
+            final Consumer<StreamDelta> onDelta)
             throws IOException, InterruptedException {
         @SuppressWarnings("unchecked")
-        final var onDeltaSafe = (Consumer<StreamDelta>) (onDelta == null ? (Consumer<StreamDelta>) d -> {
-        } : onDelta);
+        final var onDeltaSafe = (Consumer<StreamDelta>) (onDelta == null ? (Consumer<StreamDelta>) d -> {} : onDelta);
         final var flavor = effectiveFlavor();
         if (flavor == ApiFlavor.ANTHROPIC) {
             final var effective = applyOutputBudget(request, flavor);
             final var client = clients.get(ApiFlavor.ANTHROPIC);
-            return withRetries(stream ? (IoCall<A>) () -> (A) client.stream(target(), effective, onDeltaSafe, cancelled)
-                    : (IoCall<A>) () -> (A) client.chat(target(), effective, cancelled), cancelled);
+            return withRetries(
+                    stream
+                            ? (IoCall<A>) () -> (A) client.stream(target(), effective, onDeltaSafe, cancelled)
+                            : (IoCall<A>) () -> (A) client.chat(target(), effective, cancelled),
+                    cancelled);
         }
         if (flavor == ApiFlavor.RESPONSES) {
             final var client = clients.get(ApiFlavor.RESPONSES);
-            return withRetries(stream ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
-                    : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled), cancelled);
+            return withRetries(
+                    stream
+                            ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
+                            : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled),
+                    cancelled);
         }
         if (flavor == ApiFlavor.COMPLETIONS) {
             final var client = clients.get(ApiFlavor.COMPLETIONS);
-            return withRetries(stream ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
-                    : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled), cancelled);
+            return withRetries(
+                    stream
+                            ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
+                            : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled),
+                    cancelled);
         }
         try {
             final var responses = clients.get(ApiFlavor.RESPONSES);
-            return withRetries(stream ? (IoCall<A>) () -> (A) responses.stream(target(), request, onDeltaSafe, cancelled)
-                    : (IoCall<A>) () -> (A) responses.chat(target(), request, cancelled), cancelled);
+            return withRetries(
+                    stream
+                            ? (IoCall<A>) () -> (A) responses.stream(target(), request, onDeltaSafe, cancelled)
+                            : (IoCall<A>) () -> (A) responses.chat(target(), request, cancelled),
+                    cancelled);
         } catch (final FlavorMissingException e) {
             resolved = ApiFlavor.COMPLETIONS;
             final var completions = clients.get(ApiFlavor.COMPLETIONS);
-            return withRetries(stream ? (IoCall<A>) () -> (A) completions.stream(target(), request, onDeltaSafe, cancelled)
-                    : (IoCall<A>) () -> (A) completions.chat(target(), request, cancelled), cancelled);
+            return withRetries(
+                    stream
+                            ? (IoCall<A>) () -> (A) completions.stream(target(), request, onDeltaSafe, cancelled)
+                            : (IoCall<A>) () -> (A) completions.chat(target(), request, cancelled),
+                    cancelled);
         }
     }
 
     @SuppressWarnings("unchecked")
-    private <A> A withRetries(final IoCall<A> call, final BooleanSupplier cancelled) throws IOException, InterruptedException {
+    private <A> A withRetries(final IoCall<A> call, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
         var attempt = 0;
         String retryAfter = null;
         IOException last = null;

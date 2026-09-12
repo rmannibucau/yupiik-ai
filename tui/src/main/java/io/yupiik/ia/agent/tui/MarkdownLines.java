@@ -1,9 +1,26 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
+import java.util.ArrayList;
+import java.util.List;
 import org.commonmark.ext.gfm.strikethrough.Strikethrough;
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension;
 import org.commonmark.ext.gfm.tables.TableBlock;
@@ -36,9 +53,6 @@ import org.commonmark.node.Text;
 import org.commonmark.node.ThematicBreak;
 import org.commonmark.parser.Parser;
 
-import java.util.ArrayList;
-import java.util.List;
-
 /**
  * Renders a markdown text segment to pre-wrapped {@link Line} objects so the
  * visible output is exactly the selectable/copyable text and no terminal renderer
@@ -62,8 +76,8 @@ public final class MarkdownLines {
 
     public MarkdownLines() {
         parser = Parser.builder()
-                .extensions(List.of(StrikethroughExtension.create(), TablesExtension.create(),
-                        TaskListItemsExtension.create()))
+                .extensions(List.of(
+                        StrikethroughExtension.create(), TablesExtension.create(), TaskListItemsExtension.create()))
                 .build();
     }
 
@@ -95,24 +109,39 @@ public final class MarkdownLines {
         return out;
     }
 
-    private static void renderNode(final Node node, final Prefix prefix, final Style base, final MarkdownStyles styles,
-                                   final int width, final boolean breakWords, final List<Line> out) {
+    private static void renderNode(
+            final Node node,
+            final Prefix prefix,
+            final Style base,
+            final MarkdownStyles styles,
+            final int width,
+            final boolean breakWords,
+            final List<Line> out) {
         if (node instanceof Paragraph p) {
             emitInline(p, prefix, base, styles, width, breakWords, out);
         } else if (node instanceof Heading h) {
             emitInline(h, prefix, base.patch(styles.heading(h.getLevel())), styles, width, breakWords, out);
         } else if (node instanceof FencedCodeBlock c) {
-            emitLiteral(c.getLiteral(), styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
-                    width, out, true);
+            emitLiteral(
+                    c.getLiteral(),
+                    styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
+                    width,
+                    out,
+                    true);
         } else if (node instanceof IndentedCodeBlock c) {
-            emitLiteral(c.getLiteral(), styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
-                    width, out, true);
+            emitLiteral(
+                    c.getLiteral(),
+                    styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
+                    width,
+                    out,
+                    true);
         } else if (node instanceof HtmlBlock h) {
             emitLiteral(textOf(h), styles.html() == null ? base : styles.html().patch(base), width, out, true);
         } else if (node instanceof BlockQuote q) {
             final var markerStyle = styles.blockquote() == null ? Style.EMPTY : styles.blockquote();
             final var marker = Span.styled(styles.blockquotePrefix(), markerStyle.patch(base));
-            final var nested = Prefix.with(concat(prefix.first(), List.of(marker)), concat(prefix.cont(), List.of(marker)));
+            final var nested =
+                    Prefix.with(concat(prefix.first(), List.of(marker)), concat(prefix.cont(), List.of(marker)));
             renderChildren(q, nested, base, styles, width, breakWords, out);
         } else if (node instanceof BulletList l) {
             for (final var child : children(l)) {
@@ -124,13 +153,15 @@ public final class MarkdownLines {
             var index = l.getStartNumber();
             for (final var child : children(l)) {
                 if (child instanceof ListItem li) {
-                    final var marker = Span.styled(index++ + String.valueOf(l.getDelimiter()) + " ",
-                            listMarkerStyle(styles, base));
+                    final var marker = Span.styled(
+                            index++ + String.valueOf(l.getDelimiter()) + " ", listMarkerStyle(styles, base));
                     renderListItem(li, prefix, marker, base, styles, width, breakWords, out);
                 }
             }
         } else if (node instanceof ThematicBreak) {
-            final var style = styles.horizontalRule() == null ? base : styles.horizontalRule().patch(base);
+            final var style = styles.horizontalRule() == null
+                    ? base
+                    : styles.horizontalRule().patch(base);
             final var avail = Math.max(1, width - widthOf(prefix.first()));
             out.add(Line.from(concat(prefix.first(), List.of(Span.styled("─".repeat(avail), style)))));
         } else if (node instanceof TableBlock table) {
@@ -143,7 +174,8 @@ public final class MarkdownLines {
     private static Span bulletMarker(final ListItem li, final MarkdownStyles styles, final Style base) {
         final var task = taskChecked(li);
         if (task != null) {
-            final var style = styles.taskChecked() == null ? base
+            final var style = styles.taskChecked() == null
+                    ? base
                     : (task ? styles.taskChecked() : styles.taskUnchecked()).patch(base);
             return Span.styled(task ? symbol(styles.taskCheckedSymbol()) : symbol(styles.taskUncheckedSymbol()), style);
         }
@@ -167,30 +199,47 @@ public final class MarkdownLines {
         return null;
     }
 
-    private static void renderChildren(final Node node, final Prefix prefix, final Style base,
-                                       final MarkdownStyles styles, final int width, final boolean breakWords,
-                                       final List<Line> out) {
+    private static void renderChildren(
+            final Node node,
+            final Prefix prefix,
+            final Style base,
+            final MarkdownStyles styles,
+            final int width,
+            final boolean breakWords,
+            final List<Line> out) {
         for (final var child : children(node)) {
             renderNode(child, prefix, base, styles, width, breakWords, out);
         }
     }
 
-    private static void renderListItem(final ListItem li, final Prefix prefix, final Span marker, final Style base,
-                                       final MarkdownStyles styles, final int width, final boolean breakWords,
-                                       final List<Line> out) {
+    private static void renderListItem(
+            final ListItem li,
+            final Prefix prefix,
+            final Span marker,
+            final Style base,
+            final MarkdownStyles styles,
+            final int width,
+            final boolean breakWords,
+            final List<Line> out) {
         final var indent = Span.styled(" ".repeat(marker.width()), Style.EMPTY);
         final var first = Prefix.with(concat(prefix.first(), List.of(marker)), concat(prefix.cont(), List.of(indent)));
         final var rest = Prefix.with(concat(prefix.cont(), List.of(indent)), concat(prefix.cont(), List.of(indent)));
-var blockIndex = 0;
-            for (final var child : children(li)) {
-                if (!(child instanceof TaskListItemMarker)) {
-                    renderNode(child, blockIndex++ == 0 ? first : rest, base, styles, width, breakWords, out);
-                }
+        var blockIndex = 0;
+        for (final var child : children(li)) {
+            if (!(child instanceof TaskListItemMarker)) {
+                renderNode(child, blockIndex++ == 0 ? first : rest, base, styles, width, breakWords, out);
             }
+        }
     }
 
-    private static void emitInline(final Node block, final Prefix prefix, final Style base, final MarkdownStyles styles,
-                                   final int width, final boolean breakWords, final List<Line> out) {
+    private static void emitInline(
+            final Node block,
+            final Prefix prefix,
+            final Style base,
+            final MarkdownStyles styles,
+            final int width,
+            final boolean breakWords,
+            final List<Line> out) {
         final var content = new ArrayList<Span>();
         for (final var child : children(block)) {
             inline(child, prefix, base, styles, width, content, out);
@@ -198,12 +247,20 @@ var blockIndex = 0;
         appendWrapped(content, breakWords, width, prefix, out);
     }
 
-    private static void inline(final Node node, final Prefix prefix, final Style base, final MarkdownStyles styles,
-                               final int width, final List<Span> content, final List<Line> out) {
+    private static void inline(
+            final Node node,
+            final Prefix prefix,
+            final Style base,
+            final MarkdownStyles styles,
+            final int width,
+            final List<Span> content,
+            final List<Line> out) {
         if (node instanceof Text t) {
             content.add(Span.styled(t.getLiteral(), base));
         } else if (node instanceof Code c) {
-            content.add(Span.styled(c.getLiteral(), styles.inlineCode() == null ? base : styles.inlineCode().patch(base)));
+            content.add(Span.styled(
+                    c.getLiteral(),
+                    styles.inlineCode() == null ? base : styles.inlineCode().patch(base)));
         } else if (node instanceof Emphasis) {
             for (final var child : children(node)) {
                 inline(child, prefix, base.patch(styles.emphasis()), styles, width, content, out);
@@ -226,7 +283,8 @@ var blockIndex = 0;
                 inline(child, prefix, base, styles, width, content, out);
             }
         } else if (node instanceof HtmlInline h) {
-            content.add(Span.styled(h.getLiteral(), styles.html() == null ? base : styles.html().patch(base)));
+            content.add(Span.styled(
+                    h.getLiteral(), styles.html() == null ? base : styles.html().patch(base)));
         } else if (node instanceof TaskListItemMarker) {
             // rendered by bulletMarker for the whole item; nothing to emit here
         } else if (node instanceof SoftLineBreak || node instanceof HardLineBreak) {
@@ -239,13 +297,14 @@ var blockIndex = 0;
         }
     }
 
-    private static void emitLiteral(final String literal, final Style style, final int width, final List<Line> out,
-                                    final boolean breakWords) {
+    private static void emitLiteral(
+            final String literal, final Style style, final int width, final List<Line> out, final boolean breakWords) {
         if (literal == null || literal.isEmpty()) {
             return;
         }
         for (final var row : literal.split("\n", -1)) {
-            appendWrapped(row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), breakWords, width, Prefix.NONE, out);
+            appendWrapped(
+                    row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), breakWords, width, Prefix.NONE, out);
         }
     }
 
@@ -261,7 +320,8 @@ var blockIndex = 0;
         return sb.toString();
     }
 
-    private static void renderTable(final TableBlock table, final Prefix prefix, final int width, final List<Line> out) {
+    private static void renderTable(
+            final TableBlock table, final Prefix prefix, final int width, final List<Line> out) {
         final var columns = new ArrayList<Integer>();
         TableHead head = null;
         final var bodyRows = new ArrayList<TableRow>();
@@ -301,8 +361,8 @@ var blockIndex = 0;
         }
     }
 
-    private static void emitTableRow(final List<List<Span>> cells, final List<Integer> widths, final Prefix prefix,
-                                     final List<Line> out) {
+    private static void emitTableRow(
+            final List<List<Span>> cells, final List<Integer> widths, final Prefix prefix, final List<Line> out) {
         final var spans = new ArrayList<Span>(prefix.first());
         for (var i = 0; i < widths.size(); i++) {
             if (!spans.isEmpty()) {
@@ -392,8 +452,12 @@ var blockIndex = 0;
      * wrapped continuation lines. A single token wider than {@code width} is left
      * alone when {@code breakWords} is false (prose) and hard-split when true (code).
      */
-    private static void appendWrapped(final List<Span> content, final boolean breakWords, final int width,
-                                      final Prefix prefix, final List<Line> out) {
+    private static void appendWrapped(
+            final List<Span> content,
+            final boolean breakWords,
+            final int width,
+            final Prefix prefix,
+            final List<Line> out) {
         final var words = words(content);
         if (words.isEmpty()) {
             out.add(Line.from(new ArrayList<>(prefix.first())));

@@ -1,7 +1,21 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.json.JsonMapper;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -37,15 +51,19 @@ public class WiringGraphWriter {
      * enrichment cache (when supplied) contributes per-symbol summaries, crux and state; a null cache yields a
      * structural-only wiring graph.
      */
-    public static Path write(final JsonMapper mapper, final Path storeRoot, final GraphStore store,
-                             final DocEnricherCache cache) {
+    public static Path write(
+            final JsonMapper mapper, final Path storeRoot, final GraphStore store, final DocEnricherCache cache) {
         final var path = pathFor(storeRoot);
         try {
             Files.createDirectories(path.getParent());
-            final var tmp = path.resolveSibling("wiring.json." + ProcessHandle.current().pid() + ".tmp");
+            final var tmp =
+                    path.resolveSibling("wiring.json." + ProcessHandle.current().pid() + ".tmp");
             Files.writeString(tmp, render(mapper, store, cache), StandardCharsets.UTF_8);
             try {
-                Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                Files.move(
+                        tmp,
+                        path,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
                         java.nio.file.StandardCopyOption.ATOMIC_MOVE);
             } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
                 Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);

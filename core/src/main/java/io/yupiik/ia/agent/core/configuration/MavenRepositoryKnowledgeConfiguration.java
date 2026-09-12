@@ -1,0 +1,65 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.configuration;
+
+import io.yupiik.fusion.framework.build.api.configuration.Property;
+
+/**
+ * Configuration for the embedded maven-repository-knowledge tool / slash command inside yca. Mirrors the
+ * knowledge pipeline settings; the embedded tool maps this onto {@link io.yupiik.maven.knowledge.config.KnowledgeConfig}.
+ */
+public record MavenRepositoryKnowledgeConfiguration(
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Enable the embedded maven-repository-knowledge tool, slash command and session-start skill loading.")
+        boolean enabled,
+
+        @Property(defaultValue = "\"~/.m2/repository\"", documentation = "Local Maven repository root to index.")
+        String localRepository,
+
+        @Property(defaultValue = "4", documentation = "Maximum artifacts processed concurrently.")
+        int concurrency,
+
+        @Property(
+                defaultValue = "256",
+                documentation =
+                        "Hard maximum GAVs per single LLM call. This is the primary bulk-size lever: raising it "
+                                + "collapses many serial entry-points calls into few, giving the largest speedup. It also "
+                                + "bounds the JSON output size per call.")
+        int batchSize,
+
+        @Property(
+                defaultValue = "-1",
+                documentation = "Entry-points batch sizing: -1 (default) suits each batch greedily to the model's "
+                        + "known context window and output budget (from provider config or /v1/models), with a "
+                        + "conservative margin so batches under-fill rather than overflow; any positive value is a "
+                        + "hard maximum of input content characters per batch. Ignored in favour of the token budget "
+                        + "only when a strict character cap is wanted. The token budget is resolved automatically from "
+                        + "the model yca is configured with, so -1 needs no tuning.")
+        int maxBatchChars,
+
+        @Property(defaultValue = "true", documentation = "Write the remote -skills.md manifest per artifact.")
+        boolean remoteManifest,
+
+        @Property(defaultValue = "false", documentation = "Always regenerate, bypassing the immutable-skip rule.")
+        boolean force,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Load per-artifact skills at session start by dereferencing the -skills.md manifests of the session's main entry-point artifacts.")
+        boolean skillsAtSessionStart) {}

@@ -1,8 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.optimize;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -40,7 +54,8 @@ public class GenericOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var all = compact(lines.map(ANSI::matcher).map(m -> m.replaceAll("")).toList());
+        final var all =
+                compact(lines.map(ANSI::matcher).map(m -> m.replaceAll("")).toList());
         final var max = Math.max(10, configuration.optimize().genericMaxLines());
         if (all.size() <= max) {
             return all.stream();

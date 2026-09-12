@@ -1,24 +1,38 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.llm;
-
-import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import org.junit.jupiter.api.Test;
-
-import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
 class ModelsResponseTest {
-    private final JsonMapper mapper = new JsonMapperImpl(List.of(
-            new ModelsResponse$FusionJsonCodec(),
-            new ModelsResponse$Model$FusionJsonCodec()), key -> Optional.empty());
+    private final JsonMapper mapper = new JsonMapperImpl(
+            List.of(new ModelsResponse$FusionJsonCodec(), new ModelsResponse$Model$FusionJsonCodec()),
+            key -> Optional.empty());
 
     @Test
     void flatVendorKeyIsRead() {
-        final var res = mapper.fromString(ModelsResponse.class,
-                "{\"data\":[{\"id\":\"m\",\"owned_by\":\"x\",\"context_window\":8192}]}");
+        final var res = mapper.fromString(
+                ModelsResponse.class, "{\"data\":[{\"id\":\"m\",\"owned_by\":\"x\",\"context_window\":8192}]}");
         assertEquals(8192, res.data().get(0).contextWindow());
     }
 
@@ -31,25 +45,24 @@ class ModelsResponseTest {
 
     @Test
     void nCtxTrainIsUsedAsBestEffortUpperBound() {
-        final var small = mapper.fromString(ModelsResponse.class,
-                "{\"data\":[{\"id\":\"m\",\"meta\":{\"n_ctx_train\":4096}}]}");
+        final var small =
+                mapper.fromString(ModelsResponse.class, "{\"data\":[{\"id\":\"m\",\"meta\":{\"n_ctx_train\":4096}}]}");
         assertEquals(4096, small.data().get(0).contextWindow());
-        final var big = mapper.fromString(ModelsResponse.class,
-                "{\"data\":[{\"id\":\"m\",\"meta\":{\"n_ctx_train\":262144}}]}");
+        final var big = mapper.fromString(
+                ModelsResponse.class, "{\"data\":[{\"id\":\"m\",\"meta\":{\"n_ctx_train\":262144}}]}");
         assertEquals(262144, big.data().get(0).contextWindow());
     }
 
     @Test
     void noVendorDataIsNull() {
-        final var res = mapper.fromString(ModelsResponse.class,
-                "{\"data\":[{\"id\":\"m\",\"owned_by\":\"x\"}]}");
+        final var res = mapper.fromString(ModelsResponse.class, "{\"data\":[{\"id\":\"m\",\"owned_by\":\"x\"}]}");
         assertNull(res.data().get(0).contextWindow());
     }
 
     @Test
     void flatKeysHavePriorityOverNested() {
-        final var res = mapper.fromString(ModelsResponse.class,
-                "{\"data\":[{\"id\":\"m\",\"context_length\":4096,\"meta\":{\"n_ctx\":8192}}]}");
+        final var res = mapper.fromString(
+                ModelsResponse.class, "{\"data\":[{\"id\":\"m\",\"context_length\":4096,\"meta\":{\"n_ctx\":8192}}]}");
         assertEquals(4096, res.data().get(0).contextWindow());
     }
 }

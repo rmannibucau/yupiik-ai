@@ -1,27 +1,41 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.session;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.SessionConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SessionStoreTest {
     @TempDir
@@ -32,19 +46,26 @@ class SessionStoreTest {
     }
 
     private SessionStore newStore(final SessionConfiguration sessions) {
-        final JsonMapper mapper = new JsonMapperImpl(List.of(
-                new SessionEntry$FusionJsonCodec(),
-                new io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec(),
-                new io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec(),
-                new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
-                new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec()), key -> Optional.empty());
-        return new SessionStore(new CodingAgentConfiguration(dir.toString(), null, null, null, null, null, null, null, null, null, null, null, null, sessions, null, null, null,
-                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig()), mapper, Clock.systemUTC());
+        final JsonMapper mapper = new JsonMapperImpl(
+                List.of(
+                        new SessionEntry$FusionJsonCodec(),
+                        new io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec(),
+                        new io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec(),
+                        new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
+                        new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec()),
+                key -> Optional.empty());
+        return new SessionStore(
+                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                        "yca.storageHome", dir.toString(),
+                        "yca.sessions.retentionDays", String.valueOf(sessions.retentionDays()),
+                        "yca.sessions.compressDays", String.valueOf(sessions.compressDays()))),
+                mapper,
+                Clock.systemUTC());
     }
 
     private static void setAge(final Path file, final long daysOld) throws Exception {
-        Files.setLastModifiedTime(file, FileTime.fromMillis(Instant.now().toEpochMilli() - daysOld * 24L * 60L * 60L * 1000L));
+        Files.setLastModifiedTime(
+                file, FileTime.fromMillis(Instant.now().toEpochMilli() - daysOld * 24L * 60L * 60L * 1000L));
     }
 
     @Test
@@ -127,8 +148,15 @@ class SessionStoreTest {
         assertTrue(Files.exists(store.path(id)));
 
         store.append(id, SessionEntry.of(1, "user", "hi", null, null));
-        store.append(id, SessionEntry.of(2, "assistant", "reading",
-                List.of(new ToolCall("c1", "function", new FunctionCall("read_file", "{\"path\":\"a\"}"), null)), "c1"));
+        store.append(
+                id,
+                SessionEntry.of(
+                        2,
+                        "assistant",
+                        "reading",
+                        List.of(new ToolCall(
+                                "c1", "function", new FunctionCall("read_file", "{\"path\":\"a\"}"), null)),
+                        "c1"));
 
         final var loaded = store.load(id);
         assertEquals(2, loaded.size());

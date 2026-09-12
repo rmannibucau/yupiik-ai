@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -8,7 +23,6 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -50,13 +64,27 @@ public class AskUserTool implements EmbeddedTool {
 
     @Override
     public Map<String, Object> schema() {
-        final var question = Schemas.object(Map.of(
-                "id", Schemas.str("A stable unique identifier for this question; the answer is returned under this key."),
-                "prompt", Schemas.str("The question to ask the user."),
-                "options", Schemas.arrayOf("Proposed answers the user can pick from (radio for single, checkbox for multiple). May be empty.", Schemas.str("One proposed answer.")),
-                "multiple", Schemas.bool("false = the user picks exactly one option, true = the user can select several options.")), "id", "prompt");
-        return Schemas.object(Map.of(
-                "questions", Schemas.arrayOf("The questions to ask the user. Each gets its own tab in the prompt panel.", question)), "questions");
+        final var question = Schemas.object(
+                Map.of(
+                        "id",
+                                Schemas.str(
+                                        "A stable unique identifier for this question; the answer is returned under this key."),
+                        "prompt", Schemas.str("The question to ask the user."),
+                        "options",
+                                Schemas.arrayOf(
+                                        "Proposed answers the user can pick from (radio for single, checkbox for multiple). May be empty.",
+                                        Schemas.str("One proposed answer.")),
+                        "multiple",
+                                Schemas.bool(
+                                        "false = the user picks exactly one option, true = the user can select several options.")),
+                "id",
+                "prompt");
+        return Schemas.object(
+                Map.of(
+                        "questions",
+                        Schemas.arrayOf(
+                                "The questions to ask the user. Each gets its own tab in the prompt panel.", question)),
+                "questions");
     }
 
     @Override

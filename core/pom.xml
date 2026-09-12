@@ -12,6 +12,15 @@
 
   <dependencies>
     <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>html-to-markdown</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>maven-repository-knowledge</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.yupiik.fusion</groupId>
       <artifactId>fusion-build-api</artifactId>
       <scope>provided</scope>

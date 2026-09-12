@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import java.io.IOException;
@@ -17,10 +32,30 @@ import java.util.function.Supplier;
  */
 public final class CompletionEngine {
     private static final List<String> SLASH_NAMES = List.of(
-            "/help", "/shortcuts", "/new", "/resume", "/compact", "/model", "/provider", "/mode",
-            "/editplan", "/memory", "/context", "/permissions", "/thinking", "/tool-output", "/tools",
-            "/agent", "/theme", "/structural-code-graph", "/clear", "/quit", "/exit",
-            "/session-id", "/session-flush", "/session-housekeeping");
+            "/help",
+            "/shortcuts",
+            "/new",
+            "/resume",
+            "/compact",
+            "/model",
+            "/provider",
+            "/mode",
+            "/editplan",
+            "/memory",
+            "/context",
+            "/permissions",
+            "/thinking",
+            "/tool-output",
+            "/tools",
+            "/agent",
+            "/theme",
+            "/structural-code-graph",
+            "/clear",
+            "/quit",
+            "/exit",
+            "/session-id",
+            "/session-flush",
+            "/session-housekeeping");
 
     /** A completion candidate: the range of text to replace and the matches. */
     public record Suggestion(List<String> items, int replaceStart, int replaceEnd, String label) {
@@ -40,9 +75,13 @@ public final class CompletionEngine {
     private final Supplier<List<String>> tools;
     private final Supplier<List<String>> agentNames;
 
-    public CompletionEngine(final Supplier<List<String>> models, final Supplier<List<String>> providers,
-                            final Supplier<List<String>> agents, final Supplier<List<String>> sessions,
-                            final Supplier<List<String>> tools, final Supplier<List<String>> agentNames) {
+    public CompletionEngine(
+            final Supplier<List<String>> models,
+            final Supplier<List<String>> providers,
+            final Supplier<List<String>> agents,
+            final Supplier<List<String>> sessions,
+            final Supplier<List<String>> tools,
+            final Supplier<List<String>> agentNames) {
         this.models = orEmpty(models);
         this.providers = orEmpty(providers);
         this.agents = orEmpty(agents);
@@ -79,8 +118,7 @@ public final class CompletionEngine {
             // free-text @agent prefix: strip '@' for matching ("@coder" -> "coder")
             final var name = prefixInner.substring(1);
             final var items = fuzzy(agentNames.get(), name);
-            return items.isEmpty() ? Suggestion.none()
-                    : new Suggestion(items, tokenStart + 1, cursor, "agents");
+            return items.isEmpty() ? Suggestion.none() : new Suggestion(items, tokenStart + 1, cursor, "agents");
         }
         final var beforeRaw = text.substring(0, tokenStart);
         // no text before the current token means we are still typing the command itself
@@ -106,22 +144,22 @@ public final class CompletionEngine {
             case "thinking", "tool-output" -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
             case "context", "editplan" -> {
                 final var items = pathCandidates(prefixInner);
-                yield items.isEmpty() ? Suggestion.none()
-                        : new Suggestion(items, tokenStart, cursor, "path");
+                yield items.isEmpty() ? Suggestion.none() : new Suggestion(items, tokenStart, cursor, "path");
             }
             default -> Suggestion.none();
         };
     }
 
-    private Suggestion complete(final String token, final int replaceStart,
-                                final List<String> candidates, final String label) {
+    private Suggestion complete(
+            final String token, final int replaceStart, final List<String> candidates, final String label) {
         final var items = fuzzy(candidates, token);
-        return items.isEmpty() ? Suggestion.none()
+        return items.isEmpty()
+                ? Suggestion.none()
                 : new Suggestion(items, replaceStart, replaceStart + token.length(), label);
     }
 
-    private Suggestion suggestionsWithHint(final String first, final String second,
-                                           final String token, final int tokenStart) {
+    private Suggestion suggestionsWithHint(
+            final String first, final String second, final String token, final int tokenStart) {
         final var out = new ArrayList<String>();
         final var lc = token.toLowerCase(Locale.ROOT);
         if (first.toLowerCase(Locale.ROOT).contains(lc)) {
@@ -130,12 +168,13 @@ public final class CompletionEngine {
         if (second.toLowerCase(Locale.ROOT).contains(lc)) {
             out.add(second);
         }
-        return out.isEmpty() ? Suggestion.none()
+        return out.isEmpty()
+                ? Suggestion.none()
                 : new Suggestion(out, tokenStart, tokenStart + token.length(), "option");
     }
 
-    private Suggestion suggestionsWithHint(final String first, final String second, final String third,
-                                           final String token, final int tokenStart) {
+    private Suggestion suggestionsWithHint(
+            final String first, final String second, final String third, final String token, final int tokenStart) {
         final var a = suggestionsWithHint(first, second, token, tokenStart);
         final var lc = token.toLowerCase(Locale.ROOT);
         if (third.toLowerCase(Locale.ROOT).contains(lc)) {
@@ -143,7 +182,8 @@ public final class CompletionEngine {
             if (!items.contains(third)) {
                 items.add(third);
             }
-            return items.isEmpty() ? Suggestion.none()
+            return items.isEmpty()
+                    ? Suggestion.none()
                     : new Suggestion(items, a.replaceStart(), a.replaceStart() + token.length(), "option");
         }
         return a;
@@ -173,12 +213,12 @@ public final class CompletionEngine {
         final var parent = path.getParent() == null ? Path.of(".") : path.getParent();
         final var lastSlash = base.lastIndexOf('/');
         final var dirPart = lastSlash >= 0 ? base.substring(0, lastSlash + 1) : "";
-        final var fileName = path.getFileName() == null ? "" : path.getFileName().toString();
+        final var fileName =
+                path.getFileName() == null ? "" : path.getFileName().toString();
         final var lcToken = token.toLowerCase(Locale.ROOT);
         final List<String> out;
         try (final var stream = Files.list(parent)) {
-            out = stream
-                    .filter(p -> p.getFileName() != null)
+            out = stream.filter(p -> p.getFileName() != null)
                     .map(p -> {
                         final var name = p.getFileName().toString();
                         return Files.isDirectory(p) ? dirPart + name + "/" : dirPart + name;

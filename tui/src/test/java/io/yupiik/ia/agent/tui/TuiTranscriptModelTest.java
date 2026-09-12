@@ -1,12 +1,27 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
-
-import io.yupiik.ia.agent.core.agent.AgentEvent;
-import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.ia.agent.core.agent.AgentEvent;
+import org.junit.jupiter.api.Test;
 
 class TuiTranscriptModelTest {
     private final TuiTranscriptModel model = new TuiTranscriptModel();
@@ -53,7 +68,8 @@ class TuiTranscriptModelTest {
         model.onEvent(new AgentEvent.ThinkingDelta("think"));
         model.flushThinking();
         final var transcript = model.transcript().toString();
-        assertTrue(transcript.contains(TuiTranscriptModel.THOUGHT_BEGIN + "\n**Thinking**\n\nlet me think\n" + TuiTranscriptModel.THOUGHT_END));
+        assertTrue(transcript.contains(TuiTranscriptModel.THOUGHT_BEGIN + "\n**Thinking**\n\nlet me think\n"
+                + TuiTranscriptModel.THOUGHT_END));
         model.flushThinking();
         assertEquals(1, count(transcript, TuiTranscriptModel.THOUGHT_BEGIN));
     }
@@ -180,8 +196,12 @@ class TuiTranscriptModelTest {
 
     @Test
     void regionsToleratesDanglingMarkers() {
-        assertTrue(TuiTranscriptModel.regions(TuiTranscriptModel.THOUGHT_END + "\nstray end").size() >= 1);
-        assertTrue(TuiTranscriptModel.regions("start " + TuiTranscriptModel.TOOL_BEGIN + "\nnever closed").size() >= 1);
+        assertTrue(TuiTranscriptModel.regions(TuiTranscriptModel.THOUGHT_END + "\nstray end")
+                        .size()
+                >= 1);
+        assertTrue(TuiTranscriptModel.regions("start " + TuiTranscriptModel.TOOL_BEGIN + "\nnever closed")
+                        .size()
+                >= 1);
     }
 
     @Test
@@ -192,7 +212,11 @@ class TuiTranscriptModelTest {
         model.trim();
         final var trimmed = model.transcript().toString();
         assertTrue(trimmed.length() <= 40, "expected trimmed transcript: " + trimmed);
-        assertTrue(trimmed.startsWith("cccccccccc") || trimmed.startsWith("dddddddddd") || trimmed.startsWith("eeeeeeeeee") || trimmed.startsWith("ffffffffff"),
+        assertTrue(
+                trimmed.startsWith("cccccccccc")
+                        || trimmed.startsWith("dddddddddd")
+                        || trimmed.startsWith("eeeeeeeeee")
+                        || trimmed.startsWith("ffffffffff"),
                 "expected trim to align on a line boundary: " + trimmed);
     }
 
@@ -200,10 +224,14 @@ class TuiTranscriptModelTest {
     void trimDropsDanglingRegions() {
         model.maxHistoryCharacters(30);
         model.transcript().setLength(0);
-        model.transcript().append(TuiTranscriptModel.TOOL_BEGIN + "\nlong tool output spanning lines\n" + TuiTranscriptModel.TOOL_END + "\ntail");
+        model.transcript()
+                .append(TuiTranscriptModel.TOOL_BEGIN + "\nlong tool output spanning lines\n"
+                        + TuiTranscriptModel.TOOL_END + "\ntail");
         model.trim();
         final var trimmed = model.transcript().toString();
-        assertEquals(count(trimmed, TuiTranscriptModel.TOOL_BEGIN), count(trimmed, TuiTranscriptModel.TOOL_END),
+        assertEquals(
+                count(trimmed, TuiTranscriptModel.TOOL_BEGIN),
+                count(trimmed, TuiTranscriptModel.TOOL_END),
                 "trimmed transcript must not carry a dangling tool region: " + trimmed);
     }
 

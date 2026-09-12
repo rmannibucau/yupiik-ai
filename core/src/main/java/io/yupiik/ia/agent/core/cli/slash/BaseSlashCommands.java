@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.cli.slash;
 
 import java.util.List;
@@ -21,19 +36,42 @@ public abstract class BaseSlashCommands implements SlashCommands {
                 new SlashCommandSpec("/model", "[name]", "show or switch the model", SlashGroup.CONFIG),
                 new SlashCommandSpec("/provider", "[id]", "show or switch the provider", SlashGroup.CONFIG),
                 new SlashCommandSpec("/agent", "[name]", "show or set the active custom agent", SlashGroup.CONFIG),
-                new SlashCommandSpec("/permissions", "all|none|show", "allow all tools, ask for approval, or show current (session-scoped) settings", SlashGroup.CONFIG),
-                new SlashCommandSpec("/thinking", "show|hide", "show or hide the reasoning/thinking stream", SlashGroup.CONFIG),
-                new SlashCommandSpec("/tool-output", "show|hide", "show or hide tool invocations and output", SlashGroup.CONFIG),
+                new SlashCommandSpec(
+                        "/permissions",
+                        "all|none|show",
+                        "allow all tools, ask for approval, or show current (session-scoped) settings",
+                        SlashGroup.CONFIG),
+                new SlashCommandSpec(
+                        "/thinking", "show|hide", "show or hide the reasoning/thinking stream", SlashGroup.CONFIG),
+                new SlashCommandSpec(
+                        "/tool-output", "show|hide", "show or hide tool invocations and output", SlashGroup.CONFIG),
                 new SlashCommandSpec("/context", "[path]", "dump raw context to stdout or a file", SlashGroup.SESSION),
-                new SlashCommandSpec("/session-id", null, "show the current session identifier and its path", SlashGroup.SESSION),
+                new SlashCommandSpec(
+                        "/session-id", null, "show the current session identifier and its path", SlashGroup.SESSION),
                 new SlashCommandSpec("/session-flush", null, "rewrite the current session to disk", SlashGroup.SESSION),
-                new SlashCommandSpec("/session-housekeeping", null, "clean up sessions (compress, delete empty/expired) and report", SlashGroup.MAINTAIN),
+                new SlashCommandSpec(
+                        "/session-housekeeping",
+                        null,
+                        "clean up sessions (compress, delete empty/expired) and report",
+                        SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/memory", null, "show global and project memory", SlashGroup.INSPECT),
                 new SlashCommandSpec("/tools", "[filter]", "list tools, optionally filtered", SlashGroup.INSPECT),
                 new SlashCommandSpec("/compact", null, "compact the context window", SlashGroup.MAINTAIN),
-                new SlashCommandSpec("/snapshot", "save|cancel|restore|status", "manage context checkpoints that survive compaction", SlashGroup.MAINTAIN),
-                new SlashCommandSpec("/editplan", "[path]", "edit the current plan (in plan mode)", SlashGroup.MAINTAIN),
-                new SlashCommandSpec("/structural-code-graph", null, "resync the code structure index", SlashGroup.MAINTAIN),
+                new SlashCommandSpec(
+                        "/snapshot",
+                        "save|cancel|restore|status",
+                        "manage context checkpoints that survive compaction",
+                        SlashGroup.MAINTAIN),
+                new SlashCommandSpec(
+                        "/editplan", "[path]", "edit the current plan (in plan mode)", SlashGroup.MAINTAIN),
+                new SlashCommandSpec(
+                        "/structural-code-graph", null, "resync the code structure index", SlashGroup.MAINTAIN),
+                new SlashCommandSpec(
+                        "/maven-repository-knowledge",
+                        "refresh [gav]",
+                        "index local Maven artifacts so "
+                                + "agents do not rediscover library usage (refresh a single gav, or re-run the project baseline)",
+                        SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/clear", null, "clear the conversation", SlashGroup.SESSION));
     }
 }

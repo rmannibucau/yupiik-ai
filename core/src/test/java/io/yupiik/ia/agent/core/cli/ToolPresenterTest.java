@@ -1,17 +1,30 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.cli;
-
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import org.junit.jupiter.api.Test;
-
-import java.util.List;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import java.util.List;
+import java.util.Optional;
+import org.junit.jupiter.api.Test;
+
 class ToolPresenterTest {
-    private final ToolPresenter presenter = new ToolPresenter(
-            new JsonMapperImpl(List.of(), key -> Optional.empty()));
+    private final ToolPresenter presenter = new ToolPresenter(new JsonMapperImpl(List.of(), key -> Optional.empty()));
 
     @Test
     void summarizesBashCommand() {
@@ -25,11 +38,13 @@ class ToolPresenterTest {
 
     @Test
     void summarizesFileTools() {
-        assertEquals("Read(src/Foo.java: 500 lines)", presenter.summarize("read_file",
-                "{\"path\":\"src/Foo.java\",\"limit\":500}"));
+        assertEquals(
+                "Read(src/Foo.java: 500 lines)",
+                presenter.summarize("read_file", "{\"path\":\"src/Foo.java\",\"limit\":500}"));
         assertEquals("Write(pom.xml)", presenter.summarize("write_file", "{\"path\":\"pom.xml\",\"content\":\"x\"}"));
-        assertEquals("Edit(pom.xml)", presenter.summarize("edit_file",
-                "{\"path\":\"pom.xml\",\"oldString\":\"a\",\"newString\":\"b\"}"));
+        assertEquals(
+                "Edit(pom.xml)",
+                presenter.summarize("edit_file", "{\"path\":\"pom.xml\",\"oldString\":\"a\",\"newString\":\"b\"}"));
     }
 
     @Test
@@ -41,23 +56,23 @@ class ToolPresenterTest {
 
     @Test
     void summarizesTodosAndUnknown() {
-        assertEquals("Todos(2)", presenter.summarize("todo_write",
-                "{\"todos\":[{\"content\":\"a\"},{\"content\":\"b\"}]}"));
+        assertEquals(
+                "Todos(2)", presenter.summarize("todo_write", "{\"todos\":[{\"content\":\"a\"},{\"content\":\"b\"}]}"));
         final var unknown = presenter.summarize("some_mcp_tool", "{\"query\":\"hello world\"}");
         assertTrue(unknown.startsWith("some_mcp_tool("));
     }
 
     @Test
     void editDiffShowsAddAndRemove() {
-        final var diff = presenter.diff("edit_file",
-                "{\"path\":\"a\",\"oldString\":\"old line\",\"newString\":\"new line\"}", 5);
+        final var diff = presenter.diff(
+                "edit_file", "{\"path\":\"a\",\"oldString\":\"old line\",\"newString\":\"new line\"}", 5);
         assertEquals(List.of("- old line", "+ new line"), diff);
     }
 
     @Test
     void editDiffTruncatesLong() {
-        final var diff = presenter.diff("edit_file",
-                "{\"path\":\"a\",\"oldString\":\"l1\\nl2\\nl3\\nl4\\nl5\\nl6\",\"newString\":\"\"}", 5);
+        final var diff = presenter.diff(
+                "edit_file", "{\"path\":\"a\",\"oldString\":\"l1\\nl2\\nl3\\nl4\\nl5\\nl6\",\"newString\":\"\"}", 5);
         assertEquals(6, diff.size());
         assertTrue(diff.get(5).contains("more"));
     }

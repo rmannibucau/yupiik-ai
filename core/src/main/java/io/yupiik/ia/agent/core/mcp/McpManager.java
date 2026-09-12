@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -5,7 +20,6 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
@@ -26,8 +40,11 @@ public class McpManager {
     private final Map<String, McpClient> clients = new ConcurrentHashMap<>();
     private final Map<String, List<EmbeddedTool>> toolsByServer = new ConcurrentHashMap<>();
 
-    public McpManager(final CodingAgentConfiguration configuration, final JsonMapper mapper,
-                      final List<EmbeddedTool> localTools, final ExtendedHttpClient httpClient) {
+    public McpManager(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final List<EmbeddedTool> localTools,
+            final ExtendedHttpClient httpClient) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.localTools = localTools;
@@ -49,10 +66,12 @@ public class McpManager {
                 clients.put("yca", local);
                 final var imported = new ArrayList<EmbeddedTool>();
                 for (final var tool : local.listTools()) {
-                    imported.add(new LocalMcpTool(local, localTools.stream()
-                            .filter(t -> t.name().equals(tool.name()))
-                            .findFirst()
-                            .orElseThrow()));
+                    imported.add(new LocalMcpTool(
+                            local,
+                            localTools.stream()
+                                    .filter(t -> t.name().equals(tool.name()))
+                                    .findFirst()
+                                    .orElseThrow()));
                 }
                 toolsByServer.put("yca", imported);
             } catch (final RuntimeException e) {
@@ -66,15 +85,22 @@ public class McpManager {
             try {
                 final McpClient client;
                 if (server.url() != null && !server.url().isBlank()) {
-                    client = new HttpMcpClient(server.name(), server.url(), server.apiKey(), server.headers(),
-                            configuration.mcp().callTimeoutSeconds(), mapper, httpClient);
+                    client = new HttpMcpClient(
+                            server.name(),
+                            server.url(),
+                            server.apiKey(),
+                            server.headers(),
+                            configuration.mcp().callTimeoutSeconds(),
+                            mapper,
+                            httpClient);
                 } else if (server.command() != null && !server.command().isBlank()) {
                     final var command = new ArrayList<String>();
                     command.add(server.command());
                     if (server.args() != null) {
                         command.addAll(server.args());
                     }
-                    client = new StdioMcpClient(server.name(), command, server.env() == null ? List.of() : server.env(), mapper);
+                    client = new StdioMcpClient(
+                            server.name(), command, server.env() == null ? List.of() : server.env(), mapper);
                 } else {
                     LOGGER.warning("MCP server " + server.name() + " has neither url nor command, skipped");
                     continue;
@@ -125,8 +151,7 @@ public class McpManager {
         FAILED
     }
 
-    public record ServerStatus(String name, ServerState state) {
-    }
+    public record ServerStatus(String name, ServerState state) {}
 
     public List<ServerStatus> serverStatuses() {
         final var out = new ArrayList<ServerStatus>();

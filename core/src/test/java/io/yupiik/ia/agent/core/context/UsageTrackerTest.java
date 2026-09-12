@@ -1,23 +1,32 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.context;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.LlmConfiguration;
-import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-import io.yupiik.ia.agent.core.configuration.ProviderListConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.io.TempDir;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -25,9 +34,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
-
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class UsageTrackerTest {
     @TempDir
@@ -47,10 +59,12 @@ class UsageTrackerTest {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/models", exchange -> respond(exchange, modelsStatus, modelsBody));
         server.start();
-        mapper = new JsonMapperImpl(List.of(
-                new ModelsResponse$FusionJsonCodec(),
-                new ModelsResponse$Model$FusionJsonCodec(),
-                new ContextWindowCache$Entry$FusionJsonCodec()), key -> Optional.empty());
+        mapper = new JsonMapperImpl(
+                List.of(
+                        new ModelsResponse$FusionJsonCodec(),
+                        new ModelsResponse$Model$FusionJsonCodec(),
+                        new ContextWindowCache$Entry$FusionJsonCodec()),
+                key -> Optional.empty());
         configuration = configuration(-1);
         providerManager = new ProviderManager(configuration, mapper);
         client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());
@@ -75,13 +89,16 @@ class UsageTrackerTest {
 
     @Test
     void detectsFromModelsAndCachesIt() {
-        modelsBody = "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"llamacpp\",\"meta\":{\"n_ctx\":196608,\"n_ctx_train\":262144}}]}";
+        modelsBody =
+                "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"llamacpp\",\"meta\":{\"n_ctx\":196608,\"n_ctx_train\":262144}}]}";
         final var tracker = tracker();
         assertEquals(196608, tracker.contextWindow());
         server.stop(0);
         server = null;
         assertEquals(196608, tracker.contextWindow());
-        assertEquals(Optional.of(196608), new ContextWindowCache(configuration, mapper, Clock.systemUTC()).get("default", "test-model"));
+        assertEquals(
+                Optional.of(196608),
+                new ContextWindowCache(configuration, mapper, Clock.systemUTC()).get("default", "test-model"));
     }
 
     @Test
@@ -95,7 +112,8 @@ class UsageTrackerTest {
 
     @Test
     void freshCacheSkipsModelsCall() {
-        new ContextWindowCache(configuration, mapper, Clock.systemUTC()).put("default", "test-model", 64000, System.currentTimeMillis());
+        new ContextWindowCache(configuration, mapper, Clock.systemUTC())
+                .put("default", "test-model", 64000, System.currentTimeMillis());
         modelsStatus = 500;
         assertEquals(64000, tracker().contextWindow());
     }
@@ -113,19 +131,32 @@ class UsageTrackerTest {
     }
 
     private UsageTracker tracker() {
-        return new UsageTracker(providerManager, client, new ContextWindowCache(configuration, mapper, Clock.systemUTC()), Clock.systemUTC());
+        return new UsageTracker(
+                providerManager,
+                client,
+                new ContextWindowCache(configuration, mapper, Clock.systemUTC()),
+                Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration(final int contextWindow) {
-        final var provider = new ProviderConfiguration("default",
-                "http://localhost:" + server.getAddress().getPort() + "/v1", "test-key", "test-model",
-                null, null, contextWindow, -1, List.of(), 5, "", java.util.Map.of(), null);
-        return new CodingAgentConfiguration(storageHome.toString(), null, null,
-                new ProviderListConfiguration(List.of(provider), "", null, null, null, null, null, contextWindow, -1, List.of(), 120),
-                null, new LlmConfiguration(1, 1L, 0, 1, true, 250),
-                null, null, null, null, null, null, null, null, null, null, null,
-                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
+        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry(
+                        "yca.provider.providers.0.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.0.model", "test-model"),
+                Map.entry("yca.provider.providers.0.api", "auto"),
+                Map.entry("yca.provider.providers.0.contextWindow", String.valueOf(contextWindow)),
+                Map.entry("yca.provider.providers.0.timeoutSeconds", "5"),
+                Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
+                Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
+                Map.entry("yca.llm.maxConcurrent", "1"),
+                Map.entry("yca.llm.retryOnContextOverflow", "true"),
+                Map.entry("yca.llm.maxIterations", "250")));
     }
 
     private static void respond(final HttpExchange exchange, final int status, final String body) {

@@ -1,9 +1,22 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
-
-import java.io.BufferedReader;
 import java.io.IOException;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,14 +42,18 @@ final class OpenAICompletionClient extends AbstractLlmClient {
     }
 
     @Override
-    public ChatResult chat(final ProviderConfiguration provider, final ChatCompletionRequest request,
-                           final BooleanSupplier cancelled) throws IOException, InterruptedException {
+    public ChatResult chat(
+            final ProviderConfiguration provider, final ChatCompletionRequest request, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
         return toResult(sendCompletions(provider, request));
     }
 
     @Override
-    public Message stream(final ProviderConfiguration provider, final ChatCompletionRequest request,
-                          final Consumer<StreamDelta> onDelta, final BooleanSupplier cancelled)
+    public Message stream(
+            final ProviderConfiguration provider,
+            final ChatCompletionRequest request,
+            final Consumer<StreamDelta> onDelta,
+            final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var payload = mapper.toBytes(request);
         final var httpRequest = http(provider, payload);
@@ -84,8 +101,13 @@ final class OpenAICompletionClient extends AbstractLlmClient {
                     }
                 }
             }
-            return new Message("assistant", content.toString(), null,
-                    toolCalls.isEmpty() ? null : List.copyOf(toolCalls.values()), null, null);
+            return new Message(
+                    "assistant",
+                    content.toString(),
+                    null,
+                    toolCalls.isEmpty() ? null : List.copyOf(toolCalls.values()),
+                    null,
+                    null);
         }
     }
 
@@ -101,8 +123,8 @@ final class OpenAICompletionClient extends AbstractLlmClient {
         return parse(ModelsResponse.class, response.body());
     }
 
-    private ChatCompletionResponse sendCompletions(final ProviderConfiguration provider,
-                                                   final ChatCompletionRequest request) throws IOException {
+    private ChatCompletionResponse sendCompletions(
+            final ProviderConfiguration provider, final ChatCompletionRequest request) throws IOException {
         final var payload = mapper.toBytes(request);
         final var response = send(provider, http(provider, payload));
         if (response.statusCode() >= 400) {
@@ -112,8 +134,8 @@ final class OpenAICompletionClient extends AbstractLlmClient {
             if (ContextWindowExceededException.isCause(response.statusCode(), response.body())) {
                 throw new ContextWindowExceededException();
             }
-            throw new IOException("LLM request failed (" + response.statusCode() + "): " + response.body()
-                    + retryAfter(response));
+            throw new IOException(
+                    "LLM request failed (" + response.statusCode() + "): " + response.body() + retryAfter(response));
         }
         return parse(ChatCompletionResponse.class, response.body());
     }
@@ -123,7 +145,9 @@ final class OpenAICompletionClient extends AbstractLlmClient {
     }
 
     private String reasoningText(final ProviderConfiguration provider, final ChatChunk.ChunkDelta delta) {
-        return switch (provider.reasoningField() == null ? io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO : provider.reasoningField()) {
+        return switch (provider.reasoningField() == null
+                ? io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO
+                : provider.reasoningField()) {
             case REASONING -> delta.reasoning();
             case REASONING_CONTENT -> delta.reasoningContent();
             case NONE -> null;
@@ -139,15 +163,25 @@ final class OpenAICompletionClient extends AbstractLlmClient {
             return;
         }
         final var fn = call.function();
-        final var mergedFn = fn == null ? existing.function() : new ToolCall.FunctionCall(
-                fn.name() != null ? fn.name() : (existing.function() != null ? existing.function().name() : null),
-                (existing.function() != null && existing.function().arguments() != null ? existing.function().arguments() : "")
-                        + (fn.arguments() != null ? fn.arguments() : ""));
-        toolCalls.put(key, new ToolCall(
-                call.id() != null ? call.id() : existing.id(),
-                call.type() != null ? call.type() : existing.type(),
-                mergedFn,
-                call.index()));
+        final var mergedFn = fn == null
+                ? existing.function()
+                : new ToolCall.FunctionCall(
+                        fn.name() != null
+                                ? fn.name()
+                                : (existing.function() != null
+                                        ? existing.function().name()
+                                        : null),
+                        (existing.function() != null && existing.function().arguments() != null
+                                        ? existing.function().arguments()
+                                        : "")
+                                + (fn.arguments() != null ? fn.arguments() : ""));
+        toolCalls.put(
+                key,
+                new ToolCall(
+                        call.id() != null ? call.id() : existing.id(),
+                        call.type() != null ? call.type() : existing.type(),
+                        mergedFn,
+                        call.index()));
     }
 
     @SuppressWarnings("unchecked")

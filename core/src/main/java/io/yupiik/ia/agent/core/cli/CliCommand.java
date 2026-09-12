@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.cli;
 
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
@@ -15,6 +30,7 @@ import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
@@ -25,7 +41,6 @@ import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -63,6 +78,7 @@ public class CliCommand implements Runnable {
     private final ChatClient chatClient;
     private final ProviderManager providerManager;
     private final AgentSessionService agentSessionService;
+    private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final UsageTracker usageTracker;
     private final ReplSlashCommands replSlashCommands;
     private final Clock clock;
@@ -96,15 +112,23 @@ public class CliCommand implements Runnable {
     private Path contextPath;
     private final AtomicBoolean cleaned = new AtomicBoolean();
 
-    public CliCommand(final CliConf conf, final AgentLoop agentLoop, final AgentEventBridge bridge,
-                      final PermissionService permissionService, final UserFeedbackService userFeedbackService,
-                      final SessionStore sessionStore, final TodoStore todoStore,
-                      final AgentProvider agentProvider,
-                      final UsageTracker usageTracker,
-                      final ChatClient chatClient,
-                      final ProviderManager providerManager,
-                      final AgentSessionService agentSessionService,
-                      final JsonMapper mapper, final ReplSlashCommands replSlashCommands, final Clock clock) {
+    public CliCommand(
+            final CliConf conf,
+            final AgentLoop agentLoop,
+            final AgentEventBridge bridge,
+            final PermissionService permissionService,
+            final UserFeedbackService userFeedbackService,
+            final SessionStore sessionStore,
+            final TodoStore todoStore,
+            final AgentProvider agentProvider,
+            final UsageTracker usageTracker,
+            final ChatClient chatClient,
+            final ProviderManager providerManager,
+            final AgentSessionService agentSessionService,
+            final MavenRepositoryKnowledgeService mavenKnowledgeService,
+            final JsonMapper mapper,
+            final ReplSlashCommands replSlashCommands,
+            final Clock clock) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -117,6 +141,7 @@ public class CliCommand implements Runnable {
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         this.agentSessionService = agentSessionService;
+        this.mavenKnowledgeService = mavenKnowledgeService;
         this.replSlashCommands = replSlashCommands;
         this.clock = clock;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
@@ -131,17 +156,55 @@ public class CliCommand implements Runnable {
 
     @RootConfiguration("cli")
     public record CliConf(
-            @Property(defaultValue = "\"\"", documentation = "Resume an existing session by id; a new session is created when empty.") String session,
-            @Property(defaultValue = "\"\"", documentation = "Session context file (a yca session JSONL). Its file name provides the session id to resume or create.") String context,
-            @Property(defaultValue = "\"\"", documentation = "Name of a custom agent (from yca.agents) active by default. Its prompt is injected on top of the base system prompt.") String agent,
-            @Property(defaultValue = "true", documentation = "Enable ANSI colors. Color is only emitted when stdout is a terminal and neither NO_COLOR nor TERM=dumb is set.") boolean color,
-            @Property(defaultValue = "false", documentation = "Force ASCII-only symbols (no Unicode glyphs) in the output, useful for scripts or non-Unicode terminals.") boolean ascii,
-            @Property(defaultValue = "\"compact\"", documentation = "Tool output verbosity: compact (summaries and live progress), verbose (full dimmed stream) or raw (verbatim, legacy behaviour).") String presentation,
-            @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.") boolean showThinking,
-            @Property(defaultValue = "true", documentation = "Show tool invocations and output on stderr.") boolean showToolOutput,
-            @Property(defaultValue = "false", documentation = "Print the context usage (estimated tokens and percent of the context window) on stderr after each turn.") boolean showUsage,
-            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.") boolean permitAll) {
-    }
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation = "Resume an existing session by id; a new session is created when empty.")
+            String session,
+
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Session context file (a yca session JSONL). Its file name provides the session id to resume or create.")
+            String context,
+
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Name of a custom agent (from yca.agents) active by default. Its prompt is injected on top of the base system prompt.")
+            String agent,
+
+            @Property(
+                    defaultValue = "true",
+                    documentation =
+                            "Enable ANSI colors. Color is only emitted when stdout is a terminal and neither NO_COLOR nor TERM=dumb is set.")
+            boolean color,
+
+            @Property(
+                    defaultValue = "false",
+                    documentation =
+                            "Force ASCII-only symbols (no Unicode glyphs) in the output, useful for scripts or non-Unicode terminals.")
+            boolean ascii,
+
+            @Property(
+                    defaultValue = "\"compact\"",
+                    documentation =
+                            "Tool output verbosity: compact (summaries and live progress), verbose (full dimmed stream) or raw (verbatim, legacy behaviour).")
+            String presentation,
+
+            @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.")
+            boolean showThinking,
+
+            @Property(defaultValue = "true", documentation = "Show tool invocations and output on stderr.")
+            boolean showToolOutput,
+
+            @Property(
+                    defaultValue = "false",
+                    documentation =
+                            "Print the context usage (estimated tokens and percent of the context window) on stderr after each turn.")
+            boolean showUsage,
+
+            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.")
+            boolean permitAll) {}
 
     @Override
     public void run() {
@@ -156,17 +219,20 @@ public class CliCommand implements Runnable {
                     Files.writeString(contextPath, "");
                 }
             } catch (final IOException e) {
-                println(MarkdownColorizer.error("failed to prepare context file " + contextPath + ": " + e.getMessage()));
+                println(MarkdownColorizer.error(
+                        "failed to prepare context file " + contextPath + ": " + e.getMessage()));
             }
         }
         println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
         printBanner();
         if (conf.permitAll()) {
-            println(MarkdownColorizer.warning("WARNING: --permit-all is on; all tool calls will run without approval."));
+            println(MarkdownColorizer.warning(
+                    "WARNING: --permit-all is on; all tool calls will run without approval."));
         }
         if (conf.agent() != null && !conf.agent().isBlank()) {
             if (agentProvider.byName(conf.agent()) == null) {
-                throw new IllegalArgumentException("unknown agent: " + conf.agent() + " (configure one under yca.agents)");
+                throw new IllegalArgumentException(
+                        "unknown agent: " + conf.agent() + " (configure one under yca.agents)");
             }
             activeAgent = conf.agent();
         }
@@ -259,7 +325,9 @@ public class CliCommand implements Runnable {
             }
             sb.append(']');
             if (permissionLabel != null) {
-                sb.append(' ').append(permissionColor(info.permitAll(), info.permissionMode()).apply(permissionLine(permissionLabel)));
+                sb.append(' ')
+                        .append(permissionColor(info.permitAll(), info.permissionMode())
+                                .apply(permissionLine(permissionLabel)));
             }
         } else {
             sb.append('[').append(mode);
@@ -317,8 +385,10 @@ public class CliCommand implements Runnable {
     private void printBanner() {
         final var sb = new StringBuilder();
         sb.append(MarkdownColorizer.bold(symbols.toolMarker() + "yca"))
-                .append(" · ").append(permissionService.mode().name().toLowerCase(Locale.ROOT))
-                .append(" mode · session ").append(sessionId);
+                .append(" · ")
+                .append(permissionService.mode().name().toLowerCase(Locale.ROOT))
+                .append(" mode · session ")
+                .append(sessionId);
         final var model = chatClient.model();
         if (model != null && !model.isBlank()) {
             sb.append(" · ").append(model);
@@ -358,10 +428,33 @@ public class CliCommand implements Runnable {
         }
     }
 
+    private boolean mavenIndexingBlocking() {
+        final var run = mavenKnowledgeService.currentIndex();
+        if (run == null || !run.inFlight()) {
+            return false;
+        }
+        print(MarkdownColorizer.status("maven knowledge index still running (" + run.doneCount() + "/" + run.total()
+                + ") - send the prompt anyway? [y/N] "));
+        try {
+            final var answer = stdin.readLine();
+            if (answer == null) {
+                return false;
+            }
+            final var a = answer.strip().toLowerCase(Locale.ROOT);
+            return !(a.equals("y") || a.equals("yes"));
+        } catch (final IOException e) {
+            return false;
+        }
+    }
+
     private void runTurn(final String input) {
+        if (mavenIndexingBlocking()) {
+            println(MarkdownColorizer.status("prompt not sent (maven knowledge index still running)"));
+            return;
+        }
         final var override = agentSessionService.agentOverride(input);
-        final var agentName = override.agentName() != null ? override.agentName()
-                : (activeAgent.isBlank() ? null : activeAgent);
+        final var agentName =
+                override.agentName() != null ? override.agentName() : (activeAgent.isBlank() ? null : activeAgent);
         final var prompt = override.prompt();
         cancelled.set(false);
         busy.set(true);
@@ -435,8 +528,12 @@ public class CliCommand implements Runnable {
         sb.append(symbols.infoMarker());
         if (conf.showUsage()) {
             final var usage = lastUsageEvent;
-            sb.append(String.format(Locale.ROOT, "~%,d tokens (%.1f%% of %,d)",
-                    usage.estimatedContextTokens(), usage.contextPercent(), usageTracker.contextWindow()));
+            sb.append(String.format(
+                    Locale.ROOT,
+                    "~%,d tokens (%.1f%% of %,d)",
+                    usage.estimatedContextTokens(),
+                    usage.contextPercent(),
+                    usageTracker.contextWindow()));
         }
         if (toolsRun > 0) {
             if (conf.showUsage()) {
@@ -486,11 +583,12 @@ public class CliCommand implements Runnable {
                     + mode.toLowerCase(java.util.Locale.ROOT) + ")"));
         } else if (event instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message)) {
             stopSpinner();
-            final var marker = switch (level) {
-                case ERROR -> symbols.errorMarker();
-                case WARN -> symbols.warningMarker();
-                case INFO -> symbols.infoMarker();
-            };
+            final var marker =
+                    switch (level) {
+                        case ERROR -> symbols.errorMarker();
+                        case WARN -> symbols.warningMarker();
+                        case INFO -> symbols.infoMarker();
+                    };
             System.err.println(MarkdownColorizer.status(marker + " " + message));
         } else if (event instanceof AgentEvent.Status(String message)) {
             stopSpinner();
@@ -538,13 +636,15 @@ public class CliCommand implements Runnable {
     }
 
     private String colorizeDiff(final String line) {
-        final var marker = line.startsWith(symbols.diffDel()) ? symbols.diffDel()
+        final var marker = line.startsWith(symbols.diffDel())
+                ? symbols.diffDel()
                 : line.startsWith(symbols.diffAdd()) ? symbols.diffAdd() : null;
         if (marker == null) {
             return MarkdownColorizer.dim(line);
         }
         final var rest = line.substring(marker.length());
-        return (marker.equals(symbols.diffDel()) ? MarkdownColorizer.diffDel(marker + rest)
+        return (marker.equals(symbols.diffDel())
+                ? MarkdownColorizer.diffDel(marker + rest)
                 : MarkdownColorizer.diffAdd(marker + rest));
     }
 
@@ -664,6 +764,10 @@ public class CliCommand implements Runnable {
                     resyncGraph();
                     return false;
                 }),
+                Map.entry("maven-repository-knowledge", arg -> {
+                    mavenRepositoryKnowledge(arg);
+                    return false;
+                }),
                 Map.entry("compact", arg -> {
                     compact();
                     return false;
@@ -780,9 +884,17 @@ public class CliCommand implements Runnable {
         final var dump = agentSessionService.context(sessionId);
         final var sb = new StringBuilder();
         sb.append("## System prompt\n\n").append(dump.systemPrompt()).append("\n\n");
-        sb.append("## Session ").append(dump.sessionId()).append(" (").append(dump.messages().size()).append(" messages)\n\n");
+        sb.append("## Session ")
+                .append(dump.sessionId())
+                .append(" (")
+                .append(dump.messages().size())
+                .append(" messages)\n\n");
         for (final var message : dump.messages()) {
-            sb.append("- ").append(message.role()).append(": ").append(message.firstLine()).append('\n');
+            sb.append("- ")
+                    .append(message.role())
+                    .append(": ")
+                    .append(message.firstLine())
+                    .append('\n');
         }
         if (arg.isBlank()) {
             println(sb.toString());
@@ -888,8 +1000,11 @@ public class CliCommand implements Runnable {
             final var info = agentSessionService.permissionsInfo();
             println(MarkdownColorizer.accent("permissions status (session-scoped):"));
             println(MarkdownColorizer.status("permit all: " + (info.permitAll() ? "on" : "off")));
-            println(MarkdownColorizer.status("agent mode: " + info.agentMode().name().toLowerCase(Locale.ROOT)
-                    + ", permission mode: " + (info.permissionMode() == null ? "?" : info.permissionMode().toString().toLowerCase(Locale.ROOT))));
+            println(MarkdownColorizer.status(
+                    "agent mode: " + info.agentMode().name().toLowerCase(Locale.ROOT) + ", permission mode: "
+                            + (info.permissionMode() == null
+                                    ? "?"
+                                    : info.permissionMode().toString().toLowerCase(Locale.ROOT))));
             if (info.sessionGrants().isEmpty()) {
                 println(MarkdownColorizer.status("session grants: none (use 'a' in the approval prompt to add one)"));
             } else {
@@ -913,7 +1028,8 @@ public class CliCommand implements Runnable {
     private void thinking(final String arg) {
         final var parsed = parseShowHide(arg);
         if (parsed == null) {
-            println(MarkdownColorizer.status("thinking " + (showThinking ? "shown" : "hidden") + " - usage: /thinking show|hide"));
+            println(MarkdownColorizer.status(
+                    "thinking " + (showThinking ? "shown" : "hidden") + " - usage: /thinking show|hide"));
             return;
         }
         showThinking = parsed;
@@ -923,7 +1039,8 @@ public class CliCommand implements Runnable {
     private void toolOutput(final String arg) {
         final var parsed = parseShowHide(arg);
         if (parsed == null) {
-            println(MarkdownColorizer.status("tool output " + (showToolOutput ? "shown" : "hidden") + " - usage: /tool-output show|hide"));
+            println(MarkdownColorizer.status(
+                    "tool output " + (showToolOutput ? "shown" : "hidden") + " - usage: /tool-output show|hide"));
             return;
         }
         showToolOutput = parsed;
@@ -948,6 +1065,34 @@ public class CliCommand implements Runnable {
         } catch (final RuntimeException e) {
             println(MarkdownColorizer.error("resync failed: " + e.getMessage()));
         }
+    }
+
+    private void mavenRepositoryKnowledge(final String arg) {
+        try {
+            if (arg == null || arg.isBlank()) {
+                println(MarkdownColorizer.status("usage: /maven-repository-knowledge refresh [gav]"));
+                return;
+            }
+            final var parts = arg.strip().split("\\s+", 2);
+            if (!"refresh".equalsIgnoreCase(parts[0])) {
+                println(MarkdownColorizer.status("usage: /maven-repository-knowledge refresh [gav]"));
+                return;
+            }
+            final var gav = parts.length > 1 ? parts[1].strip() : "";
+            final var ack = mavenKnowledgeService.refresh(gav, this::printMavenProgress, this::printMavenSummary);
+            ack.forEach(line -> println(MarkdownColorizer.status(line)));
+        } catch (final RuntimeException e) {
+            println(MarkdownColorizer.error("maven-repository-knowledge failed: " + e.getMessage()));
+        }
+    }
+
+    private void printMavenProgress(final String progress) {
+        // progress may arrive from the background indexer thread; PrintStream is thread-safe per call
+        println(MarkdownColorizer.status(progress));
+    }
+
+    private void printMavenSummary(final String summary) {
+        summary.lines().forEach(line -> println(MarkdownColorizer.status(line)));
     }
 
     private void compact() {
@@ -986,7 +1131,8 @@ public class CliCommand implements Runnable {
             return;
         }
         println(MarkdownColorizer.status("plan exported to " + export.path()));
-        println(MarkdownColorizer.status("edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
+        println(MarkdownColorizer.status(
+                "edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
         try {
             final var input = stdin.readLine();
             if (input != null) {
@@ -1051,9 +1197,11 @@ public class CliCommand implements Runnable {
         println(MarkdownColorizer.accent(symbols.boxTop() + rule + symbols.boxCorner()));
         for (int i = 0; i < lines.size(); i++) {
             for (final var fragment : wrapLine(lines.get(i), width)) {
-                final var styled = i == 0 ? MarkdownColorizer.bold(padTo(fragment, width))
-                        : i == 1 ? MarkdownColorizer.warning(padTo(fragment, width))
-                        : MarkdownColorizer.status(padTo(fragment, width));
+                final var styled = i == 0
+                        ? MarkdownColorizer.bold(padTo(fragment, width))
+                        : i == 1
+                                ? MarkdownColorizer.warning(padTo(fragment, width))
+                                : MarkdownColorizer.status(padTo(fragment, width));
                 println(MarkdownColorizer.accent(symbols.boxLine()) + styled);
             }
         }
@@ -1264,9 +1412,7 @@ public class CliCommand implements Runnable {
             final var handle = signal.getMethod("handle", signal, handler);
             final var ctor = signal.getConstructor(String.class);
             final var interruptHandler = Proxy.newProxyInstance(
-                    CliCommand.class.getClassLoader(),
-                    new Class<?>[]{handler},
-                    (_, method, _) -> {
+                    CliCommand.class.getClassLoader(), new Class<?>[] {handler}, (_, method, _) -> {
                         if (method.getName().equals("handle")) {
                             onInterrupt();
                         }

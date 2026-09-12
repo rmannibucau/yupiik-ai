@@ -1,25 +1,34 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.llm.Usage;
 
 public sealed interface AgentEvent {
-    record TextDelta(String delta) implements AgentEvent {
-    }
+    record TextDelta(String delta) implements AgentEvent {}
 
-    record ThinkingDelta(String delta) implements AgentEvent {
-    }
+    record ThinkingDelta(String delta) implements AgentEvent {}
 
-    record ToolStarted(String name, String args) implements AgentEvent {
-    }
+    record ToolStarted(String name, String args) implements AgentEvent {}
 
-    record ToolFinished(String name, String output, boolean success) implements AgentEvent {
-    }
+    record ToolFinished(String name, String output, boolean success) implements AgentEvent {}
 
-    record ToolStream(String name, String fragment) implements AgentEvent {
-    }
+    record ToolStream(String name, String fragment) implements AgentEvent {}
 
-    record UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent) implements AgentEvent {
-    }
+    record UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent) implements AgentEvent {}
 
     record Compacted(String kind, String mode) implements AgentEvent {
 
@@ -28,8 +37,7 @@ public sealed interface AgentEvent {
         }
     }
 
-    record Status(String message) implements AgentEvent {
-    }
+    record Status(String message) implements AgentEvent {}
 
     /**
      * A durable, user-visible non-conversation notice. Unlike {@link Status},
@@ -40,7 +48,9 @@ public sealed interface AgentEvent {
     record Notice(Level level, String message) implements AgentEvent {
 
         public enum Level {
-            INFO, WARN, ERROR
+            INFO,
+            WARN,
+            ERROR
         }
 
         public static Notice info(final String message) {
@@ -56,9 +66,7 @@ public sealed interface AgentEvent {
         }
     }
 
-    record TurnDone(String content) implements AgentEvent {
-    }
+    record TurnDone(String content) implements AgentEvent {}
 
-    record Error(String message) implements AgentEvent {
-    }
+    record Error(String message) implements AgentEvent {}
 }

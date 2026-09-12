@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.buffer.Buffer;
@@ -34,20 +49,16 @@ final class HeadlessBackend implements Backend {
     }
 
     @Override
-    public void flush() {
-    }
+    public void flush() {}
 
     @Override
-    public void clear() {
-    }
+    public void clear() {}
 
     @Override
-    public void showCursor() {
-    }
+    public void showCursor() {}
 
     @Override
-    public void hideCursor() {
-    }
+    public void hideCursor() {}
 
     @Override
     public Position getCursorPosition() {
@@ -55,28 +66,22 @@ final class HeadlessBackend implements Backend {
     }
 
     @Override
-    public void setCursorPosition(final Position position) {
-    }
+    public void setCursorPosition(final Position position) {}
 
     @Override
-    public void enterAlternateScreen() {
-    }
+    public void enterAlternateScreen() {}
 
     @Override
-    public void leaveAlternateScreen() {
-    }
+    public void leaveAlternateScreen() {}
 
     @Override
-    public void enableRawMode() {
-    }
+    public void enableRawMode() {}
 
     @Override
-    public void disableRawMode() {
-    }
+    public void disableRawMode() {}
 
     @Override
-    public void onResize(final Runnable callback) {
-    }
+    public void onResize(final Runnable callback) {}
 
     @Override
     public int read(final int timeoutMillis) {
@@ -89,8 +94,7 @@ final class HeadlessBackend implements Backend {
     }
 
     @Override
-    public void close() {
-    }
+    public void close() {}
 
     String text() {
         synchronized (lock) {

@@ -1,10 +1,25 @@
-package io.yupiik.ia.agent.core.html;
-
-import org.junit.jupiter.api.Test;
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.htmltomarkdown;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import org.junit.jupiter.api.Test;
 
 class HtmlLightParserTest {
 
@@ -12,7 +27,8 @@ class HtmlLightParserTest {
 
     @Test
     void plainTextStripsMarkup() {
-        final var out = parser.toText("<html><body><h1>Title</h1><p>Hello <b>world</b> &amp; friends.</p></body></html>");
+        final var out =
+                parser.toText("<html><body><h1>Title</h1><p>Hello <b>world</b> &amp; friends.</p></body></html>");
         assertEquals("Title\nHello world & friends.", out);
     }
 
@@ -55,7 +71,8 @@ class HtmlLightParserTest {
 
     @Test
     void markdownRendersLinksAndImages() {
-        final var out = parser.toMarkdown("A <a href=\"https://example.com\">link</a> and <img src=\"x.png\" alt=\"pic\"> here.");
+        final var out = parser.toMarkdown(
+                "A <a href=\"https://example.com\">link</a> and <img src=\"x.png\" alt=\"pic\"> here.");
         assertTrue(out.contains("[img:pic]"));
         assertTrue(out.contains("link"));
         assertTrue(out.contains("(https://example.com)"));
@@ -182,7 +199,8 @@ class HtmlLightParserTest {
 
     @Test
     void definitionAndFigureBlocksBreak() {
-        final var out = parser.toText("<dl><dt>Term</dt><dd>Definition</dd></dl><figure><figcaption>Cap</figcaption></figure>");
+        final var out =
+                parser.toText("<dl><dt>Term</dt><dd>Definition</dd></dl><figure><figcaption>Cap</figcaption></figure>");
         assertTrue(out.contains("Term"));
         assertTrue(out.contains("Definition"));
         assertTrue(out.contains("Cap"));

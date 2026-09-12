@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -7,7 +22,6 @@ import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.OutputProcessor;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
-
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -19,8 +33,11 @@ public class ToolExecutionService {
     private final List<OutputProcessor> processors;
     private final StatusReporter statusReporter;
 
-    public ToolExecutionService(final CodingAgentConfiguration configuration, final Emitter emitter,
-                                final List<OutputProcessor> processors, final StatusReporter statusReporter) {
+    public ToolExecutionService(
+            final CodingAgentConfiguration configuration,
+            final Emitter emitter,
+            final List<OutputProcessor> processors,
+            final StatusReporter statusReporter) {
         this.configuration = configuration;
         this.emitter = emitter;
         this.processors = processors;
@@ -58,18 +75,21 @@ public class ToolExecutionService {
 
     private String optimizeOutput(final EmbeddedTool tool, final Map<String, Object> args, final String output) {
         final var command = args.get("command") instanceof String s ? s : tool.name();
-        final var sorted = processors.stream().sorted(Comparator.comparingInt(OutputProcessor::order)).toList();
+        final var sorted = processors.stream()
+                .sorted(Comparator.comparingInt(OutputProcessor::order))
+                .toList();
         for (final var processor : sorted) {
             if (configuration.optimize().isDisabled(processor.names())) {
                 continue;
             }
             try {
                 if (processor.supports(command)) {
-                    final var processed = processor.process(command, output.lines())
+                    final var processed = processor
+                            .process(command, output.lines())
                             .collect(java.util.stream.Collectors.joining("\n"));
                     if (processed.length() < output.length()) {
-                        statusReporter.report("output optimized by " + processor.displayName()
-                                + " (" + output.length() + " -> " + processed.length() + " chars)");
+                        statusReporter.report("output optimized by " + processor.displayName() + " (" + output.length()
+                                + " -> " + processed.length() + " chars)");
                         return processed;
                     }
                     return output;

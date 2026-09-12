@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.llm;
 
 /**
@@ -25,11 +40,12 @@ public final class OutputBudgetResolver {
      * @param detected value detected from /v1/models, or null/positive when known
      * @param contextWindow total context window in tokens, or null/positive when known
      */
-    public static int resolve(final Integer requested,
-                              final int configuredPerModel,
-                              final int configuredPerProvider,
-                              final Integer detected,
-                              final Integer contextWindow) {
+    public static int resolve(
+            final Integer requested,
+            final int configuredPerModel,
+            final int configuredPerProvider,
+            final Integer detected,
+            final Integer contextWindow) {
         int budget;
         if (requested != null && requested > 0) {
             budget = requested;

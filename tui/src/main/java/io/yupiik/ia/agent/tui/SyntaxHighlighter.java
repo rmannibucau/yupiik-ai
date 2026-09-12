@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.style.Color;
@@ -5,7 +20,6 @@ import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import dev.tamboui.text.Text;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -21,8 +35,8 @@ import java.util.regex.Pattern;
  */
 public final class SyntaxHighlighter {
 
-    private static final Pattern FENCE = Pattern.compile(
-            "(?m)^\\s*```([A-Za-z0-9_+.-]*)\\s*\\n(.*?)^\\s*```\\s*$", Pattern.DOTALL);
+    private static final Pattern FENCE =
+            Pattern.compile("(?m)^\\s*```([A-Za-z0-9_+.-]*)\\s*\\n(.*?)^\\s*```\\s*$", Pattern.DOTALL);
 
     private static final Style STRING = token("e5c07b");
     private static final Style COMMENT = token("7f848e");
@@ -50,11 +64,13 @@ public final class SyntaxHighlighter {
     }
 
     public record Segment(Type type, String language, String text) {
-        public enum Type { TEXT, CODE }
+        public enum Type {
+            TEXT,
+            CODE
+        }
     }
 
-    private SyntaxHighlighter() {
-    }
+    private SyntaxHighlighter() {}
 
     private static Style token(final String hex) {
         return Style.EMPTY.fg(Color.hex(hex));
@@ -73,50 +89,333 @@ public final class SyntaxHighlighter {
     }
 
     private static final Highlighter JAVA = language(
-            List.of("public", "private", "protected", "static", "final", "class", "interface", "enum", "record",
-                    "void", "return", "if", "else", "for", "while", "do", "switch", "case", "default", "break",
-                    "continue", "new", "try", "catch", "finally", "throw", "throws", "extends", "implements",
-                    "import", "package", "this", "super", "null", "true", "false", "var", "instanceof",
-                    "synchronized", "abstract", "yield", "sealed", "permits", "assert", "native", "transient",
+            List.of(
+                    "public",
+                    "private",
+                    "protected",
+                    "static",
+                    "final",
+                    "class",
+                    "interface",
+                    "enum",
+                    "record",
+                    "void",
+                    "return",
+                    "if",
+                    "else",
+                    "for",
+                    "while",
+                    "do",
+                    "switch",
+                    "case",
+                    "default",
+                    "break",
+                    "continue",
+                    "new",
+                    "try",
+                    "catch",
+                    "finally",
+                    "throw",
+                    "throws",
+                    "extends",
+                    "implements",
+                    "import",
+                    "package",
+                    "this",
+                    "super",
+                    "null",
+                    "true",
+                    "false",
+                    "var",
+                    "instanceof",
+                    "synchronized",
+                    "abstract",
+                    "yield",
+                    "sealed",
+                    "permits",
+                    "assert",
+                    "native",
+                    "transient",
                     "volatile"),
-            List.of("String", "int", "long", "byte", "short", "float", "double", "boolean", "char", "Object",
-                    "Integer", "Long", "Boolean", "Double", "Float", "List", "Map", "Set", "Collection", "Optional"));
+            List.of(
+                    "String",
+                    "int",
+                    "long",
+                    "byte",
+                    "short",
+                    "float",
+                    "double",
+                    "boolean",
+                    "char",
+                    "Object",
+                    "Integer",
+                    "Long",
+                    "Boolean",
+                    "Double",
+                    "Float",
+                    "List",
+                    "Map",
+                    "Set",
+                    "Collection",
+                    "Optional"));
     private static final Highlighter TS = language(
-            List.of("const", "let", "var", "function", "return", "if", "else", "for", "while", "do", "switch",
-                    "case", "default", "break", "continue", "new", "try", "catch", "finally", "throw", "throws",
-                    "extends", "implements", "import", "export", "from", "async", "await", "yield", "class",
-                    "interface", "enum", "type", "null", "true", "false", "this", "super", "of", "instanceof",
-                    "typeof", "delete", "in", "void", "readonly", "static", "public", "private", "protected"),
-            List.of("string", "number", "boolean", "any", "unknown", "never", "void", "object", "Promise", "Array",
-                    "Function", "Record", "Date"));
+            List.of(
+                    "const",
+                    "let",
+                    "var",
+                    "function",
+                    "return",
+                    "if",
+                    "else",
+                    "for",
+                    "while",
+                    "do",
+                    "switch",
+                    "case",
+                    "default",
+                    "break",
+                    "continue",
+                    "new",
+                    "try",
+                    "catch",
+                    "finally",
+                    "throw",
+                    "throws",
+                    "extends",
+                    "implements",
+                    "import",
+                    "export",
+                    "from",
+                    "async",
+                    "await",
+                    "yield",
+                    "class",
+                    "interface",
+                    "enum",
+                    "type",
+                    "null",
+                    "true",
+                    "false",
+                    "this",
+                    "super",
+                    "of",
+                    "instanceof",
+                    "typeof",
+                    "delete",
+                    "in",
+                    "void",
+                    "readonly",
+                    "static",
+                    "public",
+                    "private",
+                    "protected"),
+            List.of(
+                    "string",
+                    "number",
+                    "boolean",
+                    "any",
+                    "unknown",
+                    "never",
+                    "void",
+                    "object",
+                    "Promise",
+                    "Array",
+                    "Function",
+                    "Record",
+                    "Date"));
     private static final Highlighter PYTHON = language(
-            List.of("def", "class", "return", "if", "elif", "else", "for", "while", "try", "except", "finally",
-                    "with", "as", "import", "from", "pass", "break", "continue", "lambda", "yield", "global",
-                    "nonlocal", "raise", "assert", "del", "and", "or", "not", "in", "is", "None", "True", "False"),
-            List.of("str", "int", "float", "bool", "list", "dict", "tuple", "set", "bytes", "object", "Exception",
-                    "Any", "Optional", "Type"));
+            List.of(
+                    "def",
+                    "class",
+                    "return",
+                    "if",
+                    "elif",
+                    "else",
+                    "for",
+                    "while",
+                    "try",
+                    "except",
+                    "finally",
+                    "with",
+                    "as",
+                    "import",
+                    "from",
+                    "pass",
+                    "break",
+                    "continue",
+                    "lambda",
+                    "yield",
+                    "global",
+                    "nonlocal",
+                    "raise",
+                    "assert",
+                    "del",
+                    "and",
+                    "or",
+                    "not",
+                    "in",
+                    "is",
+                    "None",
+                    "True",
+                    "False"),
+            List.of(
+                    "str",
+                    "int",
+                    "float",
+                    "bool",
+                    "list",
+                    "dict",
+                    "tuple",
+                    "set",
+                    "bytes",
+                    "object",
+                    "Exception",
+                    "Any",
+                    "Optional",
+                    "Type"));
     private static final Highlighter SHELL = language(
-            List.of("if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "function",
-                    "in", "return", "exit", "export", "local", "readonly", "echo", "printf", "cd", "ls", "mkdir",
-                    "rm", "cp", "mv", "touch", "cat", "grep", "sed", "awk", "find", "sudo", "git", "node", "npm",
-                    "mvn", "java"),
+            List.of(
+                    "if",
+                    "then",
+                    "else",
+                    "elif",
+                    "fi",
+                    "for",
+                    "while",
+                    "do",
+                    "done",
+                    "case",
+                    "esac",
+                    "function",
+                    "in",
+                    "return",
+                    "exit",
+                    "export",
+                    "local",
+                    "readonly",
+                    "echo",
+                    "printf",
+                    "cd",
+                    "ls",
+                    "mkdir",
+                    "rm",
+                    "cp",
+                    "mv",
+                    "touch",
+                    "cat",
+                    "grep",
+                    "sed",
+                    "awk",
+                    "find",
+                    "sudo",
+                    "git",
+                    "node",
+                    "npm",
+                    "mvn",
+                    "java"),
             List.of());
     private static final Highlighter SQL = language(
-            List.of("select", "from", "where", "insert", "into", "values", "update", "set", "delete", "create",
-                    "table", "drop", "alter", "index", "join", "left", "right", "inner", "outer", "on", "group",
-                    "by", "order", "having", "limit", "offset", "and", "or", "not", "in", "like", "between", "is",
-                    "null", "as", "distinct", "union", "all", "primary", "key", "foreign", "references",
-                    "constraint", "default", "grant", "revoke"),
-            List.of("int", "integer", "bigint", "varchar", "text", "char", "date", "datetime", "timestamp",
-                    "boolean", "decimal", "numeric", "float", "double", "serial", "uuid"));
+            List.of(
+                    "select",
+                    "from",
+                    "where",
+                    "insert",
+                    "into",
+                    "values",
+                    "update",
+                    "set",
+                    "delete",
+                    "create",
+                    "table",
+                    "drop",
+                    "alter",
+                    "index",
+                    "join",
+                    "left",
+                    "right",
+                    "inner",
+                    "outer",
+                    "on",
+                    "group",
+                    "by",
+                    "order",
+                    "having",
+                    "limit",
+                    "offset",
+                    "and",
+                    "or",
+                    "not",
+                    "in",
+                    "like",
+                    "between",
+                    "is",
+                    "null",
+                    "as",
+                    "distinct",
+                    "union",
+                    "all",
+                    "primary",
+                    "key",
+                    "foreign",
+                    "references",
+                    "constraint",
+                    "default",
+                    "grant",
+                    "revoke"),
+            List.of(
+                    "int",
+                    "integer",
+                    "bigint",
+                    "varchar",
+                    "text",
+                    "char",
+                    "date",
+                    "datetime",
+                    "timestamp",
+                    "boolean",
+                    "decimal",
+                    "numeric",
+                    "float",
+                    "double",
+                    "serial",
+                    "uuid"));
     private static final Highlighter XML = language(
-            List.of("xmlns", "version", "encoding", "standalone", "DOCTYPE", "ENTITY", "SYSTEM", "PUBLIC"),
-            List.of());
+            List.of("xmlns", "version", "encoding", "standalone", "DOCTYPE", "ENTITY", "SYSTEM", "PUBLIC"), List.of());
     private static final Highlighter GENERIC = language(
-            List.of("return", "if", "else", "for", "while", "switch", "case", "break", "continue", "class",
-                    "interface", "enum", "record", "function", "def", "import", "export", "var", "let", "const",
-                    "new", "try", "catch", "finally", "throw", "this", "super", "null", "true", "false", "async",
-                    "await", "void"),
+            List.of(
+                    "return",
+                    "if",
+                    "else",
+                    "for",
+                    "while",
+                    "switch",
+                    "case",
+                    "break",
+                    "continue",
+                    "class",
+                    "interface",
+                    "enum",
+                    "record",
+                    "function",
+                    "def",
+                    "import",
+                    "export",
+                    "var",
+                    "let",
+                    "const",
+                    "new",
+                    "try",
+                    "catch",
+                    "finally",
+                    "throw",
+                    "this",
+                    "super",
+                    "null",
+                    "true",
+                    "false",
+                    "async",
+                    "await",
+                    "void"),
             List.of());
 
     public static List<Segment> split(final String markdown) {
@@ -131,7 +430,8 @@ public final class SyntaxHighlighter {
             if (!before.isBlank()) {
                 out.add(new Segment(Segment.Type.TEXT, null, before));
             }
-            out.add(new Segment(Segment.Type.CODE, m.group(1) == null ? "" : m.group(1).strip(), m.group(2)));
+            out.add(new Segment(
+                    Segment.Type.CODE, m.group(1) == null ? "" : m.group(1).strip(), m.group(2)));
             last = m.end();
         }
         if (last < markdown.length()) {
@@ -215,7 +515,11 @@ public final class SyntaxHighlighter {
         if (l.contains("xml") || l.contains("html") || l.contains("svg") || l.contains("css")) {
             return XML;
         }
-        if (l.contains("javascript") || l.contains("typescript") || l.equals("js") || l.equals("ts") || l.equals("json")) {
+        if (l.contains("javascript")
+                || l.contains("typescript")
+                || l.equals("js")
+                || l.equals("ts")
+                || l.equals("json")) {
             return TS;
         }
         return GENERIC;

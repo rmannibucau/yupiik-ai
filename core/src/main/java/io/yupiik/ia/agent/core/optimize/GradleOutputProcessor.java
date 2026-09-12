@@ -1,13 +1,27 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.optimize;
-
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
-import java.util.ArrayList;
-import java.util.Set;
-import java.util.stream.Stream;
 
 import static io.yupiik.ia.agent.core.optimize.Optimizers.containsFlag;
 import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
+
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import java.util.ArrayList;
+import java.util.Set;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class GradleOutputProcessor implements OutputProcessor {
@@ -48,7 +62,9 @@ public class GradleOutputProcessor implements OutputProcessor {
                 inFailure = false;
                 continue;
             }
-            if (line.startsWith("BUILD FAILED") || line.startsWith("FAILURE:") || line.startsWith("* What went wrong:")) {
+            if (line.startsWith("BUILD FAILED")
+                    || line.startsWith("FAILURE:")
+                    || line.startsWith("* What went wrong:")) {
                 buildResult = line.strip();
                 inFailure = true;
                 continue;
@@ -62,7 +78,9 @@ public class GradleOutputProcessor implements OutputProcessor {
                 continue;
             }
             if (inFailure) {
-                if (line.isBlank() && !failures.isEmpty() && failures.get(failures.size() - 1).isBlank()) {
+                if (line.isBlank()
+                        && !failures.isEmpty()
+                        && failures.get(failures.size() - 1).isBlank()) {
                     inFailure = false;
                     continue;
                 }

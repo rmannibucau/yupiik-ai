@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -24,7 +39,6 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -60,14 +74,25 @@ public class AgentLoop {
     private final Clock clock;
     private final SnapshotStore snapshotStore;
 
-    public AgentLoop(final ChatClient chatClient, final ToolRegistry toolRegistry,
-                     final ToolExecutionService toolExecutionService, final CodingAgentConfiguration configuration,
-                     final PermissionService permissionService, final UsageTracker usageTracker,
-                     final ContextManager contextManager, final SessionStore sessionStore,
-                     final SystemPromptBuilder systemPromptBuilder, final MemoryExtractor memoryExtractor,
-                     final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper,
-                     final StructuralCodeGraph structuralCodeGraph, final ProviderManager providerManager,
-                     final AgentProvider agentProvider, final Clock clock, final SnapshotStore snapshotStore) {
+    public AgentLoop(
+            final ChatClient chatClient,
+            final ToolRegistry toolRegistry,
+            final ToolExecutionService toolExecutionService,
+            final CodingAgentConfiguration configuration,
+            final PermissionService permissionService,
+            final UsageTracker usageTracker,
+            final ContextManager contextManager,
+            final SessionStore sessionStore,
+            final SystemPromptBuilder systemPromptBuilder,
+            final MemoryExtractor memoryExtractor,
+            final StatusReporter statusReporter,
+            final Emitter emitter,
+            final JsonMapper mapper,
+            final StructuralCodeGraph structuralCodeGraph,
+            final ProviderManager providerManager,
+            final AgentProvider agentProvider,
+            final Clock clock,
+            final SnapshotStore snapshotStore) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -109,10 +134,15 @@ public class AgentLoop {
         this.snapshotStore = null;
     }
 
-    public String run(final String prompt, final String agentName, final String sessionId, final List<Message> history,
-                      final BooleanSupplier cancelled) {
+    public String run(
+            final String prompt,
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled) {
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
-                ? null : agentProvider.byName(agentName);
+                ? null
+                : agentProvider.byName(agentName);
         structuralCodeGraph.ensureReady();
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(prompt, agent) + snapshotBlock(sessionId)));
@@ -142,8 +172,8 @@ public class AgentLoop {
         emitter.emit(event);
     }
 
-    private String loop(final String sessionId, final List<Message> messages,
-                        final BooleanSupplier cancelled) throws IOException, InterruptedException {
+    private String loop(final String sessionId, final List<Message> messages, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         final var maxIterations = configuration.llm().maxIterations();
         final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
@@ -176,8 +206,10 @@ public class AgentLoop {
             if (compactedThisTurn) {
                 consecutiveCompactions++;
                 if (consecutiveCompactions >= maxConsecutiveCompactions
-                        && usageTracker.contextPercent(usageTracker.estimateContext(messages, toolsTokens)) >= configuration.compaction().thresholdPercent()) {
-                    emit(new AgentEvent.Notice(AgentEvent.Notice.Level.ERROR,
+                        && usageTracker.contextPercent(usageTracker.estimateContext(messages, toolsTokens))
+                                >= configuration.compaction().thresholdPercent()) {
+                    emit(new AgentEvent.Notice(
+                            AgentEvent.Notice.Level.ERROR,
                             "Context keeps filling up right after compaction after " + consecutiveCompactions
                                     + " attempts. Consider /compact manually, a larger model, or splitting the task."));
                     break;
@@ -186,9 +218,8 @@ public class AgentLoop {
                 consecutiveCompactions = 0;
             }
 
-            final var request = new ChatCompletionRequest(model, messages,
-                    null, null, tools, "auto", null, null, null);
-            final var usage = new io.yupiik.ia.agent.core.llm.Usage[]{io.yupiik.ia.agent.core.llm.Usage.EMPTY};
+            final var request = new ChatCompletionRequest(model, messages, null, null, tools, "auto", null, null, null);
+            final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final Message assistant;
             try {
                 assistant = chatClient.stream(request, delta -> dispatch(delta, usage), cancelled);
@@ -197,29 +228,37 @@ public class AgentLoop {
                     throw e;
                 }
                 if (usageTracker.lastResolutionWasAuto() && !autoNoticeEmitted) {
-                    emit(new AgentEvent.Notice(AgentEvent.Notice.Level.INFO,
-                            "Context window auto-detected: no exact figure was available, using a conservative default and learning on overflow."));
+                    emit(
+                            new AgentEvent.Notice(
+                                    AgentEvent.Notice.Level.INFO,
+                                    "Context window auto-detected: no exact figure was available, using a conservative default and learning on overflow."));
                     autoNoticeEmitted = true;
                 }
                 final var shrunken = usageTracker.rememberShrinkOnOverflow();
-                emit(new AgentEvent.Notice(AgentEvent.Notice.Level.INFO,
-                        "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken + " tokens)."));
+                emit(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.INFO,
+                        "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
+                                + " tokens)."));
                 final var compacted = contextManager.compactForOverflow(messages);
                 if (compacted.changed() && !compacted.messages().isEmpty()) {
                     messages.clear();
                     messages.addAll(compacted.messages());
-                    emit(new AgentEvent.Compacted("compact-retry", compacted.mode().name()));
+                    emit(new AgentEvent.Compacted(
+                            "compact-retry", compacted.mode().name()));
                     overflowRetried = true;
                     continue;
                 }
-                emit(new AgentEvent.Notice(AgentEvent.Notice.Level.ERROR,
+                emit(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.ERROR,
                         "Context window exceeded and compacting did not free enough context: " + e.getMessage()));
                 throw e;
             }
             usageTracker.record(usage[0]);
             messages.add(assistant);
-            sessionStore.append(sessionId, SessionEntry.of(clock.millis(),
-                    "assistant", str(assistant.content()), assistant.toolCalls(), null));
+            sessionStore.append(
+                    sessionId,
+                    SessionEntry.of(
+                            clock.millis(), "assistant", str(assistant.content()), assistant.toolCalls(), null));
             emitUsage(messages, toolsTokens);
 
             if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
@@ -242,7 +281,8 @@ public class AgentLoop {
     private void executeTool(final String sessionId, final List<Message> messages, final ToolCall call) {
         final var name = call.function() == null ? "" : call.function().name();
         final var argsJson = call.function() == null || call.function().arguments() == null
-                ? "{}" : call.function().arguments();
+                ? "{}"
+                : call.function().arguments();
         final EmbeddedTool tool = toolRegistry.tool(name);
         if (tool == null) {
             messages.add(Message.tool(call.id(), "Unknown tool: " + name));
@@ -259,17 +299,19 @@ public class AgentLoop {
             return;
         }
         emit(new AgentEvent.ToolStarted(name, argsJson));
-        final PermissionService.Decision decision = permissionService.check(name, tool.category(), args, tool.readonly());
+        final PermissionService.Decision decision =
+                permissionService.check(name, tool.category(), args, tool.readonly());
         if (!decision.allowed()) {
-            final var denial = "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason());
+            final var denial =
+                    "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason());
             messages.add(Message.tool(call.id(), denial));
             emit(new AgentEvent.ToolFinished(name, denial, false));
             return;
         }
         final ToolResult result = toolExecutionService.execute(tool, args);
-        messages.add(Message.tool(call.id(), result.output() == null || result.output().isBlank() ? "(no output)" : result.output()));
-        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool",
-                result.output(), null, name));
+        messages.add(Message.tool(
+                call.id(), result.output() == null || result.output().isBlank() ? "(no output)" : result.output()));
+        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool", result.output(), null, name));
         emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
     }
 
@@ -281,17 +323,20 @@ public class AgentLoop {
                 usage[0] = delta.usage();
                 usageTracker.record(delta.usage());
             }
-            default -> {
-            }
+            default -> {}
         }
     }
 
     private void emitUsage(final List<Message> messages, final int toolsTokens) {
         final var estimated = usageTracker.estimateContext(messages, toolsTokens);
-        emit(new AgentEvent.UsageUpdated(usageTracker.promptTokens() > 0
-                ? new io.yupiik.ia.agent.core.llm.Usage((int) usageTracker.promptTokens(), (int) usageTracker.completionTokens(),
-                (int) (usageTracker.promptTokens() + usageTracker.completionTokens()))
-                : io.yupiik.ia.agent.core.llm.Usage.EMPTY, estimated, usageTracker.contextPercent(estimated)));
+        emit(new AgentEvent.UsageUpdated(
+                usageTracker.promptTokens() > 0
+                        ? new io.yupiik.ia.agent.core.llm.Usage(
+                                (int) usageTracker.promptTokens(), (int) usageTracker.completionTokens(), (int)
+                                        (usageTracker.promptTokens() + usageTracker.completionTokens()))
+                        : io.yupiik.ia.agent.core.llm.Usage.EMPTY,
+                estimated,
+                usageTracker.contextPercent(estimated)));
     }
 
     /**
@@ -338,11 +383,15 @@ public class AgentLoop {
         }
         final var retained = snapshotStore.retained(sessionId);
         if (retained == null || retained.isEmpty()) {
-            sb.append("checkpoint: ").append(label == null || label.isEmpty() ? "none" : label).append('\n');
+            sb.append("checkpoint: ")
+                    .append(label == null || label.isEmpty() ? "none" : label)
+                    .append('\n');
         } else {
             for (final var r : retained) {
                 final var summary = r.summary();
-                sb.append("- ").append(summary == null ? "" : summary.replace("\n", " ")).append('\n');
+                sb.append("- ")
+                        .append(summary == null ? "" : summary.replace("\n", " "))
+                        .append('\n');
             }
         }
         sb.append("</snapshot>\n");

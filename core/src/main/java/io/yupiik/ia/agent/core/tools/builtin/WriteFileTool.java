@@ -1,19 +1,33 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
+
+import static io.yupiik.ia.agent.core.tools.Schemas.str;
+import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
-
-import static io.yupiik.ia.agent.core.tools.Schemas.str;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
 
 @ApplicationScoped
 public class WriteFileTool implements EmbeddedTool {
@@ -35,9 +49,12 @@ public class WriteFileTool implements EmbeddedTool {
 
     @Override
     public Map<String, Object> schema() {
-        return Schemas.object(Map.of(
-                "path", str("File path, absolute or relative to the working directory."),
-                "content", str("Full file content to write.")), "path", "content");
+        return Schemas.object(
+                Map.of(
+                        "path", str("File path, absolute or relative to the working directory."),
+                        "content", str("Full file content to write.")),
+                "path",
+                "content");
     }
 
     @Override

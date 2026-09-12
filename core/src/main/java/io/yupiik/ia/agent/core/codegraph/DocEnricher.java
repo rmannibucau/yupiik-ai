@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
@@ -7,7 +22,6 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -34,8 +48,13 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     }
 
     @JsonModel
-    public record ConceptDto(String name, String slug, String type, String summary,
-                             java.util.List<String> sources, java.util.List<ConceptLinkDto> links) {
+    public record ConceptDto(
+            String name,
+            String slug,
+            String type,
+            String summary,
+            java.util.List<String> sources,
+            java.util.List<ConceptLinkDto> links) {
         public ConceptDto {
             sources = sources == null ? java.util.List.of() : sources;
             links = links == null ? java.util.List.of() : links;
@@ -43,8 +62,7 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     }
 
     @JsonModel
-    public record ConceptLinkDto(String to, String relation, String description) {
-    }
+    public record ConceptLinkDto(String to, String relation, String description) {}
 
     private static final Logger LOGGER = Logger.getLogger(DocEnricher.class.getName());
     private static final String DEEP_TAG = " --deep";
@@ -64,9 +82,13 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     private final AtomicBoolean running = new AtomicBoolean(true);
     private volatile Runnable rewireHook;
 
-    public DocEnricher(final CodingAgentConfiguration configuration, final ChatClient chatClient,
-                       final DocTreeWriter writer, final JsonMapper mapper, final Path storeRoot,
-                       final ProviderManager providerManager) {
+    public DocEnricher(
+            final CodingAgentConfiguration configuration,
+            final ChatClient chatClient,
+            final DocTreeWriter writer,
+            final JsonMapper mapper,
+            final Path storeRoot,
+            final ProviderManager providerManager) {
         this.configuration = configuration;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
@@ -74,7 +96,9 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         this.mapper = mapper;
         this.cache = new DocEnricherCache(mapper, storeRoot);
         final var workingDir = configuration.resolveWorkingDir().toString();
-        this.docsRoot = Path.of(configuration.structuralCodeGraph().resolvedDocStoreDir(workingDir)).toAbsolutePath().normalize();
+        this.docsRoot = Path.of(configuration.structuralCodeGraph().resolvedDocStoreDir(workingDir))
+                .toAbsolutePath()
+                .normalize();
         this.storeRoot = storeRoot;
         this.executor = Executors.newSingleThreadExecutor(task -> {
             final var t = new Thread(task, "yca-doc-enricher");
@@ -161,7 +185,8 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
             return 0;
         }
         final var cards = conceptSummaries();
-        LOGGER.info("concept pass: parsed " + cards.size() + " nodes from " + cache.files().size() + " files");
+        LOGGER.info("concept pass: parsed " + cards.size() + " nodes from "
+                + cache.files().size() + " files");
         var written = 0;
         for (final var node : cards) {
             if (writer.writeConcept(storeRoot, node) != null) {
@@ -205,7 +230,8 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         if (cache.files().isEmpty()) {
             return true;
         }
-        return cache.files().values().stream().noneMatch(e -> e.summary() != null && !e.summary().isBlank());
+        return cache.files().values().stream()
+                .noneMatch(e -> e.summary() != null && !e.summary().isBlank());
     }
 
     private List<DocTreeWriter.ConceptNode> conceptSummaries() {
@@ -214,14 +240,17 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         inputs.append("For each file below you get its path, its symbols and its LLM summary. Group them into a small "
                 + "number (2..8) of cohesive concept nodes (e.g. a 'parsing' node, an 'http' node). ");
         inputs.append("Each node has: name, slug (url-safe ascii, lower, hyphenated), type (e.g. 'module', 'feature', "
-                + "'library'), a 2-5 line summary, and typed links to other nodes by their slug with relation such as "
-                + "DEPENDS_ON, CONTAINS, RELATED_TO. Keep descriptions one short line.\n\n").append(GRAFT_NOTE).append("\n\n");
+                        + "'library'), a 2-5 line summary, and typed links to other nodes by their slug with relation such as "
+                        + "DEPENDS_ON, CONTAINS, RELATED_TO. Keep descriptions one short line.\n\n")
+                .append(GRAFT_NOTE)
+                .append("\n\n");
         final var files = new ArrayList<>(cache.files().entrySet());
         files.sort(Map.Entry.comparingByKey());
         for (final var e : files) {
             final var summary = e.getValue().summary();
             inputs.append("FILE ").append(e.getKey()).append('\n');
-            inputs.append(summary == null || summary.isBlank() ? "(no summary)" : summary).append("\n\n");
+            inputs.append(summary == null || summary.isBlank() ? "(no summary)" : summary)
+                    .append("\n\n");
         }
         inputs.append("Return ONLY concise JSON, no prose, no markdown, matching exactly "
                 + "{\"concepts\":[{\"name\":\"..\",\"slug\":\"..\",\"type\":\"..\",\"summary\":\"..\","
@@ -252,12 +281,14 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
             }
             final var sources = c.sources() == null
                     ? new ArrayList<String>()
-                    : new ArrayList<>(c.sources().stream().map(this::cleanSource).toList());
+                    : new ArrayList<>(
+                            c.sources().stream().map(this::cleanSource).toList());
             final var links = new ArrayList<DocTreeWriter.ConceptLink>();
             if (c.links() != null) {
                 for (final var l : c.links()) {
                     if (l.to() != null && !l.to().isBlank()) {
-                        links.add(new DocTreeWriter.ConceptLink(l.to(),
+                        links.add(new DocTreeWriter.ConceptLink(
+                                l.to(),
                                 l.relation() == null || l.relation().isBlank() ? "RELATED_TO" : l.relation(),
                                 l.description()));
                     }
@@ -266,10 +297,13 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
             final var name = c.name();
             final var type = c.type();
             result.add(new DocTreeWriter.ConceptNode(
-                    name == null || name.isBlank() ? slug : name, slug,
+                    name == null || name.isBlank() ? slug : name,
+                    slug,
                     type == null || type.isBlank() ? "module" : type,
-                    c.summary(), sources,
-                    DocTreeWriter.structuralDigest(GraphModel.empty("concept")), links));
+                    c.summary(),
+                    sources,
+                    DocTreeWriter.structuralDigest(GraphModel.empty("concept")),
+                    links));
         }
         return result;
     }
@@ -299,8 +333,12 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         rewriteCard(relSource, model);
     }
 
-    private void enrichSymbol(final String relSource, final GraphModel model, final GraphModel.Symbol symbol,
-                              final String key, final String symDigest) {
+    private void enrichSymbol(
+            final String relSource,
+            final GraphModel model,
+            final GraphModel.Symbol symbol,
+            final String key,
+            final String symDigest) {
         if (!running.get()) {
             return;
         }
@@ -349,7 +387,11 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         final var prompt = new StringBuilder();
         prompt.append("You give a fellow developer one-line notes about a single symbol.\n");
         prompt.append("File: ").append(relSource).append('\n');
-        prompt.append("Symbol: ").append(symbol.fqn()).append(" (").append(symbol.kind()).append(')');
+        prompt.append("Symbol: ")
+                .append(symbol.fqn())
+                .append(" (")
+                .append(symbol.kind())
+                .append(')');
         if (symbol.signature() != null && !symbol.signature().isBlank()) {
             prompt.append(' ').append(symbol.signature());
         }
@@ -381,8 +423,8 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
 
     private String chat(final String prompt) {
         try {
-            final var request = new ChatCompletionRequest(resolveModel(), List.of(Message.user(prompt)),
-                    (Double) null, false, null, null, 800, null, null);
+            final var request = new ChatCompletionRequest(
+                    resolveModel(), List.of(Message.user(prompt)), (Double) null, false, null, null, 800, null, null);
             final var result = chatClient.chat(request);
             return result.message() == null ? null : text(result.message().content());
         } catch (final Exception e) {
@@ -398,7 +440,9 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
             return providerManager.resolveModel(override);
         }
         final var current = providerManager.current();
-        return current == null ? "default" : (current.model() == null || current.model().isBlank() ? "default" : current.model());
+        return current == null
+                ? "default"
+                : (current.model() == null || current.model().isBlank() ? "default" : current.model());
     }
 
     private static String text(final Object content) {
@@ -417,8 +461,7 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         return content == null ? "" : content.toString();
     }
 
-    record Deep(String summary, String crux) {
-    }
+    record Deep(String summary, String crux) {}
 
     @Override
     public void close() {

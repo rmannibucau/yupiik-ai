@@ -1,45 +1,62 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.permissions;
-
-import io.yupiik.ia.agent.core.configuration.AgentMode;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.PermissionMode;
-import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
-import io.yupiik.ia.agent.core.tools.ToolCategory;
-import org.junit.jupiter.api.Test;
-
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
 
 class PermissionServiceTest {
     private PermissionService service(final PermissionMode mode, final List<String> allow, final List<String> deny) {
         return service(mode, allow, deny, List.of());
     }
 
-    private PermissionService service(final PermissionMode mode, final List<String> allow, final List<String> deny,
-                                      final List<String> planBash) {
-        final var permissions = new PermissionsConfiguration(mode, allow, deny, planBash);
-        final var configuration = new CodingAgentConfiguration("/tmp/yca-test", null, null, null, null, null, null, null, null, null, permissions, null, null, null, null, null, null,
-                io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                io.yupiik.ia.agent.core.configuration.ToolsConfiguration.defaultConfig());
+    private PermissionService service(
+            final PermissionMode mode, final List<String> allow, final List<String> deny, final List<String> planBash) {
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                "yca.storageHome", "/tmp/yca-test",
+                "yca.permissions.mode", mode.name().toLowerCase(),
+                "yca.permissions.allow", String.join(",", allow),
+                "yca.permissions.deny", String.join(",", deny),
+                "yca.permissions.planBash", String.join(",", planBash)));
         return new PermissionService(configuration);
     }
 
     @Test
     void readAlwaysAllowed() {
-        final var decision = service(PermissionMode.ASK, List.of(), List.of()).check("grep", ToolCategory.READ, Map.of());
+        final var decision =
+                service(PermissionMode.ASK, List.of(), List.of()).check("grep", ToolCategory.READ, Map.of());
         assertTrue(decision.allowed());
     }
 
     @Test
     void denyBeatsAllow() {
         final var service = service(PermissionMode.YOLO, List.of("bash"), List.of("bash:rm *"));
-        assertFalse(service.check("bash:rm -rf /", ToolCategory.BASH, Map.of("command", "rm -rf /")).allowed());
-        assertTrue(service.check("bash:ls", ToolCategory.BASH, Map.of("command", "ls")).allowed());
+        assertFalse(service.check("bash:rm -rf /", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                .allowed());
+        assertTrue(service.check("bash:ls", ToolCategory.BASH, Map.of("command", "ls"))
+                .allowed());
     }
 
     @Test
@@ -108,7 +125,8 @@ class PermissionServiceTest {
             asked.set(title);
             return ApprovalGate.Result.ALLOW_ONCE;
         });
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing")).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"))
+                .allowed());
         assertTrue(asked.get().contains("cd /somewhere && doThing"));
     }
 
@@ -117,17 +135,22 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
         service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing")).allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"))
+                .allowed());
     }
 
     @Test
     void planModeAllowsAndBlocksBashByPrefix() {
         final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("git status", "ls"));
         service.setMode(AgentMode.PLAN);
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status --short")).allowed());
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "ls -la")).allowed());
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /")).allowed());
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "git push")).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status --short"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "ls -la"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "git push"))
+                .allowed());
     }
 
     @Test
@@ -143,31 +166,38 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
         assertTrue(service.check("ctx_query", ToolCategory.MCP, Map.of(), true).allowed());
-        assertFalse(service.check("ctx_write", ToolCategory.MCP, Map.of(), false).allowed());
+        assertFalse(
+                service.check("ctx_write", ToolCategory.MCP, Map.of(), false).allowed());
     }
 
     @Test
     void buildModeUsesPermissionModeForMcp() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
-        assertFalse(service.check("ctx_write", ToolCategory.MCP, Map.of(), false).allowed());
+        assertFalse(
+                service.check("ctx_write", ToolCategory.MCP, Map.of(), false).allowed());
     }
 
     @Test
     void sessionGrantAppliesToCommandFamilyInProject() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install")).allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
         service.grantSession("bash", Map.of("command", "mvn install"));
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install")).allowed());
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test")).allowed());
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "gradle build")).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "gradle build"))
+                .allowed());
     }
 
     @Test
     void sessionGrantDoesNotCrossProjectDir() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.grantSession("bash", Map.of("command", "mvn install"));
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /")).allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                .allowed());
         assertTrue(service.sessionGrants().stream().anyMatch(g -> g.contains("|bash:mvn")));
     }
 
@@ -175,7 +205,9 @@ class PermissionServiceTest {
     void sessionGrantViaGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install")).allowed());
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test")).allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test"))
+                .allowed());
     }
 }

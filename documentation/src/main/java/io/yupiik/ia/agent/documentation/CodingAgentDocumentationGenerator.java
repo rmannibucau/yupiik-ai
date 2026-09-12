@@ -1,18 +1,15 @@
 /*
- * Licensed to Yupiik SAS under one or more contributor
- * license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright
- * ownership. Yupiik SAS licenses this file to you under
- * the Apache License, Version 2.0 (the "License"); you may
- * not use this file except in compliance with the License.
- * You may obtain a copy of the License at
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *  http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
- * KIND, either express or implied. See the License for the
+ * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
  * under the License.
  */
@@ -33,7 +30,6 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -57,19 +53,22 @@ public class CodingAgentDocumentationGenerator implements Runnable {
     @Override
     public void run() {
         try (final var container = ConfiguringContainer.of()
-                .register(new ProvidedInstanceBean<>(DefaultScoped.class, ArgsConfigSource.class, () -> new ArgsConfigSource(List.of())))
-                .register(new ProvidedInstanceBean<>(ApplicationScoped.class, ConfigurationSource.class, () -> new ConfigurationSource() {
-                    @Override
-                    public String get(final String key) {
-                        return null;
-                    }
-                }))
-                .register(new FusionModule() { // disable start/stop events to not launch side effects (McpManager, ...)
-                    @Override
-                    public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
-                        return (r, l) -> l.eventType() != Start.class && l.eventType() != Stop.class;
-                    }
-                })
+                .register(new ProvidedInstanceBean<>(
+                        DefaultScoped.class, ArgsConfigSource.class, () -> new ArgsConfigSource(List.of())))
+                .register(new ProvidedInstanceBean<>(
+                        ApplicationScoped.class, ConfigurationSource.class, () -> new ConfigurationSource() {
+                            @Override
+                            public String get(final String key) {
+                                return null;
+                            }
+                        }))
+                .register(
+                        new FusionModule() { // disable start/stop events to not launch side effects (McpManager, ...)
+                            @Override
+                            public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+                                return (r, l) -> l.eventType() != Start.class && l.eventType() != Stop.class;
+                            }
+                        })
                 .start()) {
             writeTools(container);
             writeSlashCommands(container);
@@ -77,32 +76,46 @@ public class CodingAgentDocumentationGenerator implements Runnable {
     }
 
     private void writeTools(final RuntimeContainer container) {
-        final var tools = container.lookups(EmbeddedTool.class,
-                        it -> it.stream().map(Instance::instance).sorted(Comparator.comparing(EmbeddedTool::name)).toList())
+        final var tools = container
+                .lookups(
+                        EmbeddedTool.class,
+                        it -> it.stream()
+                                .map(Instance::instance)
+                                .sorted(Comparator.comparing(EmbeddedTool::name))
+                                .toList())
                 .instance();
         final var sb = new StringBuilder();
-        for (final var category : Stream.of(io.yupiik.ia.agent.core.tools.ToolCategory.values()).sorted(Comparator.comparing(Enum::name)).toList()) {
-            final var inCategory = tools.stream().filter(t -> t.category() == category).toList();
+        for (final var category : Stream.of(io.yupiik.ia.agent.core.tools.ToolCategory.values())
+                .sorted(Comparator.comparing(Enum::name))
+                .toList()) {
+            final var inCategory =
+                    tools.stream().filter(t -> t.category() == category).toList();
             if (inCategory.isEmpty()) {
                 continue;
             }
             sb.append("== ").append(capitalize(category.name().toLowerCase())).append(" tools\n\n");
             for (final var tool : inCategory) {
                 sb.append("=== `").append(tool.name()).append("`\n\n");
-                sb.append(tool.description() == null || tool.description().isBlank() ? "No description." : tool.description()).append("\n\n");
+                sb.append(
+                                tool.description() == null || tool.description().isBlank()
+                                        ? "No description."
+                                        : tool.description())
+                        .append("\n\n");
                 if (tool.readonly()) {
                     sb.append("NOTE: Read-only tool: it never modifies the working copy.\n\n");
                 }
                 sb.append("[%collapsible]\n");
                 sb.append(".JSON schema\n====\n[source,json]\n----\n")
-                        .append(prettyJson(tool.schema())).append("\n----\n====\n\n");
+                        .append(prettyJson(tool.schema()))
+                        .append("\n----\n====\n\n");
             }
         }
         writePartial("embedded-tools.adoc", sb.toString());
     }
 
     private void writeSlashCommands(final RuntimeContainer container) {
-        try (final var providersInstance = container.lookups(SlashCommands.class, it -> it.stream().map(Instance::instance).toList())) {
+        try (final var providersInstance = container.lookups(
+                SlashCommands.class, it -> it.stream().map(Instance::instance).toList())) {
             final var providers = providersInstance.instance();
             if (providers.isEmpty()) {
                 return;
@@ -111,12 +124,16 @@ public class CodingAgentDocumentationGenerator implements Runnable {
             for (final var provider : providers) {
                 sb.append("== ").append(providerTitle(provider)).append("\n\n");
                 for (final var group : SlashGroup.values()) {
-                    final var inGroup = provider.commands().stream().filter(c -> c.group() == group)
-                            .sorted(Comparator.comparing(c -> c.name())).toList();
+                    final var inGroup = provider.commands().stream()
+                            .filter(c -> c.group() == group)
+                            .sorted(Comparator.comparing(c -> c.name()))
+                            .toList();
                     if (inGroup.isEmpty()) {
                         continue;
                     }
-                    sb.append("=== ").append(capitalize(group.name().toLowerCase())).append("\n\n");
+                    sb.append("=== ")
+                            .append(capitalize(group.name().toLowerCase()))
+                            .append("\n\n");
                     for (final var spec : inGroup) {
                         sb.append("`").append(spec.display()).append("`::\n");
                         sb.append("  ").append(spec.description()).append("\n\n");
@@ -165,7 +182,8 @@ public class CodingAgentDocumentationGenerator implements Runnable {
         if (value instanceof Map<?, ?> map) {
             sb.append("{\n");
             final var entries = new LinkedHashMap<String, Object>((Map<String, Object>) map);
-            final var flat = entries.entrySet().stream().map(entry -> entry.getKey()).toList();
+            final var flat =
+                    entries.entrySet().stream().map(entry -> entry.getKey()).toList();
             for (final var key : flat) {
                 pad(sb, indent + 1).append('"').append(key).append("\": ");
                 append(sb, entries.get(key), indent + 1);
@@ -195,7 +213,9 @@ public class CodingAgentDocumentationGenerator implements Runnable {
         } else if (value instanceof Number || value instanceof Boolean) {
             sb.append(value);
         } else {
-            sb.append('"').append(String.valueOf(value).replace("\\", "\\\\").replace("\"", "\\\"")).append('"');
+            sb.append('"')
+                    .append(String.valueOf(value).replace("\\", "\\\\").replace("\"", "\\\""))
+                    .append('"');
         }
     }
 

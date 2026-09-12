@@ -1,13 +1,25 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.tools.builtin;
+
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
-import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.WebSearchConfiguration;
-import org.junit.jupiter.api.Test;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -15,8 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import org.junit.jupiter.api.Test;
 
 class WebSearchToolTest {
 
@@ -25,22 +36,21 @@ class WebSearchToolTest {
         final var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             exchange.getRequestBody().readAllBytes();
-            respond(exchange, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"contents\":[" +
-                    "{\"title\":\"First\",\"url\":\"https://example.com\",\"text\":\"snippet here\"}" +
-                    "]}}");
+            respond(
+                    exchange,
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"contents\":["
+                            + "{\"title\":\"First\",\"url\":\"https://example.com\",\"text\":\"snippet here\"}"
+                            + "]}}");
         });
         server.start();
         try {
-            final var config = new CodingAgentConfiguration(
-                    "/tmp/yca-websearch", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                    io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                    new io.yupiik.ia.agent.core.configuration.ToolsConfiguration(
-                            io.yupiik.ia.agent.core.configuration.BuiltinToolsConfiguration.defaultConfig(),
-                            new WebSearchConfiguration("exa", "", 8,
-                                    "http://localhost:" + server.getAddress().getPort() + "/mcp",
-                                    "https://search.parallel.ai/mcp")));
-            final var client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
-                    .setDelegate(java.net.http.HttpClient.newHttpClient()));
+            final var config = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                    "yca.storageHome", "/tmp/yca-websearch",
+                    "yca.tools.websearch.provider", "exa",
+                    "yca.tools.websearch.exaUrl",
+                            "http://localhost:" + server.getAddress().getPort() + "/mcp"));
+            final var client = new ExtendedHttpClient(
+                    new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
             final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
             final var tool = new WebSearchTool(client, mapper, config);
             final var result = tool.execute(Map.of("query", "hello"));
@@ -58,22 +68,21 @@ class WebSearchToolTest {
         final var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/mcp", exchange -> {
             exchange.getRequestBody().readAllBytes();
-            respond(exchange, "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"responses\":[{\"message\":{\"content\":[" +
-                    "{\"type\":\"text\",\"text\":\"parallel answer\"}" +
-                    "]}}]}}");
+            respond(
+                    exchange,
+                    "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"responses\":[{\"message\":{\"content\":["
+                            + "{\"type\":\"text\",\"text\":\"parallel answer\"}"
+                            + "]}}]}}");
         });
         server.start();
         try {
-            final var config = new CodingAgentConfiguration(
-                    "/tmp/yca-websearch", null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                    io.yupiik.ia.agent.core.configuration.HttpClientConfiguration.defaultConfig(),
-                    new io.yupiik.ia.agent.core.configuration.ToolsConfiguration(
-                            io.yupiik.ia.agent.core.configuration.BuiltinToolsConfiguration.defaultConfig(),
-                            new WebSearchConfiguration("parallel", "", 8,
-                                    "https://mcp.exa.ai/mcp",
-                                    "http://localhost:" + server.getAddress().getPort() + "/mcp")));
-            final var client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
-                    .setDelegate(java.net.http.HttpClient.newHttpClient()));
+            final var config = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                    "yca.storageHome", "/tmp/yca-websearch",
+                    "yca.tools.websearch.provider", "parallel",
+                    "yca.tools.websearch.parallelUrl",
+                            "http://localhost:" + server.getAddress().getPort() + "/mcp"));
+            final var client = new ExtendedHttpClient(
+                    new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
             final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
             final var tool = new WebSearchTool(client, mapper, config);
             final var result = tool.execute(Map.of("query", "hello"));

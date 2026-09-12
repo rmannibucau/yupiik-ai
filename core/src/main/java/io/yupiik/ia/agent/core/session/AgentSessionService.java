@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.session;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -12,12 +27,11 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
-import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -53,13 +67,21 @@ public class AgentSessionService {
     private final CodingAgentConfiguration configuration;
     private final SnapshotStore snapshotStore;
 
-    public AgentSessionService(final PermissionService permissionService, final ChatClient chatClient,
-                               final McpManager mcpManager, final AgentProvider agentProvider,
-                               final SessionStore sessionStore, final ContextManager contextManager,
-                               final SystemPromptBuilder systemPromptBuilder, final MemoryStore memoryStore,
-                               final StructuralCodeGraph structuralCodeGraph, final PlanFileService planFileService,
-                               final PlanTodoSeeder planTodoSeeder, final TodoStore todoStore,
-                               final CodingAgentConfiguration configuration, final SnapshotStore snapshotStore) {
+    public AgentSessionService(
+            final PermissionService permissionService,
+            final ChatClient chatClient,
+            final McpManager mcpManager,
+            final AgentProvider agentProvider,
+            final SessionStore sessionStore,
+            final ContextManager contextManager,
+            final SystemPromptBuilder systemPromptBuilder,
+            final MemoryStore memoryStore,
+            final StructuralCodeGraph structuralCodeGraph,
+            final PlanFileService planFileService,
+            final PlanTodoSeeder planTodoSeeder,
+            final TodoStore todoStore,
+            final CodingAgentConfiguration configuration,
+            final SnapshotStore snapshotStore) {
         this.permissionService = permissionService;
         this.chatClient = chatClient;
         this.mcpManager = mcpManager;
@@ -76,14 +98,11 @@ public class AgentSessionService {
         this.snapshotStore = snapshotStore;
     }
 
-    public record ToolInfo(String name, String description) {
-    }
+    public record ToolInfo(String name, String description) {}
 
-    public record ServerTools(String server, List<ToolInfo> tools) {
-    }
+    public record ServerTools(String server, List<ToolInfo> tools) {}
 
-    public record ToolListing(boolean anyTool, List<ServerTools> servers, int matches) {
-    }
+    public record ToolListing(boolean anyTool, List<ServerTools> servers, int matches) {}
 
     /**
      * Lists the MCP tools, grouped by server and filtered by the user-provided
@@ -134,8 +153,7 @@ public class AgentSessionService {
         return description.isEmpty() || description.equals(tool.name()) ? null : description;
     }
 
-    public record ModeChange(String message, String seedMessage, String seedError) {
-    }
+    public record ModeChange(String message, String seedMessage, String seedError) {}
 
     /**
      * Switches the agent working mode and, when entering {@code BUILD} mode,
@@ -175,9 +193,8 @@ public class AgentSessionService {
         return null;
     }
 
-    public record PermissionsInfo(boolean permitAll, AgentMode agentMode, PermissionMode permissionMode,
-                                  List<String> sessionGrants) {
-    }
+    public record PermissionsInfo(
+            boolean permitAll, AgentMode agentMode, PermissionMode permissionMode, List<String> sessionGrants) {}
 
     /**
      * Returns the current permission state for the {@code /permissions show} command.
@@ -186,8 +203,8 @@ public class AgentSessionService {
     public PermissionsInfo permissionsInfo() {
         final var configured = configuration.permissions();
         final var mode = configured == null ? null : configured.mode();
-        return new PermissionsInfo(permissionService.isPermitAll(), permissionService.mode(), mode,
-                permissionService.sessionGrants());
+        return new PermissionsInfo(
+                permissionService.isPermitAll(), permissionService.mode(), mode, permissionService.sessionGrants());
     }
 
     /**
@@ -219,11 +236,9 @@ public class AgentSessionService {
         return agentProvider.byName(name) == null ? null : name;
     }
 
-    public record ContextMessage(String role, String firstLine, String content) {
-    }
+    public record ContextMessage(String role, String firstLine, String content) {}
 
-    public record ContextDump(String systemPrompt, String sessionId, List<ContextMessage> messages) {
-    }
+    public record ContextDump(String systemPrompt, String sessionId, List<ContextMessage> messages) {}
 
     /**
      * Builds the raw context dump: the generated system prompt and the full
@@ -240,8 +255,7 @@ public class AgentSessionService {
         return new ContextDump(systemPromptBuilder.build(), sessionId, lines);
     }
 
-    public record CompactionApplied(boolean applied, String message, String error) {
-    }
+    public record CompactionApplied(boolean applied, String message, String error) {}
 
     /**
      * Compacts the context window of a persisted session. Returns nothing to
@@ -260,13 +274,13 @@ public class AgentSessionService {
         sessionStore.replace(sessionId, result.messages());
         return switch (result.mode()) {
             case SUMMARY -> new CompactionApplied(true, "context compacted (summarized)", null);
-            case TRUNCATE -> new CompactionApplied(true, "context truncated locally (summarizer failed)", result.error());
+            case TRUNCATE ->
+                new CompactionApplied(true, "context truncated locally (summarizer failed)", result.error());
             case NONE -> new CompactionApplied(false, "context already within budget", null);
         };
     }
 
-    public record SessionInfo(String id, Path path) {
-    }
+    public record SessionInfo(String id, Path path) {}
 
     /**
      * Returns the current session identifier and its on-disk location.
@@ -289,8 +303,7 @@ public class AgentSessionService {
         return "session flushed";
     }
 
-    public record HousekeepingReport(int compressed, int deleted, int kept) {
-    }
+    public record HousekeepingReport(int compressed, int deleted, int kept) {}
 
     /**
      * Runs the session housekeeping (retention cleanup, compression, empty
@@ -309,8 +322,7 @@ public class AgentSessionService {
         return structuralCodeGraph.resync();
     }
 
-    public record PlanExport(Path path, String original, String error) {
-    }
+    public record PlanExport(Path path, String original, String error) {}
 
     /**
      * Exports the current plan (plan mode only) to a file, returning the path
@@ -341,8 +353,7 @@ public class AgentSessionService {
         }
     }
 
-    public record PlanReload(boolean changed, String message, String error) {
-    }
+    public record PlanReload(boolean changed, String message, String error) {}
 
     /**
      * Reloads an edited plan file: when its content changed, the parsed plan
@@ -367,8 +378,7 @@ public class AgentSessionService {
         return new PlanReload(true, applied, null);
     }
 
-    public record MemoryContent(String global, String project) {
-    }
+    public record MemoryContent(String global, String project) {}
 
     /**
      * Reads global and project memory. Empty strings mean "no memory".
@@ -377,8 +387,7 @@ public class AgentSessionService {
         return new MemoryContent(memoryStore.readGlobal(), memoryStore.readProject());
     }
 
-    public record AgentOverride(String agentName, String prompt) {
-    }
+    public record AgentOverride(String agentName, String prompt) {}
 
     /**
      * Parses an optional leading {@code @agent} prompt override. When the name
@@ -400,8 +409,7 @@ public class AgentSessionService {
         return new AgentOverride(null, text);
     }
 
-    public record SnapshotStatus(String checkpoint, List<String> summaries) {
-    }
+    public record SnapshotStatus(String checkpoint, List<String> summaries) {}
 
     /**
      * {@code save [label]} sets an explicit checkpoint; {@code cancel} clears it; {@code status}
@@ -428,9 +436,13 @@ public class AgentSessionService {
         }
         // status (default)
         final var checkpoint = snapshotStore.checkpointLabel(sessionId);
-        final var summaries = snapshotStore.retained(sessionId).stream().map(r -> r.summary()).toList();
+        final var summaries =
+                snapshotStore.retained(sessionId).stream().map(r -> r.summary()).toList();
         final var cp = checkpoint == null ? "(none)" : checkpoint;
-        return "checkpoint: " + cp + (summaries.isEmpty() ? " - no retained summaries" : " - " + summaries.size() + " retained summary(ies)");
+        return "checkpoint: " + cp
+                + (summaries.isEmpty()
+                        ? " - no retained summaries"
+                        : " - " + summaries.size() + " retained summary(ies)");
     }
 
     /**

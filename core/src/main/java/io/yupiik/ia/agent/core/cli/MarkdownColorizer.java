@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.cli;
 
 import java.util.List;
@@ -22,15 +37,15 @@ public class MarkdownColorizer {
     private static final String DIM = "\u001b[2m";
 
     // palette (fixed, default-theme-ish)
-    private static final String THINK = "\u001b[38;5;240m";    // ~ #585858, lower-opacity grey
-    private static final String ACCENT = "\u001b[38;5;141m";   // ~ #9d7cd8
-    private static final String TEXT = "\u001b[38;5;253m";     // ~ #d9d9d9
-    private static final String MUTED = "\u001b[38;5;244m";    // ~ #808080
+    private static final String THINK = "\u001b[38;5;240m"; // ~ #585858, lower-opacity grey
+    private static final String ACCENT = "\u001b[38;5;141m"; // ~ #9d7cd8
+    private static final String TEXT = "\u001b[38;5;253m"; // ~ #d9d9d9
+    private static final String MUTED = "\u001b[38;5;244m"; // ~ #808080
     private static final String CODE_STR = "\u001b[38;5;215m"; // #e5c07b
     private static final String CODE_COM = "\u001b[38;5;244m"; // #7f848e
     private static final String CODE_NUM = "\u001b[38;5;216m"; // #d19a66
-    private static final String CODE_KW = "\u001b[38;5;177m";  // #c678dd
-    private static final String CODE_TY = "\u001b[38;5;74m";   // #61afef
+    private static final String CODE_KW = "\u001b[38;5;177m"; // #c678dd
+    private static final String CODE_TY = "\u001b[38;5;74m"; // #61afef
     private static final String CODE_TAG = "\u001b[38;5;167m"; // #e06c75
     private static final String CODE_ATTR = "\u001b[38;5;73m"; // #56b6c2
 
@@ -84,7 +99,9 @@ public class MarkdownColorizer {
         if (trimmed.startsWith(">")) {
             return blockquote(line);
         }
-        if (trimmed.startsWith("- ") || trimmed.startsWith("* ") || trimmed.startsWith("+ ")
+        if (trimmed.startsWith("- ")
+                || trimmed.startsWith("* ")
+                || trimmed.startsWith("+ ")
                 || trimmed.matches("\\d+\\.\\s.*")) {
             return bullet(line);
         }
@@ -129,8 +146,11 @@ public class MarkdownColorizer {
                 final var paren = close > 0 ? line.indexOf('(', close) : -1;
                 final var end = paren > 0 ? line.indexOf(')', paren) : -1;
                 if (close > 0 && paren == close + 1 && end > 0) {
-                    sb.append(plain(line, i, close)).append(MUTED).append(line, close, paren + 1)
-                            .append(line, paren + 1, end + 1).append(RESET);
+                    sb.append(plain(line, i, close))
+                            .append(MUTED)
+                            .append(line, close, paren + 1)
+                            .append(line, paren + 1, end + 1)
+                            .append(RESET);
                     i = end + 1;
                 } else {
                     sb.append(c);
@@ -188,8 +208,7 @@ public class MarkdownColorizer {
         return CODE_TY;
     }
 
-    private record HL(Pattern pattern) {
-    }
+    private record HL(Pattern pattern) {}
 
     private static HL language(final List<String> keywords, final List<String> types) {
         final var alt = "(" + String.join("|", keywords) + ")";
@@ -205,47 +224,331 @@ public class MarkdownColorizer {
     }
 
     private static final HL JAVA = language(
-            List.of("public", "private", "protected", "static", "final", "class", "interface", "enum", "record",
-                    "void", "return", "if", "else", "for", "while", "do", "switch", "case", "default", "break",
-                    "continue", "new", "try", "catch", "finally", "throw", "throws", "extends", "implements",
-                    "import", "package", "this", "super", "null", "true", "false", "var", "instanceof",
-                    "synchronized", "abstract", "yield", "sealed", "permits", "assert", "native", "transient",
+            List.of(
+                    "public",
+                    "private",
+                    "protected",
+                    "static",
+                    "final",
+                    "class",
+                    "interface",
+                    "enum",
+                    "record",
+                    "void",
+                    "return",
+                    "if",
+                    "else",
+                    "for",
+                    "while",
+                    "do",
+                    "switch",
+                    "case",
+                    "default",
+                    "break",
+                    "continue",
+                    "new",
+                    "try",
+                    "catch",
+                    "finally",
+                    "throw",
+                    "throws",
+                    "extends",
+                    "implements",
+                    "import",
+                    "package",
+                    "this",
+                    "super",
+                    "null",
+                    "true",
+                    "false",
+                    "var",
+                    "instanceof",
+                    "synchronized",
+                    "abstract",
+                    "yield",
+                    "sealed",
+                    "permits",
+                    "assert",
+                    "native",
+                    "transient",
                     "volatile"),
-            List.of("String", "int", "long", "byte", "short", "float", "double", "boolean", "char", "Object",
-                    "Integer", "Long", "Boolean", "Double", "Float", "List", "Map", "Set", "Collection", "Optional"));
+            List.of(
+                    "String",
+                    "int",
+                    "long",
+                    "byte",
+                    "short",
+                    "float",
+                    "double",
+                    "boolean",
+                    "char",
+                    "Object",
+                    "Integer",
+                    "Long",
+                    "Boolean",
+                    "Double",
+                    "Float",
+                    "List",
+                    "Map",
+                    "Set",
+                    "Collection",
+                    "Optional"));
     private static final HL TS = language(
-            List.of("const", "let", "var", "function", "return", "if", "else", "for", "while", "do", "switch",
-                    "case", "default", "break", "continue", "new", "try", "catch", "finally", "throw", "throws",
-                    "extends", "implements", "import", "export", "from", "async", "await", "yield", "class",
-                    "interface", "enum", "type", "null", "true", "false", "this", "super", "of", "instanceof",
-                    "typeof", "delete", "in", "void", "readonly", "static", "public", "private", "protected"),
-            List.of("string", "number", "boolean", "any", "unknown", "never", "void", "object", "Promise", "Array",
-                    "Function", "Record", "Date"));
+            List.of(
+                    "const",
+                    "let",
+                    "var",
+                    "function",
+                    "return",
+                    "if",
+                    "else",
+                    "for",
+                    "while",
+                    "do",
+                    "switch",
+                    "case",
+                    "default",
+                    "break",
+                    "continue",
+                    "new",
+                    "try",
+                    "catch",
+                    "finally",
+                    "throw",
+                    "throws",
+                    "extends",
+                    "implements",
+                    "import",
+                    "export",
+                    "from",
+                    "async",
+                    "await",
+                    "yield",
+                    "class",
+                    "interface",
+                    "enum",
+                    "type",
+                    "null",
+                    "true",
+                    "false",
+                    "this",
+                    "super",
+                    "of",
+                    "instanceof",
+                    "typeof",
+                    "delete",
+                    "in",
+                    "void",
+                    "readonly",
+                    "static",
+                    "public",
+                    "private",
+                    "protected"),
+            List.of(
+                    "string",
+                    "number",
+                    "boolean",
+                    "any",
+                    "unknown",
+                    "never",
+                    "void",
+                    "object",
+                    "Promise",
+                    "Array",
+                    "Function",
+                    "Record",
+                    "Date"));
     private static final HL PYTHON = language(
-            List.of("def", "class", "return", "if", "elif", "else", "for", "while", "try", "except", "finally",
-                    "with", "as", "import", "from", "pass", "break", "continue", "lambda", "yield", "global",
-                    "nonlocal", "raise", "assert", "del", "and", "or", "not", "in", "is", "None", "True", "False"),
-            List.of("str", "int", "float", "bool", "list", "dict", "tuple", "set", "bytes", "object", "Exception",
-                    "Any", "Optional", "Type"));
+            List.of(
+                    "def",
+                    "class",
+                    "return",
+                    "if",
+                    "elif",
+                    "else",
+                    "for",
+                    "while",
+                    "try",
+                    "except",
+                    "finally",
+                    "with",
+                    "as",
+                    "import",
+                    "from",
+                    "pass",
+                    "break",
+                    "continue",
+                    "lambda",
+                    "yield",
+                    "global",
+                    "nonlocal",
+                    "raise",
+                    "assert",
+                    "del",
+                    "and",
+                    "or",
+                    "not",
+                    "in",
+                    "is",
+                    "None",
+                    "True",
+                    "False"),
+            List.of(
+                    "str",
+                    "int",
+                    "float",
+                    "bool",
+                    "list",
+                    "dict",
+                    "tuple",
+                    "set",
+                    "bytes",
+                    "object",
+                    "Exception",
+                    "Any",
+                    "Optional",
+                    "Type"));
     private static final HL SHELL = language(
-            List.of("if", "then", "else", "elif", "fi", "for", "while", "do", "done", "case", "esac", "function",
-                    "in", "return", "exit", "export", "local", "readonly", "echo", "printf", "cd", "ls", "mkdir",
-                    "rm", "cp", "mv", "touch", "cat", "grep", "sed", "awk", "find", "sudo", "git", "node", "npm",
-                    "mvn", "java"),
+            List.of(
+                    "if",
+                    "then",
+                    "else",
+                    "elif",
+                    "fi",
+                    "for",
+                    "while",
+                    "do",
+                    "done",
+                    "case",
+                    "esac",
+                    "function",
+                    "in",
+                    "return",
+                    "exit",
+                    "export",
+                    "local",
+                    "readonly",
+                    "echo",
+                    "printf",
+                    "cd",
+                    "ls",
+                    "mkdir",
+                    "rm",
+                    "cp",
+                    "mv",
+                    "touch",
+                    "cat",
+                    "grep",
+                    "sed",
+                    "awk",
+                    "find",
+                    "sudo",
+                    "git",
+                    "node",
+                    "npm",
+                    "mvn",
+                    "java"),
             List.of());
     private static final HL SQL = language(
-            List.of("select", "from", "where", "insert", "into", "values", "update", "set", "delete", "create",
-                    "table", "drop", "alter", "index", "join", "left", "right", "inner", "outer", "on", "group",
-                    "by", "order", "having", "limit", "offset", "and", "or", "not", "in", "like", "between", "is",
-                    "null", "as", "distinct", "union", "all", "primary", "key", "foreign", "references",
-                    "constraint", "default", "grant", "revoke"),
-            List.of("int", "integer", "bigint", "varchar", "text", "char", "date", "datetime", "timestamp",
-                    "boolean", "decimal", "numeric", "float", "double", "serial", "uuid"));
+            List.of(
+                    "select",
+                    "from",
+                    "where",
+                    "insert",
+                    "into",
+                    "values",
+                    "update",
+                    "set",
+                    "delete",
+                    "create",
+                    "table",
+                    "drop",
+                    "alter",
+                    "index",
+                    "join",
+                    "left",
+                    "right",
+                    "inner",
+                    "outer",
+                    "on",
+                    "group",
+                    "by",
+                    "order",
+                    "having",
+                    "limit",
+                    "offset",
+                    "and",
+                    "or",
+                    "not",
+                    "in",
+                    "like",
+                    "between",
+                    "is",
+                    "null",
+                    "as",
+                    "distinct",
+                    "union",
+                    "all",
+                    "primary",
+                    "key",
+                    "foreign",
+                    "references",
+                    "constraint",
+                    "default",
+                    "grant",
+                    "revoke"),
+            List.of(
+                    "int",
+                    "integer",
+                    "bigint",
+                    "varchar",
+                    "text",
+                    "char",
+                    "date",
+                    "datetime",
+                    "timestamp",
+                    "boolean",
+                    "decimal",
+                    "numeric",
+                    "float",
+                    "double",
+                    "serial",
+                    "uuid"));
     private static final HL GENERIC = language(
-            List.of("return", "if", "else", "for", "while", "switch", "case", "break", "continue", "class",
-                    "interface", "enum", "record", "function", "def", "import", "export", "var", "let", "const",
-                    "new", "try", "catch", "finally", "throw", "this", "super", "null", "true", "false", "async",
-                    "await", "void"),
+            List.of(
+                    "return",
+                    "if",
+                    "else",
+                    "for",
+                    "while",
+                    "switch",
+                    "case",
+                    "break",
+                    "continue",
+                    "class",
+                    "interface",
+                    "enum",
+                    "record",
+                    "function",
+                    "def",
+                    "import",
+                    "export",
+                    "var",
+                    "let",
+                    "const",
+                    "new",
+                    "try",
+                    "catch",
+                    "finally",
+                    "throw",
+                    "this",
+                    "super",
+                    "null",
+                    "true",
+                    "false",
+                    "async",
+                    "await",
+                    "void"),
             List.of());
 
     private static HL pick(final String lang) {
@@ -265,7 +568,11 @@ public class MarkdownColorizer {
         if (l.contains("sql")) {
             return SQL;
         }
-        if (l.contains("javascript") || l.contains("typescript") || l.equals("js") || l.equals("ts") || l.equals("json")) {
+        if (l.contains("javascript")
+                || l.contains("typescript")
+                || l.equals("js")
+                || l.equals("ts")
+                || l.equals("json")) {
             return TS;
         }
         return GENERIC;

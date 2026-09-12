@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -10,7 +25,6 @@ import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -45,11 +59,25 @@ import java.util.logging.Logger;
 @ApplicationScoped
 public class StructuralCodeGraph {
     private static final Logger LOGGER = Logger.getLogger(StructuralCodeGraph.class.getName());
-    private static final Set<String> SKIP_DIRS = Set.of("target", ".git", ".idea", ".yca", "node_modules", "build", "generated-sources");
+    private static final Set<String> SKIP_DIRS =
+            Set.of("target", ".git", ".idea", ".yca", "node_modules", "build", "generated-sources");
     private static final Set<String> PROJECT_MARKERS = Set.of(
-            "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
-            "build.xml", "Makefile", "package.json", "requirements.txt", "setup.py", "pyproject.toml",
-            "Cargo.toml", "go.mod", "README.md", "README.adoc", ".yca");
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+            "build.xml",
+            "Makefile",
+            "package.json",
+            "requirements.txt",
+            "setup.py",
+            "pyproject.toml",
+            "Cargo.toml",
+            "go.mod",
+            "README.md",
+            "README.adoc",
+            ".yca");
 
     private final CodingAgentConfiguration configuration;
     private final List<GraphParser> parsers;
@@ -66,9 +94,14 @@ public class StructuralCodeGraph {
     private volatile GraphStore graph;
     private volatile String pendingRefreshPath;
 
-    public StructuralCodeGraph(final CodingAgentConfiguration configuration, final List<GraphParser> parsers,
-                               final JsonMapper mapper, final StatusReporter statusReporter,
-                               final ChatClient chatClient, final ProviderManager providerManager, final Clock clock) {
+    public StructuralCodeGraph(
+            final CodingAgentConfiguration configuration,
+            final List<GraphParser> parsers,
+            final JsonMapper mapper,
+            final StatusReporter statusReporter,
+            final ChatClient chatClient,
+            final ProviderManager providerManager,
+            final Clock clock) {
         this.configuration = configuration;
         this.parsers = parsers.stream().filter(GraphParser::available).toList();
         this.mapper = mapper;
@@ -78,7 +111,9 @@ public class StructuralCodeGraph {
         this.clock = clock;
         final var workingDir = configuration.resolveProjectDir().toString();
         this.projectDir = configuration.resolveProjectDir().toAbsolutePath().normalize();
-        this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir)).toAbsolutePath().normalize();
+        this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir))
+                .toAbsolutePath()
+                .normalize();
         this.storeFile = storeRoot.resolve("graph.json");
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
         this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot, providerManager);
@@ -246,7 +281,8 @@ public class StructuralCodeGraph {
             symbols.addAll(model.symbols());
             edges.addAll(model.edges());
         }
-        final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
+        final var updated =
+                new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         graph = updated;
         persist(updated);
         if (fp == null) {
@@ -326,9 +362,11 @@ public class StructuralCodeGraph {
         if (!changed) {
             return current;
         }
-        final var updated = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
+        final var updated =
+                new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         persist(updated);
-        statusReporter.report("structural code graph refreshed (" + updated.symbols().size() + " symbols)");
+        statusReporter.report(
+                "structural code graph refreshed (" + updated.symbols().size() + " symbols)");
         enrichConceptsIfEnabled();
         return updated;
     }
@@ -362,16 +400,19 @@ public class StructuralCodeGraph {
                 LOGGER.warning("Cannot parse " + rel + ": " + e.getMessage());
             }
         }
-        final var built = new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
+        final var built =
+                new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         persist(built);
-        statusReporter.report("structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
+        statusReporter.report(
+                "structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
         enrichConceptsIfEnabled();
         return built;
     }
 
     private GraphParser parserFor(final Path file) {
         final var ext = extension(file);
-        if (ext == null || !configuration.structuralCodeGraph().languageExtensions().contains(ext)) {
+        if (ext == null
+                || !configuration.structuralCodeGraph().languageExtensions().contains(ext)) {
             return null;
         }
         for (final var parser : parsers) {
@@ -461,7 +502,9 @@ public class StructuralCodeGraph {
     private String extension(final Path p) {
         final var name = p.getFileName().toString();
         final var idx = name.lastIndexOf('.');
-        return idx <= 0 || idx == name.length() - 1 ? null : name.substring(idx + 1).toLowerCase(Locale.ROOT);
+        return idx <= 0 || idx == name.length() - 1
+                ? null
+                : name.substring(idx + 1).toLowerCase(Locale.ROOT);
     }
 
     public String rel(final Path file) {

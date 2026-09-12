@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
@@ -6,7 +21,6 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
@@ -29,8 +43,11 @@ public class UsageTracker {
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
 
-    public UsageTracker(final ProviderManager providerManager, final ChatClient chatClient,
-                        final ContextWindowCache contextWindowCache, final Clock clock) {
+    public UsageTracker(
+            final ProviderManager providerManager,
+            final ChatClient chatClient,
+            final ContextWindowCache contextWindowCache,
+            final Clock clock) {
         this.providerManager = providerManager;
         this.chatClient = chatClient;
         this.contextWindowCache = contextWindowCache;
@@ -91,8 +108,10 @@ public class UsageTracker {
             total += TokenEstimator.estimate(m.toolCallId());
             if (m.toolCalls() != null) {
                 for (final var tc : m.toolCalls()) {
-                    total += TokenEstimator.estimate(tc.function() == null ? null : tc.function().name());
-                    total += TokenEstimator.estimate(tc.function() == null ? null : tc.function().arguments());
+                    total += TokenEstimator.estimate(
+                            tc.function() == null ? null : tc.function().name());
+                    total += TokenEstimator.estimate(
+                            tc.function() == null ? null : tc.function().arguments());
                 }
             }
         }
@@ -135,7 +154,8 @@ public class UsageTracker {
      * 'context window auto-detected' notice on every turn.
      */
     public boolean lastResolutionWasAuto() {
-        return autoContextWindowResolutions.get() > 0 && autoContextWindowResolutions.get() >= contextWindowResolutions.get();
+        return autoContextWindowResolutions.get() > 0
+                && autoContextWindowResolutions.get() >= contextWindowResolutions.get();
     }
 
     private int rememberExplicit(final int window) {
@@ -183,7 +203,10 @@ public class UsageTracker {
             try {
                 contextWindowCache.put(providerId, model, halved, clock.millis());
             } catch (final RuntimeException e) {
-                LOGGER.log(Level.WARNING, e, () -> "Could not persist reduced context window for " + providerId + "/" + model);
+                LOGGER.log(
+                        Level.WARNING,
+                        e,
+                        () -> "Could not persist reduced context window for " + providerId + "/" + model);
             }
         }
         return halved;
@@ -206,7 +229,9 @@ public class UsageTracker {
                 }
             }
         } catch (final IOException | RuntimeException e) {
-            LOGGER.log(Level.WARNING, e,
+            LOGGER.log(
+                    Level.WARNING,
+                    e,
                     () -> "Context window auto-detection failed for " + providerId + "/" + model
                             + "; falling back to conservative default " + ModelsResponse.AUTO_DETECTED_BASELINE);
         } catch (final InterruptedException e) {

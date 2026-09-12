@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.codegraph;
 
 import com.sun.source.tree.ClassTree;
@@ -16,11 +31,6 @@ import com.sun.source.util.SourcePositions;
 import com.sun.source.util.TreeScanner;
 import com.sun.source.util.Trees;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-
-import javax.tools.DiagnosticCollector;
-import javax.tools.JavaFileObject;
-import javax.tools.StandardJavaFileManager;
-import javax.tools.ToolProvider;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
@@ -30,6 +40,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.tools.DiagnosticCollector;
+import javax.tools.JavaFileObject;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
 
 @ApplicationScoped
 public class JavaGraphParser implements GraphParser {
@@ -61,27 +75,50 @@ public class JavaGraphParser implements GraphParser {
         if (compiler == null) {
             return GraphModel.empty("java");
         }
-        try (final StandardJavaFileManager fm = compiler.getStandardFileManager(new DiagnosticCollector<>(), null, null)) {
+        try (final StandardJavaFileManager fm =
+                compiler.getStandardFileManager(new DiagnosticCollector<>(), null, null)) {
             final Iterable<? extends JavaFileObject> units = fm.getJavaFileObjects(file.toFile());
-            final JavacTask task = (JavacTask) compiler.getTask(null, fm, new DiagnosticCollector<>(),
-                    List.of("-proc:none"), null, units);
+            final JavacTask task = (JavacTask)
+                    compiler.getTask(null, fm, new DiagnosticCollector<>(), List.of("-proc:none"), null, units);
             final var unit = task.parse().iterator().next();
             final var positions = Trees.instance(task).getSourcePositions();
             final var collector = new Collector(unit, positions);
             unit.accept(collector, null);
-            return new GraphModel("java", collector.nodes, collector.edges.stream().distinct().toList());
+            return new GraphModel(
+                    "java", collector.nodes, collector.edges.stream().distinct().toList());
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
     }
 
     private static final class Collector extends TreeScanner<Void, Void> {
-        private static final Set<String> PRIMITIVES = Set.of(
-                "void", "boolean", "byte", "char", "short", "int", "long", "float", "double");
+        private static final Set<String> PRIMITIVES =
+                Set.of("void", "boolean", "byte", "char", "short", "int", "long", "float", "double");
         private static final Set<String> JAVA_LANG_TYPES = Set.of(
-                "String", "Integer", "Long", "Double", "Float", "Boolean", "Byte", "Short", "Character",
-                "Object", "Class", "Void", "Enum", "Record", "Exception", "RuntimeException", "Throwable",
-                "Math", "System", "StringBuilder", "StringBuffer", "Iterable", "Comparable", "CharSequence");
+                "String",
+                "Integer",
+                "Long",
+                "Double",
+                "Float",
+                "Boolean",
+                "Byte",
+                "Short",
+                "Character",
+                "Object",
+                "Class",
+                "Void",
+                "Enum",
+                "Record",
+                "Exception",
+                "RuntimeException",
+                "Throwable",
+                "Math",
+                "System",
+                "StringBuilder",
+                "StringBuffer",
+                "Iterable",
+                "Comparable",
+                "CharSequence");
         private final List<GraphModel.Symbol> nodes = new ArrayList<>();
         private final List<GraphModel.Edge> edges = new ArrayList<>();
         private final String fileName;
@@ -106,13 +143,17 @@ public class JavaGraphParser implements GraphParser {
             }
             final var out = new String[1];
             for (final var t : unit.getTypeDecls()) {
-                final var p = t.accept(new com.sun.source.util.SimpleTreeVisitor<Object, Object>() {
-                    @Override
-                    public Object visitPackage(final PackageTree node, final Object o) {
-                        out[0] = node.getPackageName() == null ? "" : node.getPackageName().toString();
-                        return out[0];
-                    }
-                }, null);
+                final var p = t.accept(
+                        new com.sun.source.util.SimpleTreeVisitor<Object, Object>() {
+                            @Override
+                            public Object visitPackage(final PackageTree node, final Object o) {
+                                out[0] = node.getPackageName() == null
+                                        ? ""
+                                        : node.getPackageName().toString();
+                                return out[0];
+                            }
+                        },
+                        null);
                 if (p != null) {
                     out[0] = p.toString();
                     break;
@@ -141,18 +182,20 @@ public class JavaGraphParser implements GraphParser {
 
         private int[] startEnd(final Tree tree) {
             if (tree == null || lineMap == null || positions == null) {
-                return new int[]{0, 0};
+                return new int[] {0, 0};
             }
             final var start = positions.getStartPosition(unit, tree);
             final var end = positions.getEndPosition(unit, tree);
             final var startLine = start < 0 ? 0 : (int) lineMap.getLineNumber(start);
             final var endLine = end < 0 ? startLine : (int) lineMap.getLineNumber(end);
-            return new int[]{startLine, endLine};
+            return new int[] {startLine, endLine};
         }
 
         @Override
         public Void visitImport(final ImportTree node, final Void unused) {
-            final var name = node.getQualifiedIdentifier() == null ? "" : node.getQualifiedIdentifier().toString();
+            final var name = node.getQualifiedIdentifier() == null
+                    ? ""
+                    : node.getQualifiedIdentifier().toString();
             if (node.isStatic()) {
                 final var idx = name.lastIndexOf('.');
                 if (idx > 0) {
@@ -170,13 +213,15 @@ public class JavaGraphParser implements GraphParser {
 
         @Override
         public Void visitClass(final ClassTree node, final Void unused) {
-            final var name = node.getSimpleName() == null ? "" : node.getSimpleName().toString();
+            final var name =
+                    node.getSimpleName() == null ? "" : node.getSimpleName().toString();
             final var owner = join(currentOwner(), name);
             ownerStack.push(owner);
-            final var kind = node.getKind() == Tree.Kind.INTERFACE ? GraphModel.Kind.INTERFACE
-                    : node.getKind() == Tree.Kind.ANNOTATION_TYPE ? GraphModel.Kind.ANNOTATION
-                    : node.getKind() == Tree.Kind.ENUM ? GraphModel.Kind.ENUM
-                    : GraphModel.Kind.TYPE;
+            final var kind = node.getKind() == Tree.Kind.INTERFACE
+                    ? GraphModel.Kind.INTERFACE
+                    : node.getKind() == Tree.Kind.ANNOTATION_TYPE
+                            ? GraphModel.Kind.ANNOTATION
+                            : node.getKind() == Tree.Kind.ENUM ? GraphModel.Kind.ENUM : GraphModel.Kind.TYPE;
             final var bounds = startEnd(node);
             nodes.add(new GraphModel.Symbol(owner, kind, fileName, bounds[0], bounds[1], signature(node)));
             if (node.getExtendsClause() != null) {
@@ -200,7 +245,8 @@ public class JavaGraphParser implements GraphParser {
             final var owner = join(currentOwner(), methodName);
             if (!"<init>".equals(methodName) && !"<clinit>".equals(methodName)) {
                 final var bounds = startEnd(node);
-                nodes.add(new GraphModel.Symbol(owner, GraphModel.Kind.METHOD, fileName, bounds[0], bounds[1], signature(node)));
+                nodes.add(new GraphModel.Symbol(
+                        owner, GraphModel.Kind.METHOD, fileName, bounds[0], bounds[1], signature(node)));
             }
             ownerStack.push(owner);
             for (final var param : node.getParameters()) {
@@ -229,7 +275,8 @@ public class JavaGraphParser implements GraphParser {
             final var called = methodName(node.getMethodSelect());
             final var owner = resolveOwner(node.getMethodSelect());
             if (called != null) {
-                edges.add(new GraphModel.Edge(currentOwner(), owner == null ? called : owner + "." + called, GraphModel.EdgeType.CALLS));
+                edges.add(new GraphModel.Edge(
+                        currentOwner(), owner == null ? called : owner + "." + called, GraphModel.EdgeType.CALLS));
             }
             scan(node.getArguments(), unused);
             return null;
@@ -237,7 +284,8 @@ public class JavaGraphParser implements GraphParser {
 
         @Override
         public Void visitNewClass(final NewClassTree node, final Void unused) {
-            final var type = node.getIdentifier() == null ? "" : node.getIdentifier().toString();
+            final var type =
+                    node.getIdentifier() == null ? "" : node.getIdentifier().toString();
             final var resolved = resolveConstructed(type);
             if (resolved != null) {
                 edges.add(new GraphModel.Edge(currentOwner(), resolved, GraphModel.EdgeType.CALLS));
@@ -312,7 +360,8 @@ public class JavaGraphParser implements GraphParser {
                 final var expr = m.getExpression();
                 if (expr instanceof final NewClassTree n) {
                     // `new demo.Foo().bar()` - the member call owner is the constructed type.
-                    final var constructed = n.getIdentifier() == null ? "" : n.getIdentifier().toString();
+                    final var constructed =
+                            n.getIdentifier() == null ? "" : n.getIdentifier().toString();
                     return resolve(constructed);
                 }
                 return expr == null ? null : resolve(expr.toString());
@@ -331,7 +380,9 @@ public class JavaGraphParser implements GraphParser {
         }
 
         private String signature(final Tree tree) {
-            return tree == null ? "" : tree.toString().lines().findFirst().orElse("").trim();
+            return tree == null
+                    ? ""
+                    : tree.toString().lines().findFirst().orElse("").trim();
         }
 
         private String currentOwner() {

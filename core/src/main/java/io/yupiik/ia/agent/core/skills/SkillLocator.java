@@ -1,7 +1,21 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
 package io.yupiik.ia.agent.core.skills;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -15,8 +29,7 @@ import java.util.List;
 public final class SkillLocator {
     private static final List<String> PROJECT_SKILL_DIRS = List.of(".opencode/skills", ".claude/skills", ".yca/skills");
 
-    private SkillLocator() {
-    }
+    private SkillLocator() {}
 
     public static List<Path> skillDirectories(final CodingAgentConfiguration configuration) {
         final var list = new ArrayList<Path>();
@@ -68,7 +81,8 @@ public final class SkillLocator {
             }
             try (final var dirs = Files.list(dir)) {
                 for (final var skillDir : dirs.toList()) {
-                    if (Files.isDirectory(skillDir) && skillDir.getFileName().toString().equals(name)) {
+                    if (Files.isDirectory(skillDir)
+                            && skillDir.getFileName().toString().equals(name)) {
                         final var file = skillDir.resolve("SKILL.md");
                         if (Files.isRegularFile(file)) {
                             return file;
