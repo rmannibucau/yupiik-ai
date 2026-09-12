@@ -942,6 +942,7 @@ public class TuiCommand implements Runnable {
             case "/resume" -> resume(state);
             case "/editplan" -> editPlan("", runner, state);
             case "/compact" -> compact(runner, state);
+            case "/snapshot" -> snapshot("", state);
             case "/session-id" -> sessionIdInfo(state);
             case "/session-flush" -> sessionFlush(state);
             case "/session-housekeeping" -> sessionHousekeeping(runner, state);
@@ -984,6 +985,8 @@ public class TuiCommand implements Runnable {
                     mode(text.substring("/mode ".length()).strip(), runner, state);
                 } else if (text.startsWith("/editplan ")) {
                     editPlan(text.substring("/editplan ".length()).strip(), runner, state);
+                } else if (text.startsWith("/snapshot")) {
+                    snapshot(text.substring("/snapshot".length()).strip(), state);
                 } else if (text.startsWith("/context ")) {
                     context(text.substring("/context ".length()).strip(), state);
                 } else if (text.startsWith("/permissions ")) {
@@ -1675,6 +1678,16 @@ public class TuiCommand implements Runnable {
         });
     }
 
+    private void snapshot(final String arg, final UiState state) {
+        try {
+            final var message = agentSessionService.snapshot(arg, state.sessionId);
+            state.model.status(message);
+            state.model.transcript().append("\n\n> ").append(message).append('\n');
+        } catch (final RuntimeException e) {
+            modelError(state, "snapshot failed: " + e.getMessage());
+        }
+    }
+
     private void compact(final TuiRunner runner, final UiState state) {
         if (state.model.busy()) {
             state.model.status("cannot compact while busy");
@@ -1685,9 +1698,16 @@ public class TuiCommand implements Runnable {
             try {
                 final var result = agentSessionService.compact(state.sessionId);
                 runner.runLater(() -> {
-                    state.model.status(result == null ? "nothing to compact" : result);
-                    if (result != null) {
-                        state.model.transcript().append("\n\n> session compacted\n");
+                    state.model.status(result.message());
+                    if (result.applied()) {
+                        if (result.error() != null) {
+                            state.model.transcript().append("\n\n> ⚠ ").append(result.message())
+                                    .append(": ").append(result.error()).append('\n');
+                        } else {
+                            state.model.transcript().append("\n\n> ").append(result.message()).append('\n');
+                        }
+                    } else {
+                        state.model.transcript().append("\n\n> ").append(result.message()).append('\n');
                     }
                 });
             } catch (final RuntimeException e) {
@@ -1849,8 +1869,10 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(Paragraph.builder().text(lines).scroll(overflow).build(), textRect);
         if (!rows.get(1).isEmpty()) {
             final var percent = Math.clamp(state.model.contextPercent(), 0, 100);
-            final var gaugeColor = Color.hex(percent >= 80 ? palette.error()
-                    : percent >= 65 ? palette.warning() : palette.info());
+            final var compactionThreshold = compactionThreshold();
+            final var pruningThreshold = pruningThreshold();
+            final var gaugeColor = Color.hex(percent >= compactionThreshold ? palette.error()
+                    : percent >= pruningThreshold ? palette.warning() : palette.info());
             frame.renderWidget(Gauge.builder()
                     .percent(percent)
                     .label(Span.raw(percent + "% context"))
@@ -2163,8 +2185,9 @@ public class TuiCommand implements Runnable {
         final var line = Line.from(parts.toArray(Span[]::new));
         frame.renderWidget(Paragraph.builder().text(Text.from(line)).overflow(dev.tamboui.style.Overflow.WRAP_WORD).build(), rect);
         final var percent = state.model.contextPercent();
-        if (percent >= 80) {
-            final var banner = Line.from(Span.styled("⚠  context at " + percent + "% - consider /compact  ", Style.EMPTY.fg(Color.hex(palette.warning()))));
+        final var compactionThreshold = compactionThreshold();
+        if (percent >= compactionThreshold) {
+            final var banner = Line.from(Span.styled("⚠  context at " + percent + "% (will compact at " + compactionThreshold + "%) - consider /compact  ", Style.EMPTY.fg(Color.hex(palette.warning()))));
             frame.renderWidget(Paragraph.builder().text(Text.from(banner)).overflow(dev.tamboui.style.Overflow.CLIP).build(), rect);
         }
         if (state.errorMessage != null) {
@@ -2618,6 +2641,16 @@ public class TuiCommand implements Runnable {
         }
         final var m = value / 1_000_000.0;
         return (m > 9 ? String.format("%.0fM", m) : String.format("%.1fM", m)).replace(",", ".");
+    }
+
+    /** The compaction threshold in %, falling back to a safe default when configuration is absent (rendering tests). */
+    private int compactionThreshold() {
+        return configuration == null || configuration.compaction() == null ? 80 : configuration.compaction().thresholdPercent();
+    }
+
+    /** The pruning threshold in %, falling back to a safe default when configuration is absent (rendering tests). */
+    private int pruningThreshold() {
+        return configuration == null || configuration.pruning() == null ? 65 : configuration.pruning().thresholdPercent();
     }
 
     private static String cap(final String text, final int max) {

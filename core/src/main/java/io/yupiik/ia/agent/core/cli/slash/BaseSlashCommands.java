@@ -31,6 +31,7 @@ public abstract class BaseSlashCommands implements SlashCommands {
                 new SlashCommandSpec("/memory", null, "show global and project memory", SlashGroup.INSPECT),
                 new SlashCommandSpec("/tools", "[filter]", "list tools, optionally filtered", SlashGroup.INSPECT),
                 new SlashCommandSpec("/compact", null, "compact the context window", SlashGroup.MAINTAIN),
+                new SlashCommandSpec("/snapshot", "save|cancel|restore|status", "manage context checkpoints that survive compaction", SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/editplan", "[path]", "edit the current plan (in plan mode)", SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/structural-code-graph", null, "resync the code structure index", SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/clear", null, "clear the conversation", SlashGroup.SESSION));

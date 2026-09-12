@@ -198,7 +198,7 @@ class TuiCommandRenderTest {
                 sessionStore, todoStore, chatClient, mcpManager, new VirtualThreadExecutor(),
                 new ProviderManager(configuration, mapper), new AgentProvider(configuration),
                 new AgentSessionService(new PermissionService(configuration), chatClient, mcpManager,
-                        new AgentProvider(configuration), sessionStore, null, null, null, null, null, null, todoStore, configuration),
+                        new AgentProvider(configuration), sessionStore, null, null, null, null, null, null, todoStore, configuration, null),
                 new TuiTranscriptModel(), factory, new TuiSlashCommands(), Clock.systemUTC());
     }
 

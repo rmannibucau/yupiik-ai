@@ -70,8 +70,11 @@ public class ContextWindowCache {
                 } catch (final RuntimeException e) {
                     continue;
                 }
-                if (matches(entry, providerId, model)) {
-                    found = now - entry.fetchedAt() <= TTL_MILLIS ? Optional.of(entry) : Optional.empty();
+                if (matches(entry, providerId, model) && now - entry.fetchedAt() <= TTL_MILLIS
+                        && (found.isEmpty() || entry.fetchedAt() > found.get().fetchedAt())) {
+                    // keep the freshest (highest fetchedAt) matching entry, not merely the last line,
+                    // so ordering accidents cannot let a stale entry shadow a fresh one
+                    found = Optional.of(entry);
                 }
             }
             return found;

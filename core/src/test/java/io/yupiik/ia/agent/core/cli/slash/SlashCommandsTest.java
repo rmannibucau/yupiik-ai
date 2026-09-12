@@ -21,7 +21,7 @@ class SlashCommandsTest {
     void baseCommonCommands() {
         final var common = byDisplay(new BaseSlashCommands() {
         }.commands());
-        assertEquals(22, common.size());
+        assertEquals(23, common.size());
         assertTrue(common.containsKey("/help"));
         assertTrue(common.containsKey("/clear"));
         assertTrue(common.containsKey("/thinking show|hide"));
@@ -29,12 +29,13 @@ class SlashCommandsTest {
         assertTrue(common.containsKey("/session-id"));
         assertTrue(common.containsKey("/session-flush"));
         assertTrue(common.containsKey("/session-housekeeping"));
+        assertTrue(common.containsKey("/snapshot save|cancel|restore|status"));
     }
 
     @Test
     void replAddsTodosOnTopOfCommon() {
         final var commands = byDisplay(new ReplSlashCommands().commands());
-        assertEquals(23, commands.size());
+        assertEquals(24, commands.size());
         assertTrue(commands.containsKey("/todos"));
         assertTrue(commands.containsKey("/help"));
         assertFalse(commands.containsKey("/theme"));

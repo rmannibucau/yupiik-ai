@@ -18,6 +18,7 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -27,6 +28,7 @@ public class SessionStore {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final Clock clock;
+    private final Object fileLock = new Object();
 
     public SessionStore(final CodingAgentConfiguration configuration, final JsonMapper mapper, final Clock clock) {
         this.configuration = configuration;
@@ -55,6 +57,12 @@ public class SessionStore {
      * initial prompt. Returns a report of what was done.
      */
     public HousekeepingReport housekeeping(final boolean deleteEmpty) {
+        synchronized (fileLock) {
+            return doHousekeeping(deleteEmpty);
+        }
+    }
+
+    private HousekeepingReport doHousekeeping(final boolean deleteEmpty) {
         final var conf = configuration.sessions();
         if (conf == null) {
             return new HousekeepingReport(0, 0, 0);
@@ -169,11 +177,13 @@ public class SessionStore {
     }
 
     public void append(final String id, final SessionEntry entry) {
-        writableDir();
-        try {
-            Files.writeString(path(id), mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+        synchronized (fileLock) {
+            writableDir();
+            try {
+                Files.writeString(path(id), mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
     }
 
@@ -216,15 +226,25 @@ public class SessionStore {
     }
 
     public void replace(final String id, final List<Message> messages) {
-        final var sb = new StringBuilder();
-        for (final var m : messages) {
-            sb.append(mapper.toString(SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId()))).append('\n');
-        }
-        writableDir();
-        try {
-            Files.writeString(path(id), sb.toString());
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+        synchronized (fileLock) {
+            final var sb = new StringBuilder();
+            for (final var m : messages) {
+                sb.append(mapper.toString(SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId()))).append('\n');
+            }
+            final var target = path(id);
+            writableDir();
+            final var tmp = target.resolveSibling(target.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
+            try {
+                Files.writeString(tmp, sb.toString());
+                Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (final IOException e) {
+                try {
+                    Files.deleteIfExists(tmp);
+                } catch (final IOException ignored) {
+                    // best effort cleanup
+                }
+                throw new UncheckedIOException("Cannot replace the session " + id, e);
+            }
         }
     }
 
@@ -241,11 +261,13 @@ public class SessionStore {
     }
 
     public void delete(final String id) {
-        try {
-            Files.deleteIfExists(path(id));
-            Files.deleteIfExists(dir().resolve(id + GZ_SUFFIX));
-        } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+        synchronized (fileLock) {
+            try {
+                Files.deleteIfExists(path(id));
+                Files.deleteIfExists(dir().resolve(id + GZ_SUFFIX));
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
     }
 

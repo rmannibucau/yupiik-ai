@@ -290,6 +290,15 @@ public class MarkdownColorizer {
         return MUTED + text + RESET;
     }
 
+    /**
+     * Renders a neutral informational notice in the full-brightness body grey (distinct from the
+     * dimmer {@link #status(Object)}), used for durable user-facing banners such as the session id
+     * that a user may want to copy/resume.
+     */
+    public static String info(final String text) {
+        return TEXT + text + RESET;
+    }
+
     public static String error(final String text) {
         return "\u001b[38;5;203m" + text + RESET;
     }

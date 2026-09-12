@@ -30,13 +30,13 @@ class ModelsResponseTest {
     }
 
     @Test
-    void nCtxTrainWinsOnlyWhenSmallerThanDefault() {
+    void nCtxTrainIsUsedAsBestEffortUpperBound() {
         final var small = mapper.fromString(ModelsResponse.class,
                 "{\"data\":[{\"id\":\"m\",\"meta\":{\"n_ctx_train\":4096}}]}");
         assertEquals(4096, small.data().get(0).contextWindow());
         final var big = mapper.fromString(ModelsResponse.class,
                 "{\"data\":[{\"id\":\"m\",\"meta\":{\"n_ctx_train\":262144}}]}");
-        assertNull(big.data().get(0).contextWindow());
+        assertEquals(262144, big.data().get(0).contextWindow());
     }
 
     @Test

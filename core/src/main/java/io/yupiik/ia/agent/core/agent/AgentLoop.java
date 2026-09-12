@@ -6,6 +6,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
@@ -17,6 +18,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
@@ -36,6 +38,9 @@ import java.util.logging.Logger;
 public class AgentLoop {
     private static final Logger LOGGER = Logger.getLogger(AgentLoop.class.getName());
 
+    /** Anti-thrash: stop auto-compacting when the context refills right after compaction this many turns in a row. */
+    private static final int MAX_CONSECUTIVE_COMPACTIONS = 5;
+
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
     private final ToolExecutionService toolExecutionService;
@@ -53,6 +58,7 @@ public class AgentLoop {
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
     private final Clock clock;
+    private final SnapshotStore snapshotStore;
 
     public AgentLoop(final ChatClient chatClient, final ToolRegistry toolRegistry,
                      final ToolExecutionService toolExecutionService, final CodingAgentConfiguration configuration,
@@ -61,7 +67,7 @@ public class AgentLoop {
                      final SystemPromptBuilder systemPromptBuilder, final MemoryExtractor memoryExtractor,
                      final StatusReporter statusReporter, final Emitter emitter, final JsonMapper mapper,
                      final StructuralCodeGraph structuralCodeGraph, final ProviderManager providerManager,
-                     final AgentProvider agentProvider, final Clock clock) {
+                     final AgentProvider agentProvider, final Clock clock, final SnapshotStore snapshotStore) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -79,6 +85,7 @@ public class AgentLoop {
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
         this.clock = clock;
+        this.snapshotStore = snapshotStore;
     }
 
     protected AgentLoop() {
@@ -99,6 +106,7 @@ public class AgentLoop {
         this.providerManager = null;
         this.agentProvider = null;
         this.clock = null;
+        this.snapshotStore = null;
     }
 
     public String run(final String prompt, final String agentName, final String sessionId, final List<Message> history,
@@ -107,7 +115,7 @@ public class AgentLoop {
                 ? null : agentProvider.byName(agentName);
         structuralCodeGraph.ensureReady();
         final var messages = new ArrayList<Message>();
-        messages.add(Message.system(systemPromptBuilder.build(prompt, agent)));
+        messages.add(Message.system(systemPromptBuilder.build(prompt, agent) + snapshotBlock(sessionId)));
         if (history != null) {
             messages.addAll(history);
         }
@@ -138,25 +146,44 @@ public class AgentLoop {
                         final BooleanSupplier cancelled) throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         final var maxIterations = configuration.llm().maxIterations();
+        final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
         final var model = providerManager.resolveDefault().model();
         final var tools = toolRegistry.toWireTools();
+        final var toolsTokens = toolTokens(tools);
         var overflowRetried = false;
+        var consecutiveCompactions = 0;
+        var autoNoticeEmitted = false;
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
-            if (contextManager.pruneNeeded(messages)) {
+            var compactedThisTurn = false;
+            if (contextManager.pruneNeeded(messages, toolsTokens)) {
                 final var pruned = contextManager.prune(messages);
-                if (pruned != messages) {
+                if (pruned.changed()) {
                     messages.clear();
-                    messages.addAll(pruned);
-                    emit(new AgentEvent.Compacted("prune"));
+                    messages.addAll(pruned.messages());
+                    emit(new AgentEvent.Compacted("prune", pruned.mode().name()));
+                    compactedThisTurn = true;
                 }
             }
-            if (contextManager.compactNeeded(messages)) {
+            if (contextManager.compactNeeded(messages, toolsTokens)) {
                 final var compacted = contextManager.compact(messages);
-                if (compacted != messages) {
+                if (compacted.changed()) {
                     messages.clear();
-                    messages.addAll(compacted);
-                    emit(new AgentEvent.Compacted("compact"));
+                    messages.addAll(compacted.messages());
+                    emit(new AgentEvent.Compacted("compact", compacted.mode().name()));
+                    compactedThisTurn = true;
                 }
+            }
+            if (compactedThisTurn) {
+                consecutiveCompactions++;
+                if (consecutiveCompactions >= maxConsecutiveCompactions
+                        && usageTracker.contextPercent(usageTracker.estimateContext(messages, toolsTokens)) >= configuration.compaction().thresholdPercent()) {
+                    emit(new AgentEvent.Notice(AgentEvent.Notice.Level.ERROR,
+                            "Context keeps filling up right after compaction after " + consecutiveCompactions
+                                    + " attempts. Consider /compact manually, a larger model, or splitting the task."));
+                    break;
+                }
+            } else {
+                consecutiveCompactions = 0;
             }
 
             final var request = new ChatCompletionRequest(model, messages,
@@ -169,22 +196,31 @@ public class AgentLoop {
                 if (!retryOnOverflow || overflowRetried) {
                     throw e;
                 }
-                emit(new AgentEvent.Status("Context window exceeded; compacting and retrying."));
+                if (usageTracker.lastResolutionWasAuto() && !autoNoticeEmitted) {
+                    emit(new AgentEvent.Notice(AgentEvent.Notice.Level.INFO,
+                            "Context window auto-detected: no exact figure was available, using a conservative default and learning on overflow."));
+                    autoNoticeEmitted = true;
+                }
+                final var shrunken = usageTracker.rememberShrinkOnOverflow();
+                emit(new AgentEvent.Notice(AgentEvent.Notice.Level.INFO,
+                        "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken + " tokens)."));
                 final var compacted = contextManager.compactForOverflow(messages);
-                if (compacted != messages && !compacted.isEmpty()) {
+                if (compacted.changed() && !compacted.messages().isEmpty()) {
                     messages.clear();
-                    messages.addAll(compacted);
-                    emit(new AgentEvent.Compacted("compact-retry"));
+                    messages.addAll(compacted.messages());
+                    emit(new AgentEvent.Compacted("compact-retry", compacted.mode().name()));
                     overflowRetried = true;
                     continue;
                 }
+                emit(new AgentEvent.Notice(AgentEvent.Notice.Level.ERROR,
+                        "Context window exceeded and compacting did not free enough context: " + e.getMessage()));
                 throw e;
             }
             usageTracker.record(usage[0]);
             messages.add(assistant);
             sessionStore.append(sessionId, SessionEntry.of(clock.millis(),
                     "assistant", str(assistant.content()), assistant.toolCalls(), null));
-            emitUsage(messages);
+            emitUsage(messages, toolsTokens);
 
             if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
                 final var content = str(assistant.content());
@@ -250,16 +286,67 @@ public class AgentLoop {
         }
     }
 
-    private void emitUsage(final List<Message> messages) {
-        final var estimated = usageTracker.estimateContext(messages);
+    private void emitUsage(final List<Message> messages, final int toolsTokens) {
+        final var estimated = usageTracker.estimateContext(messages, toolsTokens);
         emit(new AgentEvent.UsageUpdated(usageTracker.promptTokens() > 0
                 ? new io.yupiik.ia.agent.core.llm.Usage((int) usageTracker.promptTokens(), (int) usageTracker.completionTokens(),
                 (int) (usageTracker.promptTokens() + usageTracker.completionTokens()))
                 : io.yupiik.ia.agent.core.llm.Usage.EMPTY, estimated, usageTracker.contextPercent(estimated)));
     }
 
+    /**
+     * Estimates the token contribution of the wire tool schemas injected into every request,
+     * which are never part of the message list but consume context window. Falls back to a rough
+     * per-tool cost when the JSON mapper is unavailable.
+     */
+    private int toolTokens(final List<?> tools) {
+        if (tools == null || tools.isEmpty()) {
+            return 0;
+        }
+        if (mapper != null) {
+            try {
+                return TokenEstimator.estimate(mapper.toString(tools));
+            } catch (final RuntimeException ignored) {
+                // fall through to the per-tool approximation
+            }
+        }
+        int total = 0;
+        for (final var ignored : tools) {
+            total += 300;
+        }
+        return total;
+    }
+
     private static String str(final Object content) {
         return content instanceof String s ? s : content == null ? "" : content.toString();
+    }
+
+    /**
+     * Appends the per-session snapshot block (active checkpoint label plus retained summaries that
+     * must survive compaction) to the system prompt, when any exist.
+     */
+    private String snapshotBlock(final String sessionId) {
+        if (snapshotStore == null || sessionId == null) {
+            return "";
+        }
+        final var sb = new StringBuilder();
+        final var label = snapshotStore.checkpointLabel(sessionId);
+        if (label != null && !label.isBlank()) {
+            sb.append("\n<snapshot checkpoint=\"").append(label).append("\">\n");
+        } else {
+            sb.append("\n<snapshot>\n");
+        }
+        final var retained = snapshotStore.retained(sessionId);
+        if (retained == null || retained.isEmpty()) {
+            sb.append("checkpoint: ").append(label == null || label.isEmpty() ? "none" : label).append('\n');
+        } else {
+            for (final var r : retained) {
+                final var summary = r.summary();
+                sb.append("- ").append(summary == null ? "" : summary.replace("\n", " ")).append('\n');
+            }
+        }
+        sb.append("</snapshot>\n");
+        return sb.toString();
     }
 
     @SuppressWarnings("unchecked")

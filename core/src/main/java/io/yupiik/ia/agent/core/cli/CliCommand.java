@@ -159,7 +159,7 @@ public class CliCommand implements Runnable {
                 println(MarkdownColorizer.error("failed to prepare context file " + contextPath + ": " + e.getMessage()));
             }
         }
-        println(MarkdownColorizer.status("session " + sessionId + " - context file: " + contextPath));
+        println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
         printBanner();
         if (conf.permitAll()) {
             println(MarkdownColorizer.warning("WARNING: --permit-all is on; all tool calls will run without approval."));
@@ -205,7 +205,11 @@ public class CliCommand implements Runnable {
         }
         System.out.flush();
         System.err.flush();
-        println(MarkdownColorizer.status("session " + sessionId + " - context file: " + contextPath));
+        if (sessionId != null && contextPath != null && Files.exists(contextPath)) {
+            println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
+        } else {
+            println(MarkdownColorizer.info("session " + sessionId + " (empty; no context file was created)"));
+        }
     }
 
     /**
@@ -476,9 +480,18 @@ public class CliCommand implements Runnable {
                 onToolFinished(t);
             }
             beginSpinner("thinking");
-        } else if (event instanceof AgentEvent.Compacted(String kind)) {
+        } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
             stopSpinner();
-            System.err.println(MarkdownColorizer.status(symbols.infoMarker() + "context " + kind + " applied"));
+            System.err.println(MarkdownColorizer.status(symbols.infoMarker() + "context " + kind + " applied ("
+                    + mode.toLowerCase(java.util.Locale.ROOT) + ")"));
+        } else if (event instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message)) {
+            stopSpinner();
+            final var marker = switch (level) {
+                case ERROR -> symbols.errorMarker();
+                case WARN -> symbols.warningMarker();
+                case INFO -> symbols.infoMarker();
+            };
+            System.err.println(MarkdownColorizer.status(marker + " " + message));
         } else if (event instanceof AgentEvent.Status(String message)) {
             stopSpinner();
             System.err.println(MarkdownColorizer.status(symbols.infoMarker() + message));
@@ -653,6 +666,10 @@ public class CliCommand implements Runnable {
                 }),
                 Map.entry("compact", arg -> {
                     compact();
+                    return false;
+                }),
+                Map.entry("snapshot", arg -> {
+                    snapshot(arg);
                     return false;
                 }),
                 Map.entry("editplan", arg -> {
@@ -935,7 +952,16 @@ public class CliCommand implements Runnable {
 
     private void compact() {
         final var result = agentSessionService.compact(sessionId);
-        println(MarkdownColorizer.status(result == null ? "nothing to compact" : result));
+        if (result.applied() && result.error() != null) {
+            println(MarkdownColorizer.status(result.message()));
+            println(MarkdownColorizer.status(result.error()));
+        } else {
+            println(MarkdownColorizer.status(result.message()));
+        }
+    }
+
+    private void snapshot(final String arg) {
+        println(MarkdownColorizer.status(agentSessionService.snapshot(arg, sessionId)));
     }
 
     private void sessionIdInfo() {

@@ -51,6 +51,9 @@ class MarkdownColorizerTest {
         assertTrue(MarkdownColorizer.dim("x").startsWith("\u001b[2m"));
         assertTrue(MarkdownColorizer.thinking("x").startsWith("\u001b[38;5;240m"));
         assertTrue(MarkdownColorizer.thinking("x").endsWith("\u001b[0m"));
+        assertTrue(MarkdownColorizer.info("id").startsWith("\u001b[38;5;253m"),
+                "info uses the bright body grey so user-facing ids are legible, unlike the muted status()");
+        assertTrue(MarkdownColorizer.info("id").endsWith("\u001b[0m"));
     }
 
     @Test

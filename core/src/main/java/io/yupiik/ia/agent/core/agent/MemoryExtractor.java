@@ -1,6 +1,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -13,6 +14,7 @@ import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -28,16 +30,19 @@ public class MemoryExtractor {
     private final JsonMapper mapper;
     private final VirtualThreadExecutor executor;
     private final AtomicLong lastRun = new AtomicLong();
+    private final AtomicInteger consecutiveFailures = new AtomicInteger();
+    private final Emitter emitter;
     private final Clock clock;
 
     public MemoryExtractor(final ChatClient chatClient, final CodingAgentConfiguration configuration,
                            final MemoryStore memoryStore, final JsonMapper mapper, final VirtualThreadExecutor executor,
-                           final Clock clock) {
+                           final Emitter emitter, final Clock clock) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.mapper = mapper;
         this.executor = executor;
+        this.emitter = emitter;
         this.clock = clock;
     }
 
@@ -47,6 +52,7 @@ public class MemoryExtractor {
         this.memoryStore = null;
         this.mapper = null;
         this.executor = null;
+        this.emitter = null;
         this.clock = null;
     }
 
@@ -66,6 +72,7 @@ public class MemoryExtractor {
                 if (LOGGER.isLoggable(Level.FINER)) {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
                 }
+                notifyFailure("memory extraction failed: " + e.getMessage());
             }
         });
     }
@@ -81,7 +88,7 @@ public class MemoryExtractor {
         final var excerpt = sb.toString();
         try {
             final var request = new ChatCompletionRequest(null, List.of(
-                    Message.system("Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [short sentence strings]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state."),
+                    Message.system("Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
                     Message.user(excerpt)), null, false, null, null, null, null, null);
             final var res = chatClient.chatStructured(request, "memory_facts", factsSchema());
             if (res.structured()) {
@@ -89,39 +96,89 @@ public class MemoryExtractor {
                         ? "" : String.valueOf(res.result().message().content());
                 final var facts = parseFacts(content);
                 if (!facts.isEmpty()) {
-                    memoryStore.append(false, facts);
+                    final var global = new java.util.ArrayList<String>();
+                    final var project = new java.util.ArrayList<String>();
+                    for (final var fact : facts) {
+                        if ("global".equals(fact.scope())) {
+                            global.add(fact.text());
+                        } else {
+                            project.add(fact.text());
+                        }
+                    }
+                    if (!global.isEmpty()) {
+                        memoryStore.append(true, global);
+                    }
+                    if (!project.isEmpty()) {
+                        memoryStore.append(false, project);
+                    }
                 }
+                resetFailures();
                 return;
             }
             final var snippet = compressExcerpt(excerpt);
             if (snippet != null && !snippet.isBlank()) {
                 memoryStore.appendText(false, snippet);
             }
+            resetFailures();
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
+            notifyFailure("could not save memory: " + e.getMessage());
         }
     }
 
+    private void notifyFailure(final String message) {
+        final int failures = consecutiveFailures.incrementAndGet();
+        if (failures == 1 && emitter != null) {
+            emitter.emit(AgentEvent.Notice.warn(message));
+        }
+    }
+
+    private void resetFailures() {
+        consecutiveFailures.set(0);
+    }
+
     private static Map<String, Object> factsSchema() {
-        return Map.of(
+        final var itemProperties = Map.<String, Object>of(
+                "text", Map.of("type", "string"),
+                "scope", Map.of("type", "string"));
+        final var item = Map.<String, Object>of(
                 "type", "object",
-                "properties", Map.of("facts", Map.of(
-                        "type", "array",
-                        "items", Map.of("type", "string"),
-                        "additionalProperties", false)),
+                "properties", itemProperties,
+                "required", List.of("text", "scope"),
+                "additionalProperties", false);
+        final var facts = Map.<String, Object>of(
+                "type", "array",
+                "items", item,
+                "additionalProperties", false);
+        return Map.<String, Object>of(
+                "type", "object",
+                "properties", Map.of("facts", facts),
                 "required", List.of("facts"),
                 "additionalProperties", false);
     }
 
-    private List<String> parseFacts(final String content) {
+    private record Fact(String text, String scope) {
+    }
+
+    private List<Fact> parseFacts(final String content) {
         try {
             final var root = mapper.fromString(Object.class, content);
             if (!(root instanceof Map<?, ?> map) || !(map.get("facts") instanceof List<?> facts)) {
                 return List.of();
             }
-            return facts.stream().map(String::valueOf).toList();
+            final var out = new java.util.ArrayList<Fact>();
+            for (final var raw : facts) {
+                if (raw instanceof Map<?, ?> f) {
+                    final var text = String.valueOf(f.get("text"));
+                    final var scope = "global".equals(f.get("scope")) ? "global" : "project";
+                    if (text != null && !text.equals("null") && !text.isBlank()) {
+                        out.add(new Fact(text.strip(), scope));
+                    }
+                }
+            }
+            return out;
         } catch (final RuntimeException e) {
             LOGGER.log(Level.FINEST, "Unparsable structured memory facts: " + content, e);
             return List.of();

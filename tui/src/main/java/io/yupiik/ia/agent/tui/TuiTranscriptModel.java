@@ -36,7 +36,7 @@ public class TuiTranscriptModel {
     private volatile int contextPercent;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
-    public void onEvent(final AgentEvent event) {
+    public synchronized void onEvent(final AgentEvent event) {
         if (event instanceof AgentEvent.TextDelta(String delta)) {
             pending.append(delta);
             scrollBack = 0;
@@ -83,9 +83,22 @@ public class TuiTranscriptModel {
             completionTokens = usage == null ? 0 : usage.completionTokens();
             estimatedContext = estimatedContextTokens;
             contextPercent = (int) Math.round(percent);
-        } else if (event instanceof AgentEvent.Compacted(String kind)) {
-            status = "context " + kind + " done";
-            transcript.append("\n\n> context ").append(kind).append(" applied\n");
+        } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
+            status = "context " + kind + " done (" + mode.toLowerCase(java.util.Locale.ROOT) + ")";
+            transcript.append("\n\n> context ").append(kind).append(" applied (")
+                    .append(mode.toLowerCase(java.util.Locale.ROOT)).append(")\n");
+        } else if (event instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message)) {
+            final var tag = switch (level) {
+                case ERROR -> "⚠ error";
+                case WARN -> "⚠ warning";
+                case INFO -> "ⓘ";
+            };
+            transcript.append("\n\n> ").append(tag).append(": ").append(message).append("\n");
+            if (level == AgentEvent.Notice.Level.ERROR) {
+                status = "error: " + message;
+            } else {
+                status = message;
+            }
         } else if (event instanceof AgentEvent.Status(String message)) {
             status = message;
         } else if (event instanceof AgentEvent.TurnDone(String content)) {
@@ -113,7 +126,7 @@ public class TuiTranscriptModel {
      * transcript whatever the current {@code Ctrl+T} visibility is so toggling
      * never loses data.
      */
-    public void flushThinking() {
+    public synchronized void flushThinking() {
         if (thinking.isEmpty()) {
             return;
         }
@@ -126,7 +139,7 @@ public class TuiTranscriptModel {
                 .append(thought).append('\n').append(THOUGHT_END).append('\n');
     }
 
-    public String markdown(final String spinner, final String fallback) {
+    public synchronized String markdown(final String spinner, final String fallback) {
         final var sb = new StringBuilder(transcript);
         if (busy && !pending.isEmpty()) {
             sb.append("\n\n**Assistant**\n\n").append(pending);
@@ -189,7 +202,7 @@ public class TuiTranscriptModel {
      * incomplete by the truncation (pair straddling the cut) is dropped so the
      * renderer never sees a dangling marker.
      */
-    public void trim() {
+    public synchronized void trim() {
         final var max = maxHistoryCharacters;
         if (max <= 0 || transcript.length() <= max) {
             return;
@@ -252,13 +265,13 @@ public class TuiTranscriptModel {
         return sb.toString().strip();
     }
 
-    public void clearConversation() {
+    public synchronized void clearConversation() {
         transcript.setLength(0);
         thinking.setLength(0);
         scrollBack = 0;
     }
 
-    public void startUserTurn(final String text) {
+    public synchronized void startUserTurn(final String text) {
         transcript.append("\n\n---\n\n**You**\n\n").append(text).append('\n');
         pending.setLength(0);
         thinking.setLength(0);
@@ -266,7 +279,7 @@ public class TuiTranscriptModel {
         scrollBack = 0;
     }
 
-    public void reset() {
+    public synchronized void reset() {
         transcript.setLength(0);
         pending.setLength(0);
         thinking.setLength(0);

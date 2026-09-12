@@ -128,8 +128,17 @@ class TuiTranscriptModelTest {
     @Test
     void compactedUpdatesStatusAndTranscript() {
         model.onEvent(new AgentEvent.Compacted("auto"));
-        assertEquals("context auto done", model.status());
-        assertTrue(model.transcript().toString().contains("> context auto applied"));
+        assertEquals("context auto done (summary)", model.status());
+        assertTrue(model.transcript().toString().contains("> context auto applied (summary)"));
+    }
+
+    @Test
+    void noticeRendersDistinctTranscriptAndStatus() {
+        model.onEvent(AgentEvent.Notice.error("boom"));
+        assertTrue(model.transcript().toString().contains("> ⚠ error: boom"));
+        assertEquals("error: boom", model.status());
+        model.onEvent(AgentEvent.Notice.info("all good"));
+        assertTrue(model.transcript().toString().contains("> ⓘ: all good"));
     }
 
     @Test

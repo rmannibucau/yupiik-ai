@@ -306,7 +306,10 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        assertNull(service.compact("s1"));
+        final var result = service.compact("s1");
+        assertNotNull(result);
+        assertFalse(result.applied());
+        assertEquals("nothing to compact", result.message());
     }
 
     @Test
@@ -385,41 +388,41 @@ class AgentSessionServiceTest {
     }
 
     private static AgentSessionService service(final PermissionService permissions) {
-        return new AgentSessionService(permissions, null, null, null, null, null, null, null, null, null, null, null, cfg());
+        return new AgentSessionService(permissions, null, null, null, null, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final McpManager mcpManager) {
-        return new AgentSessionService(null, null, mcpManager, null, null, null, null, null, null, null, null, null, cfg());
+        return new AgentSessionService(null, null, mcpManager, null, null, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final ChatClient chatClient) {
-        return new AgentSessionService(null, chatClient, null, null, null, null, null, null, null, null, null, null, cfg());
+        return new AgentSessionService(null, chatClient, null, null, null, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final AgentProvider agentProvider, final CodingAgentConfiguration config) {
-        return new AgentSessionService(null, null, null, agentProvider, null, null, null, null, null, null, null, null, config);
+        return new AgentSessionService(null, null, null, agentProvider, null, null, null, null, null, null, null, null, config, null);
     }
 
     private static AgentSessionService service(final SessionStore store) {
-        return new AgentSessionService(null, null, null, null, store, null, null, null, null, null, null, null, cfg());
+        return new AgentSessionService(null, null, null, null, store, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final MemoryStore memoryStore) {
-        return new AgentSessionService(null, null, null, null, null, null, null, memoryStore, null, null, null, null, cfg());
+        return new AgentSessionService(null, null, null, null, null, null, null, memoryStore, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final StructuralCodeGraph graph) {
-        return new AgentSessionService(null, null, null, null, null, null, null, null, graph, null, null, null, cfg());
+        return new AgentSessionService(null, null, null, null, null, null, null, null, graph, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final PlanFileService planFileService, final CodingAgentConfiguration config) {
-        return new AgentSessionService(null, null, null, null, null, null, null, null, null, planFileService, null, null, config);
+        return new AgentSessionService(null, null, null, null, null, null, null, null, null, planFileService, null, null, config, null);
     }
 
     private static AgentSessionService service(final PermissionService permissions, final PlanTodoSeeder seeder,
                                                final PlanFileService planFileService, final TodoStore todoStore,
                                                final CodingAgentConfiguration config) {
-        return new AgentSessionService(permissions, null, null, null, null, null, null, null, null, planFileService, seeder, todoStore, config);
+        return new AgentSessionService(permissions, null, null, null, null, null, null, null, null, planFileService, seeder, todoStore, config, null);
     }
 
     private static CodingAgentConfiguration cfg() {

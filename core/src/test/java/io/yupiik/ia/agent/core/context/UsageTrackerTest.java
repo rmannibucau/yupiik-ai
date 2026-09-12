@@ -101,15 +101,15 @@ class UsageTrackerTest {
     }
 
     @Test
-    void missingVendorValueFallsBackToDefault() {
+    void missingVendorValueFallsBackToAutoBaseline() {
         modelsBody = "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"x\"}]}";
-        assertEquals(ModelsResponse.DEFAULT_CONTEXT_WINDOW, tracker().contextWindow());
+        assertEquals(ModelsResponse.AUTO_DETECTED_BASELINE, tracker().contextWindow());
     }
 
     @Test
-    void modelsFailureFallsBackToDefault() {
+    void modelsFailureFallsBackToAutoBaseline() {
         modelsStatus = 500;
-        assertEquals(ModelsResponse.DEFAULT_CONTEXT_WINDOW, tracker().contextWindow());
+        assertEquals(ModelsResponse.AUTO_DETECTED_BASELINE, tracker().contextWindow());
     }
 
     private UsageTracker tracker() {

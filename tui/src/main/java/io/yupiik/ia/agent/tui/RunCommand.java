@@ -106,7 +106,14 @@ public class RunCommand implements Runnable {
                 System.err.println("[tool failed] " + t.name());
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
-            System.err.println("[context] " + c.kind() + " applied");
+            System.err.println("[context] " + c.kind() + " applied (" + c.mode().toLowerCase(java.util.Locale.ROOT) + ")");
+        } else if (event instanceof final AgentEvent.Notice n) {
+            final var prefix = switch (n.level()) {
+                case ERROR -> "[error]";
+                case WARN -> "[warning]";
+                case INFO -> "[yca]";
+            };
+            System.err.println(prefix + " " + n.message());
         } else if (event instanceof final AgentEvent.Status s) {
             System.err.println("[yca] " + s.message());
         } else if (event instanceof final AgentEvent.Error e) {

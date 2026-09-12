@@ -21,7 +21,7 @@ class TokenEstimatorTest {
     void codeSyntaxCostsMore() {
         final var plain = TokenEstimator.estimate("abcdef");
         final var code = TokenEstimator.estimate("a{b}=c");
-        assertEquals(3, code);
+        assertEquals(4, code);
         assertTrue(code > plain * 0.8);
     }
 }

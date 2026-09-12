@@ -28,6 +28,14 @@ public final class Symbols {
         return ascii ? "[i] " : "ℹ ";
     }
 
+    public String warningMarker() {
+        return ascii ? "[!] " : "⚠ ";
+    }
+
+    public String errorMarker() {
+        return ascii ? "[x] " : "✖ ";
+    }
+
     public String currentMarker() {
         return ascii ? "*" : "●";
     }

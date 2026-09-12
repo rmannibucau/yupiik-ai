@@ -22,6 +22,14 @@ public class SystemPromptBuilder {
     private static final List<String> PROJECT_SKILL_DIRS = List.of(".opencode/skills", ".claude/skills", ".yca/skills");
     private static final int FILE_CAP = 4000;
 
+    /**
+     * Hard ceiling on the assembled system prompt (rules + environment + project AGENTS.md + skills
+     * + memory). It is message[0], preserved verbatim through compaction, so unbounded growth here
+     * would alone push a request over the window in a deep repository. Tail-kept with a leading
+     * marker so the durable instructions appended last (memory/agent) survive.
+     */
+    private static final int SYSTEM_PROMPT_CAP = 32_000;
+
     private final CodingAgentConfiguration configuration;
     private final MemoryStore memoryStore;
     private final TodoStore todoStore;
@@ -119,7 +127,7 @@ public class SystemPromptBuilder {
         if (!skills.isBlank()) {
             sb.append('\n').append(skills).append('\n');
         }
-        final var memory = memoryStore == null ? "" : memoryStore.promptSection();
+        final var memory = memoryStore == null ? "" : memoryStore.promptSection(prompt);
         if (!memory.isBlank()) {
             sb.append('\n').append(memory).append('\n');
         }
@@ -131,7 +139,21 @@ public class SystemPromptBuilder {
                         .append("\n</agent>\n");
             }
         }
-        return sb.toString();
+        return capSystemPrompt(sb.toString());
+    }
+
+    /**
+     * Keeps the assembled system prompt within {@link #SYSTEM_PROMPT_CAP} characters, trimming the
+     * front (the generic preamble) and keeping the tail (environment, project context, skills,
+     * memory and agent) which carry the most load-bearing durable instructions.
+     */
+    private static String capSystemPrompt(final String prompt) {
+        if (prompt.length() <= SYSTEM_PROMPT_CAP) {
+            return prompt;
+        }
+        return "[...system prompt exceeded the " + SYSTEM_PROMPT_CAP
+                + " char budget; " + (prompt.length() - SYSTEM_PROMPT_CAP) + " leading chars elided...]\n"
+                + prompt.substring(prompt.length() - SYSTEM_PROMPT_CAP);
     }
 
     private void appendTodoGuidance(final StringBuilder sb) {
@@ -168,13 +190,23 @@ public class SystemPromptBuilder {
         try {
             var content = Files.readString(path);
             if (content.length() > FILE_CAP) {
-                content = content.substring(0, FILE_CAP) + "\n[...truncated...]";
+                content = splice(content, FILE_CAP);
             }
             sb.append("<project-file name=\"").append(label).append("\" path=\"")
                     .append(path.toAbsolutePath().normalize()).append("\">\n").append(content).append("\n</project-file>\n");
         } catch (final IOException e) {
             // skip unreadable
         }
+    }
+
+    /**
+     * Keeps the head and tail of an over-long source file, eliding the middle, so the operational
+     * rules near the end of a long AGENTS.md/skill are not lost to a head-only cut.
+     */
+    private static String splice(final String content, final int cap) {
+        final var half = cap / 2;
+        return content.substring(0, half) + "\n[... " + (content.length() - cap) + " chars elided ...]\n"
+                + content.substring(content.length() - half);
     }
 
     private List<Path> agentsFiles(final Path base) {
@@ -293,7 +325,7 @@ public class SystemPromptBuilder {
             }
         }
         if (content.length() > FILE_CAP) {
-            content = content.substring(0, FILE_CAP) + "\n[...truncated...]";
+            content = splice(content, FILE_CAP);
         }
         return new Skill(name, content.strip());
     }

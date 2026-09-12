@@ -14,6 +14,15 @@ public record ModelsResponse(List<Model> data) {
     /** Context window used when neither the provider configuration nor the /v1/models vendor extensions provide one. */
     public static final int DEFAULT_CONTEXT_WINDOW = 128_000;
 
+    /**
+     * Conservative context window assumed when no configuration, no provider metadata and no
+     * vendor extension provide a figure. Kept intentionally low (much lower than the permissive
+     * {@link #DEFAULT_CONTEXT_WINDOW}) because guessing too high on a small-window model turns
+     * every request into a {@code ContextWindowExceededException}. It is the "unknown window"
+     * default, not a claim about any particular model.
+     */
+    public static final int AUTO_DETECTED_BASELINE = 32_000;
+
     public List<String> ids() {
         return data == null ? List.of() : data.stream().map(Model::id).filter(id -> id != null && !id.isBlank()).distinct().sorted().toList();
     }
@@ -24,8 +33,10 @@ public record ModelsResponse(List<Model> data) {
 
         /**
          * Best effort context window extraction from the vendor extensions: flat keys first, then
-         * the llama.cpp effective {@code meta.n_ctx}, then {@code meta.n_ctx_train} but only when
-         * smaller than {@link #DEFAULT_CONTEXT_WINDOW} so it can only lower the estimate.
+         * the llama.cpp effective {@code meta.n_ctx}, then {@code meta.n_ctx_train}. The runtime
+         * {@code meta.n_ctx} is preferred over the training value because the effective KV cache
+         * can be far smaller than {@code n_ctx_train}; when only the training window is present it
+         * is still used as a best-effort upper bound rather than assuming a huge default.
          * Anthropic exposes it as {@code max_input_tokens}. Detected values are totals
          * (prompt + completion combined).
          */
@@ -35,8 +46,7 @@ public record ModelsResponse(List<Model> data) {
             if (primary != null) {
                 return primary;
             }
-            final var train = firstPositive("/meta/n_ctx_train");
-            return train != null && train < DEFAULT_CONTEXT_WINDOW ? train : null;
+            return firstPositive("/meta/n_ctx_train");
         }
 
         /**

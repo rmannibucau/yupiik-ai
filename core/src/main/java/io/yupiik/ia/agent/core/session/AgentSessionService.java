@@ -16,6 +16,7 @@ import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -50,6 +51,7 @@ public class AgentSessionService {
     private final PlanTodoSeeder planTodoSeeder;
     private final TodoStore todoStore;
     private final CodingAgentConfiguration configuration;
+    private final SnapshotStore snapshotStore;
 
     public AgentSessionService(final PermissionService permissionService, final ChatClient chatClient,
                                final McpManager mcpManager, final AgentProvider agentProvider,
@@ -57,7 +59,7 @@ public class AgentSessionService {
                                final SystemPromptBuilder systemPromptBuilder, final MemoryStore memoryStore,
                                final StructuralCodeGraph structuralCodeGraph, final PlanFileService planFileService,
                                final PlanTodoSeeder planTodoSeeder, final TodoStore todoStore,
-                               final CodingAgentConfiguration configuration) {
+                               final CodingAgentConfiguration configuration, final SnapshotStore snapshotStore) {
         this.permissionService = permissionService;
         this.chatClient = chatClient;
         this.mcpManager = mcpManager;
@@ -71,6 +73,7 @@ public class AgentSessionService {
         this.planTodoSeeder = planTodoSeeder;
         this.todoStore = todoStore;
         this.configuration = configuration;
+        this.snapshotStore = snapshotStore;
     }
 
     public record ToolInfo(String name, String description) {
@@ -237,17 +240,29 @@ public class AgentSessionService {
         return new ContextDump(systemPromptBuilder.build(), sessionId, lines);
     }
 
+    public record CompactionApplied(boolean applied, String message, String error) {
+    }
+
     /**
-     * Compacts the context window. Returns {@code null} when there is nothing
-     * to compact.
+     * Compacts the context window of a persisted session. Returns nothing to
+     * compact when empty, and reports a fallback/error when the summarizer
+     * could not run (so the frontend never shows a false success).
      */
-    public String compact(final String sessionId) {
+    public CompactionApplied compact(final String sessionId) {
         final var history = sessionStore.load(sessionId);
         if (history.isEmpty()) {
-            return null;
+            return new CompactionApplied(false, "nothing to compact", null);
         }
-        sessionStore.replace(sessionId, contextManager.compact(history));
-        return "context compacted";
+        final var result = contextManager.compact(history);
+        if (!result.changed()) {
+            return new CompactionApplied(false, "context already within budget", null);
+        }
+        sessionStore.replace(sessionId, result.messages());
+        return switch (result.mode()) {
+            case SUMMARY -> new CompactionApplied(true, "context compacted (summarized)", null);
+            case TRUNCATE -> new CompactionApplied(true, "context truncated locally (summarizer failed)", result.error());
+            case NONE -> new CompactionApplied(false, "context already within budget", null);
+        };
     }
 
     public record SessionInfo(String id, Path path) {
@@ -383,6 +398,46 @@ public class AgentSessionService {
             }
         }
         return new AgentOverride(null, text);
+    }
+
+    public record SnapshotStatus(String checkpoint, List<String> summaries) {
+    }
+
+    /**
+     * {@code save [label]} sets an explicit checkpoint; {@code cancel} clears it; {@code status}
+     * reports the active checkpoint and retained summaries. Completion returns a short status message.
+     */
+    public String snapshot(final String arg, final String sessionId) {
+        final var trimmed = arg == null ? "" : arg.strip();
+        final var lower = trimmed.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("save")) {
+            final var label = trimmed.substring("save".length()).strip();
+            final var cp = snapshotStore.save(sessionId, label.isBlank() ? null : label);
+            return "checkpoint saved: " + cp.label();
+        }
+        if (lower.equals("cancel")) {
+            snapshotStore.cancel(sessionId);
+            return "checkpoint cancelled";
+        }
+        if (lower.startsWith("restore")) {
+            final var summary = trimmed.substring("restore".length()).strip();
+            final var retained = snapshotStore.restore(sessionId, summary.isBlank() ? "manual snapshot" : summary);
+            return retained.summary().isBlank()
+                    ? "snapshot state cleared (no summary provided)"
+                    : "snapshot recorded (summary injected in the system prompt each turn)";
+        }
+        // status (default)
+        final var checkpoint = snapshotStore.checkpointLabel(sessionId);
+        final var summaries = snapshotStore.retained(sessionId).stream().map(r -> r.summary()).toList();
+        final var cp = checkpoint == null ? "(none)" : checkpoint;
+        return "checkpoint: " + cp + (summaries.isEmpty() ? " - no retained summaries" : " - " + summaries.size() + " retained summary(ies)");
+    }
+
+    /**
+     * The retained snapshot summaries to inject into the system prompt for a session, most recent last.
+     */
+    public List<SnapshotStore.Retained> snapshotSummaries(final String sessionId) {
+        return snapshotStore.retained(sessionId);
     }
 
     /**

@@ -26,6 +26,8 @@ public class UsageTracker {
     private final AtomicLong completionTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
     private final Clock clock;
+    private final AtomicLong contextWindowResolutions = new AtomicLong();
+    private final AtomicLong autoContextWindowResolutions = new AtomicLong();
 
     public UsageTracker(final ProviderManager providerManager, final ChatClient chatClient,
                         final ContextWindowCache contextWindowCache, final Clock clock) {
@@ -70,11 +72,22 @@ public class UsageTracker {
     }
 
     public int estimateContext(final List<Message> messages) {
-        var total = 0;
+        return estimateContext(messages, 0);
+    }
+
+    /**
+     * {@link #estimateContext(List)} plus an explicit contribution for the injected tool schema
+     * (which is never part of the message list but IS part of every request). Callers building a
+     * {@code ChatCompletionRequest} should pass an estimate of their wire tools to avoid the
+     * thresholds firing late because tool definitions were uncounted.
+     */
+    public int estimateContext(final List<Message> messages, final int extraToolTokens) {
+        var total = Math.max(0, extraToolTokens);
         for (final var m : messages) {
             total += 8;
             total += TokenEstimator.estimate(m.role());
             total += TokenEstimator.estimate(m.content() instanceof String s ? s : String.valueOf(m.content()));
+            total += TokenEstimator.estimate(m.name());
             total += TokenEstimator.estimate(m.toolCallId());
             if (m.toolCalls() != null) {
                 for (final var tc : m.toolCalls()) {
@@ -89,35 +102,91 @@ public class UsageTracker {
     /**
      * The effective context window in tokens: the provider configured value when positive, else a
      * value detected from the provider /v1/models vendor extensions and cached for a day per
-     * provider and model, else {@link ModelsResponse#DEFAULT_CONTEXT_WINDOW}. Detection failures
-     * are ignored (logged at finest level).
+     * provider and model, else {@link ModelsResponse#AUTO_DETECTED_BASELINE}. Detection failures
+     * are logged at warning level. Auto-detection fallbacks are tracked so callers can surface an
+     * honest once-per-session notice to the user.
      */
     public int contextWindow() {
         final var current = providerManager == null ? null : providerManager.current();
         if (current == null) {
-            return ModelsResponse.DEFAULT_CONTEXT_WINDOW;
+            return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }
         if (current.contextWindow() > 0) {
-            return current.contextWindow();
+            return rememberExplicit(current.contextWindow());
         }
         if (chatClient == null || contextWindowCache == null) {
-            return ModelsResponse.DEFAULT_CONTEXT_WINDOW;
+            return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }
         final var model = current.model();
         if (model == null || model.isBlank()) {
-            return ModelsResponse.DEFAULT_CONTEXT_WINDOW;
+            return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }
         final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
         final var cached = contextWindowCache.get(providerId, model);
         if (cached.isPresent()) {
-            return cached.get();
+            return rememberExplicit(cached.get());
         }
-        return detect(providerId, model).orElse(ModelsResponse.DEFAULT_CONTEXT_WINDOW);
+        return detect(providerId, model).orElseGet(() -> rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE));
+    }
+
+    /**
+     * Whether the last {@link #contextWindow()} resolution (if any) fell back to the auto-detected
+     * baseline rather than an explicit/explicitly detected value. Useful to avoid spamming a
+     * 'context window auto-detected' notice on every turn.
+     */
+    public boolean lastResolutionWasAuto() {
+        return autoContextWindowResolutions.get() > 0 && autoContextWindowResolutions.get() >= contextWindowResolutions.get();
+    }
+
+    private int rememberExplicit(final int window) {
+        contextWindowResolutions.incrementAndGet();
+        return window;
+    }
+
+    private int rememberAuto(final int window) {
+        contextWindowResolutions.incrementAndGet();
+        autoContextWindowResolutions.incrementAndGet();
+        return window;
     }
 
     public double contextPercent(final int estimatedTokens) {
         final var window = Math.max(1, contextWindow());
         return 100.0 * estimatedTokens / window;
+    }
+
+    /**
+     * Learns from a {@code ContextWindowExceededException}: the assumed window was too high, so
+     * halve it and return the corrected value so the overflow-compaction retry runs against a
+     * window the provider can actually satisfy. When the current resolution came from the auto
+     * baseline (no explicit provider/config/vendor figure), the corrected value is also persisted so
+     * later turns benefit; for explicitly configured/detected windows the felt value is only used
+     * for this overflow retry, avoiding a long-lived half-window for a provider that transiently
+     * overflowed. No-op when the cache/client is unavailable.
+     *
+     * @return the new (halved) window, or the current window if it could not be adjusted.
+     */
+    public int rememberShrinkOnOverflow() {
+        if (chatClient == null || contextWindowCache == null) {
+            return contextWindow();
+        }
+        final var current = providerManager == null ? null : providerManager.current();
+        if (current == null) {
+            return contextWindow();
+        }
+        final var model = current.model();
+        if (model == null || model.isBlank()) {
+            return contextWindow();
+        }
+        final var providerId = current.id() == null || current.id().isBlank() ? "default" : current.id();
+        final var halved = Math.max(4_096, contextWindow() / 2);
+        if (lastResolutionWasAuto()) {
+            try {
+                contextWindowCache.put(providerId, model, halved, clock.millis());
+            } catch (final RuntimeException e) {
+                LOGGER.log(Level.WARNING, e, () -> "Could not persist reduced context window for " + providerId + "/" + model);
+            }
+        }
+        return halved;
     }
 
     private Optional<Integer> detect(final String providerId, final String model) {
@@ -137,8 +206,9 @@ public class UsageTracker {
                 }
             }
         } catch (final IOException | RuntimeException e) {
-            LOGGER.log(Level.FINEST, e,
-                    () -> "Ignoring /v1/models context window detection failure for " + providerId + "/" + model);
+            LOGGER.log(Level.WARNING, e,
+                    () -> "Context window auto-detection failed for " + providerId + "/" + model
+                            + "; falling back to conservative default " + ModelsResponse.AUTO_DETECTED_BASELINE);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
         }
