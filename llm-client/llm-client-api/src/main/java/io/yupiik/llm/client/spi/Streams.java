@@ -1,0 +1,138 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.llm.client.spi;
+
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.Flow;
+import java.util.function.BooleanSupplier;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+/**
+ * Turns a raw SSE byte-stream {@link Flow.Publisher} into a {@link Flow.Publisher} of
+ * {@link LlmStreamEvent}. Each streamed line is fed to a {@link SseParser}; the supplied mapper turns
+ * every parsed event into zero or more neutral events, and the supplier provides the terminal End
+ * event (or null when the dialect has no surfacing summary).
+ *
+ * <p>The stream supports cooperative cancellation through the supplied {@link BooleanSupplier}; once
+ * it returns true the subscription is cancelled and only an End event is emitted.</p>
+ */
+public final class Streams {
+
+    private Streams() {
+        // no-op utility
+    }
+
+    /**
+     * Turns a raw SSE byte-stream publisher into a publisher of neutral stream events.
+     *
+     * @param source the raw SSE byte publisher.
+     * @param cancelled cancellation probe checked between frames.
+     * @param mapper per-event translation into zero or more neutral events.
+     * @param end terminal End event supplier, or null when the dialect has no surfacing summary.
+     * @return the publisher of neutral stream events.
+     */
+    public static Flow.Publisher<LlmStreamEvent> toEvents(
+            final Flow.Publisher<List<ByteBuffer>> source,
+            final BooleanSupplier cancelled,
+            final Function<SseParser.Event, List<LlmStreamEvent>> mapper,
+            final Supplier<LlmStreamEvent> end) {
+        return subscriber -> source.subscribe(new Flow.Subscriber<>() {
+            private final SseParser parser = new SseParser();
+            private final StringBuilder line = new StringBuilder();
+            private volatile boolean aborted;
+
+            @Override
+            public void onSubscribe(final Flow.Subscription subscription) {
+                subscriber.onSubscribe(subscription);
+                subscription.request(Long.MAX_VALUE);
+            }
+
+            @Override
+            public void onNext(final List<ByteBuffer> item) {
+                if (aborted) {
+                    return;
+                }
+                for (final var buffer : item) {
+                    final var array = new byte[buffer.remaining()];
+                    buffer.get(array);
+                    line.append(new String(array, StandardCharsets.UTF_8));
+                }
+                processLines(false);
+            }
+
+            @Override
+            public void onError(final Throwable throwable) {
+                subscriber.onError(throwable);
+            }
+
+            @Override
+            public void onComplete() {
+                processLines(true);
+                final var endEvent = end.get();
+                if (endEvent != null && !aborted) {
+                    subscriber.onNext(endEvent);
+                }
+                subscriber.onComplete();
+            }
+
+            private void processLines(final boolean flushRest) {
+                while (!aborted) {
+                    final var newline = line.indexOf("\n");
+                    if (newline < 0) {
+                        if (flushRest && line.length() > 0) {
+                            handleRaw(trimCr(line.toString()));
+                            line.setLength(0);
+                        }
+                        break;
+                    }
+                    handleRaw(trimCr(line.substring(0, newline)));
+                    line.delete(0, newline + 1);
+                    if (cancelled.getAsBoolean()) {
+                        aborted = true;
+                    }
+                }
+            }
+
+            private void handleRaw(final String rawLine) {
+                for (final var event : parser.feed(rawLine)) {
+                    final var mapped = mapper.apply(event);
+                    if (mapped == null || mapped.isEmpty()) {
+                        continue;
+                    }
+                    final var toEmit = new ArrayList<LlmStreamEvent>(mapped.size());
+                    for (final var e : mapped) {
+                        if (!aborted && cancelled.getAsBoolean()) {
+                            aborted = true;
+                        }
+                        if (!aborted) {
+                            toEmit.add(e);
+                        }
+                    }
+                    toEmit.forEach(subscriber::onNext);
+                }
+            }
+
+            private static String trimCr(final String s) {
+                return s.endsWith("\r") ? s.substring(0, s.length() - 1) : s;
+            }
+        });
+    }
+}

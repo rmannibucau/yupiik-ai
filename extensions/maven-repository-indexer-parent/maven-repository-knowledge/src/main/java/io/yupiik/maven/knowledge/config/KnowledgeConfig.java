@@ -34,6 +34,16 @@ import java.nio.file.Path;
  *                        the cumulative input content; {@code 0} keeps GAV-count batching only. Whichever limit
  *                        ({@code batchSize} or the selected character/budget limit) is reached first closes a batch.
  * @param tokenBudget     model token limits for the auto ({@code -1}) mode; ignored otherwise.
+ * @param maxContentBytes maximum content size kept per artifact (sources/javadoc extraction and budget stop);
+ *                        an artifact whose acquired content still exceeds it is skipped. {@code <= 0} disables the cap.
+ * @param runContentBudget maximum cumulative content characters to acquire across a whole run; when exceeded the
+ *                        indexer stops and reports the remainder as skipped. {@code 0} keeps it unlimited.
+ * @param useLlm          whether to optionally refine knowledge with the LLM (gold-format skills). When
+ *                        {@code false} (default) no LLM call happens; validation always discards placeholder
+ *                        output so a real deterministic doc is guaranteed either way.
+ * @param maxSourceFiles  maximum number of source files acquired per artifact from a {@code -sources.jar}.
+ * @param maxSourceFileChars maximum characters kept per source file.
+ * @param maxJavadocPages maximum javadoc class pages extracted per artifact from a {@code -javadoc.jar}.
  */
 public record KnowledgeConfig(
         Path localRepository,
@@ -43,7 +53,63 @@ public record KnowledgeConfig(
         boolean force,
         BoundedFetch boundedFetch,
         int maxBatchChars,
-        TokenBudget tokenBudget) {
+        TokenBudget tokenBudget,
+        int maxContentBytes,
+        int runContentBudget,
+        boolean useLlm,
+        int maxSourceFiles,
+        int maxSourceFileChars,
+        int maxJavadocPages) {
+
+    public KnowledgeConfig(
+            final Path localRepository,
+            final int concurrency,
+            final int batchSize,
+            final boolean remoteManifest,
+            final boolean force,
+            final BoundedFetch boundedFetch,
+            final int maxBatchChars,
+            final TokenBudget tokenBudget,
+            final int maxContentBytes,
+            final int runContentBudget) {
+        this(
+                localRepository,
+                concurrency,
+                batchSize,
+                remoteManifest,
+                force,
+                boundedFetch,
+                maxBatchChars,
+                tokenBudget,
+                maxContentBytes,
+                runContentBudget,
+                false,
+                500,
+                64 * 1024,
+                500);
+    }
+
+    public KnowledgeConfig(
+            final Path localRepository,
+            final int concurrency,
+            final int batchSize,
+            final boolean remoteManifest,
+            final boolean force,
+            final BoundedFetch boundedFetch,
+            final int maxBatchChars,
+            final TokenBudget tokenBudget) {
+        this(
+                localRepository,
+                concurrency,
+                batchSize,
+                remoteManifest,
+                force,
+                boundedFetch,
+                maxBatchChars,
+                tokenBudget,
+                1024 * 1024,
+                0);
+    }
 
     public static KnowledgeConfig defaults(final Path localRepository) {
         return new KnowledgeConfig(
@@ -54,7 +120,31 @@ public record KnowledgeConfig(
                 false,
                 BoundedFetch.of(1, 30_000L, 65536),
                 0,
-                null);
+                null,
+                1024 * 1024,
+                0,
+                false,
+                500,
+                64 * 1024,
+                500);
+    }
+
+    public KnowledgeConfig withUseLlm(final boolean useLlm) {
+        return new KnowledgeConfig(
+                localRepository,
+                concurrency,
+                batchSize,
+                remoteManifest,
+                force,
+                boundedFetch,
+                maxBatchChars,
+                tokenBudget,
+                maxContentBytes,
+                runContentBudget,
+                useLlm,
+                maxSourceFiles,
+                maxSourceFileChars,
+                maxJavadocPages);
     }
 
     private static Path resolveLocalRepository(final Path localRepository) {

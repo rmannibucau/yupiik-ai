@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -119,5 +120,38 @@ class SyntaxHighlighterTest {
         assertFalse(SyntaxHighlighter.highlight("xml", "<a b='c'>text</a>").isEmpty());
         assertFalse(SyntaxHighlighter.highlight("python", "def f(x):\n    return None")
                 .isEmpty());
+    }
+
+    @Test
+    void escapedStringsAreStillHighlightedAsStrings() {
+        final var escaped = SyntaxHighlighter.highlight("java", "var s = \"a\\\"b\";").lines().get(0).spans().stream()
+                .filter(s -> s.content().contains("a"))
+                .filter(s -> s.content().contains("b"))
+                .findFirst();
+        assertTrue(escaped.isPresent(), "expected the escaped string to be present");
+        assertTrue(escaped.get().style().fg().isPresent(), "expected the escaped string literal to be colored");
+    }
+
+    @Test
+    void unclosedEscapedStringDoesNotThrow() {
+        for (final var q : new String[] {"\"", "'", "`"}) {
+            assertDoesNotThrow(() -> SyntaxHighlighter.highlight("python", q + "\\\\".repeat(9_000)));
+            assertDoesNotThrow(() -> SyntaxHighlighter.highlight("javascript", q + "a".repeat(9_000)));
+        }
+    }
+
+    @Test
+    void unclosedMultiLineCommentDoesNotThrow() {
+        assertDoesNotThrow(() -> SyntaxHighlighter.highlight("java", "/*" + "a".repeat(9_000)));
+        assertDoesNotThrow(() -> SyntaxHighlighter.highlight("xml", "<!--" + "a".repeat(9_000)));
+    }
+
+    @Test
+    void overLongLineFallsBackToPlain() {
+        final var longLine = "var s = \"x\"; " + "a".repeat(10_500);
+        final var line = SyntaxHighlighter.highlight("java", longLine).lines().get(0);
+        assertEquals(1, line.spans().size());
+        assertEquals(longLine, line.spans().get(0).content());
+        assertTrue(line.spans().get(0).style().fg().isEmpty(), "over-long line should not be tokenized");
     }
 }

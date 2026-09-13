@@ -1,0 +1,90 @@
+= llm-client-openai
+:minisite-nav-prev-link: llm-client.html
+:minisite-nav-prev-label: LLM client
+:minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-openai
+:minisite-keywords: llm, openai, chat completions, responses, dialect
+
+Artifact `io.yupiik.llm:llm-client-openai` implements the `Dialect` SPI for
+OpenAI. It depends on `llm-client-api` plus the Fusion build
+(`fusion-build-api`, `fusion-processor`, `fusion-json`, `fusion-httpclient`).
+
+== Two dialects, two wire formats
+
+* `OpenAICompletionsDialect` targets `/chat/completions` and maps to the
+  `"openai-completions"` dialect name (the gpt-4o style API).
+* `OpenAIResponsesDialect` targets `/responses` and maps to the
+  `"openai-responses"` dialect name (the gpt-5 style API).
+
+Both authenticate with an `Authorization: Bearer <apiKey>` header (the
+`AbstractDialect` default) and run fully reactive over Fusion
+`ExtendedHttpClient`.
+
+== Wire mapping
+
+Wire records in `io.yupiik.llm.client.openai.model` are annotated with Fusion
+`@JsonModel` and `@JsonProperty` snake_case renames (`top_p`, `tool_choice`,
+`max_tokens`, `reasoning_effort`, `finish_reason`), with `@JsonOthers` for
+pass-through fields. The annotation processor generates
+`FusionJsonCodec`s registered in `io.yupiik.llm.client.openai.OpenAiModule`.
+
+For `/chat/completions`, neutral `LlmMessage`/`LlmTool` map to `WireMessage`
+(with `WireToolCall`/`WireFunction`) and `CompletionsTool`/`WireTool`. For
+`/responses` the conversation is split into `instructions` (system/developer)
+and `ResponsesInput` items (messages, `function_call`, `function_call_output`).
+
+== Streaming
+
+* `/chat/completions`: `ChatChunk` SSE events become `TextDelta`
+  (`delta.content`), `ReasoningDelta` (`delta.reasoning_content`/`reasoning`)
+  and `ToolCallDelta` (`delta.tool_calls`); the `[DONE]` sentinel and the usage
+  chunk terminate with `End`.
+* `/responses`: maps `response.output_text.delta` to `TextDelta`,
+  `response.reasoning_text.delta` to `ReasoningDelta`,
+  `response.function_call_arguments.delta` to `ToolCallDelta`, and
+  `response.output_item.done` plus the terminal
+  `response.completed`/`incomplete`/`failed` events to `End`.
+
+== Getting started
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.llm</groupId>
+  <artifactId>llm-client-openai</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+== Usage
+
+Wire one `Dialect` per wire format, injecting the shared Fusion `JsonMapper`
+and `ExtendedHttpClient`. The base URL passed to `ProviderSpec` is the full chat
+endpoint; choose `/chat/completions` for the completions dialect or
+`/responses` for the responses dialect. Each dialect exposes its `name()`
+(`"openai-completions"` / `"openai-responses"`), used for routing:
+
+[source,java]
+----
+// map the shared Fusion singletons; they are closed by their owner
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+
+final var completionsSpec = ProviderSpec.of(
+        "https://api.openai.com/v1/chat/completions", "<api-key>");
+final var responsesSpec = ProviderSpec.of(
+        "https://api.openai.com/v1/responses", "<api-key>");
+
+final var completions = new OpenAICompletionsDialect(mapper, client, completionsSpec);
+final var responses = new OpenAIResponsesDialect(mapper, client, responsesSpec);
+System.out.println(completions.name() + " / " + responses.name());
+----
+
+To route a request to a specific wire format set the `api` extension to the
+dialect `name()`; a `RoutingLlmClient` built on the default `byApiExtension`
+selector falls back to the first registered client otherwise:
+
+[source,java]
+----
+final var request = LlmRequest.of("gpt-5",
+        List.of(LlmMessage.user("Hello"))).with(Map.of("api", "openai-responses"));
+----

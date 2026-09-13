@@ -26,6 +26,14 @@ public record MavenKnowledgeConfiguration(
         @Property(defaultValue = "\"~/.m2/repository\"", documentation = "Local Maven repository to index.")
         String localRepository,
 
+        @Property(
+                defaultValue = "\"\"",
+                documentation = "Maven project directory used to resolve the project's effective dependencies "
+                        + "(direct + transitive + build plugins/extensions). When blank, the server working "
+                        + "directory ({@code user.dir}) is used; when no directory can be determined the project "
+                        + "dependency resolve is skipped.")
+        String projectDir,
+
         @Property(defaultValue = "4", documentation = "Maximum artifacts processed concurrently.")
         int concurrency,
 
@@ -42,8 +50,39 @@ public record MavenKnowledgeConfiguration(
                         + "content characters per batch. Uses batchSize as a hard upper bound on GAVs in all cases.")
         int maxBatchChars,
 
+        @Property(
+                defaultValue = "1048576",
+                documentation = "Maximum size (in characters) of the content kept per artifact when extracting "
+                        + "sources or Javadoc. Larger content is truncated to this budget. A value <= 0 disables "
+                        + "the per-artifact cap.")
+        int maxContentBytes,
+
         @Property(defaultValue = "true", documentation = "Write the remote -skills.md manifest per artifact.")
         boolean remoteManifest,
 
         @Property(defaultValue = "false", documentation = "Always regenerate, bypassing the immutable-skip rule.")
-        boolean force) {}
+        boolean force,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "When true, enrich per-artifact knowledge with an LLM-written skill file via the MCP sampling "
+                                + "protocol (validated and discarded when not a plausible SKILL.md). Off by default.")
+        boolean useLlm,
+
+        @Property(
+                defaultValue = "500",
+                documentation = "Maximum source files scanned per artifact when building the sources content part.")
+        int maxSourceFiles,
+
+        @Property(
+                defaultValue = "65536",
+                documentation =
+                        "Maximum characters kept per source file when building the sources content part; larger files "
+                                + "are truncated.")
+        int maxSourceFileChars,
+
+        @Property(
+                defaultValue = "500",
+                documentation = "Maximum javadoc class pages rendered per artifact when building the javadoc parts.")
+        int maxJavadocPages) {}

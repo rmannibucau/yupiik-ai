@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.1.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.1.0 http://maven.apache.org/xsd/maven-4.1.0.xsd">
+  <modelVersion>4.1.0</modelVersion>
+  <parent />
+  <artifactId>llm-client-openai</artifactId>
+  <name>LLM Client :: OpenAI</name>
+  <description>OpenAI gpt-4o style /chat/completions and gpt-5 style /responses dialect implementations.</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.yupiik.llm</groupId>
+      <artifactId>llm-client-api</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-build-api</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-processor</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-json</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-httpclient</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <configuration>
+          <proc>full</proc>
+          <parameters>true</parameters>
+          <compilerArgs>
+            <compilerArg>-Afusion.moduleFqn=io.yupiik.llm.client.openai.OpenAiModule</compilerArg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

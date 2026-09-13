@@ -1,0 +1,144 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.llm.client.openai.model;
+
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonProperty;
+import io.yupiik.llm.client.model.LlmMessage;
+import io.yupiik.llm.client.model.LlmToolCall;
+import java.util.List;
+
+/**
+ * OpenAPI /chat/completions wire message (also reused for assistant/tool turns).
+ *
+ * @param role message role: {@code system}, {@code user}, {@code assistant} or {@code tool}.
+ * @param content textual content, {@code null} for pure tool call messages.
+ * @param name optional participant name.
+ * @param toolCalls tool calls requested by the assistant.
+ * @param toolCallId identifier of the tool call this message answers, for {@code tool} roles.
+ */
+@JsonModel
+public record WireMessage(
+        String role,
+        Object content,
+        String name,
+        @JsonProperty("tool_calls") List<WireToolCall> toolCalls,
+        @JsonProperty("tool_call_id") String toolCallId) {
+
+    /**
+     * Maps a neutral message to its wire representation.
+     *
+     * @param message neutral message to map.
+     * @return the wire message.
+     */
+    public static WireMessage from(final LlmMessage message) {
+        return new WireMessage(
+                message.role(),
+                message.content(),
+                message.name(),
+                toToolCalls(message.toolCalls()),
+                message.toolCallId());
+    }
+
+    /**
+     * Maps a wire message back to the neutral model.
+     *
+     * @param wire wire message to map.
+     * @return the neutral message, or {@code null} when the input is null.
+     */
+    public static LlmMessage toNeutral(final WireMessage wire) {
+        if (wire == null) {
+            return null;
+        }
+        return new LlmMessage(
+                wire.role(),
+                wire.content(),
+                wire.name(),
+                toNeutralToolCalls(wire.toolCalls()),
+                wire.toolCallId(),
+                null);
+    }
+
+    private static List<WireToolCall> toToolCalls(final List<LlmToolCall> calls) {
+        if (calls == null) {
+            return null;
+        }
+        return calls.stream()
+                .map(c -> new WireToolCall(
+                        c.id(),
+                        c.type(),
+                        c.function() == null
+                                ? null
+                                : new WireFunction(
+                                        c.function().name(), c.function().arguments()),
+                        c.index()))
+                .toList();
+    }
+
+    private static List<LlmToolCall> toNeutralToolCalls(final List<WireToolCall> calls) {
+        if (calls == null) {
+            return null;
+        }
+        return calls.stream()
+                .map(c -> new LlmToolCall(
+                        c.id(),
+                        c.type(),
+                        c.function() == null
+                                ? null
+                                : new LlmToolCall.FunctionCall(
+                                        c.function().name(), c.function().arguments()),
+                        c.index()))
+                .toList();
+    }
+
+    /**
+     * Tool call as sent on the wire.
+     *
+     * @param id tool call identifier.
+     * @param type tool call type, usually {@code function}.
+     * @param function function name and JSON arguments.
+     * @param index tool call index in streaming mode.
+     */
+    @JsonModel
+    public record WireToolCall(String id, String type, WireFunction function, Integer index) {}
+
+    /**
+     * Function reference of a tool call.
+     *
+     * @param name function name.
+     * @param arguments JSON arguments.
+     */
+    @JsonModel
+    public record WireFunction(String name, String arguments) {}
+
+    /**
+     * Checks the message role.
+     *
+     * @return whether this message is a tool result, for llm routing checks.
+     */
+    public boolean isTool() {
+        return "tool".equals(role);
+    }
+
+    /**
+     * Checks the message content.
+     *
+     * @return whether this message carries assistant tool calls.
+     */
+    public boolean hasToolCalls() {
+        return toolCalls != null && !toolCalls.isEmpty();
+    }
+}

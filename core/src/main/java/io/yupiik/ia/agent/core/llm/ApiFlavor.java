@@ -21,6 +21,16 @@ public enum ApiFlavor {
     RESPONSES,
     ANTHROPIC;
 
+    /** The {@code io.yupiik.llm.client.spi.Dialect#name()} routing identifier; null for {@link #AUTO}. */
+    public String dialectName() {
+        return switch (this) {
+            case COMPLETIONS -> "openai-completions";
+            case RESPONSES -> "openai-responses";
+            case ANTHROPIC -> "anthropic-messages";
+            case AUTO -> null;
+        };
+    }
+
     public static ApiFlavor fromConfigurationString(final String value) {
         if (value == null || value.isBlank()) {
             return null;

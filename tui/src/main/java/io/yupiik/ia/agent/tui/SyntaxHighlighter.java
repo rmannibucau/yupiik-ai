@@ -38,6 +38,8 @@ public final class SyntaxHighlighter {
     private static final Pattern FENCE =
             Pattern.compile("(?m)^\\s*```([A-Za-z0-9_+.-]*)\\s*\\n(.*?)^\\s*```\\s*$", Pattern.DOTALL);
 
+    private static final int DEFAULT_MAX_LINE_LENGTH = 10_000;
+
     private static final Style STRING = token("e5c07b");
     private static final Style COMMENT = token("7f848e");
     private static final Style NUMBER = token("d19a66");
@@ -78,8 +80,8 @@ public final class SyntaxHighlighter {
 
     private static Highlighter language(final List<String> keywords, final List<String> types) {
         return new RegexHighlighter(Pattern.compile(
-                "(?<str>\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|`(?:\\\\.|[^`\\\\])*`)"
-                        + "|(?<com>//[^\\n]*|/\\*.*?\\*/|#[^\\n]*|--[^\\n]*|<!--.*?-->|\\{\\{-?[^\\n]*?}})"
+                "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'(?:\\\\.|[^'\\\\])*+'|`(?:\\\\.|[^`\\\\])*+`)"
+                        + "|(?<com>//[^\\n]*+|/\\*(?:[^*]|\\*(?!/))*+\\*/|#[^\\n]*+|--[^\\n]*+|<!--(?:[^-]|-(?!-))*+-->|\\{\\{-?[^\\n]*+}})"
                         + "|(?<num>\\b\\d+(?:\\.\\d+)?\\b)"
                         + "|(?<tag><\\/?[A-Za-z][A-Za-z0-9:-]*|/?>)"
                         + "|(?<attr>[A-Za-z_:][A-Za-z0-9_:.-]*=)"
@@ -454,6 +456,9 @@ public final class SyntaxHighlighter {
     }
 
     private static List<Span> colored(final Highlighter h, final String line) {
+        if (line.length() > DEFAULT_MAX_LINE_LENGTH) {
+            return List.of(Span.raw(line));
+        }
         final var out = new ArrayList<Span>();
         final var m = h.pattern().matcher(line);
         var last = 0;

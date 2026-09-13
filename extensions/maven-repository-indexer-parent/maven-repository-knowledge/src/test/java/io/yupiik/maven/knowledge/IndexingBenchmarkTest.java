@@ -21,8 +21,7 @@ import io.yupiik.maven.knowledge.content.LocalRepository;
 import io.yupiik.maven.knowledge.content.WebFetch;
 import io.yupiik.maven.knowledge.index.Indexer;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
-import io.yupiik.maven.knowledge.manifest.ManifestWriter;
-import io.yupiik.maven.knowledge.skill.SkillWriter;
+import io.yupiik.maven.knowledge.write.KnowledgeWriter;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -144,10 +143,11 @@ class IndexingBenchmarkTest {
     private Results runIndexer(final KnowledgeConfig config, final List<Gav> cohort, final Path m2) throws IOException {
         final var output = Files.createTempDirectory("bench-out-");
         final var llm = new TimedLlm();
+        final var writer = new KnowledgeWriter(output);
         final var indexer = new Indexer(
                 new ContentAcquirer(new LocalRepository(m2), noOpWebFetch(), config),
-                new SkillWriter(output),
-                new ManifestWriter(output),
+                writer,
+                new KnowledgeFactory(writer),
                 llm,
                 config);
         try {

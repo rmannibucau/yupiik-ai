@@ -50,8 +50,27 @@ public final class BatchSizer {
     /** Conservative per-batch cap when the model budget is unknown, in input content characters. */
     private static final int DEFAULT_MAX_UNKNOWN_CHARS = 128_000;
 
+    /**
+     * Coarse window sizing: an acquisition window is {@code windowMultiplier * batchSize} GAVs, so the in-memory
+     * acquired-content map never exceeds a bounded fraction of the whole cohort at once. {@code batchSize} stays the
+     * hard fence for the final per-LLM-call batches (see {@link #batches(List, Map, KnowledgeConfig)}).
+     */
+    private static final int WINDOW_MULTIPLIER = 64;
+
     private BatchSizer() {
         // utility
+    }
+
+    /**
+     * Splits a candidate cohort into coarse acquisition windows so the caller can acquire flat content window by
+     * window (evicting each before the next) instead of holding the whole cohort's content in memory.
+     *
+     * @param toProcess the GAVs to index.
+     * @param config    pipeline configuration carrying {@code batchSize}.
+     * @return a list of coarse windows (each {@code WINDOW_MULTIPLIER * max(1,batchSize)} GAVs, last one may be smaller).
+     */
+    public static List<List<Gav>> windows(final List<Gav> toProcess, final KnowledgeConfig config) {
+        return count(toProcess, WINDOW_MULTIPLIER * Math.max(1, config.batchSize()));
     }
 
     /**

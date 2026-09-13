@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.maven;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -25,8 +26,13 @@ import io.yupiik.ia.agent.core.maven.json.SkillRoot;
 import io.yupiik.ia.agent.core.maven.json.SuggestRoot;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
+import io.yupiik.maven.knowledge.llm.LlmText;
+import io.yupiik.maven.knowledge.llm.MvnProjectDeps;
+import io.yupiik.maven.knowledge.llm.SkillPrompts;
 import java.io.IOException;
 import java.io.StringReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -42,17 +48,23 @@ import java.util.StringJoiner;
 @ApplicationScoped
 public class YcaKnowledgeLlm implements KnowledgeLlm {
 
+    private static final long MVN_TIMEOUT_MS = 300_000;
+
     private final ChatClient chatClient;
     private final JsonMapper mapper;
+    private final CodingAgentConfiguration configuration;
 
-    public YcaKnowledgeLlm(final ChatClient chatClient, final JsonMapper mapper) {
+    public YcaKnowledgeLlm(
+            final ChatClient chatClient, final JsonMapper mapper, final CodingAgentConfiguration configuration) {
         this.chatClient = chatClient;
         this.mapper = mapper;
+        this.configuration = configuration;
     }
 
     protected YcaKnowledgeLlm() {
         this.chatClient = null;
         this.mapper = null;
+        this.configuration = null;
     }
 
     @Override
@@ -64,6 +76,23 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
     @Override
     public io.yupiik.maven.knowledge.config.TokenBudget tokenBudget() {
         return new io.yupiik.maven.knowledge.config.TokenBudget(chatClient.contextWindow(), chatClient.outputTokens());
+    }
+
+    @Override
+    public List<Gav> resolveProjectDeps() {
+        if (configuration == null || configuration.resolveProjectDir() == null) {
+            return List.of();
+        }
+        return MvnProjectDeps.resolve(configuration.resolveProjectDir(), MVN_TIMEOUT_MS, dependencyCacheDir());
+    }
+
+    /** Where the {@code mvn dependency:list} result is cached (the local repository, by default {@code ~/.m2}). */
+    private Path dependencyCacheDir() {
+        final var cfg = configuration.mavenRepositoryKnowledge();
+        final var raw = cfg == null || cfg.localRepository() == null ? null : cfg.localRepository();
+        final var value = raw == null || raw.isBlank() ? "~/.m2/repository" : raw;
+        final var home = System.getProperty("user.home");
+        return Path.of(value.startsWith("~") && home != null ? home + value.substring(1) : value);
     }
 
     @Override
@@ -110,10 +139,17 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
                             null, List.of(Message.system(prompt + suffix)), null, false, null, null, null, null, null),
                     "entry_points",
                     schema);
+            dumpSample(
+                    order.size() + " artifact(s)",
+                    prompt + suffix,
+                    sb.toString(),
+                    res.result().message() == null
+                            ? null
+                            : LlmText.rawContent(res.result().message().content()));
             if (!res.structured()) {
                 return out;
             }
-            final var raw = rawContent(
+            final var raw = LlmText.rawContent(
                     res.result().message() == null
                             ? null
                             : res.result().message().content());
@@ -171,7 +207,7 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
             if (!res.structured()) {
                 return candidates;
             }
-            final var raw = rawContent(
+            final var raw = LlmText.rawContent(
                     res.result().message() == null
                             ? null
                             : res.result().message().content());
@@ -212,24 +248,11 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
                 "required",
                 List.of("skill"));
         try {
-            final var sb = new StringBuilder();
-            if (entryPoints != null && !entryPoints.isEmpty()) {
-                sb.append("\nMain entry points:\n");
-                for (final var ep : entryPoints) {
-                    sb.append("- ").append(ep).append('\n');
-                }
-            }
+            final var system = SkillPrompts.systemFor(gav, entryPoints);
             final var res = chatClient.chatStructured(
                     new ChatCompletionRequest(
                             null,
-                            List.of(
-                                    Message.system("Write a concise SKILL.md for the artifact " + gav.coordinate()
-                                            + ". Use YAML frontmatter with a `name` (short) and `description`, then a '# '"
-                                            + " title and '## Entry points' (list of fully qualified classes), '## Module"
-                                            + " rules' and '## Working in this module' (build commands) sections when relevant."
-                                            + " Focus on what a coding agent needs to use/mount the library without"
-                                            + " rediscovering it. Output only the SKILL.md content." + sb),
-                                    Message.user(content == null ? "" : content)),
+                            List.of(Message.system(system), Message.user(content == null ? "" : content)),
                             null,
                             false,
                             null,
@@ -239,21 +262,23 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
                             null),
                     "skill",
                     schema);
+            dumpSample(
+                    gav,
+                    system,
+                    content == null ? "" : content,
+                    res.result().message() == null
+                            ? null
+                            : LlmText.rawContent(res.result().message().content()));
             if (!res.structured()) {
                 return null;
             }
-            final var raw = rawContent(
+            final var raw = LlmText.rawContent(
                     res.result().message() == null
                             ? null
                             : res.result().message().content());
             final var parsed = mapper.read(SkillRoot.class, new StringReader(raw));
             final var skill = parsed.skill() == null ? raw : parsed.skill();
-            final var stripped = skill.strip();
-            if (stripped.startsWith("```")) {
-                final var nl = stripped.indexOf('\n');
-                return nl > 0 ? stripped.substring(nl + 1).strip() : stripped;
-            }
-            return stripped;
+            return LlmText.stripMarkdownFence(skill);
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException ie) {
                 Thread.currentThread().interrupt();
@@ -262,7 +287,35 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         }
     }
 
-    private static String rawContent(final Object content) {
-        return content == null ? "" : String.valueOf(content);
+    /**
+     * When the {@code yca.dumpKnowledge} system property points at an existing directory, writes the exact prompt
+     * sent and the raw response received for one artifact into {@code <dir>/sample.<run>.req} and
+     * {@code <dir>/sample.<run>.resp}. Used to capture a real request/response sample for debugging.
+     */
+    private void dumpSample(final Gav gav, final String system, final String user, final String response) {
+        dumpSample(gav.coordinate(), system, user, response);
+    }
+
+    private void dumpSample(final String label, final String system, final String user, final String response) {
+        if (system == null || !System.getProperties().containsKey("yca.dumpKnowledge")) {
+            return;
+        }
+        try {
+            final var dir = Path.of(System.getProperty("yca.dumpKnowledge"));
+            final var run = Long.toHexString(System.nanoTime());
+            Files.createDirectories(dir);
+            final var req = dir.resolve("sample." + run + ".req");
+            Files.writeString(
+                    req,
+                    "GAV: " + label
+                            + "\n\n==== system ====\n"
+                            + system
+                            + "\n\n==== user (content, truncated 6000) ====\n"
+                            + (user.length() > 6000 ? user.substring(0, 6000) + "\n...[truncated]" : user));
+            final var resp = dir.resolve("sample." + run + ".resp");
+            Files.writeString(resp, response == null ? "<null response>" : response);
+        } catch (final Exception e) {
+            // dump is best-effort, never breaks indexing
+        }
     }
 }

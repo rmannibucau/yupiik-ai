@@ -1,0 +1,81 @@
+= llm-client-anthropic
+:minisite-nav-prev-link: llm-client.html
+:minisite-nav-prev-label: LLM client
+:minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-anthropic
+:minisite-keywords: llm, anthropic, messages, dialect
+
+Artifact `io.yupiik.llm:llm-client-anthropic` implements the `Dialect` SPI for
+Anthropic. Its dependencies mirror the OpenAI module (`llm-client-api` plus the
+Fusion build), and the annotation processor generates
+`io.yupiik.llm.client.anthropic.AnthropicModule`.
+
+== Dialect
+
+A single `AnthropicDialect` targets `/v1/messages` and exposes the
+`"anthropic-messages"` dialect name. Unlike OpenAI it does not use a Bearer token: it
+overrides `AbstractDialect.authenticate` to send a `x-api-key` header together
+with the `anthropic-version: 2023-06-01` header.
+
+== Wire mapping
+
+Neutral `LlmMessage`s map to `AnthropicMessage`:
+system messages are extracted to the request-level `system` field, assistant
+tool calls become `tool_use` content blocks with parsed JSON input, tool
+results become user `tool_result` blocks, and everything else maps through the
+generic path. When absent, `maxTokens` defaults to 4096. `toolChoice` is
+mapped to `none`, `any` (for `required`/`any`) or `auto` (default), wrapped as
+`{type: ...}`.
+
+Responses normalize Anthropic `content` blocks (text + `tool_use`) and
+`stop_reason` (`max_tokens` to `length`, `tool_use` to `tool_calls`, else
+`stop`) and usage (`input_tokens` + `output_tokens`) into the neutral model.
+
+== Streaming
+
+Anthropic content-block streaming maps:
+
+* `content_block_delta` to `TextDelta` or `ReasoningDelta`;
+* `content_block_start` to the start of a tool call and
+  `content_block_delta` with the `tool` type to a `ToolCallDelta` (partial JSON
+  is accumulated);
+* `message_delta` to `End` with usage and finish reason.
+
+Other event kinds (`message_start`, `ping`, stops) are ignored.
+
+Model listing is resolved from `AnthropicModels` through the `/models`
+endpoint derived from the dialect chat route suffix.
+
+== Getting started
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.llm</groupId>
+  <artifactId>llm-client-anthropic</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+== Usage
+
+Inject the shared Fusion `JsonMapper` and `ExtendedHttpClient`, and build a
+single `AnthropicDialect` from a `ProviderSpec` pointing at
+`/v1/messages`. The dialect overrides authentication, so the API key is sent
+via the `x-api-key` header (plus `anthropic-version: 2023-06-01`) rather than a
+Bearer token:
+
+[source,java]
+----
+// map the shared Fusion singletons; they are closed by their owner
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+final var spec = ProviderSpec.of("https://api.anthropic.com/v1/messages", "<api-key>");
+
+final var dialect = new AnthropicDialect(mapper, client, spec);
+System.out.println(dialect.name());
+----
+
+The dialect maps the neutral model to the Anthropic wire format: system
+messages become the request-level `system` field, assistant tool calls become
+`tool_use` blocks and tool results become user `tool_result` blocks. When the
+request carries no `maxTokens`, the dialect defaults it to 4096.

@@ -25,9 +25,7 @@ import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
-import io.yupiik.ia.agent.core.llm.ContextWindowExceededException;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.StreamDelta;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -39,6 +37,12 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.llm.client.ContextWindowExceededException;
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.model.LlmStreamEvent.End;
+import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
+import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
+import io.yupiik.llm.client.model.Usage;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -315,15 +319,20 @@ public class AgentLoop {
         emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
     }
 
-    private void dispatch(final StreamDelta delta, final io.yupiik.ia.agent.core.llm.Usage[] usage) {
-        switch (delta.type()) {
-            case TEXT -> emit(new AgentEvent.TextDelta(delta.text()));
-            case REASONING -> emit(new AgentEvent.ThinkingDelta(delta.text()));
-            case USAGE -> {
-                usage[0] = delta.usage();
-                usageTracker.record(delta.usage());
-            }
-            default -> {}
+    private void dispatch(final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage) {
+        if (delta instanceof TextDelta(final String text)) {
+            emit(new AgentEvent.TextDelta(text));
+        } else if (delta instanceof ReasoningDelta(final String text)) {
+            emit(new AgentEvent.ThinkingDelta(text));
+        } else if (delta instanceof End(final String __, final Usage upper)) {
+            final var converted = upper == null
+                    ? io.yupiik.ia.agent.core.llm.Usage.EMPTY
+                    : new io.yupiik.ia.agent.core.llm.Usage(
+                            Math.toIntExact(upper.promptTokens()),
+                            Math.toIntExact(upper.completionTokens()),
+                            Math.toIntExact(upper.totalTokens()));
+            usage[0] = converted;
+            usageTracker.record(converted);
         }
     }
 

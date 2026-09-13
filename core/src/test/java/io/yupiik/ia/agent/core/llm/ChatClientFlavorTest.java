@@ -23,6 +23,9 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.model.LlmStreamEvent.End;
+import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -126,7 +129,21 @@ class ChatClientFlavorTest {
                         new ResponsesInput$FusionJsonCodec(),
                         new ResponsesTool$FusionJsonCodec(),
                         new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec()),
+                        new ModelsResponse$Model$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec()),
                 key -> Optional.empty());
     }
 
@@ -164,16 +181,18 @@ class ChatClientFlavorTest {
 
     @Test
     void streamParsesDeltas() throws Exception {
-        final var deltas = new CopyOnWriteArrayList<StreamDelta>();
+        final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
         final var message = client.stream(request(), deltas::add);
         assertEquals("hello", message.content());
-        assertEquals(
-                2,
-                deltas.stream().filter(d -> d.type() == StreamDelta.Type.TEXT).count());
+        assertEquals(2, deltas.stream().filter(TextDelta.class::isInstance).count());
         assertTrue(deltas.stream()
-                .anyMatch(d -> d.type() == StreamDelta.Type.USAGE && d.usage().totalTokens() == 5));
-        assertTrue(
-                deltas.stream().anyMatch(d -> d.type() == StreamDelta.Type.FINISH && "stop".equals(d.finishReason())));
+                .filter(End.class::isInstance)
+                .map(End.class::cast)
+                .anyMatch(d -> d.usage() != null && d.usage().totalTokens() == 5));
+        assertTrue(deltas.stream()
+                .filter(End.class::isInstance)
+                .map(End.class::cast)
+                .anyMatch(d -> "stop".equals(d.finishReason())));
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
     }
 

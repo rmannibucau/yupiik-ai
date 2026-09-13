@@ -23,7 +23,11 @@ import io.yupiik.fusion.mcp.model.SamplingMessage;
 import io.yupiik.fusion.mcp.protocol.MCPSessions;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
+import io.yupiik.maven.knowledge.llm.LlmText;
+import io.yupiik.maven.knowledge.llm.MvnProjectDeps;
+import io.yupiik.maven.knowledge.llm.SkillPrompts;
 import java.io.StringReader;
+import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,24 +43,46 @@ import java.util.concurrent.TimeoutException;
  */
 public class MCPKnowledgeLlm implements KnowledgeLlm {
 
+    private static final long MVN_TIMEOUT_MS = 300_000;
+
     private final MCPSessions sessions;
     private final io.yupiik.fusion.http.server.api.Request request;
     private final JsonMapper mapper;
+    private final String projectDir;
+    private final java.nio.file.Path dependencyCache;
     private final long timeoutSeconds;
 
     public MCPKnowledgeLlm(
             final MCPSessions sessions,
             final io.yupiik.fusion.http.server.api.Request request,
-            final JsonMapper mapper) {
+            final JsonMapper mapper,
+            final String projectDir,
+            final java.nio.file.Path dependencyCache) {
         this.sessions = sessions;
         this.request = request;
         this.mapper = mapper;
+        this.projectDir = projectDir;
+        this.dependencyCache = dependencyCache;
         this.timeoutSeconds = 300;
     }
 
     @Override
     public boolean available() {
         return true; // sampling is resolved at call time by the client; a failed call degrades the run
+    }
+
+    @Override
+    public List<Gav> resolveProjectDeps() {
+        return MvnProjectDeps.resolve(Path.of(resolveProjectDir()), MVN_TIMEOUT_MS, dependencyCache);
+    }
+
+    /** Project directory used to resolve the deps: configured value, else the process working directory. */
+    private String resolveProjectDir() {
+        if (projectDir != null && !projectDir.isBlank()) {
+            return projectDir;
+        }
+        final var userDir = System.getProperty("user.dir");
+        return userDir == null || userDir.isBlank() ? "" : userDir;
     }
 
     @Override
@@ -80,7 +106,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
             return out;
         }
         try {
-            final var parsed = mapper.read(Root.class, new StringReader(trimJson(text)));
+            final var parsed = mapper.read(Root.class, new StringReader(LlmText.trimJson(text)));
             if (parsed.items() != null) {
                 for (final var item : parsed.items()) {
                     if (item != null && item.gav() != null) {
@@ -102,11 +128,8 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
     @Override
     public String synthesizeSkill(
             final Gav gav, final String name, final String content, final List<String> entryPoints) {
-        final var prompt = "Write a SKILL.md knowledge file for the Maven artifact " + gav.coordinate()
-                + " (" + name + "). Use this exact structure:\n"
-                + "---\nname: " + name + "\ndescription: ...\n---\n\n"
-                + "# " + name + "\n\n## Entry points\n- `fqn`\n\n## Module rules\n...\n\n## Working in this module\n..."
-                + "\n\nKnown entry points: " + entryPoints + "\n\nArtifact content:\n"
+        final var prompt = SkillPrompts.systemFor(gav, entryPoints)
+                + "\n\nArtifact content:\n"
                 + (content == null ? "" : (content.length() > 60_000 ? content.substring(0, 60_000) : content));
         final var text = sample(
                 prompt,
@@ -115,16 +138,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
         if (text == null || text.isBlank()) {
             return fallback(gav, name, entryPoints);
         }
-        final var stripped = text.strip();
-        if (stripped.startsWith("```")) {
-            final var nl = stripped.indexOf('\n');
-            var body = nl > 0 ? stripped.substring(nl + 1) : "";
-            if (body.endsWith("```")) {
-                body = body.substring(0, body.length() - 3);
-            }
-            return body.strip();
-        }
-        return stripped;
+        return LlmText.stripMarkdownFence(text);
     }
 
     private String sample(final String user, final String system) {
@@ -147,16 +161,6 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
         } catch (final ExecutionException | TimeoutException e) {
             return null;
         }
-    }
-
-    private static String trimJson(final String text) {
-        // strip a markdown fence if the client wrapped the JSON
-        final var t = text.strip();
-        if (t.startsWith("```json")) {
-            final var nl = t.indexOf('\n');
-            return nl > 0 ? t.substring(nl + 1).replaceAll("```\\s*$", "").strip() : t;
-        }
-        return t;
     }
 
     private static String fallback(final Gav gav, final String name, final List<String> entryPoints) {

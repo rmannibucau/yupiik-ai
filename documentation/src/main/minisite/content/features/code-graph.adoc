@@ -1,0 +1,38 @@
+= Structural code graph
+:minisite-breadcrumb: Home[index.html] > Features > Structural code graph
+:minisite-keywords: code graph, structural, code trace, call graph
+
+The structural code graph gives the agent a precise, symbol-level map of the
+project instead of relying on ad-hoc searches. It deep-parses the sources into
+a semantic graph and exposes two tools:
+
+* `code_check_graph` - reports the freshness of the graph so the agent knows
+  when it is out of date.
+* `code_trace_calls` - answers "who calls this" and "what does this call" style
+  questions by tracing symbols through the graph.
+
+== How it is built
+
+When enabled, the graph parses the project source files (filtered by the
+configured language extensions and per-file size limit) into a store. It keeps
+a `resolvedStoreDir` per project so the graph is reused across sessions and
+only re-synced when needed.
+
+== Documentation doc tree
+
+With `yca.structuralCodeGraph.docs` enabled (the default), the agent writes a
+per-source-file Markdown doc tree under the graph doc store
+(`yca.structuralCodeGraph.docStoreDir`), mirroring the project source layout.
+With `yca.structuralCodeGraph.enrich` the graph can optionally be enriched, for
+example using a model, so the generated docs carry more useful context for the
+agent.
+
+== Mapping from the agent
+
+The `code_trace_calls` tool consults the graph and, to help the agent locate a
+symbol, also points to the generated doc tree under `.../docs`.
+
+Configuration lives under the `yca.structuralCodeGraph` prefix; see
+xref:../configuration.adoc[Configuration] for the full option set, including
+`enabled`, `deep`, `enrich`, `docs`, `languageExtensions`, `maxFileBytes`,
+`storeDir`/`docStoreDir`.

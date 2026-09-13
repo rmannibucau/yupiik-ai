@@ -5,4 +5,9 @@ The coding agent exposes a set of built-in tools to the model. They cover file
 inspection, editing, shell execution and memory. Tools listed as *read-only*
 never modify the working copy.
 
+All the tools below are automatically generated from the running binary. One of
+them, `maven_repository_knowledge`, indexes the local Maven repository so the
+agent never rediscovers library usage; see
+xref:features/maven-knowledge.adoc[Maven repository knowledge] for how it works.
+
 include::content/_partials/generated/embedded-tools.adoc[]

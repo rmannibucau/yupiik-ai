@@ -36,6 +36,8 @@ public final class StubLlm implements KnowledgeLlm {
     private final AtomicReference<List<Gav>> suggestResponse = new AtomicReference<>();
     private volatile boolean available = true;
     private final List<Map<Gav, String>> entryPointBatches = new ArrayList<>();
+    private final AtomicInteger synthesizeCalls = new AtomicInteger();
+    private final AtomicReference<String> skillResponse = new AtomicReference<>();
 
     public StubLlm entryPoints(final String... fqns) {
         entryPointResponse.set(List.of(fqns));
@@ -50,6 +52,21 @@ public final class StubLlm implements KnowledgeLlm {
     public StubLlm unavailable() {
         available = false;
         return this;
+    }
+
+    /** Make {@link #synthesizeSkill} return this exact text (eg. a placeholder JSON shell). */
+    public StubLlm skill(final String skill) {
+        skillResponse.set(skill);
+        return this;
+    }
+
+    /** @return true when {@link #synthesizeSkill} was ever called. */
+    public boolean wasInvoked() {
+        return synthesizeCalls.get() > 0;
+    }
+
+    public int synthesizeCallCount() {
+        return synthesizeCalls.get();
     }
 
     public int entryPointCallCount() {
@@ -98,6 +115,12 @@ public final class StubLlm implements KnowledgeLlm {
     @Override
     public String synthesizeSkill(
             final Gav gav, final String name, final String content, final List<String> entryPoints) {
+        final var resp = skillResponse.get();
+        if (resp != null) {
+            synthesizeCalls.incrementAndGet();
+            return resp;
+        }
+        synthesizeCalls.incrementAndGet();
         final var sb = new StringBuilder();
         sb.append("---\n");
         sb.append("name: ").append(name).append('\n');

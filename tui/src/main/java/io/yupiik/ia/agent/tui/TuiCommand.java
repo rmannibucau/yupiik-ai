@@ -1339,7 +1339,7 @@ public class TuiCommand implements Runnable {
         executor.execute(() -> {
             try {
                 final var listing = agentSessionService.tools(arg);
-                final var sb = new StringBuilder("\n\n**Tools**\n\n```text\n");
+                final var sb = new StringBuilder("\n\n**Tools**\n\n");
                 if (!listing.anyTool()) {
                     sb.append("(no tools available)\n");
                 } else {
@@ -1347,19 +1347,22 @@ public class TuiCommand implements Runnable {
                         sb.append("(no tool matches)\n");
                     } else {
                         for (final var server : listing.servers()) {
-                            sb.append(server.server()).append('\n');
+                            sb.append("### ")
+                                    .append(server.server())
+                                    .append("\n\n")
+                                    .append("| tool | description |\n|---|---|");
                             final var tools = server.tools();
-                            for (var i = 0; i < tools.size(); i++) {
-                                final var tool = tools.get(i);
-                                sb.append(i == tools.size() - 1 ? "└─ " : "├─ ")
-                                        .append(tool.name())
-                                        .append(tool.description() == null ? "" : ": " + tool.description())
-                                        .append('\n');
+                            for (final var tool : tools) {
+                                sb.append("\n| **")
+                                        .append(sanitizeCell(tool.name()))
+                                        .append("** | ")
+                                        .append(sanitizeCell(tool.description() == null ? "" : tool.description()))
+                                        .append(" |");
                             }
+                            sb.append('\n');
                         }
                     }
                 }
-                sb.append("```");
                 runner.runLater(() -> {
                     state.model.transcript().append(sb).append('\n');
                     state.model.scrollBack(0);
@@ -1368,6 +1371,10 @@ public class TuiCommand implements Runnable {
                 runner.runLater(() -> modelError(state, "tools listing failed: " + e.getMessage()));
             }
         });
+    }
+
+    private static String sanitizeCell(final String value) {
+        return value == null ? "" : value.replace("|", "\\|").replace("\n", " ");
     }
 
     private void complete(final TuiRunner runner, final UiState state) {
@@ -1894,10 +1901,24 @@ public class TuiCommand implements Runnable {
             state.model.status("cannot run maven knowledge while busy");
             return;
         }
+        final var parts = (arg == null ? "" : arg.strip()).split("\\s+", 2);
+        final var sub = parts.length == 0 ? "" : parts[0].toLowerCase(Locale.ROOT);
+        if ("status".equals(sub)) {
+            try {
+                final var lines = mavenKnowledgeService.status();
+                final var sb = new StringBuilder("\n\n> maven-repository-knowledge:");
+                lines.forEach(line -> sb.append("\n").append(line));
+                state.model.transcript().append(sb).append('\n');
+                state.model.status(lines.stream().findFirst().orElse("maven knowledge status"));
+            } catch (final RuntimeException e) {
+                modelError(state, "maven knowledge status failed: " + e.getMessage());
+            }
+            return;
+        }
         waiting(state, "refreshing local Maven artifact knowledge...", SpinnerStyle.BOUNCING_BALL);
         executor.execute(() -> {
             try {
-                final var gav = arg == null ? "" : arg.strip();
+                final var gav = parts.length > 1 ? parts[1].strip() : "";
                 final var ack = mavenKnowledgeService.refresh(
                         gav,
                         progress -> runner.runLater(() -> state.model.status(progress + " artifacts")),
@@ -1908,7 +1929,15 @@ public class TuiCommand implements Runnable {
                             state.model.transcript().append(sb).append('\n');
                         }));
                 runner.runLater(() -> {
-                    state.model.status(ack.stream().findFirst().orElse("maven knowledge refresh started"));
+                    final var sb = new StringBuilder();
+                    ack.forEach(line -> sb.append("\n").append(line));
+                    final var first = ack.stream().findFirst().orElse("maven knowledge refresh started");
+                    state.model.status(first);
+                    state.model
+                            .transcript()
+                            .append("\n> maven-repository-knowledge:")
+                            .append(sb)
+                            .append('\n');
                 });
             } catch (final RuntimeException e) {
                 runner.runLater(() -> modelError(state, "maven knowledge refresh failed: " + e.getMessage()));

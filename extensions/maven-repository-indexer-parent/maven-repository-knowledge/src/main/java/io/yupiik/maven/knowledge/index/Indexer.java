@@ -16,12 +16,13 @@
 package io.yupiik.maven.knowledge.index;
 
 import io.yupiik.maven.knowledge.Gav;
+import io.yupiik.maven.knowledge.KnowledgeFactory;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.content.ContentAcquired;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
-import io.yupiik.maven.knowledge.manifest.ManifestWriter;
-import io.yupiik.maven.knowledge.skill.SkillWriter;
+import io.yupiik.maven.knowledge.write.KnowledgeWriter;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -35,19 +36,21 @@ import java.util.function.IntConsumer;
 /**
  * Orchestrates indexing of a set of GAVs:
  * <ol>
- *     <li>Resolve + acquire local content (sources/javadoc/doc/classes) for every GAV.</li>
+ *     <li>Resolve + acquire local content (sources/javadoc/doc/classes) for every GAV, plus a deterministic
+ *     bytecode-derived entry-point + API view of the main jar.</li>
  *     <li>Immutable-skip release artifacts that already have knowledge; always (re)generate SNAPSHOTs unless force.</li>
- *     <li>Bulk entry-point discovery: many GAVs per single LLM call ({@code batchSize}).</li>
- *     <li>Synthesize each skill (LLM) and write it + the remote manifest.</li>
+ *     <li>Write the whole {@link KnowledgeFactory} knowledge set for every artifact
+ *     ({@code -knowledge-index/api/&lt;kind&gt;/skill-*.md} siblings) - always deterministic, never LLM-gated.</li>
+ *     <li>Optional, validated LLM refinement of entry points and gold-format skills only when
+ *     {@code config.useLlm()} is true and the LLM is available; invalid/placeholder output is discarded.</li>
  * </ol>
- * When the LLM is unavailable, the pipeline degrades: classes-only artifacts are skipped with a clear reason
- * rather than failing the whole run.
+ * The pipeline never depends on the LLM producing the knowledge: without it the output is fully deterministic.
  */
 public class Indexer {
 
     private final ContentAcquirer acquirer;
-    private final SkillWriter skillWriter;
-    private final ManifestWriter manifestWriter;
+    private final KnowledgeWriter writer;
+    private final KnowledgeFactory factory;
     private final KnowledgeLlm llm;
     private final KnowledgeConfig config;
     private final ExecutorService executor;
@@ -56,11 +59,11 @@ public class Indexer {
 
     public Indexer(
             final ContentAcquirer acquirer,
-            final SkillWriter skillWriter,
-            final ManifestWriter manifestWriter,
+            final KnowledgeWriter writer,
+            final KnowledgeFactory factory,
             final KnowledgeLlm llm,
             final KnowledgeConfig config) {
-        this(acquirer, skillWriter, manifestWriter, llm, config, null);
+        this(acquirer, writer, factory, llm, config, null);
     }
 
     /**
@@ -71,14 +74,14 @@ public class Indexer {
      */
     public Indexer(
             final ContentAcquirer acquirer,
-            final SkillWriter skillWriter,
-            final ManifestWriter manifestWriter,
+            final KnowledgeWriter writer,
+            final KnowledgeFactory factory,
             final KnowledgeLlm llm,
             final KnowledgeConfig config,
             final Map<Gav, String> expectedFingerprints) {
         this.acquirer = acquirer;
-        this.skillWriter = skillWriter;
-        this.manifestWriter = manifestWriter;
+        this.writer = writer;
+        this.factory = factory;
         this.llm = llm;
         this.config = config;
         this.expectedFingerprints = expectedFingerprints == null ? Map.of() : expectedFingerprints;
@@ -115,17 +118,42 @@ public class Indexer {
                 toProcess.add(gav);
             }
         }
-        // Acquire every remaining artifact once, then chunk into entry-points batches. The sizer picks
-        // the mode by maxBatchChars: -1 = greedy to the model token budget, > 0 = hard char cap, else GAV count.
-        final var contentByGav = new LinkedHashMap<Gav, ContentAcquired>();
-        for (final var gav : toProcess) {
-            contentByGav.put(gav, acquirer.acquire(gav));
-        }
-        for (final var batch : BatchSizer.batches(toProcess, contentByGav, config)) {
-            if (beforeBatch != null) {
-                beforeBatch.accept(results.size());
+        // Acquire content window by window (evict each before the next) so the in-memory acquired-content map
+        // stays bounded to a window no matter the cohort size.
+        final var runBudget = config.runContentBudget();
+        long consumedChars = 0;
+        for (final var window : BatchSizer.windows(toProcess, config)) {
+            final var contentByGav = new LinkedHashMap<Gav, ContentAcquired>();
+            final var eligible = new ArrayList<Gav>();
+            var budgetExhausted = false;
+            for (final var gav : window) {
+                if (runBudget > 0 && consumedChars >= runBudget) {
+                    budgetExhausted = true;
+                    final var result = IndexResult.skipped(gav, "run content budget exceeded");
+                    results.add(result);
+                    if (onResult != null) {
+                        onResult.accept(result);
+                    }
+                    continue;
+                }
+                final var acquired = acquirer.acquire(gav);
+                if (acquired != null && acquired.content() != null) {
+                    consumedChars += acquired.content().length();
+                    contentByGav.put(gav, acquired);
+                } else {
+                    contentByGav.put(gav, ContentAcquired.none(gav));
+                }
+                eligible.add(gav);
             }
-            runBatch(batch, contentByGav, results, onResult);
+            if (!eligible.isEmpty() || !budgetExhausted) {
+                for (final var batch : BatchSizer.batches(eligible, contentByGav, config)) {
+                    if (beforeBatch != null) {
+                        beforeBatch.accept(results.size());
+                    }
+                    runBatch(batch, contentByGav, results, onResult);
+                }
+            }
+            // evict: content is only held for the current window
         }
         return IndexResult.Results.summarize(results);
     }
@@ -140,14 +168,14 @@ public class Indexer {
         final var expectedFp = expectedFingerprints.get(gav);
         if (expectedFp != null) {
             // build-declaration aware: re-index only when the declaring files changed since last index
-            if (!skillWriter.alreadyIndexed(gav)) {
+            if (!writer.alreadyIndexed(gav)) {
                 return null;
             }
-            return expectedFp.equals(skillWriter.readFingerprint(gav))
+            return expectedFp.equals(writer.readFingerprint(gav))
                     ? "unchanged: already indexed with current dependencies"
                     : null; // declaring build files changed -> re-index
         }
-        return skillWriter.alreadyIndexed(gav) ? "immutable-skip: release already indexed" : null;
+        return writer.alreadyIndexed(gav) ? "immutable-skip: release already indexed" : null;
     }
 
     static boolean isSnapshot(final Gav gav) {
@@ -159,46 +187,23 @@ public class Indexer {
             final Map<Gav, ContentAcquired> contentByGav,
             final List<IndexResult> results,
             final Consumer<IndexResult> onResult) {
-        final var llmInputs = new LinkedHashMap<Gav, String>();
-
-        for (final var gav : batch) {
-            final var acquired = contentByGav.get(gav);
-            if (acquired == null || !acquired.present()) {
-                final var res = IndexResult.skipped(gav, "no usable local content (sources/javadoc/doc/classes)");
-                results.add(res);
-                if (onResult != null) {
-                    onResult.accept(res);
-                }
-            } else {
-                llmInputs.put(gav, acquired.content());
-            }
-        }
-        if (llmInputs.isEmpty()) {
-            return;
-        }
-        final Map<Gav, List<String>> entryPoints;
-        if (llm.available()) {
-            entryPoints = llm.entryPoints(llmInputs);
-        } else {
-            entryPoints = Map.of();
-        }
-        // Synthesize + write concurrently (batches already serialised by caller, fine for bounded concurrency).
         final var futures = new ArrayList<Future<?>>();
-        for (final var entry : llmInputs.entrySet()) {
+        for (final var gav : batch) {
             futures.add(executor.submit(() -> {
-                final var gav = entry.getKey();
-                final var acquired = contentByGav.get(gav);
-                final var eps = entryPoints.getOrDefault(gav, List.of());
-                final var skill = llm.available()
-                        ? llm.synthesizeSkill(gav, gav.artifactId(), acquired.content(), eps)
-                        : fallbackSkill(gav, acquired, eps);
-                final var path = skillWriter.write(gav, gav.artifactId(), skill);
-                if (config.remoteManifest()) {
-                    manifestWriter.write(gav, List.of(gav.artifactId()));
+                final Path path;
+                try {
+                    path = generate(gav, contentByGav.get(gav));
+                } catch (final RuntimeException e) {
+                    final var res = IndexResult.skipped(gav, "failed to index: " + e.getMessage());
+                    results.add(res);
+                    if (onResult != null) {
+                        onResult.accept(res);
+                    }
+                    return;
                 }
                 final var expectedFp = expectedFingerprints.get(gav);
                 if (expectedFp != null) {
-                    skillWriter.writeFingerprint(gav, expectedFp);
+                    writer.writeFingerprint(gav, expectedFp);
                 }
                 final var res = IndexResult.indexed(gav, "written " + path);
                 results.add(res);
@@ -217,30 +222,18 @@ public class Indexer {
     }
 
     /**
-     * Minimal knowledge usable when no LLM is reachable: header + entry points + the acquired content
-     * verbatim so the next run with a reachable LLM can upgrade it.
+     * Deterministically generate + write the knowledge set for one artifact, optionally refining it with the
+     * LLM when {@code useLlm} is enabled. Returns the index file path.
      */
-    private static String fallbackSkill(final Gav gav, final ContentAcquired acquired, final List<String> entryPoints) {
-        final var sb = new StringBuilder();
-        sb.append("---\n");
-        sb.append("name: ").append(gav.artifactId()).append('\n');
-        sb.append("description: ")
-                .append(gav.artifactId())
-                .append(" - ")
-                .append(gav.coordinate())
-                .append(" (generated, LLM unavailable).\n");
-        sb.append("---\n\n");
-        sb.append("# ").append(gav.artifactId()).append('\n');
-        if (!entryPoints.isEmpty()) {
-            sb.append("\n## Entry points\n");
-            for (final var ep : entryPoints) {
-                sb.append("- `").append(ep).append("`\n");
-            }
+    private Path generate(final Gav gav, final ContentAcquired acquired) {
+        final var entryPoints = acquirer.entryPoints(gav);
+        final var apiMarkdown = acquirer.api(gav);
+        final var moduleConfig = acquirer.moduleConfig(gav);
+        final var skills = new ArrayList<KnowledgeFactory.SkillDoc>();
+        if (config.useLlm() && llm.available()) {
+            skills.addAll(LlmRefinement.refine(gav, acquired, entryPoints, apiMarkdown, llm));
         }
-        sb.append("\n## Module rules\n");
-        sb.append("Generated from local Maven repository content; entry points may be incomplete because the LLM ");
-        sb.append("was not reachable.\n");
-        return sb.toString();
+        return factory.writeArtifact(gav, acquirer.contentParts(gav), apiMarkdown, moduleConfig, entryPoints, skills);
     }
 
     /**

@@ -1,0 +1,62 @@
+= LLM client
+:minisite-nav-prev-link: ../index.html
+:minisite-nav-prev-label: Libraries
+:minisite-breadcrumb: Home[index.html] > Libraries > LLM client
+
+The LLM client (parent `io.yupiik.llm:llm-client`) is a shared, provider-agnostic
+abstraction over OpenAI-compatible and Anthropic endpoints. It splits into three
+artifacts: a neutral core (`-api`) and one dialect implementation per provider
+(`-openai`, `-anthropic`).
+
+++++
+<div class="row">
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-cube"></i>
+          </span>
+          <span class="card-title-text">llm-client-api</span>
+        </h4>
+        <div class="card-text">
+          Neutral model, Dialect SPI, LlmClient facade and resilience.
+        </div>
+        <a title="llm-client-api" class="card-link-mask" href="llm-client-api.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-robot"></i>
+          </span>
+          <span class="card-title-text">llm-client-openai</span>
+        </h4>
+        <div class="card-text">
+          The chat/completions and responses dialects for OpenAI.
+        </div>
+        <a title="llm-client-openai" class="card-link-mask" href="llm-client-openai.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-code"></i>
+          </span>
+          <span class="card-title-text">llm-client-anthropic</span>
+        </h4>
+        <div class="card-text">
+          The /v1/messages dialect for Anthropic.
+        </div>
+        <a title="llm-client-anthropic" class="card-link-mask" href="llm-client-anthropic.html"></a>
+      </div>
+    </div>
+  </div>
+</div>
+++++

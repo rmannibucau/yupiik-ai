@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
@@ -38,7 +39,7 @@ import java.util.zip.ZipOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-class MavenRepositoryKnowledgeServiceTest {
+public class MavenRepositoryKnowledgeServiceTest {
 
     @TempDir
     Path tmp;
@@ -59,6 +60,9 @@ class MavenRepositoryKnowledgeServiceTest {
             final var ack = service.refresh(null, progress::add, null);
             assertFalse(ack.isEmpty(), "the refresh should acknowledge starting");
             assertTrue(ack.get(0).contains("started indexing"), () -> "unexpected ack: " + ack);
+            assertTrue(
+                    ack.stream().anyMatch(l -> l.contains("starting to index") && l.contains("g.com:artifact-a:1.0")),
+                    () -> "ack should preview the artifacts: " + ack);
 
             final var run = service.currentIndex();
             assertTrue(run.inFlight(), "indexing should be in flight right after starting");
@@ -74,10 +78,10 @@ class MavenRepositoryKnowledgeServiceTest {
             assertTrue(last.contains("(2/2)") || last.contains("100%"), () -> "final progress should be 100%: " + last);
 
             assertTrue(
-                    Files.exists(m2.resolve("g/com/artifact-a/1.0/yca/artifact-a/SKILL.md")),
-                    () -> "artifact-a SKILL.md missing; summary: " + summary);
-            assertTrue(Files.exists(m2.resolve("g/com/artifact-b/2.0/yca/artifact-b/SKILL.md")));
-            assertTrue(Files.exists(m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-skills.md")));
+                    Files.exists(m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-knowledge-index.md")),
+                    () -> "artifact-a knowledge index missing; summary: " + summary);
+            assertTrue(Files.exists(m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-knowledge-api.md")));
+            assertTrue(Files.exists(m2.resolve("g/com/artifact-b/2.0/artifact-b-2.0-knowledge-index.md")));
         } finally {
             executor.shutdown();
         }
@@ -93,6 +97,195 @@ class MavenRepositoryKnowledgeServiceTest {
         try {
             final var res = service.refresh("g.com:artifact-a:1.0", null, null);
             assertEquals(List.of("maven repository knowledge is disabled"), res);
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void statusReportsIdleThenRunProgressAndLastSummary() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-status"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-status"));
+        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
+        classesOnly(m2, "g.com", "artifact-b", "2.0", "g.com.b.Main");
+
+        final var config = config(m2.toString(), proj.toString());
+        final var executor = new VirtualThreadExecutor();
+        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
+        try {
+            assertTrue(
+                    service.status().stream().anyMatch(l -> l.contains("no index has run")),
+                    () -> "before any run the status should say nothing ran: " + service.status());
+
+            service.refresh(null, null, null);
+            final var run = service.currentIndex();
+            assertTrue(run.inFlight(), "indexing should be in flight right after starting");
+            assertTrue(
+                    service.status().stream().anyMatch(l -> l.startsWith("index in progress:")),
+                    () -> "while running the status should report progress: " + service.status());
+
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (run.inFlight() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(run.inFlight(), "indexing should have completed");
+            assertTrue(
+                    service.status().stream().anyMatch(l -> l.contains("index idle") && l.contains("indexed")),
+                    () -> "after the run the status should show the last summary: " + service.status());
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void baselineScopesToProjectDependenciesOnly() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-cohort"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-cohort"));
+        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
+        classesOnly(m2, "g.com", "artifact-b", "2.0", "g.com.b.Main");
+        classesOnly(m2, "g.com", "artifact-other", "3.0", "g.com.other.Main");
+
+        final var config = config(m2.toString(), proj.toString());
+        final var executor = new VirtualThreadExecutor();
+        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
+        try {
+            final var ack = service.refresh(null, null, null);
+            assertTrue(ack.get(0).contains("indexing 2"), () -> "only project deps should be indexed: " + ack);
+            assertFalse(
+                    ack.stream().anyMatch(l -> l.contains("artifact-other")),
+                    () -> "a local artifact not in the project deps must be ignored: " + ack);
+
+            final var run = service.currentIndex();
+            assertEquals(2, run.total(), "cohort must match project deps");
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (run.inFlight() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(run.inFlight(), "indexing should have completed");
+            assertTrue(Files.exists(m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-knowledge-index.md")));
+            assertTrue(Files.exists(m2.resolve("g/com/artifact-b/2.0/artifact-b-2.0-knowledge-index.md")));
+            assertFalse(Files.exists(m2.resolve("g/com/artifact-other/3.0/artifact-other-3.0-knowledge-index.md")));
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void sessionSkillsLoadIndexesAfterIndexing() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-skills"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-skills"));
+        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
+        classesOnly(m2, "g.com", "artifact-b", "2.0", "g.com.b.Main");
+
+        final var config = config(m2.toString(), proj.toString());
+        final var executor = new VirtualThreadExecutor();
+        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
+        try {
+            service.refresh(null, null, null);
+            final var run = service.currentIndex();
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (run.inFlight() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(run.inFlight(), "indexing should have completed");
+
+            service.onStart(new Start());
+            final var blocksDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (service.sessionSkillBlocks().isEmpty() && System.nanoTime() < blocksDeadline) {
+                Thread.sleep(50);
+            }
+            final var blocks = service.sessionSkillBlocks();
+            assertFalse(blocks.isEmpty(), () -> "session skills should load after indexing: " + blocks);
+            final var joined = String.join("\n", blocks);
+            assertTrue(
+                    joined.contains("<skill name=\"artifact-a-index\">"),
+                    () -> "missing artifact-a index block: " + joined);
+            assertTrue(
+                    joined.contains("<skill name=\"artifact-b-index\">"),
+                    () -> "missing artifact-b index block: " + joined);
+            assertTrue(joined.contains("## Knowledge"), () -> "index content should be loaded: " + joined);
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void sessionSkillIndexIsTruncatedByMaxSessionSkillChars() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-cap"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-cap"));
+        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
+
+        final var map = new HashMap<String, String>();
+        map.put("yca.storageHome", "~/.yupiik/coding-agent");
+        map.put("yca.workingDir", ".");
+        map.put("yca.projectDir", proj.toString());
+        map.put("yca.mavenRepositoryKnowledge.enabled", "true");
+        map.put("yca.mavenRepositoryKnowledge.localRepository", m2.toString());
+        map.put("yca.mavenRepositoryKnowledge.maxSessionSkillChars", "64");
+        final var config =
+                new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
+
+        final var executor = new VirtualThreadExecutor();
+        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
+        try {
+            service.refresh(null, null, null);
+            final var run = service.currentIndex();
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (run.inFlight() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(run.inFlight(), "indexing should have completed");
+
+            service.onStart(new Start());
+            final var blocksDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (service.sessionSkillBlocks().isEmpty() && System.nanoTime() < blocksDeadline) {
+                Thread.sleep(50);
+            }
+            final var blocks = service.sessionSkillBlocks();
+            assertFalse(blocks.isEmpty(), () -> "session skills should load: " + blocks);
+            assertTrue(
+                    blocks.get(0).contains("index truncated"),
+                    () -> "truncated index should carry the on-demand marker: " + blocks);
+        } finally {
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void knowledgeReadsIndexAndReferencedSibling() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-content"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-content"));
+        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
+
+        final var config = config(m2.toString(), proj.toString());
+        final var executor = new VirtualThreadExecutor();
+        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
+        try {
+            service.refresh(null, null, null);
+            final var run = service.currentIndex();
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (run.inFlight() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(run.inFlight(), "indexing should have completed");
+
+            final var index = service.knowledge("g.com:artifact-a:1.0", null);
+            assertTrue(index.contains("## Knowledge"), () -> "index content expected: " + index);
+            final var api = service.knowledge("g.com:artifact-a:1.0", "api");
+            assertTrue(
+                    api.contains("Artifact API") || api.contains("No public API detected."),
+                    () -> "api sibling content expected: " + api);
+            assertTrue(
+                    service.knowledge("g.com:artifact-a:1.0", "unknown").contains("no knowledge file"),
+                    () -> "missing sibling should be reported");
+            assertTrue(
+                    service.knowledge("g.com:notindexed:1.0", null).contains("no knowledge indexed"),
+                    () -> "unindexed coordinate should be reported");
         } finally {
             executor.shutdown();
         }
@@ -125,10 +318,15 @@ class MavenRepositoryKnowledgeServiceTest {
         return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
     }
 
-    private static final class StubLlm implements KnowledgeLlm {
+    public static final class StubLlm implements KnowledgeLlm {
         @Override
         public boolean available() {
             return true;
+        }
+
+        @Override
+        public List<Gav> resolveProjectDeps() {
+            return List.of(Gav.of("g.com", "artifact-a", "1.0"), Gav.of("g.com", "artifact-b", "2.0"));
         }
 
         @Override

@@ -113,8 +113,9 @@ class AnthropicMessagesLiveTest {
                             null,
                             null),
                     delta -> {
-                        if (delta.type() == StreamDelta.Type.TEXT && delta.text() != null) {
-                            sb.append(delta.text());
+                        if (delta instanceof io.yupiik.llm.client.model.LlmStreamEvent.TextDelta(final String text)
+                                && text != null) {
+                            sb.append(text);
                         }
                     },
                     () -> false);

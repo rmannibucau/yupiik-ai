@@ -142,4 +142,24 @@ class BatchSizerTest {
         assertEquals(2, batches.get(0).size());
         assertEquals(2, batches.get(1).size());
     }
+
+    @Test
+    void windowsSplitByCountWithoutNeedingContent() {
+        // 128 gavs, batchSize=2 -> window = 64*2 = 128, so a single window
+        final var small = BatchSizer.windows(gavs(128), config(0, 2, null));
+        assertEquals(1, small.size());
+        assertEquals(128, small.get(0).size());
+        // 129 gavs -> two windows (128 + 1)
+        final var large = BatchSizer.windows(gavs(129), config(0, 2, null));
+        assertEquals(2, large.size());
+        assertEquals(128, large.get(0).size());
+        assertTrue(large.get(0).size() == 128, "windows must be bounded to WINDOW_MULTIPLIER * batchSize");
+        // every GAV present exactly once across windows (no dupes, no loss)
+        final var seen = new ArrayList<Gav>();
+        for (final var w : large) {
+            seen.addAll(w);
+        }
+        assertEquals(129, seen.size());
+        assertEquals(129, new java.util.HashSet<>(seen).size(), "windows must not duplicate or drop GAVs");
+    }
 }

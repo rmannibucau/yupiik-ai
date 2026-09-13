@@ -984,9 +984,13 @@ public class CliCommand implements Runnable {
             return;
         }
         for (final var server : listing.servers()) {
-            println(MarkdownColorizer.accent(server.server()));
-            for (final var tool : server.tools()) {
-                println("  " + tool.name() + (tool.description() == null ? "" : ": " + tool.description()));
+            println(MarkdownColorizer.accent(server.server() + ":"));
+            final var tools = server.tools();
+            for (final var tool : tools) {
+                final var name = tool.name();
+                final var desc = tool.description() == null ? "" : tool.description();
+                final var pad = " ".repeat(Math.max(2, 12 - name.length()));
+                println("  " + MarkdownColorizer.bold(name) + pad + desc);
             }
         }
         if (listing.matches() == 0) {
@@ -1070,12 +1074,17 @@ public class CliCommand implements Runnable {
     private void mavenRepositoryKnowledge(final String arg) {
         try {
             if (arg == null || arg.isBlank()) {
-                println(MarkdownColorizer.status("usage: /maven-repository-knowledge refresh [gav]"));
+                println(MarkdownColorizer.status("usage: /maven-repository-knowledge <refresh [gav]|status>"));
                 return;
             }
             final var parts = arg.strip().split("\\s+", 2);
-            if (!"refresh".equalsIgnoreCase(parts[0])) {
-                println(MarkdownColorizer.status("usage: /maven-repository-knowledge refresh [gav]"));
+            final var sub = parts[0].toLowerCase(Locale.ROOT);
+            if ("status".equals(sub)) {
+                mavenKnowledgeService.status().forEach(line -> println(MarkdownColorizer.status(line)));
+                return;
+            }
+            if (!"refresh".equalsIgnoreCase(sub)) {
+                println(MarkdownColorizer.status("usage: /maven-repository-knowledge <refresh [gav]|status>"));
                 return;
             }
             final var gav = parts.length > 1 ? parts[1].strip() : "";

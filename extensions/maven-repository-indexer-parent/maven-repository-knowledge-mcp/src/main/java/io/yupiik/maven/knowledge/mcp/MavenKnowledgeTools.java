@@ -23,17 +23,17 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.mcp.protocol.MCPSessions;
 import io.yupiik.maven.knowledge.Gav;
+import io.yupiik.maven.knowledge.KnowledgeFactory;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig.BoundedFetch;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.LocalRepository;
 import io.yupiik.maven.knowledge.index.Indexer;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
-import io.yupiik.maven.knowledge.manifest.ManifestWriter;
 import io.yupiik.maven.knowledge.mcp.configuration.MavenKnowledgeConfiguration;
 import io.yupiik.maven.knowledge.mcp.llm.MCPKnowledgeLlm;
 import io.yupiik.maven.knowledge.mcp.model.IndexResponse;
-import io.yupiik.maven.knowledge.skill.SkillWriter;
+import io.yupiik.maven.knowledge.write.KnowledgeWriter;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -77,7 +77,13 @@ public class MavenKnowledgeTools {
                 configuration.force(),
                 new BoundedFetch(1, 30_000L, 65536),
                 configuration.maxBatchChars(),
-                null);
+                null,
+                configuration.maxContentBytes(),
+                0,
+                configuration.useLlm(),
+                configuration.maxSourceFiles(),
+                configuration.maxSourceFileChars(),
+                configuration.maxJavadocPages());
         this.localRepository = new LocalRepository(knowledgeConfig.localRepository());
     }
 
@@ -112,9 +118,16 @@ public class MavenKnowledgeTools {
                         true,
                         knowledgeConfig.boundedFetch(),
                         knowledgeConfig.maxBatchChars(),
-                        knowledgeConfig.tokenBudget())
+                        knowledgeConfig.tokenBudget(),
+                        knowledgeConfig.maxContentBytes(),
+                        knowledgeConfig.runContentBudget(),
+                        knowledgeConfig.useLlm(),
+                        knowledgeConfig.maxSourceFiles(),
+                        knowledgeConfig.maxSourceFileChars(),
+                        knowledgeConfig.maxJavadocPages())
                 : knowledgeConfig;
-        final var llm = new MCPKnowledgeLlm(sessions, request, mapper);
+        final var llm = new MCPKnowledgeLlm(
+                sessions, request, mapper, configuration.projectDir(), knowledgeConfig.localRepository());
         final var indexer = newIndexer(effective, llm);
         try {
             final var results = indexer.index(gavList, null);
@@ -140,7 +153,7 @@ public class MavenKnowledgeTools {
                             required = true,
                             documentation = "Artifacts to check, as groupId:artifactId[:version] " + "strings.")
                     final List<String> gavs) {
-        final var writer = new SkillWriter(knowledgeConfig.localRepository());
+        final var writer = new KnowledgeWriter(knowledgeConfig.localRepository());
         final var items = new ArrayList<IndexResponse.Item>();
         var indexed = 0;
         var skipped = 0;
@@ -158,6 +171,45 @@ public class MavenKnowledgeTools {
             }
         }
         return new IndexResponse(indexed, skipped, items);
+    }
+
+    /**
+     * Read generated knowledge on demand. With only a {@code gav} the artifact's {@code -knowledge-index.md}
+     * is returned; pass a {@code file} short name to read the referenced sibling instead.
+     */
+    @JsonRpc(
+            value = "maven/knowledge/content",
+            documentation = "Reads a local artifact's generated knowledge: its index by default, or the "
+                    + "referenced sibling file (e.g. api, sources-0, javadoc-<class>) by short name, so agents can "
+                    + "load knowledge on demand without re-indexing.")
+    public String content(
+            @JsonRpcParam(required = true, documentation = "Artifact as groupId:artifactId:version.") final String gav,
+            @JsonRpcParam(
+                            documentation =
+                                    "Optional knowledge file short name read from the index; omit for the index itself.")
+                    final String file) {
+        final Gav g = Gav.parse(gav);
+        if (g.version() == null) {
+            return "version required for content lookup: " + g.coordinate();
+        }
+        final var writer = new KnowledgeWriter(knowledgeConfig.localRepository());
+        if (!writer.alreadyIndexed(g)) {
+            return "no knowledge indexed for " + g.coordinate();
+        }
+        final java.nio.file.Path target;
+        if (file == null || file.isBlank() || file.equals("index")) {
+            target = writer.indexFile(g);
+        } else {
+            target = writer.sibling(g, file);
+        }
+        if (!java.nio.file.Files.isRegularFile(target)) {
+            return "no knowledge file " + g.coordinate() + " for '" + file + "'";
+        }
+        try {
+            return java.nio.file.Files.readString(target, StandardCharsets.UTF_8);
+        } catch (final IOException e) {
+            return "unable to read " + target + ": " + e.getMessage();
+        }
     }
 
     private Indexer newIndexer(final KnowledgeConfig effective, final KnowledgeLlm llm) {
@@ -184,8 +236,8 @@ public class MavenKnowledgeTools {
         };
         return new Indexer(
                 new ContentAcquirer(localRepository, webfetch, effective),
-                new SkillWriter(effective.localRepository()),
-                new ManifestWriter(effective.localRepository()),
+                new KnowledgeWriter(effective.localRepository()),
+                new KnowledgeFactory(new KnowledgeWriter(effective.localRepository())),
                 llm,
                 effective);
     }

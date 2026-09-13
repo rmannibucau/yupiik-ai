@@ -72,9 +72,14 @@ public final class FakeMavenRepo implements AutoCloseable {
             final String version,
             final String fileName,
             final String javaSource) {
+        return sourcesJar(groupId, artifactId, version, Map.of(fileName, javaSource));
+    }
+
+    public FakeMavenRepo sourcesJar(
+            final String groupId, final String artifactId, final String version, final Map<String, String> entries) {
         final var dir = artifactDir(groupId, artifactId, version);
         final var jar = dir.resolve(artifactId + "-" + version + "-sources.jar");
-        writeZip(jar, Map.of(fileName, javaSource));
+        writeZip(jar, entries);
         return this;
     }
 
@@ -84,9 +89,14 @@ public final class FakeMavenRepo implements AutoCloseable {
             final String version,
             final String fileName,
             final String html) {
+        return javadocJar(groupId, artifactId, version, Map.of(fileName, html));
+    }
+
+    public FakeMavenRepo javadocJar(
+            final String groupId, final String artifactId, final String version, final Map<String, String> entries) {
         final var dir = artifactDir(groupId, artifactId, version);
         final var jar = dir.resolve(artifactId + "-" + version + "-javadoc.jar");
-        writeZip(jar, Map.of(fileName, html));
+        writeZip(jar, entries);
         return this;
     }
 
@@ -99,10 +109,33 @@ public final class FakeMavenRepo implements AutoCloseable {
         return this;
     }
 
-    /** Idempotent marker writing, mirroring {@code SkillWriter}. */
+    public FakeMavenRepo pluginJar(
+            final String groupId, final String artifactId, final String version, final String pluginXml) {
+        final var dir = artifactDir(groupId, artifactId, version);
+        final var jar = dir.resolve(artifactId + "-" + version + ".jar");
+        writeZip(jar, Map.of("META-INF/maven/plugin.xml", pluginXml));
+        return this;
+    }
+
+    public FakeMavenRepo extensionJar(
+            final String groupId,
+            final String artifactId,
+            final String version,
+            final String descriptorPath,
+            final String extensionXml) {
+        final var dir = artifactDir(groupId, artifactId, version);
+        final var jar = dir.resolve(artifactId + "-" + version + ".jar");
+        writeZip(jar, Map.of(descriptorPath, extensionXml));
+        return this;
+    }
+
+    /** Idempotent marker writing necessary for the {@code -knowledge-index.md} presence check in {@code KnowledgeWriter}. */
     public void markIndexed(final String groupId, final String artifactId, final String version, final String name) {
-        final var dir = artifactDir(groupId, artifactId, version).resolve("yca").resolve(name);
-        write(dir, "SKILL.md", "---\nname: " + name + "\ndescription: existing\n---\npreexisting\n");
+        final var dir = artifactDir(groupId, artifactId, version);
+        write(
+                dir,
+                artifactId + "-" + version + "-knowledge-index.md",
+                "---\nname: " + name + "\ndescription: existing\n---\npreexisting\n");
     }
 
     /**

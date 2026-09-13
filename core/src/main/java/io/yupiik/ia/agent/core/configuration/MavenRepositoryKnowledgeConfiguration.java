@@ -52,6 +52,20 @@ public record MavenRepositoryKnowledgeConfiguration(
                         + "the model yca is configured with, so -1 needs no tuning.")
         int maxBatchChars,
 
+        @Property(
+                defaultValue = "1048576",
+                documentation = "Maximum size (in characters) of the content kept per artifact when extracting "
+                        + "sources or Javadoc. Larger sources/javadoc content is truncated to this budget. A value "
+                        + "<= 0 disables the per-artifact cap.")
+        int maxContentBytes,
+
+        @Property(
+                defaultValue = "0",
+                documentation = "Maximum cumulative content characters acquired across a whole indexing run; when "
+                        + "reached the pipeline stops acquiring and reports the remainder as skipped. 0 (default) "
+                        + "keeps the run unlimited.")
+        int runContentBudget,
+
         @Property(defaultValue = "true", documentation = "Write the remote -skills.md manifest per artifact.")
         boolean remoteManifest,
 
@@ -62,4 +76,37 @@ public record MavenRepositoryKnowledgeConfiguration(
                 defaultValue = "true",
                 documentation =
                         "Load per-artifact skills at session start by dereferencing the -skills.md manifests of the session's main entry-point artifacts.")
-        boolean skillsAtSessionStart) {}
+        boolean skillsAtSessionStart,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "When true and an LLM is available, enrich per-artifact knowledge with an LLM-written skill "
+                                + "file (validated and discarded when not a plausible SKILL.md). Off by default so most "
+                                + "changes keep working without the LLM; enable it on instances where you want prose.")
+        boolean useLlm,
+
+        @Property(
+                defaultValue = "500",
+                documentation = "Maximum source files scanned per artifact when building the sources content part.")
+        int maxSourceFiles,
+
+        @Property(
+                defaultValue = "65536",
+                documentation =
+                        "Maximum characters kept per source file when building the sources content part; larger files "
+                                + "are truncated.")
+        int maxSourceFileChars,
+
+        @Property(
+                defaultValue = "500",
+                documentation = "Maximum javadoc class pages rendered per artifact when building the javadoc parts.")
+        int maxJavadocPages,
+
+        @Property(
+                defaultValue = "32768",
+                documentation =
+                        "Maximum characters kept per knowledge-index file when loading the per-artifact knowledge "
+                                + "index into the session prompt at startup. Larger indexes are truncated with a marker so "
+                                + "the referenced files can still be loaded on demand. 0 or negative disables the cap.")
+        int maxSessionSkillChars) {}

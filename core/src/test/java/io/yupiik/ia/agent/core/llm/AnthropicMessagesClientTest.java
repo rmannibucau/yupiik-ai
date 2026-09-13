@@ -22,11 +22,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
@@ -34,8 +38,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+/**
+ * Exercises the Anthropic wire format through the routed {@link ChatClient} (provider configured
+ * with the {@code anthropic} api flavor): headers, streaming, models listing and tool-call mapping.
+ */
 class AnthropicMessagesClientTest {
     private HttpServer server;
+    private ChatClient client;
     private final AtomicReference<String> reqHeaders = new AtomicReference<>();
     private final AtomicReference<String> reqBody = new AtomicReference<>();
     private final CopyOnWriteArrayList<String> streamTexts = new CopyOnWriteArrayList<>();
@@ -47,30 +56,41 @@ class AnthropicMessagesClientTest {
 
     @AfterEach
     void stop() {
+        if (client != null) {
+            client.close();
+        }
         if (server != null) {
             server.stop(0);
         }
     }
 
-    private ProviderConfiguration provider(final String baseUrl) {
-        return new ProviderConfiguration(
-                "default",
-                baseUrl,
-                "sk-test",
-                "deepseek-v4-flash",
-                ApiFlavor.ANTHROPIC,
-                null,
-                1000000,
-                -1,
-                List.of(),
-                30,
-                "",
-                java.util.Map.of(),
-                null);
+    private String base() {
+        return "http://localhost:" + server.getAddress().getPort() + "/anthropic/v1/messages";
     }
 
-    private AnthropicMessagesClient client() {
-        return new AnthropicMessagesClient(mapper());
+    private ChatClient client() {
+        final var configuration = configuration();
+        return new ChatClient(configuration, mapper(), new ProviderManager(configuration, mapper()), Clock.systemUTC());
+    }
+
+    private CodingAgentConfiguration configuration() {
+        return TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", "/tmp/yca-test"),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry("yca.provider.providers.0.baseUrl", base()),
+                Map.entry("yca.provider.providers.0.apiKey", "sk-test"),
+                Map.entry("yca.provider.providers.0.model", "deepseek-v4-flash"),
+                Map.entry("yca.provider.providers.0.api", "anthropic"),
+                Map.entry("yca.provider.providers.0.contextWindow", "1000000"),
+                Map.entry("yca.provider.providers.0.outputTokens", "-1"),
+                Map.entry("yca.provider.providers.0.timeoutSeconds", "30"),
+                Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
+                Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
+                Map.entry("yca.llm.maxConcurrent", "1"),
+                Map.entry("yca.llm.retryOnContextOverflow", "true"),
+                Map.entry("yca.llm.maxIterations", "250")));
     }
 
     private JsonMapper mapper() {
@@ -81,18 +101,20 @@ class AnthropicMessagesClientTest {
                         new ToolCall$FunctionCall$FusionJsonCodec(),
                         new Usage$FusionJsonCodec(),
                         new ChatCompletionRequest$FusionJsonCodec(),
-                        new AnthropicMessagesRequest$FusionJsonCodec(),
-                        new AnthropicMessage$FusionJsonCodec(),
-                        new AnthropicTool$FusionJsonCodec(),
-                        new AnthropicMessagesResponse$FusionJsonCodec(),
-                        new AnthropicMessagesResponse$ContentBlock$FusionJsonCodec(),
-                        new AnthropicMessagesResponse$AnthropicUsage$FusionJsonCodec(),
-                        new AnthropicStreamEvent$FusionJsonCodec(),
-                        new AnthropicStreamEvent$Delta$FusionJsonCodec(),
-                        new AnthropicModels$FusionJsonCodec(),
-                        new AnthropicModels$Model$FusionJsonCodec(),
                         new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec()),
+                        new ModelsResponse$Model$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicMessagesRequest$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicMessage$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicTool$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model
+                                .AnthropicMessagesResponse$ContentBlock$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model
+                                .AnthropicMessagesResponse$AnthropicUsage$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent$Delta$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicModels$FusionJsonCodec(),
+                        new io.yupiik.llm.client.anthropic.model.AnthropicModels$Model$FusionJsonCodec()),
                 key -> Optional.empty());
     }
 
@@ -129,9 +151,9 @@ class AnthropicMessagesClientTest {
             exchange.close();
         });
         server.start();
-        final var result = client().chat(
-                        provider("http://localhost:" + server.getAddress().getPort() + "/anthropic/v1/messages"),
-                        request());
+        client = client();
+        assertEquals(ApiFlavor.ANTHROPIC, client.flavor());
+        final var result = client.chat(request());
         assertEquals("hello", result.message().content());
         assertEquals(6, result.usage().totalTokens());
         final var headers = reqHeaders.get();
@@ -144,7 +166,6 @@ class AnthropicMessagesClientTest {
 
     @Test
     void streamEmitsTextAndFinishDeltas() throws Exception {
-        final var base = "http://localhost:" + server.getAddress().getPort() + "/anthropic/v1/messages";
         server.createContext("/anthropic/v1/messages", exchange -> {
             final var sse = String.join(
                     "\n",
@@ -176,6 +197,7 @@ class AnthropicMessagesClientTest {
             exchange.close();
         });
         server.start();
+        client = client();
         final var streamReq = new ChatCompletionRequest(
                 "deepseek-v4-flash",
                 List.of(new Message("user", "hi", null, null, null, null)),
@@ -187,19 +209,18 @@ class AnthropicMessagesClientTest {
                 null,
                 null);
         final var finish = new AtomicReference<String>();
-        final var message = client().stream(
-                provider(base),
+        final var message = client.stream(
                 streamReq,
                 delta -> {
-                    if (delta.type() == StreamDelta.Type.TEXT) {
-                        streamTexts.add(delta.text());
-                    } else if (delta.type() == StreamDelta.Type.FINISH) {
-                        finish.set(delta.finishReason());
+                    if (delta instanceof io.yupiik.llm.client.model.LlmStreamEvent.TextDelta(final String text)) {
+                        streamTexts.add(text);
+                    } else if (delta instanceof io.yupiik.llm.client.model.LlmStreamEvent.End end) {
+                        finish.set(end.finishReason());
                     }
                 },
                 () -> false);
         assertEquals(List.of("hel", "lo"), streamTexts);
-        assertEquals("end_turn", finish.get());
+        assertEquals("stop", finish.get());
         assertEquals("hello", message.content());
     }
 
@@ -215,8 +236,8 @@ class AnthropicMessagesClientTest {
             exchange.close();
         });
         server.start();
-        final var models = client().models(
-                        provider("http://localhost:" + server.getAddress().getPort() + "/anthropic/v1/messages"));
+        client = client();
+        final var models = client.models();
         assertEquals(List.of("a-m", "b-m"), models.ids());
     }
 
@@ -229,8 +250,8 @@ class AnthropicMessagesClientTest {
             exchange.close();
         });
         server.start();
-        final var models = client().models(
-                        provider("http://localhost:" + server.getAddress().getPort() + "/anthropic/v1/messages"));
+        client = client();
+        final var models = client.models();
         assertTrue(models.data().isEmpty());
     }
 
@@ -247,9 +268,8 @@ class AnthropicMessagesClientTest {
             exchange.close();
         });
         server.start();
-        final var result = client().chat(
-                        provider("http://localhost:" + server.getAddress().getPort() + "/anthropic/v1/messages"),
-                        request());
+        client = client();
+        final var result = client.chat(request());
         assertNotNull(result.message().toolCalls());
         assertEquals(1, result.message().toolCalls().size());
         final var call = result.message().toolCalls().getFirst();

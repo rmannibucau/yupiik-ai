@@ -1,0 +1,146 @@
+= Maven repository knowledge
+:minisite-breadcrumb: Home[index.html] > Features > Maven repository knowledge
+:minisite-keywords: maven, knowledge, index, skill, local repository
+
+Maven repository knowledge indexes the *local Maven repository* so coding agents
+never rediscover library usage. For every artifact it extracts real
+documentation or source and writes it, *deterministically*, as a flat set of
+markdown siblings in the repository. The pipeline no longer depends on the LLM
+to scan jars/bytecode for most changes: content acquisition, entry-point
+discovery and API surface are all derived locally. The LLM is only an optional,
+validated enrichment step.
+
+It exposes two access paths over the same pipeline. The `maven_repository_knowledge`
+tool (and its `/maven-repository-knowledge` slash command) run it embedded in
+yca, and a read-only `maven_knowledge_content` tool loads generated knowledge on
+demand; a standalone MCP module exposes `maven/knowledge/index`,
+`maven/knowledge/status` and `maven/knowledge/content` tools over the MCP
+protocol.
+
+== What it generates
+
+For each artifact the feature writes a set of flat markdown files directly in
+the Maven version directory `<repo>/<g-path>/<a>/<v>/`, all prefixed
+`<artifactId>-<version>-knowledge-`:
+
+* `-knowledge-index.md` - the entry point. YAML frontmatter (`name`,
+  `description`), then `# title`, `## Entry points`, `## Module rules`,
+  `## Working in this module` and a `## Knowledge` index that lists the sibling
+  files (by short name). Plugin/extension configuration is folded into this
+  file (per-mojo goal and each config parameter with its system-property
+  override, default and description) so no separate sibling is needed.
+* `-knowledge-api.md` - the bytecode-derived public API surface (classes,
+  kind/modifiers/superclass/interfaces/annotations and public method
+  signatures), computed with the JDK Class-File API (`java.lang.classfile`),
+  so even source-less jars get a structural index.
+* `-knowledge-api-<Class>.md` - one file per public top-level class when the
+  API is large enough to warrant it.
+* `-knowledge-sources-N.md`, `-knowledge-javadoc-<Class>.md`,
+  `-knowledge-doc.md` - one per acquired content part (sources are chunked,
+  javadoc is one file per class page).
+* `-knowledge-skill-<short>.md` + `-knowledge-skill.md` index - only when
+  `useLlm` is enabled *and* the LLM returns a plausible skill. Hand-written
+  skill siblings are never overwritten.
+
+The marker for "already indexed" is the presence of `-knowledge-index.md`; that
+same file is what tools dereference to discover everything else.
+
+== How content is acquired
+
+For each artifact the pipeline follows a locked fallback chain until one source
+provides content:
+
+* Maven plugin descriptor (`META-INF/maven/plugin.xml`) -> `PLUGIN`
+* build-extension descriptor -> `EXTENSION`
+* `-sources.jar` Java sources (comments and license headers stripped, bounded) -> `SOURCES`
+* `-javadoc.jar` class-page text -> `JAVADOC`
+* POM `<url>` (bounded webfetch, git hosts skipped) -> `DOC`
+* bytecode API surface -> `CLASSES`
+* otherwise -> `NONE`
+
+Source scans strip all comments (including license headers), keeping string and
+char literals intact, so the character budget is spent on real code. Acquisition
+happens in windows to bound memory and honors `maxContentBytes` per artifact,
+an optional whole-run content budget, and the `maxSourceFiles`,
+`maxSourceFileChars` and `maxJavadocPages` caps.
+
+== The LLM is optional
+
+Off by default (`useLlm=false`). When enabled and an LLM is available, the
+pipeline asks it to write a prose skill from the already-acquired content. The
+result is validated (`---` frontmatter, a `name:` line and a `#` heading, not a
+bare token) and discarded when implausible, so a placeholder response never
+overwrites the deterministic knowledge. Most changes keep working with the LLM
+turned off.
+
+== Incremental re-indexing
+
+*Fingerprints.* A per-artifact SHA-256 fingerprint is computed from the
+concatenated content of every project build file (`pom.xml`,
+`build.gradle[.kts]`, `settings.gradle[.kts]`) that mentions the artifact
+`artifactId`. If none mentions it, the fingerprint is absent and the artifact is
+not tracked. A build change therefore re-indexes only the dependencies whose
+declaring files changed.
+
+*Skip logic.* `force` and SNAPSHOT versions always reprocess. Otherwise a release
+that already has `-knowledge-index.md` is treated as immutable and skipped.
+
+== Session start and on-demand loading
+
+At session start the lightweight `-knowledge-index.md` of the session's main
+entry-point artifacts (project dependencies that are already indexed, narrowed
+by the LLM when available) is always mounted in the system prompt as a
+`<skill>` block. Its `## Knowledge` section references the heavier files, which
+are *not* pre-loaded; an agent reads them on demand through the read-only
+tools:
+
+* embedded `maven_knowledge_content` tool - `gav` plus an optional `file` short
+  name (`api`, `sources-0`, `javadoc-<Class>`, `doc`, ...), defaulting to the
+  index itself.
+* MCP `maven/knowledge/content` tool - same contract.
+
+Each pre-loaded index is capped to `maxSessionSkillChars` (default `32768`) and
+carries a marker when truncated, so the prompt stays bounded while the rest
+remains reachable on demand.
+
+== Access and configuration
+
+Embedded in yca, the feature is configurable under the `yca.maven` prefix (the
+`yca.mavenRepositoryKnowledge.*` keys): `enabled`, `localRepository` (default
+`~/.m2/repository`), `concurrency`, `batchSize`, `maxBatchChars`,
+`maxContentBytes`, `runContentBudget`, `remoteManifest`, `force`,
+`skillsAtSessionStart`, `useLlm`, `maxSourceFiles`, `maxSourceFileChars`,
+`maxJavadocPages` and `maxSessionSkillChars`.
+
+The MCP module is a Fusion module with no `main`; it is composed into a
+`fusion-mcp-server`. Its tools are:
+
+* `maven/knowledge/index` - indexes or re-indexes a list of
+`groupId:artifactId[:version]` coordinates, with an optional `force` flag. It
+returns per-artifact outcomes. All optional LLM work goes through the MCP
+*sampling* protocol, so the *client* decides the model - OpenAI and Anthropic
+clients both work without any server-side provider dependency.
+* `maven/knowledge/status` - reports which artifacts already have generated
+knowledge versus what is available (requires the version in each coordinate).
+* `maven/knowledge/content` - reads an artifact's generated knowledge on demand:
+  its index by default, or a referenced sibling file by `file` short name.
+
+== Cleaning up generated knowledge
+
+All generated files live in each artifact's version directory and are clearly
+named `<artifactId>-<version>-knowledge-*.md` (plus the `.maven-knowledge-fingerprint`
+sidecar). To remove generated knowledge from the whole local repository:
+
+[source,bash]
+----
+# dry run: show what would be removed
+find ~/.m2/repository -name '*-knowledge-*.md' -o -name '.maven-knowledge-fingerprint'
+
+# actually remove
+find ~/.m2/repository -name '*-knowledge-*.md' -delete
+find ~/.m2/repository -name '.maven-knowledge-fingerprint' -delete
+----
+
+This deletes only pipeline-generated files and leaves third-party artifacts,
+hand-written skills and the rest of the repository untouched. A subsequent index
+run regenerates them on demand.

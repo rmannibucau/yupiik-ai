@@ -68,9 +68,9 @@ public abstract class BaseSlashCommands implements SlashCommands {
                         "/structural-code-graph", null, "resync the code structure index", SlashGroup.MAINTAIN),
                 new SlashCommandSpec(
                         "/maven-repository-knowledge",
-                        "refresh [gav]",
+                        "<refresh [gav]|status>",
                         "index local Maven artifacts so "
-                                + "agents do not rediscover library usage (refresh a single gav, or re-run the project baseline)",
+                                + "agents do not rediscover library usage (refresh a single gav, or re-run the project baseline; status shows the current/last index run)",
                         SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/clear", null, "clear the conversation", SlashGroup.SESSION));
     }

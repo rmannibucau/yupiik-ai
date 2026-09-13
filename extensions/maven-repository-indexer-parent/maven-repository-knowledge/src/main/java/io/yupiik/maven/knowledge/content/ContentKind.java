@@ -27,6 +27,10 @@ public enum ContentKind {
     DOC,
     /** From the bytecode jar's class/index listing (entry points delegated to the LLM). */
     CLASSES,
+    /** From a Maven plugin descriptor ({@code META-INF/maven/plugin.xml}); no sources/javadoc/deep scan. */
+    PLUGIN,
+    /** From a Maven build-extension descriptor; no sources/javadoc/deep scan. */
+    EXTENSION,
     /** Nothing usable was present locally. */
     NONE
 }

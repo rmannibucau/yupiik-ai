@@ -23,6 +23,7 @@ import io.yupiik.maven.knowledge.content.ContentKind;
 import io.yupiik.maven.knowledge.content.LocalRepository;
 import io.yupiik.maven.knowledge.test.FakeMavenRepo;
 import java.nio.file.Path;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -73,6 +74,35 @@ class ContentAcquirerTest {
     }
 
     @Test
+    void docContentIsMarkdownifiedWithoutChrome() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.pom("g", "doc", "1", "https://docs.example.com/doc/");
+            final var html = """
+                    <!DOCTYPE html>
+                    <html><head><title>Docs</title></head><body>
+                    <nav class="topbar"><a href="/x">nav link</a></nav>
+                    <header id="header"><h1>Site header</h1></header>
+                    <main>
+                      <h1>Widget</h1>
+                      <p>The <strong>Widget</strong> library exposes one entry point.</p>
+                      <script>var x = 1;</script>
+                    </main>
+                    <footer>copyright</footer>
+                    </body></html>""";
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> html, config);
+            final var acquired = acquirer.acquire(Gav.of("g", "doc", "1"));
+            assertEquals(ContentKind.DOC, acquired.kind());
+            final var text = acquired.content();
+            assertEquals(false, text.contains("<nav"), "nav must be dropped");
+            assertEquals(false, text.contains("<script"), "script must be dropped");
+            assertEquals(false, text.contains("<main"), "raw html must not reach the LLM");
+            assertEquals(false, text.contains("nav link"), "nav content must be dropped");
+            assertEquals(true, text.contains("Widget"), "main content must be kept");
+        }
+    }
+
+    @Test
     void webfetchFailureIsOptionalAndNeverBlocks() {
         try (final var repo = new FakeMavenRepo(tmp)) {
             repo.pom("g", "f", "1", "https://docs.example.com/f/");
@@ -117,7 +147,65 @@ class ContentAcquirerTest {
             final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
             final var acquired = acquirer.acquire(Gav.of("g", "e", "1"));
             assertEquals(ContentKind.CLASSES, acquired.kind());
-            assertEquals(true, acquired.content().contains("g.e.Main"), "listing should contain the class");
+            assertEquals(true, acquired.content().contains("Artifact API:"), "bytecode surface must be listed");
+        }
+    }
+
+    @Test
+    void readsPluginDescriptorBeforeSources() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.pluginJar("g", "plugin-a", "1", "<plugin><name>a-plugin</name></plugin>")
+                    .sourcesJar("g", "plugin-a", "1", "g/a/A.java", "package g.a; public class A {}")
+                    .pom("g", "plugin-a", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            final var acquired = acquirer.acquire(Gav.of("g", "plugin-a", "1"));
+            assertEquals(ContentKind.PLUGIN, acquired.kind(), "plugin.xml descriptor must win over sources");
+            assertEquals(true, acquired.content().contains("<plugin>"), "content should be the plugin descriptor");
+        }
+    }
+
+    @Test
+    void readsExtensionDescriptorInMavenSubPath() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.extensionJar(
+                            "g",
+                            "ext-a",
+                            "1",
+                            "META-INF/maven/extension.xml",
+                            "<extension><name>a-ext</name></extension>")
+                    .pom("g", "ext-a", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            assertEquals(
+                    ContentKind.EXTENSION,
+                    acquirer.acquire(Gav.of("g", "ext-a", "1")).kind());
+        }
+    }
+
+    @Test
+    void readsExtensionDescriptorInRootPath() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.extensionJar("g", "ext-b", "1", "META-INF/extension.xml", "<extension><name>b-ext</name></extension>")
+                    .pom("g", "ext-b", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            assertEquals(
+                    ContentKind.EXTENSION,
+                    acquirer.acquire(Gav.of("g", "ext-b", "1")).kind());
+        }
+    }
+
+    @Test
+    void fallsBackToSourcesWhenNoDescriptor() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.sourcesJar("g", "plain-a", "1", "g/a/A.java", "package g.a; public class A {}")
+                    .pom("g", "plain-a", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            assertEquals(
+                    ContentKind.SOURCES,
+                    acquirer.acquire(Gav.of("g", "plain-a", "1")).kind());
         }
     }
 
@@ -127,5 +215,111 @@ class ContentAcquirerTest {
         final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
         assertEquals(
                 ContentKind.NONE, acquirer.acquire(Gav.of("missing", "x", "9")).kind());
+    }
+
+    @Test
+    void javadocExtractsOnlyClassPagesAndMembers() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.javadocJar(
+                            "g",
+                            "doc",
+                            "1",
+                            Map.of(
+                                    "index-all.html", "<html>INDEX</html>",
+                                    "help-doc.html", "<html>HELP</html>",
+                                    "overview-summary.html", "<html>OVERVIEW</html>",
+                                    "com/example/Foo.html",
+                                            "<html><body><h1>Class Foo</h1>"
+                                                    + "<pre class=\"type-signature\">final class com.example.Foo</pre>"
+                                                    + "<div class=\"description\"><div class=\"block\">A short description of Foo.</div>"
+                                                    + "</div>"
+                                                    + "<pre class=\"member-signature\">public void run(String arg)</pre>"
+                                                    + "<div class=\"block\">Runs the thing.</div>"
+                                                    + "</body></html>"))
+                    .pom("g", "doc", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            final var acquired = acquirer.acquire(Gav.of("g", "doc", "1"));
+            assertEquals(ContentKind.JAVADOC, acquired.kind());
+            final var content = acquired.content();
+            assertEquals(true, content.contains("Class Foo"), "class name must be present");
+            assertEquals(true, content.contains("public void run(String arg)"), "member signature must be extracted");
+            assertEquals(false, content.contains("INDEX"), "index-all.html must be pruned (chrome only)");
+            assertEquals(false, content.contains("HELP"), "help-doc.html must be pruned (chrome only)");
+            assertEquals(false, content.contains("OVERVIEW"), "summary/overview pages must be pruned");
+        }
+    }
+
+    @Test
+    void prunesGeneratedAndModuleInfoSources() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.sourcesJar(
+                            "g",
+                            "p",
+                            "1",
+                            Map.of(
+                                    "g/p/A.java", "package g.p; public class A {}",
+                                    "g/p/module-info.java", "module g.p {}",
+                                    "g/p/package-info.java", "package g.p;",
+                                    "g/p/generated/B.java", "package g.p.generated; public class B {}",
+                                    "g/p/srcgen/C.java", "package g.p.srcgen; public class C {}"))
+                    .pom("g", "p", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            final var acquired = acquirer.acquire(Gav.of("g", "p", "1"));
+            assertEquals(ContentKind.SOURCES, acquired.kind());
+            final var content = acquired.content();
+            assertEquals(true, content.contains("class A"), "regular source must be kept");
+            assertEquals(false, content.contains("module-info"), "module-info must be pruned");
+            assertEquals(false, content.contains("package-info"), "package-info must be pruned");
+            assertEquals(false, content.contains("class B"), "generated source must be pruned");
+            assertEquals(false, content.contains("class C"), "srcgen source must be pruned");
+        }
+    }
+
+    @Test
+    void dedupesIdenticalSourceContent() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            final var body = "package g.d; public class Duplicate {}";
+            repo.sourcesJar(
+                            "g",
+                            "d",
+                            "1",
+                            Map.of(
+                                    "g/d/Foo.java", body,
+                                    "g/d/Bar.java", body))
+                    .pom("g", "d", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            final var acquired = acquirer.acquire(Gav.of("g", "d", "1"));
+            assertEquals(ContentKind.SOURCES, acquired.kind());
+            final var content = acquired.content();
+            final var occurrences = content.split("Duplicate", -1).length - 1;
+            assertEquals(1, occurrences, "identical file content must be deduplicated to a single occurrence");
+        }
+    }
+
+    @Test
+    void limitsSourceContentToContentBudget() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.sourcesJar(
+                            "g",
+                            "b",
+                            "1",
+                            Map.of(
+                                    "g/b/A.java", "package g.b; public class A {" + "x".repeat(10_000) + "}",
+                                    "g/b/B.java", "package g.b; public class B {" + "y".repeat(10_000) + "}"))
+                    .pom("g", "b", "1", null);
+            final var config = new KnowledgeConfig(
+                    tmp, 1, 8, true, false, KnowledgeConfig.BoundedFetch.of(1, 30_000L, 65536), 0, null, 12_000, 0);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            final var acquired = acquirer.acquire(Gav.of("g", "b", "1"));
+            assertEquals(ContentKind.SOURCES, acquired.kind());
+            assertEquals(
+                    true,
+                    acquired.content().length() <= 13_000,
+                    "per-artifact content must be capped by the content budget (got "
+                            + acquired.content().length() + ")");
+        }
     }
 }

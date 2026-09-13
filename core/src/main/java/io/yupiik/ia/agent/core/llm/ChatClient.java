@@ -16,33 +16,46 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.llm.client.DialectLlmClient;
+import io.yupiik.llm.client.DialectNotSupportedException;
+import io.yupiik.llm.client.LlmClientResilienceWrapper;
+import io.yupiik.llm.client.LlmResilienceConfig;
+import io.yupiik.llm.client.RoutingLlmClient;
+import io.yupiik.llm.client.anthropic.AnthropicDialect;
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.openai.OpenAICompletionsDialect;
+import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
+import io.yupiik.llm.client.spi.Dialect;
+import io.yupiik.llm.client.spi.ProviderSpec;
 import java.io.IOException;
+import java.net.http.HttpClient;
 import java.time.Clock;
-import java.util.ArrayDeque;
-import java.util.Deque;
-import java.util.EnumMap;
+import java.time.Duration;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Semaphore;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /**
- * Facade and dispatcher over the protocol-specific {@link LlmClient} implementations
- * ({@link OpenAICompletionClient}, {@link OpenAIResponsesClient} and {@link AnthropicMessagesClient}).
+ * Blocking facade over the shared {@code llm-client} library. Requests are dispatched through a
+ * {@link RoutingLlmClient} whose selector resolves, per request, the resilient
+ * {@link DialectLlmClient} matching the current provider and {@link ApiFlavor}; concurrency,
+ * throttling, retries and {@code retry-after} handling are delegated to the library resilience layer
+ * ({@link LlmClientResilienceWrapper}).
  *
  * <p>Keeps the historical public API ({@link #chat}, {@link #stream}, {@link #models}, {@link #model},
  * {@link #setModel}, {@link #setProvider}, {@link #flavor}, {@link #providerId}) and owns the concerns
- * shared across every provider: model/provider resolution, provider-specific option merging, the
- * per-request output budget, the AUTO flavor detection and fallback, and the concurrency / throttling /
- * retries orchestration. The wire protocol and authentication are delegated to the selected client.</p>
+ * the library must not know about: model/provider resolution, provider-specific option merging, the
+ * per-request output budget and the AUTO flavor detection and responses-to-completions fallback.</p>
  */
 @ApplicationScoped
 public class ChatClient implements AutoCloseable {
@@ -52,9 +65,10 @@ public class ChatClient implements AutoCloseable {
     private final ProviderManager providerManager;
     private final Clock clock;
     private final ContextWindowCache contextWindowCache;
-    private final Map<ApiFlavor, LlmClient> clients;
-    private final Semaphore permits;
-    private final Deque<Long> requestTimes = new ArrayDeque<>();
+    private final ExtendedHttpClient httpClient;
+    private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
+    private final LlmClientResilienceWrapper resilience;
+    private final RoutingLlmClient routing;
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
     private volatile ProviderConfiguration targetProvider;
@@ -71,11 +85,21 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = providerManager;
         this.clock = clock;
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
-        this.permits = new Semaphore(Math.max(1, configuration.llm().maxConcurrent()));
-        this.clients = new EnumMap<>(ApiFlavor.class);
-        this.clients.put(ApiFlavor.COMPLETIONS, new OpenAICompletionClient(mapper));
-        this.clients.put(ApiFlavor.RESPONSES, new OpenAIResponsesClient(mapper));
-        this.clients.put(ApiFlavor.ANTHROPIC, new AnthropicMessagesClient(mapper));
+        final var httpClient =
+                new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient()));
+        this.httpClient = httpClient;
+        // context overflow is handled by the agent loop (context compaction), retries after are
+        // honored by the library resilience layer
+        this.resilience = new LlmClientResilienceWrapper(
+                new LlmResilienceConfig(
+                        configuration.llm().retriesMaxAttempts(),
+                        configuration.llm().retriesBaseDelayMs(),
+                        configuration.llm().rateLimitRequestsPerMinute(),
+                        configuration.llm().maxConcurrent(),
+                        false,
+                        true),
+                this::onLibraryPause);
+        this.routing = new RoutingLlmClient(request -> dialectClient(flavorForRouting(), target()));
     }
 
     protected ChatClient() {
@@ -84,18 +108,22 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = null;
         this.clock = null;
         this.contextWindowCache = null;
-        this.clients = null;
-        this.permits = null;
+        this.httpClient = null;
+        this.resilience = null;
+        this.routing = null;
     }
+
+    /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
+    private record ClientKey(ApiFlavor flavor, ProviderConfiguration provider) {}
 
     public ApiFlavor flavor() {
         return effectiveFlavor();
     }
 
     /**
-     * The flavor used to select a client: an explicitly resolved flavor wins, then the configured
+     * The flavor used to select a dialect: an explicitly resolved flavor wins, then the configured
      * provider flavor, then a flavor deduced from the base URL route; {@link ApiFlavor#AUTO} when it
-     * cannot be pinned (in which case the responses flavour is probed first and falls back).
+     * cannot be pinned (in which case the responses route is probed first and falls back).
      */
     private ApiFlavor effectiveFlavor() {
         if (resolved != ApiFlavor.AUTO) {
@@ -109,8 +137,55 @@ public class ChatClient implements AutoCloseable {
         if (configured != null && configured != ApiFlavor.AUTO) {
             return configured;
         }
-        final var detected = LlmEndpoints.detectFlavor(current.baseUrl());
+        final var detected = ChatRoutes.detectFlavor(current.baseUrl());
         return detected == null ? ApiFlavor.AUTO : detected;
+    }
+
+    /** The concrete flavor handed to the router: AUTO resolves to probing the responses route first. */
+    private ApiFlavor flavorForRouting() {
+        final var flavor = effectiveFlavor();
+        return flavor == ApiFlavor.AUTO ? ApiFlavor.RESPONSES : flavor;
+    }
+
+    /** The resilient dialect client for a (flavor, provider) pair, built on first use and cached. */
+    private DialectLlmClient dialectClient(final ApiFlavor flavor, final ProviderConfiguration provider) {
+        if (flavor == null || flavor == ApiFlavor.AUTO || provider == null) {
+            throw new IllegalStateException("resolved flavor and provider must be concrete");
+        }
+        return dialectClients.computeIfAbsent(new ClientKey(flavor, provider), key -> {
+            final var spec = new ProviderSpec(
+                    ChatRoutes.chatEndpoint(provider.baseUrl(), flavor),
+                    provider.resolveApiKey(),
+                    Duration.ofSeconds(provider.timeoutSeconds()),
+                    provider.headers(),
+                    null);
+            return new DialectLlmClient(dialect(flavor, spec), resilience);
+        });
+    }
+
+    private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec) {
+        return switch (flavor) {
+            case COMPLETIONS -> new OpenAICompletionsDialect(mapper, httpClient, spec);
+            case RESPONSES -> new OpenAIResponsesDialect(mapper, httpClient, spec);
+            case ANTHROPIC -> new AnthropicDialect(mapper, httpClient, spec);
+            case AUTO -> throw new IllegalStateException("resolved flavor must not be AUTO");
+        };
+    }
+
+    private void onLibraryPause(final io.yupiik.llm.client.PauseEvent event) {
+        try {
+            if (event.attempt() <= 0) {
+                pauses.accept(PauseEvent.throttle(
+                        "Rate limit reached, waiting ~" + (event.waitMs() / 1000) + "s", event.waitMs()));
+            } else {
+                pauses.accept(PauseEvent.retry(
+                        "LLM call failed, retrying in ~" + (event.waitMs() / 1000) + "s (attempt "
+                                + (event.attempt() + 1) + ")",
+                        event.waitMs()));
+            }
+        } catch (final RuntimeException e) {
+            // listener failures must not break the request
+        }
     }
 
     public String model() {
@@ -131,6 +206,8 @@ public class ChatClient implements AutoCloseable {
         this.modelOverride = null;
         this.resolved = ApiFlavor.AUTO;
         this.structuredOutputUnsupported = false;
+        this.targetProvider = null;
+        this.dialectClients.clear();
     }
 
     /** Registers a listener notified whenever the resilience layer delays a request (throttle or retry backoff). */
@@ -297,14 +374,7 @@ public class ChatClient implements AutoCloseable {
 
     public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        final var effective = useModel(request);
-        throttle();
-        permits.acquire();
-        try {
-            return doWithFallback(effective, cancelled, false, null);
-        } finally {
-            permits.release();
-        }
+        return doWithFallback(useModel(request), cancelled, false, null);
     }
 
     /**
@@ -355,30 +425,24 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 withStructuredField(base, flavor, schemaName, schema));
-        throttle();
-        permits.acquire();
+        if (structuredOutputUnsupported) {
+            return new StructuredResult(chatInternal(plainReq), false);
+        }
         try {
-            if (structuredOutputUnsupported) {
-                return new StructuredResult(chatInternal(plainReq), false);
+            return new StructuredResult(chatInternal(structuredReq), true);
+        } catch (final IOException first) {
+            if (!isStatus400(first)) {
+                throw first;
             }
             try {
-                return new StructuredResult(chatInternal(structuredReq), true);
-            } catch (final IOException first) {
-                if (!isStatus400(first)) {
-                    throw first;
+                return new StructuredResult(chatInternal(plainReq), false);
+            } catch (final IOException second) {
+                if (!isStatus400(second)) {
+                    throw second;
                 }
-                try {
-                    return new StructuredResult(chatInternal(plainReq), false);
-                } catch (final IOException second) {
-                    if (!isStatus400(second)) {
-                        throw second;
-                    }
-                    structuredOutputUnsupported = true;
-                    return new StructuredResult(chatInternal(plainReq), false);
-                }
+                structuredOutputUnsupported = true;
+                return new StructuredResult(chatInternal(plainReq), false);
             }
-        } finally {
-            permits.release();
         }
     }
 
@@ -425,18 +489,20 @@ public class ChatClient implements AutoCloseable {
         return out;
     }
 
-    /** Route a request through the current flavor with retries, reusing the shared dispatch logic. */
+    /** Route a request through the current flavor, reusing the shared dispatch logic. */
     private ChatResult chatInternal(final ChatCompletionRequest request) throws IOException, InterruptedException {
         return doWithFallback(request, () -> false, false, null);
     }
 
-    public Message stream(final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta)
+    public Message stream(final ChatCompletionRequest request, final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
         return stream(request, onDelta, () -> false);
     }
 
     public Message stream(
-            final ChatCompletionRequest request, final Consumer<StreamDelta> onDelta, final BooleanSupplier cancelled)
+            final ChatCompletionRequest request,
+            final Consumer<LlmStreamEvent> onDelta,
+            final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var model = resolveModel();
         final var effective = new ChatCompletionRequest(
@@ -449,13 +515,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 mergeOptions(request.others()));
-        throttle();
-        permits.acquire();
-        try {
-            return doWithFallback(effective, cancelled, true, onDelta);
-        } finally {
-            permits.release();
-        }
+        return doWithFallback(effective, cancelled, true, onDelta);
     }
 
     @SuppressWarnings("unchecked")
@@ -463,180 +523,48 @@ public class ChatClient implements AutoCloseable {
             final ChatCompletionRequest request,
             final BooleanSupplier cancelled,
             final boolean stream,
-            final Consumer<StreamDelta> onDelta)
+            final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
-        @SuppressWarnings("unchecked")
-        final var onDeltaSafe = (Consumer<StreamDelta>) (onDelta == null ? (Consumer<StreamDelta>) d -> {} : onDelta);
-        final var flavor = effectiveFlavor();
-        if (flavor == ApiFlavor.ANTHROPIC) {
-            final var effective = applyOutputBudget(request, flavor);
-            final var client = clients.get(ApiFlavor.ANTHROPIC);
-            return withRetries(
-                    stream
-                            ? (IoCall<A>) () -> (A) client.stream(target(), effective, onDeltaSafe, cancelled)
-                            : (IoCall<A>) () -> (A) client.chat(target(), effective, cancelled),
-                    cancelled);
-        }
-        if (flavor == ApiFlavor.RESPONSES) {
-            final var client = clients.get(ApiFlavor.RESPONSES);
-            return withRetries(
-                    stream
-                            ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
-                            : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled),
-                    cancelled);
-        }
-        if (flavor == ApiFlavor.COMPLETIONS) {
-            final var client = clients.get(ApiFlavor.COMPLETIONS);
-            return withRetries(
-                    stream
-                            ? (IoCall<A>) () -> (A) client.stream(target(), request, onDeltaSafe, cancelled)
-                            : (IoCall<A>) () -> (A) client.chat(target(), request, cancelled),
-                    cancelled);
-        }
+        final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
+        final var effective =
+                effectiveFlavor() == ApiFlavor.ANTHROPIC ? applyOutputBudget(request, ApiFlavor.ANTHROPIC) : request;
         try {
-            final var responses = clients.get(ApiFlavor.RESPONSES);
-            return withRetries(
-                    stream
-                            ? (IoCall<A>) () -> (A) responses.stream(target(), request, onDeltaSafe, cancelled)
-                            : (IoCall<A>) () -> (A) responses.chat(target(), request, cancelled),
-                    cancelled);
-        } catch (final FlavorMissingException e) {
-            resolved = ApiFlavor.COMPLETIONS;
-            final var completions = clients.get(ApiFlavor.COMPLETIONS);
-            return withRetries(
-                    stream
-                            ? (IoCall<A>) () -> (A) completions.stream(target(), request, onDeltaSafe, cancelled)
-                            : (IoCall<A>) () -> (A) completions.chat(target(), request, cancelled),
-                    cancelled);
+            if (stream) {
+                final var publisher = LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled));
+                return (A) LlmWire.pump(publisher, onDeltaSafe, cancelled);
+            }
+            return (A) LlmWire.toChatResult(LlmWire.join(routing.chat(LlmWire.toLlmRequest(effective), cancelled)));
+        } catch (final DialectNotSupportedException e) {
+            if (resolved != ApiFlavor.AUTO) {
+                throw e; // explicitly configured flavor: surface the incompatibility
+            }
+            resolved = ApiFlavor.COMPLETIONS; // AUTO probed the responses route first: fall back
+            return doWithFallback(request, cancelled, stream, onDelta);
         }
-    }
-
-    @SuppressWarnings("unchecked")
-    private <A> A withRetries(final IoCall<A> call, final BooleanSupplier cancelled)
-            throws IOException, InterruptedException {
-        var attempt = 0;
-        String retryAfter = null;
-        IOException last = null;
-        do {
-            try {
-                return call.get();
-            } catch (final IOException e) {
-                if (e instanceof FlavorMissingException || e instanceof ContextWindowExceededException) {
-                    throw e;
-                }
-                last = e;
-                if (!retryable(e)) {
-                    throw e;
-                }
-                retryAfter = extractRetryAfter(e);
-                attempt++;
-            }
-            if (attempt >= configuration.llm().retriesMaxAttempts() || cancelled.getAsBoolean()) {
-                throw new IOException("LLM request failed: " + last.getMessage(), last);
-            }
-            sleepBackoff(attempt, retryAfter);
-        } while (true);
     }
 
     public ModelsResponse models() throws IOException, InterruptedException {
-        permits.acquire();
+        final var flavor = effectiveFlavor();
         try {
-            final var flavor = effectiveFlavor();
-            final var client = clients.get(flavor == ApiFlavor.RESPONSES ? ApiFlavor.RESPONSES : ApiFlavor.COMPLETIONS);
-            return client.models(target());
-        } finally {
-            permits.release();
+            return LlmWire.toModelsResponse(
+                    LlmWire.join(dialectClient(flavor == ApiFlavor.AUTO ? ApiFlavor.COMPLETIONS : flavor, target())
+                            .models()));
+        } catch (final DialectNotSupportedException e) {
+            return new ModelsResponse(List.of());
         }
-    }
-
-    private boolean retryable(final IOException e) {
-        final var m = e.getMessage();
-        if (m == null) {
-            return true;
-        }
-        if (m.startsWith("LLM request failed (")) {
-            for (final var code : List.of(408, 429)) {
-                if (m.startsWith("LLM request failed (" + code + ")")) {
-                    return true;
-                }
-            }
-            for (var i = 500; i <= 599; i++) {
-                if (m.startsWith("LLM request failed (" + i + ")")) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return true;
-    }
-
-    private static String extractRetryAfter(final IOException e) {
-        final var m = e.getMessage();
-        if (m == null) {
-            return null;
-        }
-        final var i = m.indexOf("retry-after=");
-        return i >= 0 ? m.substring(i + "retry-after=".length()).trim() : null;
-    }
-
-    private void sleepBackoff(final int attempt, final String retryAfter) throws InterruptedException {
-        long delay = configuration.llm().retriesBaseDelayMs() * (1L << Math.min(attempt - 1, 10));
-        delay += ThreadLocalRandom.current().nextLong(Math.max(1, delay / 2));
-        if (retryAfter != null && !retryAfter.isBlank()) {
-            try {
-                delay = Math.max(delay, Long.parseLong(retryAfter.strip()) * 1000);
-            } catch (final NumberFormatException nfe) {
-                // date form, ignore
-            }
-        }
-        final var capped = Math.min(delay, 60_000);
-        final var msg = retryAfter != null && !retryAfter.isBlank()
-                ? "Rate limited, waiting ~" + (capped / 1000) + "s before retrying"
-                : "LLM call failed, retrying in ~" + (capped / 1000) + "s (attempt " + (attempt + 1) + ")";
-        try {
-            pauses.accept(PauseEvent.retry(msg, capped));
-        } catch (final RuntimeException re) {
-            // listener failures must not break the request
-        }
-        Thread.sleep(capped);
-    }
-
-    private void throttle() throws InterruptedException {
-        final var rpm = configuration.llm().rateLimitRequestsPerMinute();
-        if (rpm <= 0) {
-            return;
-        }
-        do {
-            final long now = clock.millis();
-            final Long waitMs;
-            synchronized (requestTimes) {
-                while (!requestTimes.isEmpty() && now - requestTimes.peekFirst() >= 60_000) {
-                    requestTimes.pollFirst();
-                }
-                if (requestTimes.size() < rpm) {
-                    requestTimes.addLast(now);
-                    return;
-                }
-                waitMs = 60_000 - (now - requestTimes.peekFirst()) + 50;
-            }
-            try {
-                pauses.accept(PauseEvent.throttle("Rate limit reached, waiting ~" + (waitMs / 1000) + "s", waitMs));
-            } catch (final RuntimeException re) {
-                // listener failures must not break the request
-            }
-            Thread.sleep(waitMs);
-        } while (true);
     }
 
     @Override
     public void close() {
-        if (clients != null) {
-            clients.values().forEach(LlmClient::close);
+        if (dialectClients != null) {
+            dialectClients.values().forEach(DialectLlmClient::close);
         }
-    }
-
-    @FunctionalInterface
-    private interface IoCall<A> {
-        A get() throws IOException, InterruptedException;
+        if (httpClient != null) {
+            try {
+                httpClient.close();
+            } catch (final RuntimeException e) {
+                // ignore close failures on shutdown
+            }
+        }
     }
 }

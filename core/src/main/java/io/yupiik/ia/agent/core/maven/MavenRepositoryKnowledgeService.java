@@ -22,6 +22,7 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.maven.knowledge.Gav;
+import io.yupiik.maven.knowledge.KnowledgeFactory;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.LocalRepository;
@@ -30,14 +31,12 @@ import io.yupiik.maven.knowledge.fingerprint.ProjectFingerprint;
 import io.yupiik.maven.knowledge.index.IndexResult;
 import io.yupiik.maven.knowledge.index.Indexer;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
-import io.yupiik.maven.knowledge.manifest.ManifestWriter;
-import io.yupiik.maven.knowledge.skill.SkillWriter;
+import io.yupiik.maven.knowledge.write.KnowledgeWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -60,6 +59,10 @@ public class MavenRepositoryKnowledgeService {
     private final AtomicReference<List<String>> sessionSkillBlocks = new AtomicReference<>(List.of());
     private final AtomicBoolean sessionSkillsRequested = new AtomicBoolean();
     private final AtomicReference<IndexRun> runningIndex = new AtomicReference<>();
+    private volatile String lastSummary;
+
+    /** How many coordinates are previewed in the {@code starting to index ...} acknowledgement. */
+    private static final int STARTING_LIST_CAP = 20;
 
     public MavenRepositoryKnowledgeService(
             final CodingAgentConfiguration configuration,
@@ -97,8 +100,9 @@ public class MavenRepositoryKnowledgeService {
 
     /**
      * Load (once per process) the <code>&lt;skill&gt;</code> blocks for the session's main entry-point
-     * artifacts, by suggesting GAVs through the LLM and dereferencing their {@code -skills.md} manifest.
-     * Returns cached blocks if already computed; never blocks the caller for more than the first call.
+     * artifacts: the {@code -knowledge-index.md} of each already-indexed artifact, so the lightweight index is
+     * always mounted and the files it references can be loaded on demand. Returns cached blocks if already
+     * computed; never blocks the caller for more than the first call.
      */
     public List<String> sessionSkillBlocks() {
         if (!enabled() || !configuration.mavenRepositoryKnowledge().skillsAtSessionStart()) {
@@ -114,36 +118,38 @@ public class MavenRepositoryKnowledgeService {
         try {
             final var suggested = suggest();
             final var config = knowledgeConfig();
-            final var writer = new SkillWriter(config.localRepository());
-            final var manifestWriter = new ManifestWriter(config.localRepository());
+            final var writer = new KnowledgeWriter(config.localRepository());
+            final var maxChars = configuration.mavenRepositoryKnowledge().maxSessionSkillChars();
             final var blocks = new ArrayList<String>();
-            final var seen = new LinkedHashSet<String>();
             for (final var gav : suggested) {
-                final var manifest = manifestWriter.manifestPath(gav);
-                if (manifest == null || !Files.isRegularFile(manifest)) {
+                final var file = writer.indexFile(gav);
+                if (!Files.isRegularFile(file)) {
                     continue;
                 }
-                for (final var marker : writer.resolvedMarkers(gav)) {
-                    final var skillFile = marker.resolve("SKILL.md");
-                    if (!Files.isRegularFile(skillFile)) {
-                        continue;
-                    }
-                    final var name = marker.getFileName().toString();
-                    if (!seen.add(name)) {
-                        continue;
-                    }
-                    try {
-                        final var raw = Files.readString(skillFile, StandardCharsets.UTF_8);
-                        blocks.add("<skill name=\"" + name + "\">\n" + raw + "\n</skill>");
-                    } catch (final IOException e) {
-                        // skip unreadable skill
-                    }
+                try {
+                    final var raw = Files.readString(file, StandardCharsets.UTF_8);
+                    blocks.add("<skill name=\""
+                            + gav.artifactId()
+                            + "-index\">\n"
+                            + truncate(raw, maxChars)
+                            + "\n</skill>");
+                } catch (final IOException e) {
+                    // skip unreadable knowledge index
                 }
             }
             sessionSkillBlocks.set(List.copyOf(blocks));
         } catch (final RuntimeException e) {
             sessionSkillBlocks.set(List.of());
         }
+    }
+
+    /** Keep the first {@code maxChars} chars of an index, adding a marker when it was cut so the rest can be loaded on demand. */
+    private static String truncate(final String raw, final int maxChars) {
+        if (maxChars <= 0 || raw.length() <= maxChars) {
+            return raw;
+        }
+        final var marker = "\n<!-- index truncated; load the referenced sibling files on demand -->\n";
+        return raw.substring(0, maxChars) + marker;
     }
 
     private boolean enabled() {
@@ -169,17 +175,18 @@ public class MavenRepositoryKnowledgeService {
     }
 
     /**
-     * Choose the session's main entry-point artifacts: only artifacts that exist locally but are not yet
-     * indexed are considered candidates; the LLM picks the main ones (silently returning all when
-     * structured output is unsupported).
+     * Choose the session's main entry-point artifacts to mount in the prompt: only artifacts that exist
+     * locally AND are already indexed are considered, so their ({@code -knowledge-index.md}) can be loaded
+     * without re-indexing; the LLM picks the main ones (silently returning all when structured output is
+     * unsupported).
      */
     private List<Gav> suggest() {
         final var config = knowledgeConfig();
         final var repo = new LocalRepository(config.localRepository());
-        final var writer = new SkillWriter(config.localRepository());
+        final var writer = new KnowledgeWriter(config.localRepository());
         final var candidates = new ArrayList<Gav>();
-        for (final var gav : localGavs(config.localRepository())) {
-            if (!writer.alreadyIndexed(gav) && repo.resolve(gav).present()) {
+        for (final var gav : projectDependencies()) {
+            if (writer.alreadyIndexed(gav) && repo.resolve(gav).present()) {
                 candidates.add(gav);
             }
         }
@@ -194,6 +201,29 @@ public class MavenRepositoryKnowledgeService {
         } catch (final RuntimeException e) {
             return candidates;
         }
+    }
+
+    /**
+     * Resolve the project's jar-resolving dependency set (direct + transitive + build plugins/extensions)
+     * through the LLM, keeping only coordinates that resolve to a regular local {@code .jar}. The returned
+     * set drives the no-arg {@code refresh} baseline and the session-start suggestion instead of a whole-repo
+     * walk, so the context stays bounded to what the project actually uses.
+     */
+    private List<Gav> projectDependencies() {
+        if (llm == null) {
+            return List.of();
+        }
+        final var config = knowledgeConfig();
+        final var repo = new LocalRepository(config.localRepository());
+        final var out = new ArrayList<Gav>();
+        for (final var gav : llm.resolveProjectDeps()) {
+            final var resolved = repo.resolve(gav);
+            final var main = resolved.mainJar();
+            if (resolved.present() && main != null && Files.isRegularFile(main)) {
+                out.add(gav);
+            }
+        }
+        return out;
     }
 
     /**
@@ -212,10 +242,13 @@ public class MavenRepositoryKnowledgeService {
                 force,
                 config.boundedFetch(),
                 config.maxBatchChars(),
-                config.tokenBudget());
-        final var repo = new LocalRepository(config.localRepository());
-        final var writer = new SkillWriter(config.localRepository());
-        final var manifestWriter = new ManifestWriter(config.localRepository());
+                config.tokenBudget(),
+                config.maxContentBytes(),
+                config.runContentBudget(),
+                config.useLlm(),
+                config.maxSourceFiles(),
+                config.maxSourceFileChars(),
+                config.maxJavadocPages());
         final var gavs = new ArrayList<Gav>();
         final var problems = new StringBuilder();
         for (final var raw : gavStrings) {
@@ -286,9 +319,7 @@ public class MavenRepositoryKnowledgeService {
         final List<String> targets;
         final boolean force;
         if (gav == null || gav.isBlank()) {
-            targets = localGavs(config.localRepository()).stream()
-                    .map(Gav::coordinate)
-                    .toList();
+            targets = projectDependencies().stream().map(Gav::coordinate).toList();
             force = false;
         } else {
             targets = List.of(Gav.parse(gav.strip()).coordinate());
@@ -328,7 +359,9 @@ public class MavenRepositoryKnowledgeService {
                 force,
                 config.boundedFetch(),
                 config.maxBatchChars(),
-                config.tokenBudget());
+                config.tokenBudget(),
+                config.maxContentBytes(),
+                config.runContentBudget());
         final List<Gav> parsed = new ArrayList<>();
         for (final var raw : gavs) {
             try {
@@ -350,6 +383,7 @@ public class MavenRepositoryKnowledgeService {
                 fireProgress(run, progress); // final ~100% (done/total) line once every artifact is processed
                 final var summary = summarize(results);
                 run.summary(summary);
+                lastSummary = summary;
                 if (onFinished != null) {
                     onFinished.accept(summary);
                 }
@@ -359,7 +393,82 @@ public class MavenRepositoryKnowledgeService {
                 runningIndex.compareAndSet(run, null);
             }
         });
-        return List.of("started indexing " + total + " artifact(s)");
+        return List.of("started indexing " + total + " artifact(s)", "starting to index " + coordsPreview(parsed));
+    }
+
+    /**
+     * Report the current index state: whether a run is in progress with its progress, the last completed
+     * run summary (when any), and how many per-artifact skills are loaded for the session.
+     */
+    public List<String> status() {
+        final var run = currentIndex();
+        final var list = new ArrayList<String>();
+        if (run.inFlight()) {
+            final var pct = run.total() > 0 ? (int) (100.0 * run.doneCount() / run.total()) : 0;
+            list.add("index in progress: ~" + pct + "% (" + run.doneCount() + "/" + run.total() + ")");
+        } else if (lastSummary != null && !lastSummary.isBlank()) {
+            list.add("index idle (last run): " + lastSummary.lines().findFirst().orElse(""));
+        } else {
+            list.add("no index has run");
+        }
+        list.add("session skills loaded: " + sessionSkillBlocks().size());
+        return list;
+    }
+
+    /**
+     * Read generated knowledge on demand. With only a {@code coordinate} ({@code g:a:v}) the artifact's
+     * {@code -knowledge-index.md} is returned; pass a {@code shortName} (e.g. {@code api},
+     * {@code sources-0}, {@code javadoc-<class>}) to read the referenced sibling file instead, so the index
+     * mounted at session start can be dereferenced without re-indexing. Returns a human-readable message when
+     * the coordinate is unknown, not indexed or the file is missing.
+     */
+    public String knowledge(final String coordinate, final String shortName) {
+        if (!enabled()) {
+            return "maven repository knowledge is disabled";
+        }
+        final var config = knowledgeConfig();
+        final var writer = new KnowledgeWriter(config.localRepository());
+        final Gav gav;
+        try {
+            gav = Gav.parse(coordinate);
+        } catch (final IllegalArgumentException e) {
+            return "invalid coordinate: " + coordinate;
+        }
+        if (gav.version() == null) {
+            return "version required for knowledge lookup: " + coordinate;
+        }
+        if (!writer.alreadyIndexed(gav)) {
+            return "no knowledge indexed for " + gav.coordinate();
+        }
+        final Path file;
+        if (shortName == null || shortName.isBlank() || shortName.equals("index")) {
+            file = writer.indexFile(gav);
+        } else {
+            file = writer.sibling(gav, shortName);
+        }
+        if (!Files.isRegularFile(file)) {
+            return "no knowledge file " + gav.coordinate() + " for '" + shortName + "'";
+        }
+        try {
+            return Files.readString(file, StandardCharsets.UTF_8);
+        } catch (final IOException e) {
+            return "unable to read " + file + ": " + e.getMessage();
+        }
+    }
+
+    private static String coordsPreview(final List<Gav> gavs) {
+        final var sb = new StringBuilder();
+        final var limit = Math.min(gavs.size(), STARTING_LIST_CAP);
+        for (var i = 0; i < limit; i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(gavs.get(i).coordinate());
+        }
+        if (gavs.size() > limit) {
+            sb.append(" ... and ").append(gavs.size() - limit).append(" more");
+        }
+        return sb.toString();
     }
 
     /**
@@ -403,10 +512,11 @@ public class MavenRepositoryKnowledgeService {
     }
 
     private Indexer newIndexer(final KnowledgeConfig config, final Map<Gav, String> expectedFingerprints) {
+        final var writer = new KnowledgeWriter(config.localRepository());
         return new Indexer(
                 new ContentAcquirer(new LocalRepository(config.localRepository()), webFetch(), config),
-                new SkillWriter(config.localRepository()),
-                new ManifestWriter(config.localRepository()),
+                writer,
+                new KnowledgeFactory(writer),
                 llm,
                 config,
                 expectedFingerprints);
@@ -485,7 +595,13 @@ public class MavenRepositoryKnowledgeService {
                 force,
                 KnowledgeConfig.BoundedFetch.of(60, 30_000L, 200_000),
                 cfg.maxBatchChars(),
-                llm == null ? null : llm.tokenBudget());
+                llm == null ? null : llm.tokenBudget(),
+                cfg.maxContentBytes(),
+                cfg.runContentBudget(),
+                cfg.useLlm(),
+                cfg.maxSourceFiles(),
+                cfg.maxSourceFileChars(),
+                cfg.maxJavadocPages());
     }
 
     private static Path resolveLocalRepository(final String raw) {
@@ -495,55 +611,6 @@ public class MavenRepositoryKnowledgeService {
                 : raw;
         final var home = value.startsWith("~/") ? System.getProperty("user.home") + value.substring(1) : value;
         return Path.of(home).toAbsolutePath().normalize();
-    }
-
-    private static List<Gav> localGavs(final Path root) {
-        final var out = new ArrayList<Gav>();
-        collect(root, root, out);
-        return out;
-    }
-
-    private static void collect(final Path root, final Path dir, final List<Gav> out) {
-        if (dir == null || !Files.isDirectory(dir)) {
-            return;
-        }
-        try (final var entries = Files.list(dir)) {
-            final var children = entries.sorted().toList();
-            for (final var child : children) {
-                if (Files.isDirectory(child)) {
-                    collect(root, child, out);
-                }
-            }
-        } catch (final IOException e) {
-            // ignore unreadable
-        }
-        // a "<version>" directory directly contains jars; treat its parent as artifactId level if it has jars
-        final var version = dir.getFileName() == null ? null : dir.getFileName().toString();
-        if (version == null || version.isBlank()) {
-            return;
-        }
-        boolean hasJars = false;
-        try (final var files = Files.list(dir)) {
-            hasJars = files.anyMatch(
-                    f -> Files.isRegularFile(f) && f.getFileName().toString().endsWith(".jar"));
-        } catch (final IOException e) {
-            return;
-        }
-        if (!hasJars) {
-            return;
-        }
-        final var artifactDir = dir.getParent();
-        final var artifact = artifactDir == null
-                ? null
-                : artifactDir.getFileName() == null
-                        ? null
-                        : artifactDir.getFileName().toString();
-        final var groupDir = artifactDir == null ? null : artifactDir.getParent();
-        if (artifact == null || groupDir == null) {
-            return;
-        }
-        final var groupPath = root.relativize(groupDir).toString().replace(java.io.File.separatorChar, '.');
-        out.add(Gav.of(groupPath, artifact, version));
     }
 
     /**

@@ -1,0 +1,210 @@
+= llm-client-api
+:minisite-nav-prev-link: llm-client.html
+:minisite-nav-prev-label: LLM client
+:minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-api
+:minisite-keywords: llm, client, api, dialect, resilience
+
+Artifact `io.yupiik.llm:llm-client-api` is the provider-agnostic core shared by
+every implementation. It carries no concrete wire logic: it exposes a neutral
+data model, the `Dialect` SPI every provider implements, the `LlmClient`
+facade, and the resilience machinery. It depends only on `fusion-json` and
+`fusion-httpclient`.
+
+== Neutral model
+
+Requests, responses, messages, tools and streaming events are plain records in
+package `io.yupiik.llm.client.model`:
+
+* `LlmRequest` models a generation: model, messages, sampling knobs
+  (`temperature`, `topP`, `maxTokens`, `stop`), `tools`/`toolChoice`, response
+  format, reasoning effort and a `stream` flag. An `extensions` map carries
+  provider-specific fields verbatim; the optional `extensions["api"]` key names
+  the dialect to route the request to. Use the `of(model, messages)` factory and
+  the fluent builders (`model()`, `messages()`, `stream()`, `with(extensions)`).
+* `LlmMessage` is a `role`/`content` pair with static factories
+  (`system()`, `user()`, `assistant()`, `tool()`). `content` is either a plain
+  String or a list of OpenAI-style content-part maps for multimodal input.
+* `LlmTool` and `LlmToolCall` (with nested `FunctionCall(name, arguments)`)
+  describe functions the model may call.
+* `LlmResponse` wraps the result with `first()`/`text()` helpers, `choices`
+  (`LlmChoice`), `usage` and `extensions`.
+* `LlmStreamEvent` is a *sealed* interface permitting `Start`, `TextDelta`,
+  `ReasoningDelta`, `ToolCallDelta` and `End`, so callers can switch over the
+  event kinds exhaustively. Streaming always terminates on an `End` event.
+* `LlmModels`/`LlmModel` list available models with best-effort
+  `contextWindow()`/`maxTokens()` heuristics; `Usage` reports token counts.
+
+== Dialect SPI
+
+The `Dialect` SPI (`io.yupiik.llm.client.spi`) is the contract each provider
+fulfils. Each dialect exposes a `name()` (a stable identifier and label used for
+routing and exceptions, e.g. `"openai-completions"`, `"anthropic-messages"`),
+plus `chat`, `stream` and `models` calls (and raw `streamRaw`/`postRaw`
+passthroughs for proxying). `AbstractDialect` provides the shared
+HTTP/JSON/SSE/error-classification backbone: buffered `post()`, `getModels()`,
+`openStream()`, and `classify()` which maps non-2xx responses to typed failures
+(see below). Each dialect declares its own chat route suffix so the `/models`
+endpoint is derived per dialect. It also ships `ProviderSpec` (baseUrl, apiKey,
+timeout, headers, options).
+
+== LlmClient facade
+
+`LlmClient` (`io.yupiik.llm.client`) is a small interface: `chat(request[, cancelled])`
+returning a `CompletionStage<LlmResponse>`, `stream(request, cancelled)` returning a
+`CompletionStage<Flow.Publisher<LlmStreamEvent>>`, `models()` and `close()`. It carries
+no knowledge of which dialects are present - implementations range from simple dialect
+adapters to resilient wrappers and routers.
+
+`DialectLlmClient` wraps a single `Dialect` with the shared `LlmClientResilienceWrapper` resilience,
+exposing it as an `LlmClient`. Build one per provider you want to harden:
+
+[source,java]
+----
+final var resilient = new DialectLlmClient(dialect, LlmResilienceConfig.defaults(), null);
+----
+
+`RoutingLlmClient` is the provided router: it holds only a
+`clientSelector` (`Function<LlmRequest, LlmClient>`) and delegates each operation to the
+selected client untouched - it never applies resilience itself. Wrap each target in a
+`DialectLlmClient` if you want resilience. The router does not know the registered clients;
+selection policy (dialect name matching, fallback chains, absence handling) is supplied at
+construction. The static helper `RoutingLlmClient.byApiExtension(byName, fallback)` builds a
+default selector that reads `extensions["api"]`, matches it (case-insensitively) against the
+dialect names of the supplied `Map<String, LlmClient>` and falls back to a registered client
+for null, blank or unknown values.
+
+`LlmClientResilienceWrapper` owns the resilience machinery: a per-minute token-bucket throttle, a
+concurrency semaphore and retries with exponential backoff. It is applied by `DialectLlmClient`
+so the logic is written once, per dialect.
+
+== Resilience
+
+`LlmClientResilienceWrapper` applies a per-minute token-bucket throttle, a concurrency semaphore
+limiting in-flight requests, and retries with exponential backoff and jitter
+(capped at 60s), all driven by `LlmResilienceConfig` (defaults: 3 attempts,
+500 ms base delay, throttling off, 4 concurrent). `PauseEvent`s are emitted
+while throttling or backing off if a listener is registered.
+
+== Error classification
+
+* `ContextWindowExceededException` (an `IOException`) signals a recoverable
+  context overflow; `isCause(statusCode, message)` helps detect it on raw
+  responses.
+* `DialectNotSupportedException` signals a provider that does not support a
+  requested dialect (HTTP 404/405/501). It flows through the resilience layer to
+  the caller; a router or selector that wants to fall back to another client is
+  free to catch it.
+
+== Getting started
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.llm</groupId>
+  <artifactId>llm-client-api</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+Then add one (or more) dialect implementation, for example:
+
+[source,xml]
+----
+<dependency>
+  <groupId>io.yupiik.llm</groupId>
+  <artifactId>llm-client-openai</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+</dependency>
+----
+
+== Usage
+
+Assemble one `LlmClient` per provider you target (each exposing its dialect
+`name()`), optionally wrap each in a `DialectLlmClient` for shared resilience, then
+route requests through a `RoutingLlmClient` built on the default `byApiExtension`
+selector:
+
+[source,java]
+----
+// reuse the shared Fusion JsonMapper and ExtendedHttpClient instances;
+// they must be closed by their owner, not by this code
+final var mapper = getJsonMapper();
+final var client = getHttpClient();
+final var spec = ProviderSpec.of("https://api.openai.com/v1/chat/completions", "<api-key>");
+
+// @Dialects = the per-dialect Dialect implementations you assemble;
+// each wrapped in a DialectLlmClient for shared resilience
+final var config = LlmResilienceConfig.defaults();
+final var clients = Map.of(
+        "openai-completions", new DialectLlmClient(completionsDialect, config, null),
+        "anthropic-messages", new DialectLlmClient(anthropicDialect, config, null));
+
+final var selector = RoutingLlmClient.byApiExtension(clients, clients.entrySet().iterator().next().getValue());
+final var llm = new RoutingLlmClient(selector);
+try (llm) {
+    // ... use llm
+}
+----
+
+`ProviderSpec.of(baseUrl, apiKey)` applies a 120 s timeout and empty headers by
+default; use the full `ProviderSpec` constructor to tweak the timeout, extra
+headers or provider-specific `options`. The `JsonMapper` and
+`ExtendedHttpClient` are shared runtime singletons - obtain them from your
+container (here the abstract `getJsonMapper()`/`getHttpClient()`) and let their
+owner close them; only `LlmClient` is created and closed here.
+
+A non-streaming completion:
+
+[source,java]
+----
+final var request = LlmRequest.of(
+        "gpt-4o",
+        List.of(
+LlmMessage.system("You are a terse, helpful assistant."),
+        LlmMessage.user("What is llm-client?")));
+
+final var response = llm.chat(request).toCompletableFuture().join();
+System.out.println(response.text()); // first choice text
+----
+
+Streaming returns a reactive `Flow.Publisher<LlmStreamEvent>`; because the
+events are a sealed hierarchy you can `switch` exhaustively over them:
+
+[source,java]
+----
+llm.stream(request, () -> false).thenCompose(publisher -> {
+    final var done = new CompletableFuture<Void>();
+    publisher.subscribe(new Flow.Subscriber<>() {
+        @Override
+        public void onSubscribe(final Flow.Subscription subscription) {
+            subscription.request(Long.MAX_VALUE);
+        }
+        @Override
+        public void onNext(final LlmStreamEvent event) {
+            switch (event) {
+                case LlmStreamEvent.Start start -> { /* no-op */ }
+                case LlmStreamEvent.TextDelta delta ->
+                        System.out.print(delta.text());
+                case LlmStreamEvent.ReasoningDelta delta -> { /* reasoning */ }
+                case LlmStreamEvent.ToolCallDelta delta -> { /* tool call */ }
+                case LlmStreamEvent.End end -> done.complete(null);
+            }
+        }
+        @Override
+        public void onError(final Throwable throwable) {
+            done.completeExceptionally(throwable);
+        }
+        @Override
+        public void onComplete() {
+            done.complete(null);
+        }
+    });
+    return done;
+});
+----
+
+The concurrency semaphore permit is released automatically when the stream
+completes or errors. To route a request to a specific dialect, name it in the
+request extensions, e.g. `request.with(Map.of("api", "openai-responses"))`
+with a `RoutingLlmClient` built on the default `byApiExtension` selector
+(referencing the dialect `name()`).

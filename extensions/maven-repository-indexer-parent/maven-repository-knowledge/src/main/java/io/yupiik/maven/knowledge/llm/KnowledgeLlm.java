@@ -63,6 +63,22 @@ public interface KnowledgeLlm {
     String synthesizeSkill(Gav gav, String name, String content, List<String> entryPoints);
 
     /**
+     * Resolve the project's effective dependency set as coordinates to index. Implementations may shell out to
+     * the build tool (eg. {@code mvn dependency:resolve}) or delegate to the LLM over the transport available to
+     * them; the returned set MUST cover the project's direct + transitive dependencies, plus its build plugins
+     * and extensions, so the indexer scopes to what the project actually uses rather than the whole local repo.
+     *
+     * <p>Implementations SHOULD drop coordinates that do not resolve to a regular local {@code .jar} (native
+     * classifiers, POMs, test-jars with no jar, etc.) so the pipeline does not try to index non-compilable
+     * artifacts.</p>
+     *
+     * @return coordinates to index; empty when the runtime cannot resolve them.
+     */
+    default List<Gav> resolveProjectDeps() {
+        return List.of();
+    }
+
+    /**
      * Whether the runtime can actually reach an LLM. When false the pipeline degrades gracefully (skips LLM
      * stages) rather than failing.
      */
