@@ -109,4 +109,13 @@ public record MavenRepositoryKnowledgeConfiguration(
                         "Maximum characters kept per knowledge-index file when loading the per-artifact knowledge "
                                 + "index into the session prompt at startup. Larger indexes are truncated with a marker so "
                                 + "the referenced files can still be loaded on demand. 0 or negative disables the cap.")
-        int maxSessionSkillChars) {}
+        int maxSessionSkillChars,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Run session-start skill loading synchronously on the caller thread and block until the "
+                                + "knowledge index for the project's artifacts is fully provisioned, instead of returning "
+                                + "immediately from the async executor. Intended for tests/benchmarks that must ensure the "
+                                + "index is completely built (and mounted into the session prompt) before the prompt starts.")
+        boolean synchronous) {}

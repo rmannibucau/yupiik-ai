@@ -28,6 +28,7 @@ import io.yupiik.llm.client.model.LlmTool;
 import io.yupiik.llm.client.model.LlmToolCall;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -153,6 +154,10 @@ final class LlmWire {
         final var done = new CompletableFuture<Message>();
         final var text = new StringBuilder();
         final var toolCalls = new ArrayList<ToolCall>();
+        // Streaming dialects emit one delta per fragment: the first carries the name,
+        // the following ones carry only argument fragments and a null name (and possibly
+        // a missing id). Coalesce them back into a single logical tool call per (id, index).
+        final var partials = new LinkedHashMap<String, PartialToolCall>();
         publisher.subscribe(new Flow.Subscriber<>() {
             private Flow.Subscription subscription;
 
@@ -175,7 +180,14 @@ final class LlmWire {
                 } else if (event instanceof ReasoningDelta) {
                     onDelta.accept(event);
                 } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
-                    toolCalls.add(new ToolCall(id, "function", new ToolCall.FunctionCall(name, args), index));
+                    final var key = id == null ? Integer.toString(index) : id;
+                    final var partial = partials.computeIfAbsent(key, ignored -> new PartialToolCall(index, id));
+                    if (name != null) {
+                        partial.name = name;
+                    }
+                    if (args != null) {
+                        partial.arguments.append(args);
+                    }
                     onDelta.accept(event);
                 } else if (event instanceof End) {
                     onDelta.accept(event);
@@ -189,6 +201,9 @@ final class LlmWire {
 
             @Override
             public void onComplete() {
+                toolCalls.addAll(partials.values().stream()
+                        .map(partial -> partial.toToolCall())
+                        .toList());
                 done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
             }
         });
@@ -206,6 +221,27 @@ final class LlmWire {
 
     private static List<ToolCall> toNull(final List<ToolCall> calls) {
         return calls.isEmpty() ? null : calls;
+    }
+
+    /**
+     * Mutable accumulator for a single streaming tool call: fragments coalesced by (id, index)
+     * carry the first non-null name and the concatenated argument JSON.
+     */
+    private static final class PartialToolCall {
+
+        private final int index;
+        private final String id;
+        private final StringBuilder arguments = new StringBuilder();
+        private String name;
+
+        private PartialToolCall(final int index, final String id) {
+            this.index = index;
+            this.id = id;
+        }
+
+        private ToolCall toToolCall() {
+            return new ToolCall(id, "function", new ToolCall.FunctionCall(name, arguments.toString()), index);
+        }
     }
 
     static <A> A join(final CompletionStage<A> stage) throws IOException, InterruptedException {

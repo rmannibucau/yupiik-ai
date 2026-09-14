@@ -136,6 +136,11 @@ public class SystemPromptBuilder {
             appendTodoGuidance(sb);
             sb.append('\n');
         }
+        sb.append("You may invoke a tool only if its exact name appears in the `tools` field of this request. "
+                + "Do not invent, abbreviate, or guess tool names: any other name will be rejected. "
+                + "If the task needs a capability none of the provided tools offers, tell the user "
+                + "and propose the closest available tool instead of calling an unknown one.\n");
+        sb.append('\n');
         final var workingDir = configuration.resolveWorkingDir();
         final var projectDir = configuration.resolveProjectDir();
         sb.append("Environment:\n");

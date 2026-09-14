@@ -286,6 +286,36 @@ class SystemPromptBuilderTest {
         assertFalse(prompt.contains("<todo-guidance>"), "false must disable the guidance appendix");
     }
 
+    @Test
+    void closedToolsetInvariantPresentInBuildMode() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(
+                prompt.contains("only if its exact name appears in the `tools` field"),
+                "build mode should teach the closed-toolset invariant");
+        assertTrue(prompt.contains("any other name will be rejected"));
+    }
+
+    @Test
+    void closedToolsetInvariantPresentInPlanMode() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "plan"));
+        final var permissions = new PermissionService(cfg);
+        permissions.setMode(AgentMode.PLAN);
+        final var builder = new SystemPromptBuilder(
+                cfg, null, null, permissions, new AgentProvider(cfg), providerManager(cfg), null, null);
+        final var prompt = builder.build();
+        assertTrue(
+                prompt.contains("only if its exact name appears in the `tools` field"),
+                "plan mode should also teach the closed-toolset invariant");
+        assertTrue(prompt.contains("any other name will be rejected"));
+    }
+
     private static TodoPromptResolver todoResolver() {
         return new TodoPromptResolver();
     }

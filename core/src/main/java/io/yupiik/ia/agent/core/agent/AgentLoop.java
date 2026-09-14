@@ -283,14 +283,16 @@ public class AgentLoop {
     }
 
     private void executeTool(final String sessionId, final List<Message> messages, final ToolCall call) {
-        final var name = call.function() == null ? "" : call.function().name();
+        final var name = call.function() == null || call.function().name() == null
+                ? ""
+                : call.function().name();
         final var argsJson = call.function() == null || call.function().arguments() == null
                 ? "{}"
                 : call.function().arguments();
         final EmbeddedTool tool = toolRegistry.tool(name);
         if (tool == null) {
             messages.add(Message.tool(call.id(), "Unknown tool: " + name));
-            emit(new AgentEvent.ToolFinished(name, "unknown tool", false));
+            emit(new AgentEvent.ToolFinished(name, unknownToolDiagnostic(name), false));
             return;
         }
         final Map<String, Object> args;
@@ -317,6 +319,11 @@ public class AgentLoop {
                 call.id(), result.output() == null || result.output().isBlank() ? "(no output)" : result.output()));
         sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool", result.output(), null, name));
         emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
+    }
+
+    private static String unknownToolDiagnostic(final String name) {
+        return "Unknown tool \"" + name + "\": not in this session's toolset (built-in or enabled MCP)."
+                + " Run /tools to list the valid tools; only exact names from the request's tools field are accepted.";
     }
 
     private void dispatch(final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage) {

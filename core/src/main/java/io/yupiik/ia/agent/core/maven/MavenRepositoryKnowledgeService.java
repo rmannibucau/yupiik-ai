@@ -84,7 +84,9 @@ public class MavenRepositoryKnowledgeService {
 
     /**
      * Kick off an asynchronous warm-up of the per-session artifact skills once indexed artifacts are
-     * discovered, so the first system prompt does not block on a slow LLM call.
+     * discovered, so the first system prompt does not block on a slow LLM call. When the
+     * {@code synchronous} config flag is set, the warm-up runs on the calling thread and blocks until the
+     * index is fully provisioned (used by tests/benchmarks that must guarantee the index is finished).
      */
     public void onStart(@OnEvent final Start start) {
         if (!enabled()) {
@@ -93,7 +95,12 @@ public class MavenRepositoryKnowledgeService {
         if (!configuration.mavenRepositoryKnowledge().skillsAtSessionStart()) {
             return;
         }
-        if (llm.available()) {
+        if (!llm.available()) {
+            return;
+        }
+        if (configuration.mavenRepositoryKnowledge().synchronous()) {
+            loadSessionSkillsLazily();
+        } else {
             executor.execute(this::loadSessionSkillsLazily);
         }
     }
@@ -116,6 +123,7 @@ public class MavenRepositoryKnowledgeService {
             return;
         }
         try {
+            synchronouslyProvisioned();
             final var suggested = suggest();
             final var config = knowledgeConfig();
             final var writer = new KnowledgeWriter(config.localRepository());
@@ -140,6 +148,52 @@ public class MavenRepositoryKnowledgeService {
             sessionSkillBlocks.set(List.copyOf(blocks));
         } catch (final RuntimeException e) {
             sessionSkillBlocks.set(List.of());
+        }
+    }
+
+    /**
+     * In synchronous mode, block until the project's artifacts are fully indexed so the mounted per-artifact
+     * skills are complete before the prompt starts. When no index is currently in flight, a baseline index is
+     * started over the project dependencies and awaited (bounded).
+     *
+     * @return {@code true} when the index is known to be complete before mounting skills.
+     */
+    private boolean synchronouslyProvisioned() {
+        final var synchronous = configuration != null
+                && configuration.mavenRepositoryKnowledge() != null
+                && configuration.mavenRepositoryKnowledge().synchronous();
+        if (!synchronous) {
+            return false;
+        }
+        var run = currentIndex();
+        if (!run.inFlight() && !anyIndexed()) {
+            final var targets =
+                    projectDependencies().stream().map(Gav::coordinate).toList();
+            if (!targets.isEmpty()) {
+                startIndex(targets, false, null, null);
+                run = currentIndex();
+            }
+        }
+        awaitIdle(run);
+        return true;
+    }
+
+    private boolean anyIndexed() {
+        final var config = knowledgeConfig();
+        final var writer = new KnowledgeWriter(config.localRepository());
+        return projectDependencies().stream().anyMatch(writer::alreadyIndexed);
+    }
+
+    private void awaitIdle(final IndexRun run) {
+        final var timeoutMs = 15L * 60L * 1000L; // generous upper bound for a large project
+        final var deadline = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (run.inFlight() && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(200L);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
     }
 
