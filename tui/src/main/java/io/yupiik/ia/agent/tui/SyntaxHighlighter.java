@@ -33,12 +33,14 @@ import java.util.regex.Pattern;
  * while everything else stays plain. It never throws and falls back to a plain
  * generic tokenizer for unknown languages.
  */
-public final class SyntaxHighlighter {
+public class SyntaxHighlighter {
 
     private static final Pattern FENCE =
             Pattern.compile("(?m)^\\s*```([A-Za-z0-9_+.-]*)\\s*\\n(.*?)^\\s*```\\s*$", Pattern.DOTALL);
 
     private static final int DEFAULT_MAX_LINE_LENGTH = 10_000;
+
+    private int maxLineLength = DEFAULT_MAX_LINE_LENGTH;
 
     private static final Style STRING = token("e5c07b");
     private static final Style COMMENT = token("7f848e");
@@ -72,7 +74,12 @@ public final class SyntaxHighlighter {
         }
     }
 
-    private SyntaxHighlighter() {}
+    public SyntaxHighlighter() {}
+
+    public SyntaxHighlighter maxLineLength(final int maxLineLength) {
+        this.maxLineLength = Math.max(1, maxLineLength);
+        return this;
+    }
 
     private static Style token(final String hex) {
         return Style.EMPTY.fg(Color.hex(hex));
@@ -84,7 +91,7 @@ public final class SyntaxHighlighter {
                         + "|(?<com>//[^\\n]*+|/\\*(?:[^*]|\\*(?!/))*+\\*/|#[^\\n]*+|--[^\\n]*+|<!--(?:[^-]|-(?!-))*+-->|\\{\\{-?[^\\n]*+}})"
                         + "|(?<num>\\b\\d+(?:\\.\\d+)?\\b)"
                         + "|(?<tag><\\/?[A-Za-z][A-Za-z0-9:-]*|/?>)"
-                        + "|(?<attr>[A-Za-z_:][A-Za-z0-9_:.-]*=)"
+                        + "|(?<attr>(?<![A-Za-z0-9_])[A-Za-z_:][A-Za-z0-9_:.-]*=)"
                         + "|(?<kw>(" + String.join("|", keywords) + "))"
                         + "|(?<ty>(" + String.join("|", types) + "))",
                 Pattern.MULTILINE));
@@ -420,7 +427,7 @@ public final class SyntaxHighlighter {
                     "void"),
             List.of());
 
-    public static List<Segment> split(final String markdown) {
+    public List<Segment> split(final String markdown) {
         final var out = new ArrayList<Segment>();
         if (markdown == null || markdown.isBlank()) {
             return out;
@@ -445,7 +452,7 @@ public final class SyntaxHighlighter {
         return out;
     }
 
-    public static Text highlight(final String lang, final String code) {
+    public Text highlight(final String lang, final String code) {
         final var tokenizer = pick(lang);
         final var lines = code.replace("\r\n", "\n").split("\n", -1);
         final var result = new ArrayList<Line>(lines.length);
@@ -455,8 +462,8 @@ public final class SyntaxHighlighter {
         return Text.from(result);
     }
 
-    private static List<Span> colored(final Highlighter h, final String line) {
-        if (line.length() > DEFAULT_MAX_LINE_LENGTH) {
+    private List<Span> colored(final Highlighter h, final String line) {
+        if (line.length() > maxLineLength) {
             return List.of(Span.raw(line));
         }
         final var out = new ArrayList<Span>();

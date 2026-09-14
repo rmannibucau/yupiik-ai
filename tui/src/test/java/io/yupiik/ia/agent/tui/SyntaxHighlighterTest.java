@@ -25,9 +25,13 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class SyntaxHighlighterTest {
+    private final SyntaxHighlighter highlighter = new SyntaxHighlighter();
+
+    private final SyntaxHighlighter shortHighlighter = new SyntaxHighlighter().maxLineLength(2000);
+
     @Test
     void splitWithoutFenceIsSingleTextSegment() {
-        final var segments = SyntaxHighlighter.split("just some text\non two lines");
+        final var segments = highlighter.split("just some text\non two lines");
         assertEquals(1, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.TEXT, segments.get(0).type());
         assertEquals("just some text\non two lines", segments.get(0).text());
@@ -35,7 +39,7 @@ class SyntaxHighlighterTest {
 
     @Test
     void splitWithFenceExtractsLanguageAndBody() {
-        final var segments = SyntaxHighlighter.split("before\n\n```java\nint a = 1;\n```\n\nafter");
+        final var segments = highlighter.split("before\n\n```java\nint a = 1;\n```\n\nafter");
         assertEquals(3, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.TEXT, segments.get(0).type());
         assertEquals("before", segments.get(0).text().strip());
@@ -48,7 +52,7 @@ class SyntaxHighlighterTest {
 
     @Test
     void splitFenceWithoutLanguageUsesEmptyLanguage() {
-        final var segments = SyntaxHighlighter.split("```\nplain code\n```");
+        final var segments = highlighter.split("```\nplain code\n```");
         assertEquals(1, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
         assertEquals("", segments.get(0).language());
@@ -57,28 +61,27 @@ class SyntaxHighlighterTest {
 
     @Test
     void splitSkipsBlankTextSegments() {
-        final var segments = SyntaxHighlighter.split("```java\nint a;\n```");
+        final var segments = highlighter.split("```java\nint a;\n```");
         assertEquals(1, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
     }
 
     @Test
     void splitHandlesNullAndBlank() {
-        assertEquals(List.of(), SyntaxHighlighter.split(null));
-        assertEquals(List.of(), SyntaxHighlighter.split("   \n  "));
+        assertEquals(List.of(), highlighter.split(null));
+        assertEquals(List.of(), highlighter.split("   \n  "));
     }
 
     @Test
     void highlightProducesOneLinePerSourceLine() {
-        final var text = SyntaxHighlighter.highlight("java", "public class A {\n    int a;\n}");
+        final var text = highlighter.highlight("java", "public class A {\n    int a;\n}");
         assertEquals(3, text.height());
         assertTrue(text.rawContent().contains("public"));
     }
 
     @Test
     void highlightColorsJavaKeywords() {
-        final var line =
-                SyntaxHighlighter.highlight("java", "public class A").lines().get(0);
+        final var line = highlighter.highlight("java", "public class A").lines().get(0);
         final Optional<dev.tamboui.style.Color> keyword = line.spans().stream()
                 .filter(s -> s.content().equals("public"))
                 .findFirst()
@@ -92,7 +95,7 @@ class SyntaxHighlighterTest {
     @Test
     void highlightColorsStrings() {
         final var line =
-                SyntaxHighlighter.highlight("java", "var s = \"str\";").lines().get(0);
+                highlighter.highlight("java", "var s = \"str\";").lines().get(0);
         assertTrue(
                 line.spans().stream()
                         .anyMatch(s ->
@@ -102,29 +105,28 @@ class SyntaxHighlighterTest {
 
     @Test
     void highlightUnknownLanguageStillTokenizes() {
-        final var text = SyntaxHighlighter.highlight("cobol", "MOVE A TO B.");
+        final var text = highlighter.highlight("cobol", "MOVE A TO B.");
         assertEquals(1, text.height());
         assertFalse(text.isEmpty());
     }
 
     @Test
     void highlightEmptyCodeIsSafe() {
-        assertTrue(SyntaxHighlighter.highlight("java", "").isEmpty());
+        assertTrue(highlighter.highlight("java", "").isEmpty());
     }
 
     @Test
     void highlightShellAndSqlAndXmlDoNotThrow() {
-        assertFalse(SyntaxHighlighter.highlight("bash", "echo 'hi' # comment").isEmpty());
-        assertFalse(SyntaxHighlighter.highlight("sql", "SELECT * FROM t WHERE x = 1")
-                .isEmpty());
-        assertFalse(SyntaxHighlighter.highlight("xml", "<a b='c'>text</a>").isEmpty());
-        assertFalse(SyntaxHighlighter.highlight("python", "def f(x):\n    return None")
-                .isEmpty());
+        assertFalse(highlighter.highlight("bash", "echo 'hi' # comment").isEmpty());
+        assertFalse(highlighter.highlight("sql", "SELECT * FROM t WHERE x = 1").isEmpty());
+        assertFalse(highlighter.highlight("xml", "<a b='c'>text</a>").isEmpty());
+        assertFalse(
+                highlighter.highlight("python", "def f(x):\n    return None").isEmpty());
     }
 
     @Test
     void escapedStringsAreStillHighlightedAsStrings() {
-        final var escaped = SyntaxHighlighter.highlight("java", "var s = \"a\\\"b\";").lines().get(0).spans().stream()
+        final var escaped = highlighter.highlight("java", "var s = \"a\\\"b\";").lines().get(0).spans().stream()
                 .filter(s -> s.content().contains("a"))
                 .filter(s -> s.content().contains("b"))
                 .findFirst();
@@ -135,21 +137,21 @@ class SyntaxHighlighterTest {
     @Test
     void unclosedEscapedStringDoesNotThrow() {
         for (final var q : new String[] {"\"", "'", "`"}) {
-            assertDoesNotThrow(() -> SyntaxHighlighter.highlight("python", q + "\\\\".repeat(9_000)));
-            assertDoesNotThrow(() -> SyntaxHighlighter.highlight("javascript", q + "a".repeat(9_000)));
+            assertDoesNotThrow(() -> shortHighlighter.highlight("python", q + "\\\\".repeat(9_000)));
+            assertDoesNotThrow(() -> shortHighlighter.highlight("javascript", q + "a".repeat(9_000)));
         }
     }
 
     @Test
     void unclosedMultiLineCommentDoesNotThrow() {
-        assertDoesNotThrow(() -> SyntaxHighlighter.highlight("java", "/*" + "a".repeat(9_000)));
-        assertDoesNotThrow(() -> SyntaxHighlighter.highlight("xml", "<!--" + "a".repeat(9_000)));
+        assertDoesNotThrow(() -> shortHighlighter.highlight("java", "/*" + "a".repeat(9_000)));
+        assertDoesNotThrow(() -> shortHighlighter.highlight("xml", "<!--" + "a".repeat(9_000)));
     }
 
     @Test
     void overLongLineFallsBackToPlain() {
         final var longLine = "var s = \"x\"; " + "a".repeat(10_500);
-        final var line = SyntaxHighlighter.highlight("java", longLine).lines().get(0);
+        final var line = shortHighlighter.highlight("java", longLine).lines().get(0);
         assertEquals(1, line.spans().size());
         assertEquals(longLine, line.spans().get(0).content());
         assertTrue(line.spans().get(0).style().fg().isEmpty(), "over-long line should not be tokenized");

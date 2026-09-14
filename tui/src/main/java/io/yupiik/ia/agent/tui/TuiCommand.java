@@ -152,6 +152,7 @@ public class TuiCommand implements Runnable {
     private final PromptHistory promptHistory;
     private final TuiSlashCommands slashCommands;
     private final Clock clock;
+    private final SyntaxHighlighter syntaxHighlighter;
 
     private static final int MAX_RESUME_LIST = 25;
     private static final int RESUME_SUMMARY_WIDTH = 80;
@@ -197,6 +198,7 @@ public class TuiCommand implements Runnable {
         this.tuiRunnerFactory = tuiRunnerFactory;
         this.slashCommands = slashCommands;
         this.clock = clock;
+        this.syntaxHighlighter = new SyntaxHighlighter().maxLineLength(configuration.maxLineLength());
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
         this.completionEngine = new CompletionEngine(
                 this::completionModels,
@@ -2255,14 +2257,14 @@ public class TuiCommand implements Runnable {
     }
 
     private void appendChunks(final List<RenderedChunk> out, final String md, final int width) {
-        for (final var seg : SyntaxHighlighter.split(md)) {
+        for (final var seg : syntaxHighlighter.split(md)) {
             if (seg.type() == SyntaxHighlighter.Segment.Type.TEXT) {
                 final var lines =
                         transcriptRenderer.renderRegion(seg.text(), width, Style.EMPTY, MarkdownStyles.DEFAULTS);
                 addMarkdownChunk(out, lines);
             } else {
                 final var lang = seg.language();
-                final var text = SyntaxHighlighter.highlight(lang, seg.text());
+                final var text = syntaxHighlighter.highlight(lang, seg.text());
                 final var wrapped = MarkdownLines.wrapCode(text.lines(), Math.max(1, width - 2));
                 final var wrappedText = Text.from(wrapped);
                 final var boxed = codeBlock(lang);

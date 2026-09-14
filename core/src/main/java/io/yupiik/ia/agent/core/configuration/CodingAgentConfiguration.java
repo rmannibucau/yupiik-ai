@@ -96,7 +96,13 @@ public record CodingAgentConfiguration(
         HttpClientConfiguration httpClient,
 
         @Property(documentation = "Agent tool settings (built-in tool server and web search).")
-        ToolsConfiguration tools) {
+        ToolsConfiguration tools,
+
+        @Property(
+                defaultValue = "10000",
+                documentation =
+                        "Maximum line length in characters the TUI syntax highlighter tokenizes. Longer lines render as a single plain un-styled span to avoid pathological cost.")
+        int maxLineLength) {
 
     public String resolveStorageHome() {
         var home = storageHome == null || storageHome.isBlank() ? "~/.yupiik/coding-agent" : storageHome;
