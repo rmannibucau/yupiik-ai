@@ -76,9 +76,13 @@ class MvnProjectDepsTest {
     }
 
     @Test
-    void resolveReturnsEmptyWhenMvnFails(@TempDir final Path tmp) {
-        // no pom.xml in the directory: mvn fails quickly (offline) and the resolution degrades to empty
-        assertEquals(List.of(), MvnProjectDeps.resolve(tmp, 120_000));
+    void resolveRunsFakeMavenOnPathAndReturnsItsParsedOutput(@TempDir final Path tmp) {
+        // the fake `mvn` (prepended to PATH by surefire) always emits a constant `dependency:list`
+        // output; resolution must parse it rather than spawn the real (slow) build tool. provided
+        // is ordered before compile (see DependencyScope.order()).
+        assertEquals(
+                List.of(Gav.of("io.yupiik.fake", "fake-util", "2.0"), Gav.of("io.yupiik.fake", "fake-lib", "1.0")),
+                MvnProjectDeps.resolve(tmp, 120_000));
     }
 
     @Test
@@ -120,10 +124,11 @@ class MvnProjectDepsTest {
         Files.createDirectories(cacheFile.getParent());
         Files.writeString(cacheFile, "com.ex:cached:1\n");
 
-        // change a build file so the fingerprint no longer matches the stale cache entry
+        // change a build file so the fingerprint no longer matches the stale cache entry; the stale entry
+        // must not be reused - resolution runs the fake `mvn` and returns its constant output instead
         Files.writeString(project.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
         assertEquals(
-                List.of(),
+                List.of(Gav.of("io.yupiik.fake", "fake-util", "2.0"), Gav.of("io.yupiik.fake", "fake-lib", "1.0")),
                 MvnProjectDeps.resolve(project, 120_000, cacheDir),
                 "a stale cache entry (different fingerprint) must not be reused");
     }

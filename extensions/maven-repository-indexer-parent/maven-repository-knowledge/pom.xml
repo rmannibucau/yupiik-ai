@@ -17,4 +17,23 @@
       <artifactId>junit-jupiter</artifactId>
     </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration combine.children="append">
+          <environmentVariables>
+            <!-- MvnProjectDepsTest spawns `mvn` on PATH; replace it with the fake
+                 script (src/test/resources/fake-mvn/bin) so tests are fast and
+                 hermetic. `Path` is the Windows key, `PATH` the POSIX one; the
+                 unused key is a no-op on the other OS. -->
+            <Path>${project.build.testOutputDirectory}/fake-mvn/bin;${env.Path}</Path>
+            <PATH>${project.build.testOutputDirectory}/fake-mvn/bin:${env.PATH}</PATH>
+          </environmentVariables>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
 </project>
