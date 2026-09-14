@@ -173,9 +173,9 @@ public class MavenRepositoryKnowledgeServiceTest {
     }
 
     @Test
-    void sessionSkillsLoadIndexesAfterIndexing() throws IOException, InterruptedException {
-        final var m2 = Files.createDirectories(tmp.resolve("m2-skills"));
-        final var proj = Files.createDirectories(tmp.resolve("proj-skills"));
+    void sessionSkillBlocksRemainEmptyForLazyMountAfterIndexing() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-lazy"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-lazy"));
         Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
         classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
         classesOnly(m2, "g.com", "artifact-b", "2.0", "g.com.b.Main");
@@ -193,63 +193,12 @@ public class MavenRepositoryKnowledgeServiceTest {
             assertFalse(run.inFlight(), "indexing should have completed");
 
             service.onStart(new Start());
-            final var blocksDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (service.sessionSkillBlocks().isEmpty() && System.nanoTime() < blocksDeadline) {
-                Thread.sleep(50);
-            }
-            final var blocks = service.sessionSkillBlocks();
-            assertFalse(blocks.isEmpty(), () -> "session skills should load after indexing: " + blocks);
-            final var joined = String.join("\n", blocks);
             assertTrue(
-                    joined.contains("<skill name=\"artifact-a-index\">"),
-                    () -> "missing artifact-a index block: " + joined);
-            assertTrue(
-                    joined.contains("<skill name=\"artifact-b-index\">"),
-                    () -> "missing artifact-b index block: " + joined);
-            assertTrue(joined.contains("## Knowledge"), () -> "index content should be loaded: " + joined);
-        } finally {
-            executor.shutdown();
-        }
-    }
+                    service.sessionSkillBlocks().isEmpty(),
+                    "with the lazy mount design no skill block is pre-mounted into the prompt");
 
-    @Test
-    void sessionSkillIndexIsTruncatedByMaxSessionSkillChars() throws IOException, InterruptedException {
-        final var m2 = Files.createDirectories(tmp.resolve("m2-cap"));
-        final var proj = Files.createDirectories(tmp.resolve("proj-cap"));
-        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
-        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
-
-        final var map = new HashMap<String, String>();
-        map.put("yca.storageHome", "~/.yupiik/coding-agent");
-        map.put("yca.workingDir", ".");
-        map.put("yca.projectDir", proj.toString());
-        map.put("yca.mavenRepositoryKnowledge.enabled", "true");
-        map.put("yca.mavenRepositoryKnowledge.localRepository", m2.toString());
-        map.put("yca.mavenRepositoryKnowledge.maxSessionSkillChars", "64");
-        final var config =
-                new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
-
-        final var executor = new VirtualThreadExecutor();
-        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
-        try {
-            service.refresh(null, null, null);
-            final var run = service.currentIndex();
-            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-            while (run.inFlight() && System.nanoTime() < deadline) {
-                Thread.sleep(50);
-            }
-            assertFalse(run.inFlight(), "indexing should have completed");
-
-            service.onStart(new Start());
-            final var blocksDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-            while (service.sessionSkillBlocks().isEmpty() && System.nanoTime() < blocksDeadline) {
-                Thread.sleep(50);
-            }
-            final var blocks = service.sessionSkillBlocks();
-            assertFalse(blocks.isEmpty(), () -> "session skills should load: " + blocks);
-            assertTrue(
-                    blocks.get(0).contains("index truncated"),
-                    () -> "truncated index should carry the on-demand marker: " + blocks);
+            final var index = service.knowledge("g.com:artifact-a:1.0", null);
+            assertTrue(index.contains("## Knowledge"), () -> "on-demand index still available: " + index);
         } finally {
             executor.shutdown();
         }

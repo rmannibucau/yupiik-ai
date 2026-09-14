@@ -47,8 +47,10 @@ public final class SkillLocator {
             }
         }
         list.add(Path.of(configuration.resolveStorageHome(), "skills"));
-        list.add(Path.of(System.getProperty("user.home"), ".config", "opencode", "skills"));
-        list.add(Path.of(System.getProperty("user.home"), ".claude", "skills"));
+        final var home = configuration.resolveHome();
+        list.add(Path.of(home, ".config", "opencode", "skills"));
+        list.add(Path.of(home, ".claude", "skills"));
+        list.add(Path.of(home, ".agents", "skills"));
         return list;
     }
 

@@ -23,9 +23,11 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class CodeTraceCallsTool implements EmbeddedTool {
@@ -46,7 +48,10 @@ public class CodeTraceCallsTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Trace callers and callees of a symbol in the structural code graph (breadth-first, optional depth limit).";
+        return "Trace relations of a symbol in the structural code graph (breadth-first, optional depth limit): "
+                + "callers/callees via calls, implementors (edgeTypes=implements), extensions (extends), usages (uses) "
+                + "or imports. Default follows calls; narrow with the edgeTypes parameter (eg. edgeTypes=implements). "
+                + "Returns each found symbol resolved to its kind and file location so you do not need to re-trace.";
     }
 
     @Override
@@ -69,6 +74,11 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                         "direction",
                                 Schemas.str(
                                         "`callers` (who calls it), `callees` (what it calls) or `both`, default `both`."),
+                        "edgeTypes",
+                                Schemas.str(
+                                        "Comma-separated relation types to follow, default `calls`. Accepted: calls, "
+                                                + "implements, extends, uses, imports, all. Eg. `implements` finds "
+                                                + "implementors of an interface."),
                         "depth", Schemas.intProp("Maximum traversal depth, default 3."),
                         "max", Schemas.intProp("Maximum number of edges to report, default 80.")),
                 "symbol");
@@ -81,20 +91,29 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             return ToolResult.error("symbol is required");
         }
         final var direction = arg(args, "direction");
-        final var depth = (int) Math.max(1, Math.min(8, optInt(args, "depth", 3)));
-        final var max = (int) Math.max(1, Math.min(500, optInt(args, "max", 80)));
+        final var edgeTypes = parseEdgeTypes(arg(args, "edgeTypes"));
+        final var depth = Math.clamp(optInt(args, "depth", 3), 1, 8);
+        final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
         final var g = codeGraph.graph();
         if (g.symbols().isEmpty() && g.edges().isEmpty()) {
             return ToolResult.ok("Structural code graph is empty.");
         }
+        final var dir = direction == null ? "both" : direction.toLowerCase(java.util.Locale.ROOT);
         final var target = resolveExact(symbol, g);
         if (target == null) {
-            return ToolResult.error("Symbol not found: " + symbol + ". Grep the graph docs with the grep tool (path="
-                    + codeGraph.storeRoot().resolve("docs") + ") to locate a symbol.");
+            return ToolResult.error("Symbol not found: " + symbol + ". List candidate symbols with the code_find_code "
+                    + "tool, then retrace using the fully-qualified name (or grep the graph docs at path="
+                    + codeGraph.storeRoot().resolve("docs") + ").");
+        }
+        final var neighborIndex = buildNeighborIndex(g, edgeTypes, dir);
+        final var byFqn = new HashMap<String, GraphModel.Symbol>();
+        for (final var s : g.symbols()) {
+            byFqn.put(s.fqn(), s);
         }
 
         final var sb = new StringBuilder();
         var count = 0;
+        final var found = new ArrayList<String>();
         final var visited = new HashSet<String>();
         final Deque<String[]> queue = new ArrayDeque<>();
         queue.add(new String[] {target, "0"});
@@ -104,7 +123,8 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             final var name = cur[0];
             final var level = Integer.parseInt(cur[1]);
             if (level > 0) {
-                sb.append("  ".repeat(level - 1)).append('-').append(name).append('\n');
+                sb.repeat("  ", level - 1).append('-').append(name).append('\n');
+                found.add(name);
                 count++;
                 if (count >= max) {
                     break;
@@ -113,19 +133,49 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             if (level >= depth) {
                 continue;
             }
-            final var neighbors = neighbors(name, direction, g);
-            for (final var n : neighbors) {
+            for (final var n : neighborIndex.getOrDefault(name, Set.of())) {
                 if (visited.add(n)) {
                     queue.add(new String[] {n, Integer.toString(level + 1)});
                 }
             }
         }
-        sb.append("\ntraced ").append(symbol).append(" down to depth ").append(depth);
-        if (count >= max) {
-            sb.append(" (capped at ").append(max).append(" edges)");
+        sb.append("\nresolved ")
+                .append(symbol)
+                .append(" (")
+                .append(edgeTypesLabel(edgeTypes))
+                .append("), ")
+                .append(found.size())
+                .append(" distinct symbol(s) found:\n");
+        for (final var name : found) {
+            final var s = byFqn.get(name);
+            if (s == null || s.file() == null) {
+                sb.append("- ").append(name).append('\n');
+                continue;
+            }
+            sb.append("- ")
+                    .append(s.kind().name().toLowerCase(java.util.Locale.ROOT))
+                    .append(' ')
+                    .append(name)
+                    .append(" (")
+                    .append(s.file())
+                    .append(':')
+                    .append(s.startLine())
+                    .append('-')
+                    .append(s.endLine())
+                    .append(")\n");
         }
-        sb.append('\n');
+        if (count >= max) {
+            sb.append("(truncated to ").append(max).append(" edges; raise max and narrow edgeTypes for more)\n");
+        }
         return ToolResult.ok(sb.toString());
+    }
+
+    private String edgeTypesLabel(final Set<GraphModel.EdgeType> edgeTypes) {
+        return edgeTypes.stream()
+                .map(t -> t.name().toLowerCase(java.util.Locale.ROOT))
+                .sorted()
+                .reduce((a, b) -> a + ", " + b)
+                .orElse("-");
     }
 
     private String resolveExact(final String symbol, final GraphStore g) {
@@ -134,35 +184,59 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                 return s.fqn();
             }
         }
+        final var candidates = new ArrayList<String>();
         for (final var s : g.symbols()) {
             final var fqn = s.fqn();
             if (fqn != null && fqn.endsWith("." + symbol)) {
-                return fqn;
+                candidates.add(fqn);
             }
         }
-        return null;
+        return candidates.size() == 1 ? candidates.get(0) : null;
     }
 
-    private List<String> neighbors(final String name, final String direction, final GraphStore g) {
-        final var dir = direction == null ? "both" : direction.toLowerCase(java.util.Locale.ROOT);
-        final var out = new ArrayList<String>();
-        if ("callers".equals(dir) || "both".equals(dir)) {
-            for (final var e : g.edges()) {
-                if (e.type() == GraphModel.EdgeType.CALLS && name.equals(e.to()) && e.from() != null) {
-                    out.add(e.from());
-                }
+    /**
+     * Build a symbol-to-neighbors index in a single pass over the edges, so each BFS level is an O(1) lookup
+     * instead of re-scanning the whole edge list. Caller/callee adjacency is deduped by construction via {@link Set}.
+     */
+    private Map<String, Set<String>> buildNeighborIndex(
+            final GraphStore g, final Set<GraphModel.EdgeType> edgeTypes, final String direction) {
+        final var wantCallers = "callers".equals(direction) || "both".equals(direction);
+        final var wantCallees = "callees".equals(direction) || "both".equals(direction);
+        final var index = new HashMap<String, Set<String>>();
+        for (final var e : g.edges()) {
+            if (!edgeTypes.contains(e.type())) {
+                continue;
+            }
+            if (wantCallers && e.to() != null && e.from() != null) {
+                index.computeIfAbsent(e.to(), name -> new HashSet<>()).add(e.from());
+            }
+            if (wantCallees && e.from() != null && e.to() != null) {
+                index.computeIfAbsent(e.from(), name -> new HashSet<>()).add(e.to());
             }
         }
-        if ("callees".equals(dir) || "both".equals(dir)) {
-            for (final var e : g.edges()) {
-                if (e.type() == GraphModel.EdgeType.CALLS && name.equals(e.from()) && e.to() != null) {
-                    out.add(e.to());
-                }
+        return index;
+    }
+
+    private Set<GraphModel.EdgeType> parseEdgeTypes(final String raw) {
+        if (raw == null || raw.isBlank()) {
+            return EnumSet.of(GraphModel.EdgeType.CALLS);
+        }
+        final var result = new HashSet<GraphModel.EdgeType>();
+        for (final var token : raw.split(",")) {
+            if (token.isBlank()) {
+                continue;
+            }
+            final var t = token.trim().toUpperCase(java.util.Locale.ROOT);
+            if ("ALL".equals(t)) {
+                return EnumSet.allOf(GraphModel.EdgeType.class);
+            }
+            try {
+                result.add(GraphModel.EdgeType.valueOf(t));
+            } catch (final IllegalArgumentException ignored) {
+                // ignore unknown relation types so a typo does not abort the trace
             }
         }
-        final var seen = new HashSet<String>();
-        out.removeIf(n -> !seen.add(n));
-        return out;
+        return result.isEmpty() ? EnumSet.of(GraphModel.EdgeType.CALLS) : result;
     }
 
     private String arg(final Map<String, Object> args, final String key) {

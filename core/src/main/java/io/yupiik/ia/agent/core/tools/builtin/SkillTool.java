@@ -48,7 +48,7 @@ public class SkillTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Load a skill by name and return its SKILL.md instructions. Available skills are the directories containing a SKILL.md under .opencode/skills, .claude/skills or .yca/skills (searched up from the working directory) and the global skill directories.";
+        return "Load a skill by name and return its SKILL.md instructions. Available skills are the directories containing a SKILL.md under .opencode/skills, .claude/skills or .yca/skills (searched up from the working directory) and the global skill directories (~/.yupiik/coding-agent/skills, ~/.config/opencode/skills, ~/.claude/skills, ~/.agents/skills).";
     }
 
     @Override

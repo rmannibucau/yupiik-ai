@@ -35,7 +35,6 @@ import java.util.List;
 public class SystemPromptBuilder {
     private static final List<String> SIBLING_CONTEXT_FILES = List.of("CLAUDE.md", "README.md");
     private static final List<String> PROJECT_SKILL_DIRS = List.of(".opencode/skills", ".claude/skills", ".yca/skills");
-    private static final int FILE_CAP = 4000;
 
     /**
      * Hard ceiling on the assembled system prompt (rules + environment + project AGENTS.md + skills
@@ -238,10 +237,7 @@ public class SystemPromptBuilder {
 
     private void append(final StringBuilder sb, final String label, final Path path) {
         try {
-            var content = Files.readString(path);
-            if (content.length() > FILE_CAP) {
-                content = splice(content, FILE_CAP);
-            }
+            final var content = Files.readString(path);
             sb.append("<project-file name=\"")
                     .append(label)
                     .append("\" path=\"")
@@ -254,42 +250,39 @@ public class SystemPromptBuilder {
         }
     }
 
-    /**
-     * Keeps the head and tail of an over-long source file, eliding the middle, so the operational
-     * rules near the end of a long AGENTS.md/skill are not lost to a head-only cut.
-     */
-    private static String splice(final String content, final int cap) {
-        final var half = cap / 2;
-        return content.substring(0, half) + "\n[... " + (content.length() - cap) + " chars elided ...]\n"
-                + content.substring(content.length() - half);
-    }
-
     private List<Path> agentsFiles(final Path base) {
         final var found = new ArrayList<Path>();
-        final var walk = new ArrayList<Path>();
         var dir = base;
-        walk.add(dir);
-        while (dir.getParent() != null) {
-            dir = dir.getParent();
-            walk.add(dir);
-        }
-        for (var i = walk.size() - 1; i >= 0; i--) {
-            final var candidate = walk.get(i).resolve("AGENTS.md");
+        while (dir != null) {
+            final var candidate = dir.resolve("AGENTS.md");
             if (Files.isRegularFile(candidate)) {
                 found.add(candidate);
+                break;
             }
+            dir = dir.getParent();
         }
-        for (final var global : globalAgentsFiles()) {
+        final var global = firstGlobalAgentsFile();
+        if (global != null) {
             found.add(global);
         }
         return found;
     }
 
+    private Path firstGlobalAgentsFile() {
+        for (final var global : globalAgentsFiles()) {
+            if (global != null) {
+                return global;
+            }
+        }
+        return null;
+    }
+
     private List<Path> globalAgentsFiles() {
+        final var home = configuration.resolveHome();
         final var list = new ArrayList<Path>();
+        addIfRegular(list, Path.of(home, ".config", "opencode", "AGENTS.md"));
         addIfRegular(list, Path.of(configuration.resolveStorageHome()).resolve("AGENTS.md"));
-        addIfRegular(list, Path.of(System.getProperty("user.home"), ".config", "opencode", "AGENTS.md"));
-        addIfRegular(list, Path.of(System.getProperty("user.home"), ".claude", "AGENTS.md"));
+        addIfRegular(list, Path.of(home, ".claude", "AGENTS.md"));
         return list;
     }
 
@@ -332,7 +325,7 @@ public class SystemPromptBuilder {
                         sb.append("<skill name=\"")
                                 .append(parsed.name())
                                 .append("\">\n")
-                                .append(parsed.content())
+                                .append(parsed.description())
                                 .append("\n</skill>\n");
                         added = true;
                     } catch (final IOException e) {
@@ -361,9 +354,10 @@ public class SystemPromptBuilder {
             }
         }
         list.add(Path.of(configuration.resolveStorageHome(), "skills").toString());
-        list.add(Path.of(System.getProperty("user.home"), ".config", "opencode", "skills")
-                .toString());
-        list.add(Path.of(System.getProperty("user.home"), ".claude", "skills").toString());
+        final var home = configuration.resolveHome();
+        list.add(Path.of(home, ".config", "opencode", "skills").toString());
+        list.add(Path.of(home, ".claude", "skills").toString());
+        list.add(Path.of(home, ".agents", "skills").toString());
         return list;
     }
 
@@ -373,25 +367,39 @@ public class SystemPromptBuilder {
     private static Skill parseSkill(final String raw, final String dirName) {
         var content = raw;
         var name = dirName;
+        var description = "";
         if (content.startsWith(FRONTMATTER_START)) {
             final var end = content.indexOf('\n' + FRONTMATTER_END + "\n", FRONTMATTER_START.length());
             if (end > 0) {
                 final var front = content.substring(FRONTMATTER_START.length(), end);
-                final var nameLine = front.lines()
-                        .filter(l -> l.startsWith("name:"))
-                        .findFirst()
-                        .orElse("");
-                if (!nameLine.isBlank()) {
-                    name = nameLine.substring("name:".length()).strip();
+                for (final var line : front.lines().toList()) {
+                    if (line.startsWith("name:") && line.length() > "name:".length()) {
+                        final var candidate = line.substring("name:".length()).strip();
+                        if (!candidate.isEmpty()) {
+                            name = candidate;
+                        }
+                    } else if (line.startsWith("description:") && line.length() > "description:".length()) {
+                        description = line.substring("description:".length()).strip();
+                    }
                 }
                 content = content.substring(end + FRONTMATTER_END.length() + 2);
             }
         }
-        if (content.length() > FILE_CAP) {
-            content = splice(content, FILE_CAP);
+        if (description.isEmpty()) {
+            description = firstMeaningfulLine(content);
         }
-        return new Skill(name, content.strip());
+        return new Skill(name, description);
     }
 
-    private record Skill(String name, String content) {}
+    private static String firstMeaningfulLine(final String content) {
+        for (final var line : content.lines().toList()) {
+            final var stripped = line.strip();
+            if (!stripped.isEmpty() && !stripped.startsWith("#")) {
+                return stripped;
+            }
+        }
+        return content.strip();
+    }
+
+    private record Skill(String name, String description) {}
 }

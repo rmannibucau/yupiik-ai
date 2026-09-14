@@ -41,7 +41,8 @@ public class CodeCheckGraphTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Report the freshness and health of the structural code graph (symbol/file counts, missing files, store location).";
+        return "Report the freshness and health of the structural code graph (symbol/file counts, missing files, "
+                + "store location). Use it to decide whether to query the graph with code_find_code / code_trace_calls.";
     }
 
     @Override

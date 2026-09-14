@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.tools;
 import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
+import io.yupiik.ia.agent.core.codegraph.CodeResolveTool;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import java.util.Comparator;
@@ -50,7 +51,29 @@ public class ToolRegistry {
     }
 
     public List<Tool> toWireTools() {
-        return tools().stream()
+        final var all = tools();
+        // The merged code_resolve tool subsumes the granular structural/share tools. When it is registered we
+        // expose only it (plus on-demand maven_knowledge_content); when registered but no data source is live we
+        // hide code_resolve too (and the granular no-op tools), keeping the wire tool list lean. When the merged
+        // tool is not present at all, the underlying tool list is left untouched.
+        final var resolve = all.stream()
+                .filter(t -> t instanceof CodeResolveTool)
+                .findFirst()
+                .map(CodeResolveTool.class::cast)
+                .orElse(null);
+        if (resolve == null) {
+            return all.stream()
+                    .map(t -> Tool.function(t.name(), t.description(), t.schema()))
+                    .toList();
+        }
+        final var usable = resolve.usable();
+        return all.stream()
+                .filter(t -> {
+                    if (usable) {
+                        return !CodeResolveTool.prunedRichToolNames().contains(t.name());
+                    }
+                    return !CodeResolveTool.prunedRichToolNames().contains(t.name()) && !(t instanceof CodeResolveTool);
+                })
                 .map(t -> Tool.function(t.name(), t.description(), t.schema()))
                 .toList();
     }

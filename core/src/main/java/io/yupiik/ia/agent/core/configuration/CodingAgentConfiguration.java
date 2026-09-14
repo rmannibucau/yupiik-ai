@@ -28,6 +28,11 @@ public record CodingAgentConfiguration(
         String storageHome,
 
         @Property(
+                documentation =
+                        "Home/root used to resolve the global (user-level) context locations such as ~/.config/opencode and ~/.claude (AGENTS.md, skills). Defaults to the JVM user.home.")
+        String home,
+
+        @Property(
                 defaultValue = "\".\"",
                 documentation =
                         "Working directory from which project files (AGENTS.md hierarchy, skills) are discovered. Defaults to the current directory.")
@@ -122,5 +127,13 @@ public record CodingAgentConfiguration(
             return Path.of(projectDir).toAbsolutePath().normalize();
         }
         return resolveWorkingDir();
+    }
+
+    public String resolveHome() {
+        var value = home == null || home.isBlank() ? System.getProperty("user.home") : home;
+        if (value.startsWith("~/")) {
+            value = System.getProperty("user.home") + value.substring(1);
+        }
+        return value;
     }
 }

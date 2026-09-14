@@ -106,16 +106,18 @@ public class MavenRepositoryKnowledgeService {
     }
 
     /**
-     * Load (once per process) the <code>&lt;skill&gt;</code> blocks for the session's main entry-point
-     * artifacts: the {@code -knowledge-index.md} of each already-indexed artifact, so the lightweight index is
-     * always mounted and the files it references can be loaded on demand. Returns cached blocks if already
-     * computed; never blocks the caller for more than the first call.
+     * The per-artifact knowledge is intentionally <strong>not</strong> pre-mounted as {@code <skill>} blocks
+     * in the system prompt (a "lazy mount"). Mounting every indexed dependency's {@code -knowledge-index.md}
+     * added a ~9k token baseline to every message even for local-symbol questions, slowing graph+knowledge
+     * sessions. Instead, artifacts are enumerated with {@code code_resolve} (op=resolve/list) and their
+     * content dereferenced on demand via {@code maven_knowledge_content}.
+     *
+     * <p>Indexing still runs (see {@link #onStart(io.yupiik.fusion.framework.api.lifecycle.Start)}) so the
+     * on-demand path and {@code code_resolve} have real data to serve; only the eager prompt mounting is
+     * disabled. Returns an always-empty list so callers (e.g. {@code SystemPromptBuilder}) mount nothing.
      */
     public List<String> sessionSkillBlocks() {
-        if (!enabled() || !configuration.mavenRepositoryKnowledge().skillsAtSessionStart()) {
-            return List.of();
-        }
-        return sessionSkillBlocks.get();
+        return List.of();
     }
 
     private void loadSessionSkillsLazily() {
@@ -255,6 +257,39 @@ public class MavenRepositoryKnowledgeService {
         } catch (final RuntimeException e) {
             return candidates;
         }
+    }
+
+    /**
+     * Public flavour of {@link #enabled()}: whether the embedded Maven knowledge source is usable for the
+     * current project (feature enabled and a build file is present). Used by tools that must decide whether
+     * the knowledge source will actually serve data before advertising it or spending a round trip.
+     */
+    public boolean knowledgeEnabled() {
+        return enabled();
+    }
+
+    /**
+     * Enumerates the project's dependency coordinates that are already indexed (an index file exists and the
+     * artifact resolves to a local jar). This backs the {@code list} operation of the merged resolve tool so
+     * the model can discover which artifacts' knowledge is available without a prompt-time manifest.
+     *
+     * @return the sorted list of {@code groupId:artifactId:version} coordinates with knowledge already indexed.
+     */
+    public List<String> indexedArtifacts() {
+        if (!enabled()) {
+            return List.of();
+        }
+        final var config = knowledgeConfig();
+        final var repo = new LocalRepository(config.localRepository());
+        final var writer = new KnowledgeWriter(config.localRepository());
+        final var out = new ArrayList<String>();
+        for (final var gav : projectDependencies()) {
+            if (writer.alreadyIndexed(gav) && repo.resolve(gav).present()) {
+                out.add(gav.coordinate());
+            }
+        }
+        out.sort(String::compareTo);
+        return out;
     }
 
     /**

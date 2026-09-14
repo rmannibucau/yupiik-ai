@@ -192,9 +192,25 @@ based on per-file content hashes.
   summaries) can be enabled with `yca.structural-code-graph.enrich`.
 - **Cache**: the index is stored per-project under `workingDir/.yca/generated/graph/`
   (`graph.json` + optional `nodes/*.md`) and is regenerable, so it is git-ignored.
-- **Tools**: `code_find_code`, `code_file_api`, `code_trace_calls`,
-  `code_find_all`, `code_repo_map`, `code_check_graph`. All are read-only and
-  therefore available in `plan` mode too.
+
+Because the per-project `.yca` directory concentrates regenerable caches (code
+graph, project memory, the Maven dependency list), add it to your global
+gitignore rather than adding it to every repository. Create or edit
+`~/.config/git/ignore` (or per-platform `~/.gitignore_global`) and add:
+
+```
+.yca/
+```
+
+then register the file with `git config --global core.excludesfile ~/.config/git/ignore`.
+This ignores `.yca` in every repo so caches and project state are never
+accidentally committed.
+- **Tools**: `code_resolve` is the single structural lookup tool. `op=resolve`
+  returns the relations of a symbol (implementors/extensions, callers, callees,
+  usages) with file:line locations from the local code graph, and notes which
+  indexed Maven artifact provides a class; `op=list` enumerates the indexed
+  artifacts. On demand, `maven_knowledge_content` reads a specific artifact's
+  index. All are read-only and therefore available in `plan` mode too.
 
 Configuration (`yca.structural-code-graph.*`): `enabled` (default `true`),
 `enrich` (default `false`), `baseUrl`/`apiKey`/`model` (optional cheaper model

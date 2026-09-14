@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -47,14 +48,15 @@ public final class MvnProjectDeps {
     }
 
     /**
-     * Resolves the project dependencies, caching the result per fingerprint (aggregate content hash) of the
+     * Resolves the project dependencies, caching the result under the project tree at
+     * {@code $projectDir/.yca/maven.dependency.list}, gated by the fingerprint (aggregate content hash) of the
      * project build files so {@code mvn} is only run when a build file actually changed.
      *
      * @param projectDir       the Maven project directory; when it is not an existing directory an empty list is
      *                         returned.
      * @param timeoutMs        how long to wait for {@code mvn} to complete before killing it.
-     * @param localRepository  cache location; the resolution cache (keyed by the project fingerprint) is stored
-     *                         there. When {@code null} no cache is used.
+     * @param localRepository  retained for backward compatibility with callers; the cache now lives under the
+     *                         project tree and this parameter no longer controls its location.
      * @return the project's resolved, de-duplicated dependency coordinates ordered by {@link DependencyScope#order()},
      *         empty when Maven is not runnable, times out, fails or the directory is absent.
      */
@@ -62,25 +64,27 @@ public final class MvnProjectDeps {
         if (projectDir == null || !Files.isDirectory(projectDir)) {
             return List.of();
         }
-        Path cacheFile = null;
-        String fingerprint = null;
-        if (localRepository != null) {
-            fingerprint = fingerprint(projectDir);
-            cacheFile = cacheFile(localRepository, fingerprint);
-            final var cached = readCache(cacheFile);
-            if (cached != null) {
-                return cached;
-            }
+        // cache the (slow) dependency:list run under the project tree, gated by the fingerprint of all build
+        // files so mvn only runs when a pom/script actually changed and the coordinate list stays portable.
+        final var fingerprint = fingerprint(projectDir);
+        final var cacheFile = cacheFile(projectDir);
+        final var cached = readCache(cacheFile, fingerprint);
+        if (cached != null) {
+            return cached;
         }
         final var deps = resolveFromMaven(projectDir, timeoutMs);
-        if (cacheFile != null && !deps.isEmpty()) {
-            writeCache(cacheFile, deps);
+        if (deps.isEmpty()) {
+            // dependency:list failed (build extension not resolvable offline, reactor incoherence, ...): a
+            // project with zero resolved dependencies is implausible, so do not cache an empty failure and
+            // let the next call retry.
+            return List.of();
         }
+        writeCache(cacheFile, fingerprint, deps);
         return deps;
     }
 
     /**
-     * {@code resolve} with no cache: always runs {@code mvn}.
+     * {@code resolve} with the project-local cache under {@code $projectDir/.yca}.
      *
      * @param projectDir the Maven project directory.
      * @param timeoutMs  how long to wait for {@code mvn} to complete before killing it.
@@ -91,8 +95,38 @@ public final class MvnProjectDeps {
     }
 
     private static List<Gav> resolveFromMaven(final Path projectDir, final long timeoutMs) {
+        final var isWindows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        final var mvnw = projectDir.resolve(isWindows ? "mvnw.cmd" : "mvnw");
+        final var mvn = isWindows ? "mvn.cmd" : "mvn";
+        // prefer the project's Maven wrapper when present (it pins the Maven/plugin versions the build expects),
+        // otherwise fall back to a plain `mvn`. Windows `.cmd` wrappers must be launched through `cmd /c`.
+        final var launcher = new ArrayList<String>();
+        if (Files.isRegularFile(mvnw)) {
+            if (isWindows) {
+                launcher.addAll(List.of("cmd", "/c"));
+            }
+            launcher.add(mvnw.toString());
+        } else {
+            launcher.add(mvn);
+        }
+        // try offline first (fast when everything is cached); if the project's build extensions or plugins are
+        // not yet in the local repo, offline resolution aborts before any goal runs, so fall back to online.
+        var deps = runMaven(launcher, true, projectDir, timeoutMs);
+        if (deps.isEmpty()) {
+            deps = runMaven(launcher, false, projectDir, timeoutMs);
+        }
+        return deps;
+    }
+
+    private static List<Gav> runMaven(
+            final List<String> launcher, final boolean offline, final Path projectDir, final long timeoutMs) {
         try {
-            final var pb = new ProcessBuilder("mvn", "-o", "dependency:list");
+            final var command = new ArrayList<>(launcher);
+            if (offline) {
+                command.add("-o");
+            }
+            command.add("dependency:list");
+            final var pb = new ProcessBuilder(command);
             pb.directory(projectDir.toFile());
             pb.redirectErrorStream(true);
             final var process = pb.start();
@@ -118,18 +152,23 @@ public final class MvnProjectDeps {
 
     // -- dependency-resolution caching (keyed by the project build files fingerprint) --
 
-    /** Cache file layout: one coordinate ({@code groupId:artifactId:version}) per line. */
-    private static Path cacheFile(final Path localRepository, final String fingerprint) {
-        return localRepository.resolve(".yca").resolve("project-deps").resolve(fingerprint + ".deps");
+    /** Cache file layout: {@code # fingerprint=<hex>} header then one coordinate ({@code g:a:v}) per line. */
+    private static Path cacheFile(final Path projectDir) {
+        return projectDir.resolve(".yca").resolve("maven.dependency.list");
     }
 
-    private static List<Gav> readCache(final Path cacheFile) {
+    /** Read the cached coordinates only when the stored build-file fingerprint matches the current one. */
+    private static List<Gav> readCache(final Path cacheFile, final String fingerprint) {
         try {
             if (!Files.isRegularFile(cacheFile)) {
                 return null;
             }
+            final var lines = Files.readAllLines(cacheFile, StandardCharsets.UTF_8);
+            if (lines.isEmpty() || !lines.get(0).equals("# fingerprint=" + fingerprint)) {
+                return null;
+            }
             final var out = new java.util.ArrayList<Gav>();
-            for (final var line : Files.readAllLines(cacheFile, StandardCharsets.UTF_8)) {
+            for (final var line : lines.subList(1, lines.size())) {
                 final var stripped = line.strip();
                 if (!stripped.isBlank()) {
                     try {
@@ -139,22 +178,23 @@ public final class MvnProjectDeps {
                     }
                 }
             }
-            return out.isEmpty() ? null : List.copyOf(out);
+            return List.copyOf(out);
         } catch (final IOException e) {
             return null;
         }
     }
 
-    private static void writeCache(final Path cacheFile, final List<Gav> deps) {
+    private static void writeCache(final Path cacheFile, final String fingerprint, final List<Gav> deps) {
         try {
-            final var sb = new StringBuilder();
+            final var sb = new StringBuilder("# fingerprint=");
+            sb.append(fingerprint).append('\n');
             for (final var gav : deps) {
                 sb.append(gav.coordinate()).append('\n');
             }
             Files.createDirectories(cacheFile.getParent());
             Files.writeString(cacheFile, sb.toString(), StandardCharsets.UTF_8);
         } catch (final IOException ignored) {
-            // a cache write failure is not fatal
+            // a cache write failure is not fatal; the caller can always re-run dependency:list
         }
     }
 

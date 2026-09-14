@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.skills.SkillLocator;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -42,15 +43,23 @@ class SystemPromptBuilderTest {
     Path project;
 
     @Test
-    void includesHierarchicalAndGlobalAgentsMd() throws Exception {
+    void includesNearestAndFirstGlobalAgentsMd() throws Exception {
         Files.writeString(project.resolve("AGENTS.md"), "# Project AGENTS\nproject rule");
         Files.createDirectories(project.resolve("src").resolve("main"));
         final var nested = project.resolve("src").resolve("main");
         Files.writeString(nested.resolve("AGENTS.md"), "# Nested AGENTS\nnested rule");
-        Files.writeString(storageHome.resolve("AGENTS.md"), "# Global AGENTS\nalways use tabs");
+        final var fakeHome = storageHome.resolve("home");
+        final var configAgents = fakeHome.resolve(".config").resolve("opencode").resolve("AGENTS.md");
+        Files.createDirectories(configAgents.getParent());
+        Files.writeString(configAgents, "# Config AGENTS\nalways use tabs");
+        final var storageAgents =
+                fakeHome.resolve(".yupiik").resolve("coding-agent").resolve("AGENTS.md");
+        Files.createDirectories(storageAgents.getParent());
+        Files.writeString(storageAgents, "# Storage AGENTS\nstorage rule");
         final var builder = new SystemPromptBuilder(
                 config(Map.of(
-                        "yca.storageHome", storageHome.toString(),
+                        "yca.home", fakeHome.toString(),
+                        "yca.storageHome", storageAgents.getParent().toString(),
                         "yca.workingDir", nested.toString(),
                         "yca.skills.enabled", "true")),
                 null,
@@ -61,13 +70,26 @@ class SystemPromptBuilderTest {
                 null,
                 null);
         final var prompt = builder.build();
-        assertTrue(prompt.contains("project rule"));
         assertTrue(prompt.contains("nested rule"));
-        assertTrue(prompt.contains("always use tabs"));
+        assertFalse(
+                prompt.contains("project rule"),
+                "only the nearest project AGENTS.md should be loaded, not the full ancestor stack");
+        assertTrue(
+                prompt.contains("always use tabs"),
+                "opencode-precedence global (~/.config/opencode/AGENTS.md) should win over storage-home");
+        assertFalse(prompt.contains("storage rule"), "only the first existing global AGENTS.md should be loaded");
     }
 
     @Test
-    void includesGlobalSkill() throws Exception {
+    void skillsLocatorIncludesAgentsGlobalDir() {
+        final var dirs = SkillLocator.skillDirectories(config(Map.of()));
+        assertTrue(
+                dirs.contains(Path.of(System.getProperty("user.home"), ".agents", "skills")),
+                "~/.agents/skills should be a global skill directory: " + dirs);
+    }
+
+    @Test
+    void includesGlobalSkillIndexOnly() throws Exception {
         final var skill = storageHome.resolve("skills").resolve("my-skill").resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: custom-name\ndescription: a skill\n---\nUse the skill body here.");
@@ -85,11 +107,14 @@ class SystemPromptBuilderTest {
                 null);
         final var prompt = builder.build();
         assertTrue(prompt.contains("<skill name=\"custom-name\">"));
-        assertTrue(prompt.contains("Use the skill body here."));
+        assertTrue(prompt.contains("a skill"));
+        assertFalse(
+                prompt.contains("Use the skill body here."),
+                "skill bodies should be index-only; the full body loads on demand via the skill tool");
     }
 
     @Test
-    void includesProjectSkillFromConventionalDir() throws Exception {
+    void includesProjectSkillFromConventionalDirIndexOnly() throws Exception {
         final var skill = project.resolve(".opencode")
                 .resolve("skills")
                 .resolve("proj-skill")
