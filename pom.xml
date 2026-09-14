@@ -181,7 +181,6 @@
           <compilerArgs>
             <compilerArg>-Xlint:all,-serial,-this-escape,-missing-explicit-ctor,-processing</compilerArg>
             <compilerArg>-Werror</compilerArg>
-            <compilerArg>-Afusion.generateBeanForCliCommands=true</compilerArg>
           </compilerArgs>
         </configuration>
       </plugin>

@@ -10,7 +10,7 @@
   <artifactId>llm-client</artifactId>
   <version>1.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
-  <name>LLM Client</name>
+  <name>YCA :: LLM Client</name>
   <description>Shared provider-agnostic LLM client abstraction: neutral model, dialect SPI and resilience, with OpenAI and Anthropic implementations.</description>
 
   <subprojects>

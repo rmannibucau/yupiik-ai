@@ -3,7 +3,7 @@
   <modelVersion>4.1.0</modelVersion>
   <parent />
   <artifactId>llm-client-api</artifactId>
-  <name>LLM Client :: API</name>
+  <name>YCA :: LLM Client :: API</name>
   <description>Neutral LLM model, transport and dialect SPI plus shared resilience facade, provider-agnostic.</description>
 
   <dependencies>
