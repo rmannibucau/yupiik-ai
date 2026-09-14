@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.scanning.Bean;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.httpclient.core.listener.RequestListener;
+import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.httpclient.core.listener.impl.SetUserAgent;
 import io.yupiik.fusion.httpclient.core.request.UnlockedHttpRequest;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -64,6 +65,11 @@ public class HttpClientProducer {
             listeners.add(new SetHeader(cfg.headers()));
         }
         listeners.add(new SetUserAgent(DEFAULT_CHROME_UA));
+        if (cfg.debug()) {
+            listeners.add(new CurlLoggerListener(
+                    new CurlLoggerListener.Configuration(java.util.logging.Logger.getLogger("yca.http"))
+                            .setLogPayload(true)));
+        }
         return new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
                 .setDelegate(builder.build())
                 .setRequestListeners(listeners));

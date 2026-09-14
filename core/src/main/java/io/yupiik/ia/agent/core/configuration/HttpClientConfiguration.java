@@ -35,4 +35,10 @@ public record HttpClientConfiguration(
         String version,
 
         @Property(defaultValue = "30", documentation = "Connect timeout in seconds.")
-        int connectTimeoutSeconds) {}
+        int connectTimeoutSeconds,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Log every HTTP exchange (method, URL, headers and payload) as a curl-style trace. Only for debugging; the authorization header is redacted.")
+        boolean debug) {}

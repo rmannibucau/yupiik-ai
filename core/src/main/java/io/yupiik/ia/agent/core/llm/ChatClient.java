@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.llm;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
+import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
@@ -85,8 +86,13 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = providerManager;
         this.clock = clock;
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
-        final var httpClient =
-                new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient()));
+        final var clientConfig = new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient());
+        if (configuration.httpClient().debug()) {
+            clientConfig.setRequestListeners(List.of(new CurlLoggerListener(
+                    new CurlLoggerListener.Configuration(java.util.logging.Logger.getLogger("yca.http"))
+                            .setLogPayload(true))));
+        }
+        final var httpClient = new ExtendedHttpClient(clientConfig);
         this.httpClient = httpClient;
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer
@@ -164,10 +170,30 @@ public class ChatClient implements AutoCloseable {
     }
 
     private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec) {
+        final var debugLogger =
+                configuration.httpClient().debug() ? java.util.logging.Logger.getLogger("yca.http") : null;
         return switch (flavor) {
-            case COMPLETIONS -> new OpenAICompletionsDialect(mapper, httpClient, spec);
-            case RESPONSES -> new OpenAIResponsesDialect(mapper, httpClient, spec);
-            case ANTHROPIC -> new AnthropicDialect(mapper, httpClient, spec);
+            case COMPLETIONS -> {
+                final var d = new OpenAICompletionsDialect(mapper, httpClient, spec);
+                if (debugLogger != null) {
+                    d.setOnRawLine(debugLogger::fine);
+                }
+                yield d;
+            }
+            case RESPONSES -> {
+                final var d = new OpenAIResponsesDialect(mapper, httpClient, spec);
+                if (debugLogger != null) {
+                    d.setOnRawLine(debugLogger::fine);
+                }
+                yield d;
+            }
+            case ANTHROPIC -> {
+                final var d = new AnthropicDialect(mapper, httpClient, spec);
+                if (debugLogger != null) {
+                    d.setOnRawLine(debugLogger::fine);
+                }
+                yield d;
+            }
             case AUTO -> throw new IllegalStateException("resolved flavor must not be AUTO");
         };
     }

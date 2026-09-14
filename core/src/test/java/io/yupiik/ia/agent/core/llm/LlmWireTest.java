@@ -78,4 +78,105 @@ class LlmWireTest {
         assertEquals("bash", second.function().name());
         assertEquals("{\"cmd\":\"ls\"}", second.function().arguments());
     }
+
+    /**
+     * The Responses dialect emits the id + name on a leading {@code output_item.added} fragment and
+     * then only null-id/null-name argument fragments (the coalescing must keep a single call per
+     * index — this is the shape captured live from freeinference.org/v1/responses).
+     */
+    @Test
+    void coalescesResponsesStyleToolCallFragments() throws Exception {
+        // shape captured live from freeinference.org/v1/responses: output_item.added/done carry the
+        // id + name, function_call_arguments.delta fragments carry only argument json and a null name.
+        final var events = List.<LlmStreamEvent>of(
+                new LlmStreamEvent.ToolCallDelta(0, "fc_abc", "search", null),
+                new LlmStreamEvent.ToolCallDelta(0, null, null, "{\"q\""),
+                new LlmStreamEvent.ToolCallDelta(0, null, null, ": \"weather paris\"}"),
+                new LlmStreamEvent.ToolCallDelta(0, "fc_abc", "search", null));
+
+        final var message = LlmWire.pump(
+                new Flow.Publisher<>() {
+                    @Override
+                    public void subscribe(final Flow.Subscriber<? super LlmStreamEvent> subscriber) {
+                        subscriber.onSubscribe(new Flow.Subscription() {
+                            private int cursor = -1;
+
+                            @Override
+                            public void request(final long n) {
+                                while (cursor + 1 < events.size()) {
+                                    subscriber.onNext(events.get(++cursor));
+                                }
+                                subscriber.onComplete();
+                            }
+
+                            @Override
+                            public void cancel() {
+                                // no-op
+                            }
+                        });
+                    }
+                },
+                ignored -> {},
+                null);
+
+        final var calls = message.toolCalls();
+        assertNotNull(calls);
+        assertEquals(1, calls.size());
+
+        final var first = calls.get(0);
+        assertEquals(0, first.index());
+        assertEquals("fc_abc", first.id());
+        assertNotNull(first.function());
+        assertEquals("search", first.function().name());
+        assertEquals("{\"q\": \"weather paris\"}", first.function().arguments());
+    }
+
+    /**
+     * Captures the live Responses split that relied on id-only coalescing: the item events report a
+     * different {@code output_index} than the argument delta fragments, so the same logical call (same
+     * id) arrives under two indexes and must still collapse to a single tool call.
+     */
+    @Test
+    void coalescesResponsesCallAcrossVaryingIndexes() throws Exception {
+        final var events = List.<LlmStreamEvent>of(
+                new LlmStreamEvent.ToolCallDelta(1, "fc_1decd0", "search", null),
+                new LlmStreamEvent.ToolCallDelta(0, "fc_1decd0", null, "{\"q\""),
+                new LlmStreamEvent.ToolCallDelta(0, "fc_1decd0", null, ": \"weather paris\"}"),
+                new LlmStreamEvent.ToolCallDelta(1, "fc_1decd0", "search", null));
+
+        final var message = LlmWire.pump(
+                new Flow.Publisher<>() {
+                    @Override
+                    public void subscribe(final Flow.Subscriber<? super LlmStreamEvent> subscriber) {
+                        subscriber.onSubscribe(new Flow.Subscription() {
+                            private int cursor = -1;
+
+                            @Override
+                            public void request(final long n) {
+                                while (cursor + 1 < events.size()) {
+                                    subscriber.onNext(events.get(++cursor));
+                                }
+                                subscriber.onComplete();
+                            }
+
+                            @Override
+                            public void cancel() {
+                                // no-op
+                            }
+                        });
+                    }
+                },
+                ignored -> {},
+                null);
+
+        final var calls = message.toolCalls();
+        assertNotNull(calls);
+        assertEquals(1, calls.size());
+
+        final var first = calls.get(0);
+        assertEquals("fc_1decd0", first.id());
+        assertNotNull(first.function());
+        assertEquals("search", first.function().name());
+        assertEquals("{\"q\": \"weather paris\"}", first.function().arguments());
+    }
 }

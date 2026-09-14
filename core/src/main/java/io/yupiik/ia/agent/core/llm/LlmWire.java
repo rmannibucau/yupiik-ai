@@ -28,7 +28,8 @@ import io.yupiik.llm.client.model.LlmTool;
 import io.yupiik.llm.client.model.LlmToolCall;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -154,10 +155,17 @@ final class LlmWire {
         final var done = new CompletableFuture<Message>();
         final var text = new StringBuilder();
         final var toolCalls = new ArrayList<ToolCall>();
-        // Streaming dialects emit one delta per fragment: the first carries the name,
-        // the following ones carry only argument fragments and a null name (and possibly
-        // a missing id). Coalesce them back into a single logical tool call per (id, index).
-        final var partials = new LinkedHashMap<String, PartialToolCall>();
+        // Streaming dialects emit one delta per fragment. The stable identity of a logical tool call
+        // is not uniform across dialects: OpenAI Responses carries the same id (item_id) on every
+        // fragment but varies the index, while Anthropic/Completions keep the index stable and only
+        // put the id/name on the first fragment. So a fragment belongs with an existing partial when
+        // it shares either its id or its index; index -gt id links are resolved lazily on arrival.
+        // Reactive publishers must signal sequentially per the Flow.Subscriber contract, but the
+        // coalescing state below is guarded by a monitor to stay correct even if the publisher is
+        // non-conformant and delivers fragments concurrently.
+        final var byId = new HashMap<String, PartialToolCall>();
+        final var byIndex = new HashMap<Integer, PartialToolCall>();
+        final var mergeLock = new Object();
         publisher.subscribe(new Flow.Subscriber<>() {
             private Flow.Subscription subscription;
 
@@ -169,28 +177,36 @@ final class LlmWire {
 
             @Override
             public void onNext(final LlmStreamEvent event) {
-                if (cancelled != null && cancelled.getAsBoolean()) {
-                    subscription.cancel();
-                    done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
-                    return;
-                }
-                if (event instanceof TextDelta(String t)) {
-                    text.append(t);
-                    onDelta.accept(event);
-                } else if (event instanceof ReasoningDelta) {
-                    onDelta.accept(event);
-                } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
-                    final var key = id == null ? Integer.toString(index) : id;
-                    final var partial = partials.computeIfAbsent(key, ignored -> new PartialToolCall(index, id));
-                    if (name != null) {
-                        partial.name = name;
+                synchronized (mergeLock) {
+                    if (cancelled != null && cancelled.getAsBoolean()) {
+                        subscription.cancel();
+                        done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                        return;
                     }
-                    if (args != null) {
-                        partial.arguments.append(args);
+                    if (event instanceof TextDelta(String t)) {
+                        text.append(t);
+                        onDelta.accept(event);
+                    } else if (event instanceof ReasoningDelta) {
+                        onDelta.accept(event);
+                    } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
+                        final var partial = resolvePartial(byId, byIndex, index, id);
+                        if (id != null) {
+                            byId.put(id, partial);
+                        }
+                        byIndex.put(index, partial);
+                        if (id != null && partial.id == null) {
+                            partial.id = id;
+                        }
+                        if (name != null) {
+                            partial.name = name;
+                        }
+                        if (args != null) {
+                            partial.arguments.append(args);
+                        }
+                        onDelta.accept(event);
+                    } else if (event instanceof End) {
+                        onDelta.accept(event);
                     }
-                    onDelta.accept(event);
-                } else if (event instanceof End) {
-                    onDelta.accept(event);
                 }
             }
 
@@ -201,10 +217,13 @@ final class LlmWire {
 
             @Override
             public void onComplete() {
-                toolCalls.addAll(partials.values().stream()
-                        .map(partial -> partial.toToolCall())
-                        .toList());
-                done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                synchronized (mergeLock) {
+                    final var partials = new LinkedHashSet<>(byId.values());
+                    partials.addAll(byIndex.values());
+                    toolCalls.addAll(
+                            partials.stream().map(PartialToolCall::toToolCall).toList());
+                    done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                }
             }
         });
         try {
@@ -223,20 +242,61 @@ final class LlmWire {
         return calls.isEmpty() ? null : calls;
     }
 
+    private static PartialToolCall resolvePartial(
+            final Map<String, PartialToolCall> byId,
+            final Map<Integer, PartialToolCall> byIndex,
+            final int index,
+            final String id) {
+        final var fromId = id != null ? byId.get(id) : null;
+        final var fromIndex = byIndex.get(index);
+        if (fromId != null) {
+            if (fromIndex != null && fromIndex != fromId) {
+                // same logical call surfaced under both identities: merge the grouping so later
+                // fragments (which may carry only the index or only the id) find the same partial
+                fromId.arguments.append(fromIndex.arguments());
+                if (fromId.name == null) {
+                    fromId.name = fromIndex.name;
+                }
+                if (fromId.id == null) {
+                    fromId.id = fromIndex.id;
+                }
+                byIndex.put(index, fromId);
+            } else if (fromIndex == null) {
+                byIndex.put(index, fromId);
+            }
+            return fromId;
+        }
+        if (fromIndex != null) {
+            if (id != null) {
+                byId.put(id, fromIndex);
+            }
+            return fromIndex;
+        }
+        final var created = new PartialToolCall(index);
+        if (id != null) {
+            byId.put(id, created);
+        }
+        byIndex.put(index, created);
+        return created;
+    }
+
     /**
-     * Mutable accumulator for a single streaming tool call: fragments coalesced by (id, index)
-     * carry the first non-null name and the concatenated argument JSON.
+     * Mutable accumulator for a single streaming tool call: fragments coalesced by their shared id or
+     * index carry the first non-null id and name and the concatenated argument JSON.
      */
     private static final class PartialToolCall {
 
         private final int index;
-        private final String id;
+        private String id;
         private final StringBuilder arguments = new StringBuilder();
         private String name;
 
-        private PartialToolCall(final int index, final String id) {
+        private PartialToolCall(final int index) {
             this.index = index;
-            this.id = id;
+        }
+
+        private String arguments() {
+            return arguments.toString();
         }
 
         private ToolCall toToolCall() {
