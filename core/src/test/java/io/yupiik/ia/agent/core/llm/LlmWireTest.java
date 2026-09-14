@@ -179,4 +179,64 @@ class LlmWireTest {
         assertEquals("search", first.function().name());
         assertEquals("{\"q\": \"weather paris\"}", first.function().arguments());
     }
+
+    /**
+     * Two tool calls in one stream, interleaved by their real output_index (as the Responses dialect
+     * now delivers after carrying output_index on the argument fragments). This guards against the
+     * hardcoded-index-0 regression that dropped the leading arguments (eg. bash 'command') by
+     * merging argument fragments from distinct calls into the wrong partial.
+     */
+    @Test
+    void keepsTwoInterleavedToolCallsSepared() throws Exception {
+        final var events = List.<LlmStreamEvent>of(
+                new LlmStreamEvent.ToolCallDelta(0, "fc_list", "list_dir", null),
+                new LlmStreamEvent.ToolCallDelta(0, "fc_list", null, "{\"path\":\"/"),
+                new LlmStreamEvent.ToolCallDelta(1, "fc_bash", "bash", null),
+                new LlmStreamEvent.ToolCallDelta(1, "fc_bash", null, "{\"command\":\"ls"),
+                new LlmStreamEvent.ToolCallDelta(1, "fc_bash", null, "\"}"),
+                new LlmStreamEvent.ToolCallDelta(0, "fc_list", null, "tmp\"}"));
+
+        final var message = LlmWire.pump(
+                new Flow.Publisher<>() {
+                    @Override
+                    public void subscribe(final Flow.Subscriber<? super LlmStreamEvent> subscriber) {
+                        subscriber.onSubscribe(new Flow.Subscription() {
+                            private int cursor = -1;
+
+                            @Override
+                            public void request(final long n) {
+                                while (cursor + 1 < events.size()) {
+                                    subscriber.onNext(events.get(++cursor));
+                                }
+                                subscriber.onComplete();
+                            }
+
+                            @Override
+                            public void cancel() {
+                                // no-op
+                            }
+                        });
+                    }
+                },
+                ignored -> {},
+                null);
+
+        final var calls = new java.util.TreeMap<Integer, ToolCall>();
+        final var received = message.toolCalls();
+        assertNotNull(received);
+        for (final var call : received) {
+            calls.put(call.index(), call);
+        }
+        assertEquals(2, calls.size());
+
+        final var listCall = calls.get(0);
+        assertEquals("fc_list", listCall.id());
+        assertEquals("list_dir", listCall.function().name());
+        assertEquals("{\"path\":\"/tmp\"}", listCall.function().arguments());
+
+        final var bashCall = calls.get(1);
+        assertEquals("fc_bash", bashCall.id());
+        assertEquals("bash", bashCall.function().name());
+        assertEquals("{\"command\":\"ls\"}", bashCall.function().arguments());
+    }
 }

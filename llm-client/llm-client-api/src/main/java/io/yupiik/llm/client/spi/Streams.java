@@ -54,6 +54,26 @@ public final class Streams {
             final BooleanSupplier cancelled,
             final Function<SseParser.Event, List<LlmStreamEvent>> mapper,
             final Supplier<LlmStreamEvent> end) {
+        return toEvents(source, cancelled, mapper, end, null);
+    }
+
+    /**
+     * Turns a raw SSE byte-stream publisher into a publisher of neutral stream events.
+     *
+     * @param source the raw SSE byte publisher.
+     * @param cancelled cancellation probe checked between frames.
+     * @param mapper per-event translation into zero or more neutral events.
+     * @param end terminal End event supplier, or null when the dialect has no surfacing summary.
+     * @param onRawLine optional tee for every raw SSE line (before parsing), or null; useful to log
+     *     the wire, e.g. to observe tool-call fragments on the streaming responses API.
+     * @return the publisher of neutral stream events.
+     */
+    public static Flow.Publisher<LlmStreamEvent> toEvents(
+            final Flow.Publisher<List<ByteBuffer>> source,
+            final BooleanSupplier cancelled,
+            final Function<SseParser.Event, List<LlmStreamEvent>> mapper,
+            final Supplier<LlmStreamEvent> end,
+            final java.util.function.Consumer<String> onRawLine) {
         return subscriber -> source.subscribe(new Flow.Subscriber<>() {
             private final SseParser parser = new SseParser();
             private final StringBuilder line = new StringBuilder();
@@ -112,6 +132,9 @@ public final class Streams {
             }
 
             private void handleRaw(final String rawLine) {
+                if (onRawLine != null) {
+                    onRawLine.accept(rawLine);
+                }
                 for (final var event : parser.feed(rawLine)) {
                     final var mapped = mapper.apply(event);
                     if (mapped == null || mapped.isEmpty()) {

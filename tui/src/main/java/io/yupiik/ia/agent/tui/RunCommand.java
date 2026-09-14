@@ -27,7 +27,13 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @DefaultScoped
@@ -78,7 +84,17 @@ public class RunCommand implements Runnable {
             boolean showThinking,
 
             @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.")
-            boolean permitAll) {}
+            boolean permitAll,
+
+            @Property(
+                    value = "metrics-output-file",
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Optional path of a metrics file appended on completion (blank to disable). When set, a "
+                                    + "single line is written with elapsed ms, accumulated prompt/completion/total tokens, "
+                                    + "last estimated context tokens/percent, compaction and code-graph tool-call counts; "
+                                    + "useful for headless benchmarks.")
+            String metricsOutputFile) {}
 
     @Override
     public void run() {
@@ -86,8 +102,11 @@ public class RunCommand implements Runnable {
                 conf.session() == null || conf.session().isBlank() ? sessionStore.create() : conf.session();
         final var failed = new AtomicBoolean();
         final var lastError = new AtomicReference<String>();
+        final var metrics = new Metrics();
+        final var started = System.nanoTime();
         bridge.sink(event -> {
             print(event, conf.showThinking());
+            metrics.accept(event);
             if (event instanceof final AgentEvent.Error e) {
                 failed.set(true);
                 lastError.set(e.message());
@@ -116,9 +135,58 @@ public class RunCommand implements Runnable {
             permissionService.setGate(null);
             permissionService.setPermitAll(false);
             userFeedbackService.setGate(null);
+            writeMetrics(metrics, started);
         }
         if (failed.get()) {
             throw new IllegalStateException("run failed: " + lastError.get());
+        }
+    }
+
+    private void writeMetrics(final Metrics metrics, final long started) {
+        if (conf.metricsOutputFile() == null || conf.metricsOutputFile().isBlank()) {
+            return;
+        }
+        final var elapsedMs = (System.nanoTime() - started) / 1_000_000L;
+        final var line = "elapsedMs=" + elapsedMs
+                + " promptTokens=" + metrics.promptTokens.get()
+                + " completionTokens=" + metrics.completionTokens.get()
+                + " totalTokens=" + metrics.totalTokens.get()
+                + " contextTokens=" + metrics.contextTokens
+                + " contextPct=" + metrics.contextPercent
+                + " compactions=" + metrics.compactions.get()
+                + " codeTools=" + metrics.codeTools.get();
+        try {
+            Files.writeString(
+                    Paths.get(conf.metricsOutputFile()), line + System.lineSeparator(), StandardCharsets.UTF_8);
+        } catch (final IOException e) {
+            System.err.println(
+                    "[error] failed to write metrics to " + conf.metricsOutputFile() + ": " + e.getMessage());
+        }
+    }
+
+    private static final class Metrics {
+        private final AtomicLong promptTokens = new AtomicLong();
+        private final AtomicLong completionTokens = new AtomicLong();
+        private final AtomicLong totalTokens = new AtomicLong();
+        private final AtomicInteger compactions = new AtomicInteger();
+        private final AtomicInteger codeTools = new AtomicInteger();
+        private volatile long contextTokens;
+        private volatile double contextPercent;
+
+        void accept(final AgentEvent event) {
+            if (event instanceof final AgentEvent.UsageUpdated u) {
+                promptTokens.addAndGet(u.usage().promptTokens());
+                completionTokens.addAndGet(u.usage().completionTokens());
+                totalTokens.addAndGet(u.usage().totalTokens());
+                contextTokens = u.estimatedContextTokens();
+                contextPercent = u.contextPercent();
+            } else if (event instanceof final AgentEvent.Compacted c) {
+                compactions.incrementAndGet();
+            } else if (event instanceof final AgentEvent.ToolStarted t) {
+                if (t.name().startsWith("code_")) {
+                    codeTools.incrementAndGet();
+                }
+            }
         }
     }
 

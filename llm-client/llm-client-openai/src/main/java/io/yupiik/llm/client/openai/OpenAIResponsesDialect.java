@@ -43,6 +43,12 @@ import java.util.function.BooleanSupplier;
 /** OpenAI {@code /responses} reactive dialect mapping the neutral model to the Responses wire format. */
 public final class OpenAIResponsesDialect extends AbstractDialect {
 
+    private volatile java.util.function.Consumer<String> onRawLine;
+    // Records the ids of tool calls whose arguments were already streamed incrementally via
+    // response.function_call_arguments.delta, so the assembled arguments carried by the completion
+    // events are only emitted as a fallback (when no delta was seen) and never double-appended.
+    private final java.util.Set<String> streamedArgIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
     /**
      * Creates the dialect.
      *
@@ -53,6 +59,16 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
     public OpenAIResponsesDialect(
             final JsonMapper mapper, final ExtendedHttpClient client, final ProviderSpec provider) {
         super(mapper, client, provider);
+    }
+
+    /**
+     * Registers an optional tee consuming every raw SSE line before parsing (mainly for wire
+     * debugging). When null (the default) raw lines are discarded.
+     *
+     * @param onRawLine the raw-line consumer or null.
+     */
+    public void setOnRawLine(final java.util.function.Consumer<String> onRawLine) {
+        this.onRawLine = onRawLine;
     }
 
     /**
@@ -94,11 +110,12 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final LlmRequest request, final BooleanSupplier cancelled) {
         try {
+            streamedArgIds.clear();
             final var payload = mapper.toBytes(toWire(request, true));
             return openStream(payload, cancelled)
                     .thenCompose(attempt -> attempt.ok()
                             ? CompletableFuture.completedFuture(
-                                    Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null))
+                                    Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine))
                             : streamError(attempt));
         } catch (final RuntimeException e) {
             return failed(e);
@@ -243,11 +260,45 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                 case "response.function_call_arguments.delta" -> {
                     final var text = str(root.get("delta"));
                     final var callId = str(root.get("item_id"));
-                    result.add(new LlmStreamEvent.ToolCallDelta(0, callId, null, text == null ? "" : text));
+                    // use the item's real output_index (not a constant) so the coalescing subscriber
+                    // can match this fragment to the output_item that carries the name; index 0 would
+                    // collide across tool calls in a multi-call turn and drop the leading arguments
+                    // (eg. the 'command' of a bash call), leaving command empty.
+                    final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
+                    if (callId != null) {
+                        streamedArgIds.add(callId);
+                    }
+                    result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, callId, null, text == null ? "" : text));
                 }
-                case "response.output_item.done" -> {
-                    if (root.get("output") instanceof Map<?, ?> item) {
-                        result.addAll(mapOutputItem(item));
+                case "response.function_call_arguments.done" -> {
+                    final var callId = str(root.get("item_id"));
+                    final var assembled = str(root.get("arguments"));
+                    if (callId != null
+                            && assembled != null
+                            && !assembled.isEmpty()
+                            && !streamedArgIds.contains(callId)) {
+                        final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
+                        result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, callId, null, assembled));
+                    }
+                }
+                case "response.output_item.added", "response.output_item.done" -> {
+                    if (root.get("item") instanceof Map<?, ?> item && "function_call".equals(str(item.get("type")))) {
+                        // output_item.added carries the name; output_item.done carries the fully
+                        // assembled arguments.
+                        final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
+                        final var id = str(item.get("id"));
+                        result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, str(item.get("name")), null));
+                        final var assembled = str(item.get("arguments"));
+                        if ("response.output_item.done".equals(type)
+                                && assembled != null
+                                && !assembled.isEmpty()
+                                && id != null
+                                && !streamedArgIds.contains(id)) {
+                            // no incremental delta was seen for this call: emit the assembled
+                            // arguments so the coalesced tool call is complete (prevents an empty
+                            // 'command is required' failure when a provider skips the delta events).
+                            result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, null, assembled));
+                        }
                     }
                 }
                 case "response.completed", "response.incomplete" ->
@@ -262,18 +313,6 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
         } catch (final RuntimeException e) {
             return List.of();
         }
-    }
-
-    private List<LlmStreamEvent> mapOutputItem(final Map<?, ?> item) {
-        final var type = str(item.get("type"));
-        if ("function_call".equals(type)) {
-            return List.of(new LlmStreamEvent.ToolCallDelta(
-                    0,
-                    str(item.get("id")),
-                    str(item.get("name")),
-                    item.get("arguments") == null ? "" : str(item.get("arguments"))));
-        }
-        return List.of();
     }
 
     private static Usage usage(final Object value) {

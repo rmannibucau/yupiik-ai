@@ -46,6 +46,8 @@ import java.util.function.BooleanSupplier;
 /** Anthropic Messages reactive dialect mapping the neutral model to the Messages wire format. */
 public final class AnthropicDialect extends AbstractDialect {
 
+    private volatile java.util.function.Consumer<String> onRawLine;
+
     /**
      * Creates the dialect.
      *
@@ -55,6 +57,16 @@ public final class AnthropicDialect extends AbstractDialect {
      */
     public AnthropicDialect(final JsonMapper mapper, final ExtendedHttpClient client, final ProviderSpec provider) {
         super(mapper, client, provider);
+    }
+
+    /**
+     * Registers an optional tee consuming every raw SSE line before parsing (mainly for wire
+     * debugging). When null (the default) raw lines are discarded.
+     *
+     * @param onRawLine the raw-line consumer or null.
+     */
+    public void setOnRawLine(final java.util.function.Consumer<String> onRawLine) {
+        this.onRawLine = onRawLine;
     }
 
     /**
@@ -112,7 +124,7 @@ public final class AnthropicDialect extends AbstractDialect {
             return openStream(payload, cancelled)
                     .thenCompose(attempt -> attempt.ok()
                             ? CompletableFuture.completedFuture(
-                                    Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null))
+                                    Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine))
                             : streamError(attempt));
         } catch (final RuntimeException e) {
             return failed(e);
