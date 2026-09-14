@@ -27,10 +27,14 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -92,9 +96,21 @@ public class RunCommand implements Runnable {
                     documentation =
                             "Optional path of a metrics file appended on completion (blank to disable). When set, a "
                                     + "single line is written with elapsed ms, accumulated prompt/completion/total tokens, "
-                                    + "last estimated context tokens/percent, compaction and code-graph tool-call counts; "
-                                    + "useful for headless benchmarks.")
-            String metricsOutputFile) {}
+                                    + "last estimated context tokens/percent, compaction and code-graph tool-call counts, "
+                                    + "plus drill-down aggregates (LLM call count, peak/sum context, tool activity, "
+                                    + "tool time and answer length); useful for headless benchmarks.")
+            String metricsOutputFile,
+
+            @Property(
+                    value = "metrics-detail-file",
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Optional path of a per-event detail log appended during the run (blank to disable). Each "
+                                    + "line is one event with a monotonic tick (ms since JVM start): llm (one per LLM "
+                                    + "call, with context tokens/percent), toolStart/toolEnd (with tool duration), "
+                                    + "compact and answer (final answer length); enables LLM-latency and context-curve "
+                                    + "drill-down for benchmarks.")
+            String metricsDetailFile) {}
 
     @Override
     public void run() {
@@ -104,9 +120,10 @@ public class RunCommand implements Runnable {
         final var lastError = new AtomicReference<String>();
         final var metrics = new Metrics();
         final var started = System.nanoTime();
+        final var detailLog = Detail.of(conf.metricsDetailFile());
         bridge.sink(event -> {
             print(event, conf.showThinking());
-            metrics.accept(event);
+            metrics.accept(event, started, detailLog);
             if (event instanceof final AgentEvent.Error e) {
                 failed.set(true);
                 lastError.set(e.message());
@@ -135,6 +152,7 @@ public class RunCommand implements Runnable {
             permissionService.setGate(null);
             permissionService.setPermitAll(false);
             userFeedbackService.setGate(null);
+            detailLog.close();
             writeMetrics(metrics, started);
         }
         if (failed.get()) {
@@ -154,7 +172,17 @@ public class RunCommand implements Runnable {
                 + " contextTokens=" + metrics.contextTokens
                 + " contextPct=" + metrics.contextPercent
                 + " compactions=" + metrics.compactions.get()
-                + " codeTools=" + metrics.codeTools.get();
+                + " codeTools=" + metrics.codeTools.get()
+                + " llmCalls=" + metrics.llmCalls.get()
+                + " maxContext=" + metrics.maxContext
+                + " sumContext=" + metrics.sumContext.get()
+                + " toolCalls=" + metrics.toolCalls.get()
+                + " codeTraceCalls=" + metrics.codeTraceCalls.get()
+                + " codeCheckGraph=" + metrics.codeCheckGraph.get()
+                + " toolErrors=" + metrics.toolErrors.get()
+                + " toolMs=" + metrics.toolMs.get()
+                + " llmMs=" + Math.max(0, elapsedMs - metrics.toolMs.get())
+                + " answerChars=" + metrics.answerChars.get();
         try {
             Files.writeString(
                     Paths.get(conf.metricsOutputFile()), line + System.lineSeparator(), StandardCharsets.UTF_8);
@@ -170,22 +198,137 @@ public class RunCommand implements Runnable {
         private final AtomicLong totalTokens = new AtomicLong();
         private final AtomicInteger compactions = new AtomicInteger();
         private final AtomicInteger codeTools = new AtomicInteger();
+        private final AtomicInteger llmCalls = new AtomicInteger();
+        private final AtomicLong sumContext = new AtomicLong();
+        private final AtomicInteger toolCalls = new AtomicInteger();
+        private final AtomicInteger codeTraceCalls = new AtomicInteger();
+        private final AtomicInteger codeCheckGraph = new AtomicInteger();
+        private final AtomicInteger toolErrors = new AtomicInteger();
+        private final AtomicLong toolMs = new AtomicLong();
+        private final AtomicInteger answerChars = new AtomicInteger();
+        private final Deque<Long> toolStack = new ArrayDeque<>();
+        private final StringBuilder answer = new StringBuilder();
         private volatile long contextTokens;
         private volatile double contextPercent;
+        private volatile long maxContext;
 
-        void accept(final AgentEvent event) {
+        void accept(final AgentEvent event, final long started, final Detail detail) {
             if (event instanceof final AgentEvent.UsageUpdated u) {
                 promptTokens.addAndGet(u.usage().promptTokens());
                 completionTokens.addAndGet(u.usage().completionTokens());
                 totalTokens.addAndGet(u.usage().totalTokens());
                 contextTokens = u.estimatedContextTokens();
                 contextPercent = u.contextPercent();
+                if (u.estimatedContextTokens() > maxContext) {
+                    maxContext = u.estimatedContextTokens();
+                }
+                sumContext.addAndGet(u.estimatedContextTokens());
+                llmCalls.incrementAndGet();
+                detail.llm(started, contextTokens, contextPercent);
             } else if (event instanceof final AgentEvent.Compacted c) {
                 compactions.incrementAndGet();
+                detail.compact(started, c.kind(), c.mode());
             } else if (event instanceof final AgentEvent.ToolStarted t) {
+                toolCalls.incrementAndGet();
                 if (t.name().startsWith("code_")) {
                     codeTools.incrementAndGet();
                 }
+                if ("code_trace_calls".equals(t.name())) {
+                    codeTraceCalls.incrementAndGet();
+                } else if ("code_check_graph".equals(t.name())) {
+                    codeCheckGraph.incrementAndGet();
+                }
+                toolStack.push(System.nanoTime());
+                detail.toolStart(started, t.name());
+            } else if (event instanceof final AgentEvent.ToolFinished t) {
+                if (!t.success()) {
+                    toolErrors.incrementAndGet();
+                }
+                final var start = toolStack.isEmpty() ? null : toolStack.pollFirst();
+                if (start != null) {
+                    final var ms = (System.nanoTime() - start) / 1_000_000L;
+                    toolMs.addAndGet(ms);
+                    detail.toolEnd(started, t.name(), ms);
+                }
+            } else if (event instanceof final AgentEvent.TextDelta t) {
+                answer.append(t.delta());
+            } else if (event instanceof final AgentEvent.TurnDone t) {
+                answerChars.set(
+                        t.content() == null ? answer.length() : t.content().length());
+                detail.answer(
+                        started,
+                        t.content() == null ? answer.length() : t.content().length());
+            }
+        }
+    }
+
+    /**
+     * Optional per-event detail log enabling LLM-latency and context-curve drill-down.
+     */
+    private static final class Detail implements AutoCloseable {
+        private final BufferedWriter writer;
+
+        private Detail(final BufferedWriter writer) {
+            this.writer = writer;
+        }
+
+        static Detail of(final String path) {
+            if (path == null || path.isBlank()) {
+                return new Detail(null);
+            }
+            try {
+                return new Detail(Files.newBufferedWriter(
+                        Paths.get(path),
+                        StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING));
+            } catch (final IOException e) {
+                System.err.println("[error] failed to open metrics-detail-file " + path + ": " + e.getMessage());
+                return new Detail(null);
+            }
+        }
+
+        private void write(final String line) {
+            if (writer == null) {
+                return;
+            }
+            try {
+                writer.write(line);
+                writer.write(System.lineSeparator());
+            } catch (final IOException e) {
+                // non-fatal for the benchmark; drop further detail logging
+            }
+        }
+
+        void llm(final long started, final long context, final double pct) {
+            write("llm t=" + (System.nanoTime() - started) / 1_000_000L + " context=" + context + " pct=" + pct);
+        }
+
+        void toolStart(final long started, final String name) {
+            write("toolStart t=" + (System.nanoTime() - started) / 1_000_000L + " name=" + name);
+        }
+
+        void toolEnd(final long started, final String name, final long ms) {
+            write("toolEnd t=" + (System.nanoTime() - started) / 1_000_000L + " name=" + name + " ms=" + ms);
+        }
+
+        void answer(final long started, final int chars) {
+            write("answer t=" + (System.nanoTime() - started) / 1_000_000L + " chars=" + chars);
+        }
+
+        void compact(final long started, final String kind, final String mode) {
+            write("compact t=" + (System.nanoTime() - started) / 1_000_000L + " kind=" + kind + " mode=" + mode);
+        }
+
+        @Override
+        public void close() {
+            if (writer == null) {
+                return;
+            }
+            try {
+                writer.close();
+            } catch (final IOException e) {
+                // ignore
             }
         }
     }

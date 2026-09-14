@@ -91,7 +91,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, true, ""),
+                new RunCommand.RunConf("say hi", "", "", false, true, "", ""),
                 agentLoop,
                 bridge,
                 new PermissionService(null),
@@ -125,7 +125,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "s-2", "", false, true, ""),
+                new RunCommand.RunConf("say hi", "s-2", "", false, true, "", ""),
                 agentLoop,
                 bridge,
                 new PermissionService(null),
@@ -163,7 +163,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, ""),
+                new RunCommand.RunConf("say hi", "", "", false, false, "", ""),
                 agentLoop,
                 bridge,
                 permissions,
@@ -183,7 +183,7 @@ class RunCommandTest {
         final var configuration = MockLlmServer.configuration("http://localhost:1/v1", temp.toString());
         final var bridge = new AgentEventBridge();
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "nope", false, true, ""),
+                new RunCommand.RunConf("say hi", "", "nope", false, true, "", ""),
                 stubAgentLoop(bridge),
                 bridge,
                 new PermissionService(null),
