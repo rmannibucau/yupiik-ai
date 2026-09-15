@@ -77,6 +77,11 @@
         <version>${project.version}</version>
       </dependency>
       <dependency>
+        <groupId>io.yupiik.ia.agent</groupId>
+        <artifactId>code-graph-index</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
         <groupId>io.yupiik.llm</groupId>
         <artifactId>llm-client-api</artifactId>
         <version>${project.version}</version>
@@ -253,6 +258,7 @@
   <subprojects>
     <subproject>llm-client</subproject>
     <subproject>html-to-markdown</subproject>
+    <subproject>code-graph-index</subproject>
     <subproject>core</subproject>
     <subproject>tui</subproject>
     <subproject>documentation</subproject>

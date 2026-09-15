@@ -191,7 +191,7 @@ based on per-file content hashes.
   without any model call. Optional LLM *concept nodes* (per-subsystem Markdown
   summaries) can be enabled with `yca.structural-code-graph.enrich`.
 - **Cache**: the index is stored per-project under `workingDir/.yca/generated/graph/`
-  (`graph.json` + optional `nodes/*.md`) and is regenerable, so it is git-ignored.
+  (`index.bin` + optional `nodes/*.md`) and is regenerable, so it is git-ignored.
 
 Because the per-project `.yca` directory concentrates regenerable caches (code
 graph, project memory, the Maven dependency list), add it to your global
