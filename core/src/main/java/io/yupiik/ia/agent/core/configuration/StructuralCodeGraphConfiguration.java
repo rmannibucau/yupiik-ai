@@ -100,7 +100,29 @@ public record StructuralCodeGraphConfiguration(
                 defaultValue = "false",
                 documentation =
                         "Disable the automatic per-query graph refresh that stats the tree against the last build fingerprint. Equivalent to Graft's GRAFT_NO_REFRESH=1.")
-        boolean noRefresh) {
+        boolean noRefresh,
+
+        @Property(
+                defaultValue =
+                        "java.util.List.of(\".yca/**\", \"target/**\", \"build/**\", \".git/**\", \".idea/**\", \"node_modules/**\", \"dist/**\", \"generated-sources/**\", \"**/*.class\", \"**/*.jar\")",
+                documentation =
+                        "Glob patterns (gitignore-ish, relative to the project root) whose files and directories are excluded from "
+                                + "the structural code graph: indexing, freshness checks and per-file refresh. A directory matching a "
+                                + "pattern causes the whole subtree to be skipped. The defaults skip build outputs and tool metadata "
+                                + "(the pattern list merged with the project root .gitignore).")
+        List<String> ignoreGlobs) {
+
+    public static final List<String> DEFAULT_IGNORE_GLOBS = List.of(
+            ".yca/**",
+            "target/**",
+            "build/**",
+            ".git/**",
+            ".idea/**",
+            "node_modules/**",
+            "dist/**",
+            "generated-sources/**",
+            "**/*.class",
+            "**/*.jar");
 
     public String resolvedStoreDir(final String workingDir) {
         final var value = storeDir == null || storeDir.isBlank() ? ".yca/generated/graph" : storeDir;
@@ -109,5 +131,15 @@ public record StructuralCodeGraphConfiguration(
 
     public String resolvedDocStoreDir(final String workingDir) {
         return resolvedStoreDir(workingDir);
+    }
+
+    /** The effective ignore list: built-in defaults merged with any config-supplied globs (config wins, appended). */
+    public List<String> effectiveIgnoreGlobs() {
+        if (ignoreGlobs == null || ignoreGlobs.isEmpty()) {
+            return DEFAULT_IGNORE_GLOBS;
+        }
+        final var merged = new java.util.ArrayList<>(DEFAULT_IGNORE_GLOBS);
+        merged.addAll(ignoreGlobs);
+        return merged;
     }
 }

@@ -98,6 +98,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         final var edgeTypes = parseEdgeTypes(arg(args, "edgeTypes"));
         final var depth = optInt(args, "depth", 0);
         final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
+        codeGraph.ensureRefreshedReady();
         final var idx = codeGraph.queryIndex();
         if (idx == null || idx.symbolCount() == 0) {
             return ToolResult.ok("Structural code graph is empty.");
@@ -108,6 +109,25 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             return ToolResult.error("Symbol not found: " + symbol + ". List candidate symbols with the code_find_code "
                     + "tool, then retrace using the fully-qualified name (or grep the graph docs at path="
                     + codeGraph.storeRoot().resolve("docs") + ").");
+        }
+        // Terminal verdict for concrete-class implements trace (mirrors CodeResolveTool)
+        if (edgeTypes.equals(EnumSet.of(GraphModel.EdgeType.IMPLEMENTS))) {
+            final var targetSymbol = idx.symbol(targetOrd);
+            if (targetSymbol.kind() != GraphModel.Kind.INTERFACE) {
+                final var suggestion = ImplementorsSuggestion.suggest(idx, targetOrd);
+                final var ctSb = new StringBuilder();
+                ctSb.append(symbol)
+                        .append(" is a ")
+                        .append(targetSymbol.kind().name().toLowerCase(java.util.Locale.ROOT))
+                        .append(", not an interface, so nothing implements it directly");
+                if (suggestion != null) {
+                    ctSb.append("; ").append(suggestion).append('\n');
+                } else {
+                    ctSb.append("; trace the interfaces it references (e.g. its field/method return types) "
+                            + "for implementors.\n");
+                }
+                return ToolResult.ok(ctSb.toString());
+            }
         }
         final var wantOut = dir.equals("callees") || dir.equals("both");
         final var wantIn = dir.equals("callers") || dir.equals("both");

@@ -79,6 +79,7 @@ public class CodeFindCodeTool implements EmbeddedTool {
         final var kind = arg(args, "kind");
         final var qKind = parseKind(kind);
         final var max = (int) Math.max(1, Math.min(200, optInt(args, "max", 40)));
+        codeGraph.ensureRefreshedReady();
         final var idx = codeGraph.queryIndex();
         if (idx == null) {
             return ToolResult.ok("Structural code graph is empty.");

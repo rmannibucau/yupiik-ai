@@ -64,6 +64,7 @@ public class MavenRepositoryKnowledgeService {
     private final AtomicReference<IndexRun> runningIndex = new AtomicReference<>();
     private volatile String lastSummary;
     private final CodeGraphIndexCache codeGraphCache = new CodeGraphIndexCache();
+    private final KnowledgeFileCache knowledgeFileCache = new KnowledgeFileCache();
 
     /** How many coordinates are previewed in the {@code starting to index ...} acknowledgement. */
     private static final int STARTING_LIST_CAP = 20;
@@ -589,11 +590,11 @@ public class MavenRepositoryKnowledgeService {
         if (!Files.isRegularFile(file)) {
             return "no knowledge file " + gav.coordinate() + " for '" + shortName + "'";
         }
-        try {
-            return Files.readString(file, StandardCharsets.UTF_8);
-        } catch (final IOException e) {
-            return "unable to read " + file + ": " + e.getMessage();
+        final var content = knowledgeFileCache.get(file);
+        if (content == null) {
+            return "unable to read " + file;
         }
+        return content;
     }
 
     private static String coordsPreview(final List<Gav> gavs) {
@@ -852,5 +853,45 @@ public class MavenRepositoryKnowledgeService {
         }
 
         private record Entry(CodeGraphIndex index, long bytes) {}
+    }
+
+    /**
+     * A size-bounded, least-recently-used cache of knowledge file contents, keyed by absolute file path.
+     * Entries are invalidated when the file's {@code lastModifiedTime} changes (stat cost ~sub-ms per file),
+     * so the 60-file appendKnowledge scan in {@code code_resolve} amortizes to a single disk read per
+     * modified file across calls within the same JVM process.
+     */
+    private final class KnowledgeFileCache {
+        private final LinkedHashMap<Path, Entry> entries = new LinkedHashMap<>(16, 0.75f, true);
+        private static final int MAX_ENTRIES = 256;
+
+        synchronized String get(final Path file) {
+            final var cached = entries.get(file);
+            final long mt;
+            try {
+                mt = Files.getLastModifiedTime(file).toMillis();
+            } catch (final IOException e) {
+                return null;
+            }
+            if (cached != null && cached.lastModified == mt) {
+                return cached.content;
+            }
+            final String content;
+            try {
+                content = Files.readString(file, StandardCharsets.UTF_8);
+            } catch (final IOException e) {
+                entries.remove(file);
+                return null;
+            }
+            entries.put(file, new Entry(mt, content));
+            while (entries.size() > MAX_ENTRIES) {
+                final var it = entries.keySet().iterator();
+                it.next();
+                it.remove();
+            }
+            return content;
+        }
+
+        private record Entry(long lastModified, String content) {}
     }
 }

@@ -189,7 +189,7 @@ public class CodeResolveTool implements EmbeddedTool {
         if (graphLive()) {
             graphHits = appendGraph(sb, symbol, relation, edgeTypes, depth, max);
         }
-        if (knowledgeLive()) {
+        if (knowledgeLive() && (graphHits == 0 || (artifact != null && !artifact.isBlank()))) {
             appendKnowledge(sb, symbol, artifact, graphHits);
         }
         if (graphHits == 0 && knowledgeLive() && (artifact == null || artifact.isBlank())) {
@@ -210,6 +210,7 @@ public class CodeResolveTool implements EmbeddedTool {
             final Set<GraphModel.EdgeType> edgeTypes,
             final int depth,
             final int max) {
+        codeGraph.ensureRefreshedReady();
         final var idx = codeGraph.queryIndex();
         if (idx == null || idx.symbolCount() == 0) {
             sb.append("code graph: empty (nothing indexed for this project).\n");
@@ -224,12 +225,18 @@ public class CodeResolveTool implements EmbeddedTool {
         final var targetSymbol = idx.symbol(targetOrd);
         final var onlyImplements = "implements".equalsIgnoreCase(relation != null ? relation.trim() : "");
         if (onlyImplements && targetSymbol.kind() != GraphModel.Kind.INTERFACE) {
+            final var suggestion = ImplementorsSuggestion.suggest(idx, targetOrd);
             sb.append("code graph: ")
                     .append(targetName)
                     .append(" is a ")
                     .append(targetSymbol.kind().name().toLowerCase(Locale.ROOT))
-                    .append(", not an interface, so nothing implements it directly; trace the interfaces it "
-                            + "references (e.g. its field/method return types) for implementors.\n");
+                    .append(", not an interface, so nothing implements it directly");
+            if (suggestion != null) {
+                sb.append("; ").append(suggestion).append('\n');
+            } else {
+                sb.append("; trace the interfaces it references (e.g. its field/method return types) "
+                        + "for implementors.\n");
+            }
             return 0;
         }
         final var direction = directionFor(relation, edgeTypes);
@@ -338,7 +345,7 @@ public class CodeResolveTool implements EmbeddedTool {
             return;
         }
         String match = null;
-        final var cap = Math.min(gavs.size(), 60);
+        final var cap = gavs.size();
         for (var i = 0; i < cap && match == null; i++) {
             final var gav = gavs.get(i);
             if (artifactHint != null && !artifactHint.isBlank() && !gav.contains(artifactHint)) {
@@ -360,9 +367,7 @@ public class CodeResolveTool implements EmbeddedTool {
         } else if (graphHits == 0 && (artifactHint == null || artifactHint.isBlank())) {
             sb.append("artifact knowledge: no indexed dependency matches ")
                     .append(symbol)
-                    .append(" in the first ")
-                    .append(cap)
-                    .append(" artifacts; use op=list to enumerate.\n");
+                    .append("; use op=list to enumerate.\n");
         }
     }
 

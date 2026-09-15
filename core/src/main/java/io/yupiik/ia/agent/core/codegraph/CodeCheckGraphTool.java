@@ -62,6 +62,7 @@ public class CodeCheckGraphTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        codeGraph.ensureRefreshedReady();
         return ToolResult.ok(codeGraph.freshness());
     }
 }

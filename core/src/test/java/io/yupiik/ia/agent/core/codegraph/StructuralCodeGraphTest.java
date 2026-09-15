@@ -237,6 +237,101 @@ class StructuralCodeGraphTest {
     }
 
     @Test
+    void ignoreGlobsAndGitignoreExcludeFiles() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("proj-ignore"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.createDirectories(project.resolve("src/main/java/demo"));
+        Files.writeString(project.resolve("src/main/java/demo/A.java"), """
+                package demo;
+                public class A {
+                    public void run() {}
+                }
+                """);
+        // files under default-ignored dirs (pruned via SKIP_SUBTREE) must not be indexed
+        Files.createDirectories(project.resolve(".yca/secret"));
+        Files.writeString(
+                project.resolve(".yca/secret/B.java"), "package demo;\npublic class B { public void run() {} }\n");
+        Files.createDirectories(project.resolve("target"));
+        Files.writeString(project.resolve("target/C.java"), "package demo;\npublic class C { public void run() {} }\n");
+        Files.createDirectories(project.resolve("node_modules"));
+        Files.writeString(
+                project.resolve("node_modules/D.java"), "package demo;\npublic class D { public void run() {} }\n");
+        // gitignore negation re-includes a file NOT under a dir-pruned subtree
+        Files.writeString(project.resolve(".gitignore"), "**/*.VEN.java\n!src/main/java/demo/VEN.java\n");
+        Files.writeString(project.resolve("src/main/java/demo/VEN.java"), """
+                package demo;
+                public class VEN {
+                    public void run() {}
+                }
+                """);
+
+        final var config = config(project, Map.of());
+        final JsonMapper mapper = newMapper();
+        final var graph = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        graph.ensureReady();
+
+        final var symbols = graph.graph().symbols();
+        assertTrue(
+                symbols.stream().anyMatch(s -> s.fqn().equals("demo.A")),
+                "expected the source under src/main/java to be indexed");
+        assertTrue(
+                symbols.stream().anyMatch(s -> s.fqn().equals("demo.VEN")),
+                "expected a .gitignore-negated file to be re-included");
+        assertTrue(symbols.stream().noneMatch(s -> s.fqn().equals("demo.B")), "expected .yca/** to be ignored");
+        assertTrue(symbols.stream().noneMatch(s -> s.fqn().equals("demo.C")), "expected target/** to be ignored");
+        assertTrue(symbols.stream().noneMatch(s -> s.fqn().equals("demo.D")), "expected node_modules/** to be ignored");
+    }
+
+    @Test
+    void configIgnoreGlobsAreAddedToDefaults() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("proj-ignorecfg"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.createDirectories(project.resolve("src/main/java/demo"));
+        Files.writeString(project.resolve("src/main/java/demo/A.java"), """
+                package demo;
+                public class A {
+                    public void run() {}
+                }
+                """);
+        // a custom glob not covered by the defaults: config override adds "custom/**"
+        Files.createDirectories(project.resolve("custom"));
+        Files.writeString(project.resolve("custom/E.java"), "package demo;\npublic class E { public void run() {} }\n");
+        Files.writeString(project.resolve("src/main/java/demo/F.java"), """
+                package demo;
+                public class F {
+                    public void run() {}
+                }
+                """);
+
+        final var config = config(project, Map.of("yca.structuralCodeGraph.ignoreGlobs", "custom/**"));
+
+        final JsonMapper mapper = newMapper();
+        final var graph = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        graph.ensureReady();
+
+        final var symbols = graph.graph().symbols();
+        assertTrue(symbols.stream().anyMatch(s -> s.fqn().equals("demo.A")), "expected demo.A indexed");
+        assertTrue(symbols.stream().anyMatch(s -> s.fqn().equals("demo.F")), "expected demo.F indexed");
+        assertTrue(
+                symbols.stream().noneMatch(s -> s.fqn().equals("demo.E")),
+                "expected a config-added ignoreGlob (custom/**) to exclude custom/E.java");
+    }
+
+    @Test
     void docTreeSkipsUnchangedAndWritesSummaryInjection() throws Exception {
         final var project = Files.createDirectory(temp.resolve("proj"));
         Files.writeString(project.resolve("pom.xml"), "<project/>");

@@ -175,13 +175,33 @@ class CodeResolveToolTest {
     }
 
     @Test
-    void graphAndKnowledgeMergeBothBranchesPresent() {
+    void graphHitSkipsKnowledgeScanWithoutArtifactHint() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"));
         final var tool = tool(graph(store()), knowledge);
         final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "implements"))
                 .output();
         assertTrue(out.contains("code graph: resolved org.hop.RowSet (implements)"));
         assertTrue(out.contains("type org.hop.RowSetImpl (RowSetImpl.java:1-5)"));
+        assertFalse(
+                out.contains("artifact knowledge"),
+                "knowledge scan should be skipped when graph hit and no artifact hint");
+    }
+
+    @Test
+    void artifactHintNarrowsKnowledgeWhenGraphHits() {
+        final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"));
+        final var tool = tool(graph(store()), knowledge);
+        final var out = tool.execute(Map.of(
+                        "op",
+                        "resolve",
+                        "symbol",
+                        "org.hop.RowSet",
+                        "relation",
+                        "implements",
+                        "artifact",
+                        "artifact-a"))
+                .output();
+        assertTrue(out.contains("code graph: resolved org.hop.RowSet (implements)"));
         assertTrue(out.contains("artifact knowledge: org.hop.RowSet is provided/listed by g.com:artifact-a:1.0"));
     }
 
@@ -189,9 +209,55 @@ class CodeResolveToolTest {
     void knowledgeProviderNoteIsAppendedWhenGraphHasNoHit() {
         final var knowledge = knowledge(true, List.of("g.com:artifact-a:1.0"));
         final var tool = tool(graph(store()), knowledge);
-        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "uses"))
+        final var out = tool.execute(Map.of("op", "resolve", "symbol", "org.hop.RowSet", "relation", "callees"))
                 .output();
         assertTrue(out.contains("artifact knowledge: org.hop.RowSet is provided/listed by g.com:artifact-a:1.0"));
+    }
+
+    @Test
+    void concreteClassVerdictSuggestsInterfaceImplementedBySubclasses() {
+        final var store = new GraphStore(
+                List.of(
+                        new GraphModel.Symbol(
+                                "org.hop.PipelineRunConfiguration", GraphModel.Kind.TYPE, "Cfg.java", 1, 5, null),
+                        new GraphModel.Symbol(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                GraphModel.Kind.TYPE,
+                                "Local.java",
+                                1,
+                                5,
+                                null),
+                        new GraphModel.Symbol(
+                                "org.hop.IPipelineEngineRunConfiguration",
+                                GraphModel.Kind.INTERFACE,
+                                "I.java",
+                                1,
+                                5,
+                                null)),
+                List.of(
+                        new GraphModel.Edge(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                "org.hop.PipelineRunConfiguration",
+                                GraphModel.EdgeType.EXTENDS),
+                        new GraphModel.Edge(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                "org.hop.IPipelineEngineRunConfiguration",
+                                GraphModel.EdgeType.IMPLEMENTS),
+                        new GraphModel.Edge(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                "java.io.Serializable",
+                                GraphModel.EdgeType.IMPLEMENTS)),
+                Map.of(),
+                System.currentTimeMillis());
+        final var tool = tool(graph(store), knowledge(false, List.of()));
+        final var out = tool.execute(
+                        Map.of("op", "resolve", "symbol", "org.hop.PipelineRunConfiguration", "relation", "implements"))
+                .output();
+        assertTrue(out.contains("is a type, not an interface"), out);
+        assertTrue(
+                out.contains("1 of its 1 direct subclass(es) implement org.hop.IPipelineEngineRunConfiguration"),
+                "verdict should suggest the interface: " + out);
+        assertFalse(out.contains("java.io.Serializable"), "JDK noise interfaces must be excluded: " + out);
     }
 
     @Test

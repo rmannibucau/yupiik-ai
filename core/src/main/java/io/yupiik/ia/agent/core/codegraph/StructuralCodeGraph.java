@@ -33,14 +33,17 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.PathMatcher;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -49,7 +52,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Logger;
+import java.util.stream.Stream;
 
 /**
  * The structural code graph of the agent: a symbol-and-edge graph extracted from the working tree by the
@@ -64,8 +74,6 @@ import java.util.logging.Logger;
 @ApplicationScoped
 public class StructuralCodeGraph {
     private static final Logger LOGGER = Logger.getLogger(StructuralCodeGraph.class.getName());
-    private static final Set<String> SKIP_DIRS =
-            Set.of("target", ".git", ".idea", ".yca", "node_modules", "build", "generated-sources");
     private static final Set<String> PROJECT_MARKERS = Set.of(
             "pom.xml",
             "build.gradle",
@@ -97,9 +105,17 @@ public class StructuralCodeGraph {
     private final ProviderManager providerManager;
     private final Path projectDir;
     private final Clock clock;
+    private final List<IgnoreRule> ignoreRules;
+    private final boolean configNoRefresh;
+    private final long refreshAwaitMs;
+    private final ExecutorService refreshExecutor;
+    private final AtomicLong refreshPending = new AtomicLong();
+    private volatile long latestRefreshJob;
     private volatile GraphStore graph;
     private volatile CodeGraphIndex index;
     private volatile String pendingRefreshPath;
+    private final AtomicBoolean readyStarted = new AtomicBoolean();
+    private volatile CompletableFuture<Void> readyFuture;
 
     public StructuralCodeGraph(
             final CodingAgentConfiguration configuration,
@@ -123,6 +139,15 @@ public class StructuralCodeGraph {
                 .normalize();
         this.indexFile = storeRoot.resolve("index.bin");
         this.indexMetaFile = storeRoot.resolve("index.meta");
+        final var scg = configuration.structuralCodeGraph();
+        this.ignoreRules = buildIgnoreMatchers(projectDir, scg.effectiveIgnoreGlobs());
+        this.configNoRefresh = scg.noRefresh();
+        this.refreshAwaitMs = 3000L; // bound for ensureRefreshedReady() when a background refresh is pending
+        this.refreshExecutor = Executors.newSingleThreadExecutor(r -> {
+            final var t = new Thread(r, "yca-graph-refresher");
+            t.setDaemon(true);
+            return t;
+        });
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
         this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot, providerManager);
         this.docWriter.enrichment(docEnricher);
@@ -141,8 +166,20 @@ public class StructuralCodeGraph {
         this.storeRoot = null;
         this.indexFile = null;
         this.indexMetaFile = null;
+        this.ignoreRules = null;
+        this.configNoRefresh = true;
+        this.refreshAwaitMs = 0;
+        this.refreshExecutor = testRefreshExecutor();
         this.docWriter = null;
         this.docEnricher = null;
+    }
+
+    private static ExecutorService testRefreshExecutor() {
+        return Executors.newSingleThreadExecutor(r -> {
+            final var t = new Thread(r, "yca-graph-refresher-test");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public boolean enabled() {
@@ -158,16 +195,69 @@ public class StructuralCodeGraph {
         if (docEnricher != null) {
             docEnricher.close();
         }
+        if (refreshExecutor != null) {
+            refreshExecutor.shutdownNow();
+        }
     }
 
+    /**
+     * Ensures the code graph index is ready before serving a query. Synchronous and blocking so graph tools see an
+     * authoritative index: if the background preload (see {@link #ensureReadyAsync()}) is still in flight it is awaited
+     * (bounded, so a cold slow build never hangs a tool; on timeout the call proceeds and {@code queryIndex()} builds a
+     * transient index over the in-memory graph as a fallback). When nothing has been scheduled yet, schedules it now.
+     */
     public void ensureReady() {
         if (!enabled() || index != null) {
             return;
         }
-        // A test double constructed through the no-arg constructor has no persisted-index machinery
-        // (storeRoot/indexFile/projectDir are null). It exposes the graph via graph(); keep that path working
-        // without touching the filesystem, and let queryIndex() build a transient index over it.
+        ensureReadyAsync();
+        final var future = readyFuture;
+        if (future == null) {
+            return;
+        }
+        try {
+            future.get(refreshAwaitMs / 2, TimeUnit.MILLISECONDS);
+        } catch (final Exception e) {
+            // bounded wait: a slow build must not hang a tool; queryIndex() fills the transient-index gap
+        }
+    }
+
+    /**
+     * Kicks off the code-graph index load in the background on the shared refresher thread, so the load overlaps the
+     * provider's first LLM round-trip (the dominant cost of a session's first call). Idempotent: only the first call
+     * schedules the work, and the scheduled job no-ops once an index is already present. Never blocks.
+     */
+    public void ensureReadyAsync() {
+        if (!enabled() || index != null || indexFile == null || projectDir == null) {
+            return;
+        }
+        if (!readyStarted.compareAndSet(false, true)) {
+            return;
+        }
+        readyFuture = CompletableFuture.runAsync(this::ensureReadyNow, refreshExecutor);
+    }
+
+    /**
+     * The synchronous load body, run on the background thread by {@link #ensureReadyAsync()} (and never re-run once an
+     * index is present). A test double short-circuits here because it has no persisted-index machinery
+     * (storeRoot/indexFile/projectDir are null), leaving {@code queryIndex()} to build a transient index over {@code graph()}.
+     */
+    private void ensureReadyNow() {
+        if (!enabled() || index != null) {
+            return;
+        }
+        final var t0 = System.nanoTime();
         if (indexFile == null || projectDir == null) {
+            return;
+        }
+        // Fast path: a current binary index exists -> memory-map/load it and serve queries directly off it,
+        // avoiding any full-tree rescan or JSON materialisation on this session start. When noRefresh trusts the
+        // on-disk index as authoritative, attempt this FIRST and skip the expensive hasIndexableContent() tree
+        // walk (the very existence of a current index.bin is proof the directory is code). For the default
+        // noRefresh=false the tree walk still runs first to decide whether there is anything to index at all.
+        if (configNoRefresh && loadIndex()) {
+            LOGGER.info("CodeGraph ensureReady fast-path took " + (System.nanoTime() - t0) / 1_000_000L
+                    + "ms (session-start load)");
             return;
         }
         // For a fresh or non-code target directory (e.g. scaffolding a new project) there is nothing
@@ -175,21 +265,35 @@ public class StructuralCodeGraph {
         if (!hasIndexableContent()) {
             return;
         }
-        // Fast path: a current binary index exists -> memory-map/load it and serve queries directly off it,
-        // avoiding any full-tree rescan or JSON materialisation on this session start.
-        if (loadIndex()) {
+        if (!configNoRefresh && loadIndex()) {
+            LOGGER.info("CodeGraph ensureReady fast-path took " + (System.nanoTime() - t0) / 1_000_000L
+                    + "ms (session-start load)");
             return;
         }
         final var loaded = load();
         if (loaded != null) {
+            LOGGER.info("CodeGraph ensureReady slow-path(load) took " + (System.nanoTime() - t0) / 1_000_000L + "ms");
             final var patched = patch(loaded);
             graph = patched;
-            reloadIndex();
+            assignIndexFrom(patched);
             return;
         }
+        LOGGER.info("CodeGraph ensureReady slow-path(rebuild) took " + (System.nanoTime() - t0) / 1_000_000L + "ms");
         final var built = rebuild();
         graph = built;
-        reloadIndex();
+        assignIndexFrom(built);
+    }
+
+    /** A3: after a slow-path (patch/rebuild) indexation, assign the in-memory index directly from the in-memory store so
+     * the first tool call never pays a transient index build (and never trips the disk freshness gate again). */
+    private void assignIndexFrom(final GraphStore store) {
+        try {
+            index = CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(store)));
+        } catch (final RuntimeException e) {
+            LOGGER.warning("Cannot build in-memory code graph index after indexation: " + e.getMessage());
+            index = null;
+            reloadIndex();
+        }
     }
 
     public GraphStore graph() {
@@ -273,7 +377,7 @@ public class StructuralCodeGraph {
             rebuilt = rebuild();
         }
         graph = rebuilt;
-        reloadIndex();
+        assignIndexFrom(rebuilt);
         return freshness();
     }
 
@@ -290,7 +394,54 @@ public class StructuralCodeGraph {
         final var path = pendingRefreshPath;
         pendingRefreshPath = null;
         if (path != null && !path.isBlank()) {
-            refreshFile(Path.of(path));
+            enqueueRefresh(Path.of(path));
+        }
+    }
+
+    /**
+     * A5: asynchronously re-index a single source file in the background (single-thread executor, FIFO, daemon).
+     * Same-path jobs coalesce; writes landed via write_file/edit_file never block the agent loop.
+     */
+    private void enqueueRefresh(final Path file) {
+        if (configNoRefresh || projectDir == null || ignoreRules == null) {
+            return;
+        }
+        final var absolute = file.toAbsolutePath().normalize();
+        if (!absolute.startsWith(projectDir)) {
+            return;
+        }
+        final var rel = rel(absolute);
+        if (isIgnored(rel, absolute)) {
+            return;
+        }
+        refreshPending.incrementAndGet();
+        final var job = ++latestRefreshJob;
+        refreshExecutor.execute(() -> {
+            try {
+                refreshFileNow(absolute);
+            } finally {
+                refreshPending.decrementAndGet();
+            }
+        });
+    }
+
+    /** A5: graph-reading tools call this before queryIndex() so a pending background refresh is seen as authoritative
+     * (single-thread FIFO: awaiting the latest enqueued job implies all earlier ones finished too). Bounded by
+     * {@link #refreshAwaitMs} so a slow/broken re-index never hangs a tool - on timeout we proceed with the current index. */
+    public void ensureRefreshedReady() {
+        if (latestRefreshJob == 0 || configNoRefresh) {
+            return;
+        }
+        final var deadline =
+                System.nanoTime() + Duration.ofMillis(refreshAwaitMs).toNanos();
+        // await until no refresh job is pending (single-thread FIFO means once pending hits 0, the latest is done)
+        while (refreshPending.get() > 0 && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(20);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
         }
     }
 
@@ -306,17 +457,24 @@ public class StructuralCodeGraph {
         return v == null ? null : v.toString();
     }
 
+    /** Synchronous refresh body (used by the async executor; a test seam may call it directly). Public for tests. */
     public void refreshFile(final Path file) {
-        if (!enabled()) {
+        refreshFileNow(file == null ? null : file.toAbsolutePath().normalize());
+    }
+
+    private void refreshFileNow(final Path absolute) {
+        if (!enabled() || absolute == null || projectDir == null) {
             return;
         }
-        final var absolute = file.toAbsolutePath().normalize();
         // only files inside the project dir (any depth) belong to the graph; writes
         // targeting another folder must not pollute the index
         if (!absolute.startsWith(projectDir)) {
             return;
         }
         final var rel = rel(absolute);
+        if (isIgnored(rel, absolute)) {
+            return;
+        }
         final var parser = parserFor(absolute);
         if (parser == null) {
             return;
@@ -560,10 +718,109 @@ public class StructuralCodeGraph {
         }
     }
 
-    private boolean isSkipped(final Path p) {
-        final var n = p.toString();
-        return SKIP_DIRS.stream().anyMatch(n::contains);
+    private boolean isSkipped(final Path dir) {
+        return isIgnored(rel(dir), dir);
     }
+
+    /** A1: true when {@code path} (relative path {@code relPath}, or absolute) matches any configured ignore rule.
+     * Git-like last-match-wins: a '!' negation can re-include a path previously ignored. */
+    private boolean isIgnored(final String relPath, final Path absolute) {
+        if (ignoreRules == null || ignoreRules.isEmpty()) {
+            return false;
+        }
+        final var rel = (relPath == null || relPath.isEmpty()) ? rel(absolute) : relPath;
+        if (rel == null || rel.isEmpty()) {
+            return false;
+        }
+        final var relSlash = rel.replace('\\', '/');
+        final Path relP = Path.of(relSlash);
+        boolean ignored = false;
+        for (final var rule : ignoreRules) {
+            if (matches(rule, relP, absolute)) {
+                ignored = !rule.negated();
+            }
+        }
+        return ignored;
+    }
+
+    private static boolean matches(final IgnoreRule rule, final Path relP, final Path absolute) {
+        if (rule.rootAnchored()) {
+            return rule.matcher().matches(relP);
+        }
+        // unanchored pattern should match at any depth: try the relative path and, as a fallback, a synthetic
+        // '/' + rel so a leading-**-style glob resolves; the glob normalized with ** already covers depth
+        return rule.matcher().matches(relP) || rule.matcher().matches(Path.of("/", relP.toString()));
+    }
+
+    /** A1: build ignore rules from the effective glob list merged with the project-root .gitignore (last-match-wins). */
+    private static List<IgnoreRule> buildIgnoreMatchers(final Path projectDir, final List<String> globs) {
+        final List<String> patterns = new ArrayList<>();
+        if (globs != null) {
+            patterns.addAll(globs);
+        }
+        appendGitignore(projectDir, patterns);
+        final List<IgnoreRule> rules = new ArrayList<>();
+        for (final String raw : patterns) {
+            if (raw == null || raw.isBlank()) {
+                continue;
+            }
+            final String p = raw.trim();
+            if (p.startsWith("#")) {
+                continue;
+            }
+            final boolean negation = p.startsWith("!");
+            final String body = negation ? p.substring(1) : p;
+            if (body.isBlank()) {
+                continue;
+            }
+            final boolean rootAnchored = body.startsWith("/");
+            final String glob = normalizeGitignoreToGlob(rootAnchored ? body.substring(1) : body, rootAnchored);
+            rules.add(new IgnoreRule(negation, FileSystems.getDefault().getPathMatcher("glob:" + glob), rootAnchored));
+            // A dir-only rule like "target/**" matches paths under target but not the bare "target"
+            // directory itself, so the tree-walk's preVisitDirectory SKIP_SUBTREE would never prune it.
+            // Register a companion rule for the bare directory so the whole subtree is pruned fast.
+            if (glob.endsWith("/**")) {
+                final String dirGlob = glob.substring(0, glob.length() - 3); // drop the trailing "/**"
+                if (!dirGlob.isEmpty()) {
+                    rules.add(new IgnoreRule(
+                            negation, FileSystems.getDefault().getPathMatcher("glob:" + dirGlob), rootAnchored));
+                }
+            }
+        }
+        return rules;
+    }
+
+    /** Append the project-root .gitignore lines (after the configured globs; git semantic = later rules override). */
+    private static void appendGitignore(final Path projectDir, final List<String> patterns) {
+        if (projectDir == null) {
+            return;
+        }
+        final var gitignore = projectDir.resolve(".gitignore");
+        if (!Files.isRegularFile(gitignore)) {
+            return;
+        }
+        try (final Stream<String> lines = Files.lines(gitignore)) {
+            lines.forEach(patterns::add);
+        } catch (final IOException e) {
+            LOGGER.fine(() -> "Cannot read " + gitignore + ": " + e.getMessage());
+        }
+    }
+
+    // Convert a gitignore pattern to a single java.nio glob: a bare name (no slash) becomes '**/name' so it
+    // matches at any depth; a leading '/' marks root-anchored; a trailing '/' marks directory-only.
+    private static String normalizeGitignoreToGlob(final String body, final boolean rootAnchored) {
+        var g = body.chars().filter(c -> c != '/').count() == 0 ? body : body;
+        final String trimmed = g.endsWith("/") && g.length() > 1 ? g.substring(0, g.length() - 1) : g;
+        final boolean noSlash = !trimmed.contains("/");
+        String out = noSlash ? "**/" + trimmed : trimmed;
+        if (rootAnchored) {
+            out = trimmed.startsWith("**") ? trimmed : trimmed;
+        }
+        return out;
+    }
+
+    /** A1: an ignore rule; {@code rootAnchored} and {@code negated} mirror gitignore semantics. */
+    public record IgnoreRule(boolean negated, PathMatcher matcher, boolean rootAnchored) {}
 
     private String extension(final Path p) {
         final var name = p.getFileName().toString();
@@ -710,11 +967,18 @@ public class StructuralCodeGraph {
         if (!conf.indexEnabled() || indexFile == null || !Files.isRegularFile(indexFile)) {
             return false;
         }
-        if (!indexIsFresh()) {
+        // noRefresh means the on-disk index is authoritative: skip the per-file lastModified stat walk
+        // (thousands of stats on a big tree) that would otherwise make every session start several seconds
+        // slower even when nothing changed. The freshness gate is still honoured when refreshing is enabled.
+        if (!configNoRefresh && !indexIsFresh()) {
             return false;
         }
         try {
+            final var t0 = System.nanoTime();
             index = conf.indexMemoryMap() ? CodeGraphIndex.mmap(indexFile) : CodeGraphIndex.load(indexFile);
+            LOGGER.info("CodeGraph loadIndex (mmap=" + conf.indexMemoryMap() + ") at wall="
+                    + (System.currentTimeMillis() / 1000) + " took "
+                    + (System.nanoTime() - t0) / 1_000_000L + "ms, file=" + indexFile);
             return true;
         } catch (final IOException | RuntimeException e) {
             LOGGER.warning("Cannot load binary code graph index from " + indexFile + ": " + e.getMessage());

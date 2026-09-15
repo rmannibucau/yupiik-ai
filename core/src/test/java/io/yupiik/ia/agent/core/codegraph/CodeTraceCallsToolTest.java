@@ -99,6 +99,63 @@ class CodeTraceCallsToolTest {
         assertTrue(out.contains("- type org.hop.RowSetImpl (RowSetImpl.java:1-5)"), out);
     }
 
+    @Test
+    void implementsOnConcreteClassYieldsVerdictWithSuggestion() {
+        final var store = new GraphStore(
+                List.of(
+                        new GraphModel.Symbol(
+                                "org.hop.PipelineRunConfiguration", GraphModel.Kind.TYPE, "Cfg.java", 1, 5, null),
+                        new GraphModel.Symbol(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                GraphModel.Kind.TYPE,
+                                "Local.java",
+                                1,
+                                5,
+                                null),
+                        new GraphModel.Symbol(
+                                "org.hop.IPipelineEngineRunConfiguration",
+                                GraphModel.Kind.INTERFACE,
+                                "I.java",
+                                1,
+                                5,
+                                null)),
+                List.of(
+                        new GraphModel.Edge(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                "org.hop.PipelineRunConfiguration",
+                                GraphModel.EdgeType.EXTENDS),
+                        new GraphModel.Edge(
+                                "org.hop.LocalPipelineRunConfiguration",
+                                "org.hop.IPipelineEngineRunConfiguration",
+                                GraphModel.EdgeType.IMPLEMENTS)),
+                Map.of(),
+                System.currentTimeMillis());
+        final var result = new CodeTraceCallsTool(fake(store))
+                .execute(Map.of("symbol", "org.hop.PipelineRunConfiguration", "edgeTypes", "implements"));
+        assertTrue(result.success());
+        final var out = result.output();
+        assertTrue(out.contains("is a type, not an interface"), out);
+        assertTrue(
+                out.contains("1 of its 1 direct subclass(es) implement org.hop.IPipelineEngineRunConfiguration"),
+                "verdict should suggest the interface: " + out);
+    }
+
+    @Test
+    void implementsOnConcreteClassWithNoSubclassesYieldsVerdict() {
+        final var store = new GraphStore(
+                List.of(new GraphModel.Symbol(
+                        "org.hop.PipelineRunConfiguration", GraphModel.Kind.TYPE, "Cfg.java", 1, 5, null)),
+                List.of(),
+                Map.of(),
+                System.currentTimeMillis());
+        final var result = new CodeTraceCallsTool(fake(store))
+                .execute(Map.of("symbol", "org.hop.PipelineRunConfiguration", "edgeTypes", "implements"));
+        assertTrue(result.success());
+        final var out = result.output();
+        assertTrue(out.contains("is a type, not an interface"), out);
+        assertTrue(out.contains("trace the interfaces it references"), out);
+    }
+
     private static StructuralCodeGraph fake(final GraphStore store) {
         return new StructuralCodeGraph() {
             @Override

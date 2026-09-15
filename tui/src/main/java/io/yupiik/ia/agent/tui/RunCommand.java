@@ -211,11 +211,18 @@ public class RunCommand implements Runnable {
         private volatile long contextTokens;
         private volatile double contextPercent;
         private volatile long maxContext;
+        private long prevPromptTokens;
+        private long prevCompletionTokens;
+        private long perCallReasoning;
 
         void accept(final AgentEvent event, final long started, final Detail detail) {
             if (event instanceof final AgentEvent.UsageUpdated u) {
-                promptTokens.addAndGet(u.usage().promptTokens());
-                completionTokens.addAndGet(u.usage().completionTokens());
+                final var callPrompt = Math.max(0, u.usage().promptTokens() - prevPromptTokens);
+                final var callCompletion = Math.max(0, u.usage().completionTokens() - prevCompletionTokens);
+                prevPromptTokens = u.usage().promptTokens();
+                prevCompletionTokens = u.usage().completionTokens();
+                promptTokens.addAndGet(callPrompt);
+                completionTokens.addAndGet(callCompletion);
                 totalTokens.addAndGet(u.usage().totalTokens());
                 contextTokens = u.estimatedContextTokens();
                 contextPercent = u.contextPercent();
@@ -224,7 +231,8 @@ public class RunCommand implements Runnable {
                 }
                 sumContext.addAndGet(u.estimatedContextTokens());
                 llmCalls.incrementAndGet();
-                detail.llm(started, contextTokens, contextPercent);
+                detail.llm(started, contextTokens, contextPercent, callPrompt, callCompletion, perCallReasoning);
+                perCallReasoning = 0;
             } else if (event instanceof final AgentEvent.Compacted c) {
                 compactions.incrementAndGet();
                 detail.compact(started, c.kind(), c.mode());
@@ -252,6 +260,8 @@ public class RunCommand implements Runnable {
                 }
             } else if (event instanceof final AgentEvent.TextDelta t) {
                 answer.append(t.delta());
+            } else if (event instanceof final AgentEvent.ThinkingDelta t) {
+                perCallReasoning += t.delta().length();
             } else if (event instanceof final AgentEvent.TurnDone t) {
                 answerChars.set(
                         t.content() == null ? answer.length() : t.content().length());
@@ -300,8 +310,19 @@ public class RunCommand implements Runnable {
             }
         }
 
-        void llm(final long started, final long context, final double pct) {
-            write("llm t=" + (System.nanoTime() - started) / 1_000_000L + " context=" + context + " pct=" + pct);
+        void llm(
+                final long started,
+                final long context,
+                final double pct,
+                final long prompt,
+                final long completion,
+                final long reasoning) {
+            write("llm t=" + (System.nanoTime() - started) / 1_000_000L
+                    + " context=" + context
+                    + " pct=" + pct
+                    + " prompt=" + prompt
+                    + " completion=" + completion
+                    + " reasoningChars=" + reasoning);
         }
 
         void toolStart(final long started, final String name) {

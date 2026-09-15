@@ -147,7 +147,7 @@ public class AgentLoop {
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
                 ? null
                 : agentProvider.byName(agentName);
-        structuralCodeGraph.ensureReady();
+        structuralCodeGraph.ensureReadyAsync();
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(prompt, agent) + snapshotBlock(sessionId)));
         if (history != null) {

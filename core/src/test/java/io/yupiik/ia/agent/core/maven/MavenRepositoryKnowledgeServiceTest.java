@@ -240,6 +240,40 @@ public class MavenRepositoryKnowledgeServiceTest {
         }
     }
 
+    @Test
+    void knowledgeCacheInvalidatedByFileMtime() throws IOException, InterruptedException {
+        final var m2 = Files.createDirectories(tmp.resolve("m2-cache"));
+        final var proj = Files.createDirectories(tmp.resolve("proj-cache"));
+        Files.writeString(proj.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
+
+        final var config = config(m2.toString(), proj.toString());
+        final var executor = new VirtualThreadExecutor();
+        final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
+        try {
+            service.refresh(null, null, null);
+            final var run = service.currentIndex();
+            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+            while (run.inFlight() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertFalse(run.inFlight(), "indexing should have completed");
+
+            final var indexFile = m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-knowledge-index.md");
+            final var first = service.knowledge("g.com:artifact-a:1.0", null);
+            assertTrue(first.contains("## Knowledge"), () -> "first read should succeed: " + first);
+
+            Files.writeString(indexFile, "## Modified\nchanged content\n");
+            final var future = java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 2000);
+            Files.setLastModifiedTime(indexFile, future);
+
+            final var second = service.knowledge("g.com:artifact-a:1.0", null);
+            assertTrue(second.contains("## Modified"), () -> "cache should invalidate on mtime change: " + second);
+        } finally {
+            executor.shutdown();
+        }
+    }
+
     private void classesOnly(
             final Path m2, final String group, final String artifact, final String version, final String mainClass)
             throws IOException {
