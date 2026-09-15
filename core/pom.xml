@@ -17,6 +17,10 @@
       <artifactId>maven-repository-knowledge</artifactId>
     </dependency>
     <dependency>
+      <groupId>io.yupiik.ia.agent</groupId>
+      <artifactId>code-graph-index</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.yupiik.fusion</groupId>
       <artifactId>fusion-build-api</artifactId>
       <scope>provided</scope>

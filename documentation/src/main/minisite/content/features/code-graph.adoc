@@ -18,6 +18,11 @@ configured language extensions and per-file size limit) into a store. It keeps
 a `resolvedStoreDir` per project so the graph is reused across sessions and
 only re-synced when needed.
 
+The graph is persisted as a compact, memory-mapped binary index (`index.bin`)
+so the tools answer queries quickly without re-parsing the tree; see
+xref:code-graph-index.adoc[Compact binary code graph index] for the format and
+the freshness guard.
+
 == Documentation doc tree
 
 With `yca.structuralCodeGraph.docs` enabled (the default), the agent writes a

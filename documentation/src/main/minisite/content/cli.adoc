@@ -16,7 +16,9 @@ agent:
   a thinking stream, approval modals and an editable plan (`/editplan`).
 
 For automation, `run` executes a single headless prompt and prints the result on
-stdout. `completion bash` generates the bash completion script.
+stdout. `completion bash` generates the bash completion script. `code-graph-index`
+builds a binary xref:features/code-graph-index.adoc[code graph index] from a jar
+for fast symbol lookups.
 
 The complete generated reference for every command and its options (including
 `cli.*`, `tui.*` and `run.*`) is on the xref:cli/index.adoc[All commands] page.

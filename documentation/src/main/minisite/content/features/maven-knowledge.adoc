@@ -41,6 +41,10 @@ the Maven version directory `<repo>/<g-path>/<a>/<v>/`, all prefixed
 * `-knowledge-skill-<short>.md` + `-knowledge-skill.md` index - only when
   `useLlm` is enabled *and* the LLM returns a plausible skill. Hand-written
   skill siblings are never overwritten.
+* `<artifactId>-<version>-codegraph.bin` - a compact, memory-mapped binary code
+  graph of the jar's public/protected class + method surface (same source as
+  `-knowledge-api.md`), written at index time and read directly by the tools.
+  See xref:code-graph-index.adoc[Compact binary code graph index].
 
 The marker for "already indexed" is the presence of `-knowledge-index.md`; that
 same file is what tools dereference to discover everything else.

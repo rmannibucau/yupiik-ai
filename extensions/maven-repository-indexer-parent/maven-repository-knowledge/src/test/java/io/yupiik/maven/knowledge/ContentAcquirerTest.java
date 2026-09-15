@@ -152,6 +152,28 @@ class ContentAcquirerTest {
     }
 
     @Test
+    void producesCompactBinaryCodeGraphSidecar() {
+        try (final var repo = new FakeMavenRepo(tmp)) {
+            repo.classesJar("g", "cgraph", "1", "g.cgraph.Main").pom("g", "cgraph", "1", null);
+            final var config = KnowledgeConfig.defaults(tmp);
+            final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+            final var bytes = acquirer.codeGraph(Gav.of("g", "cgraph", "1"));
+            assertEquals(false, bytes.length == 0, "codegraph must be produced for a jar with classes");
+            // the fake jar embeds an invalid class entry, so BytecodeAnalyzer tolerates it and yields no symbols;
+            // what matters is that the payload is a valid, loadable shared index (round-trips without error)
+            final var index = io.yupiik.codegraph.index.CodeGraphIndex.load(bytes);
+            assertEquals(0, index.symbolCount(), "invalid fake class is skipped, index still loads");
+        }
+    }
+
+    @Test
+    void codeGraphIsEmptyWhenNoMainJar() {
+        final var config = KnowledgeConfig.defaults(tmp);
+        final var acquirer = new ContentAcquirer(new LocalRepository(tmp), (url, timeout, bytes) -> "DOC", config);
+        assertEquals(0, acquirer.codeGraph(Gav.of("missing", "x", "9")).length, "no jar -> no codegraph");
+    }
+
+    @Test
     void readsPluginDescriptorBeforeSources() {
         try (final var repo = new FakeMavenRepo(tmp)) {
             repo.pluginJar("g", "plugin-a", "1", "<plugin><name>a-plugin</name></plugin>")

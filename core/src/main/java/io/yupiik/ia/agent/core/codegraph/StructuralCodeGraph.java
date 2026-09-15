@@ -15,10 +15,15 @@
  */
 package io.yupiik.ia.agent.core.codegraph;
 
+import io.yupiik.codegraph.index.CodeGraphIndexWriter;
+import io.yupiik.codegraph.index.IndexEdge;
+import io.yupiik.codegraph.index.IndexGraph;
+import io.yupiik.codegraph.index.IndexSymbol;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
@@ -85,13 +90,15 @@ public class StructuralCodeGraph {
     private final StatusReporter statusReporter;
     private final ChatClient chatClient;
     private final Path storeRoot;
-    private final Path storeFile;
+    private final Path indexFile;
+    private final Path indexMetaFile;
     private final DocTreeWriter docWriter;
     private final DocEnricher docEnricher;
     private final ProviderManager providerManager;
     private final Path projectDir;
     private final Clock clock;
     private volatile GraphStore graph;
+    private volatile CodeGraphIndex index;
     private volatile String pendingRefreshPath;
 
     public StructuralCodeGraph(
@@ -114,7 +121,8 @@ public class StructuralCodeGraph {
         this.storeRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir))
                 .toAbsolutePath()
                 .normalize();
-        this.storeFile = storeRoot.resolve("graph.json");
+        this.indexFile = storeRoot.resolve("index.bin");
+        this.indexMetaFile = storeRoot.resolve("index.meta");
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
         this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot, providerManager);
         this.docWriter.enrichment(docEnricher);
@@ -131,7 +139,8 @@ public class StructuralCodeGraph {
         this.projectDir = null;
         this.clock = null;
         this.storeRoot = null;
-        this.storeFile = null;
+        this.indexFile = null;
+        this.indexMetaFile = null;
         this.docWriter = null;
         this.docEnricher = null;
     }
@@ -152,7 +161,13 @@ public class StructuralCodeGraph {
     }
 
     public void ensureReady() {
-        if (!enabled() || graph != null) {
+        if (!enabled() || index != null) {
+            return;
+        }
+        // A test double constructed through the no-arg constructor has no persisted-index machinery
+        // (storeRoot/indexFile/projectDir are null). It exposes the graph via graph(); keep that path working
+        // without touching the filesystem, and let queryIndex() build a transient index over it.
+        if (indexFile == null || projectDir == null) {
             return;
         }
         // For a fresh or non-code target directory (e.g. scaffolding a new project) there is nothing
@@ -160,14 +175,21 @@ public class StructuralCodeGraph {
         if (!hasIndexableContent()) {
             return;
         }
+        // Fast path: a current binary index exists -> memory-map/load it and serve queries directly off it,
+        // avoiding any full-tree rescan or JSON materialisation on this session start.
+        if (loadIndex()) {
+            return;
+        }
         final var loaded = load();
         if (loaded != null) {
             final var patched = patch(loaded);
             graph = patched;
+            reloadIndex();
             return;
         }
         final var built = rebuild();
         graph = built;
+        reloadIndex();
     }
 
     public GraphStore graph() {
@@ -176,24 +198,60 @@ public class StructuralCodeGraph {
         }
         ensureReady();
         final var g = graph;
-        return g == null ? GraphStore.empty() : g;
+        if (g != null) {
+            return g;
+        }
+        // When only the binary index is loaded (fast path), materialise the store on demand for legacy callers/tests;
+        // the structured tools use queryIndex() and never pay this decode at query time.
+        final var idx = index;
+        return idx == null ? GraphStore.empty() : idx.toStore();
     }
 
+    /**
+     * The fast, canonical query surface for the structured graph tools: a {@link CodeGraphIndex} held in memory and,
+     * when configured, memory-mapped straight off the on-disk {@code index.bin}. Query tools must use this, never
+     * {@link #graph()} (which stays the transient ingest scratch), so no full graph is materialised at query time.
+     */
+    public CodeGraphIndex queryIndex() {
+        ensureReady();
+        var current = index;
+        if (current == null) {
+            // No persisted binary index is loaded (fresh build, or a test double exposing only graph()): serve
+            // queries off a transient index built from the current GraphStore so tools keep a single query API.
+            final var scratch = graph();
+            if (scratch != null) {
+                current = CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(scratch)));
+                index = current;
+            }
+        }
+        return current;
+    }
+
+    /**
+     * Timestamp-first freshness: cheap {@code lastModified} comparison per indexed file is the fast guard; only files
+     * whose timestamp changed (and whose SHA would then differ) drive a re-index. This avoids the O(symbols) stat
+     * churn of the previous per-file freshness and the full-tree SHA walk on session start.
+     */
     public String freshness() {
         if (!enabled()) {
             return "disabled (enable yca.structural-code-graph.enabled)";
         }
-        final var g = graph();
-        int missing = 0;
-        for (final var s : g.symbols()) {
-            if (!Files.isRegularFile(Path.of(s.file()))) {
-                missing++;
-            }
-        }
-        return "symbols=" + g.symbols().size() + " edges=" + g.edges().size() + " missingFiles=" + missing
-                + " files=" + g.fingerprints().size() + " storedAt=" + g.builtAt()
-                + " dir=" + storeRoot + " graph=" + storeFile.getFileName()
-                + " wiring=" + WiringGraphWriter.pathFor(storeRoot).getFileName();
+        ensureReady();
+        final var g = graph == null ? GraphStore.empty() : graph;
+        return "symbols="
+                + (index != null ? index.symbolCount() : g.symbols().size())
+                + " edges="
+                + (index != null ? index.edgeCount() : g.edges().size())
+                + " files="
+                + g.fingerprints().size()
+                + " storedAt="
+                + (index != null ? index.builtAt() : g.builtAt())
+                + " dir="
+                + storeRoot
+                + " graph="
+                + (indexFile != null ? indexFile.getFileName() : "-")
+                + " wiring="
+                + WiringGraphWriter.pathFor(storeRoot).getFileName();
     }
 
     /**
@@ -215,6 +273,7 @@ public class StructuralCodeGraph {
             rebuilt = rebuild();
         }
         graph = rebuilt;
+        reloadIndex();
         return freshness();
     }
 
@@ -285,6 +344,7 @@ public class StructuralCodeGraph {
                 new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         graph = updated;
         persist(updated);
+        reloadIndex();
         if (fp == null) {
             docWriter.delete(rel);
             docEnricher.drop(rel);
@@ -308,14 +368,20 @@ public class StructuralCodeGraph {
     }
 
     private GraphStore load() {
-        if (!Files.isRegularFile(storeFile)) {
+        // The canonical persisted form is the compact binary index.bin (graph.json is no longer written). When the
+        // index is stale (some file changed since it was built) we still need its previous symbols/edges/fingerprints
+        // to run the incremental patch() diff, so reconstruct the ingest store from whatever index is on disk.
+        if (!configuration.structuralCodeGraph().indexEnabled()
+                || indexFile == null
+                || !Files.isRegularFile(indexFile)) {
             return null;
         }
+        final var conf = configuration.structuralCodeGraph();
         try {
-            final var loaded = mapper.fromString(GraphStore.class, Files.readString(storeFile, StandardCharsets.UTF_8));
-            return loaded == null ? null : loaded;
+            final var idx = conf.indexMemoryMap() ? CodeGraphIndex.mmap(indexFile) : CodeGraphIndex.load(indexFile);
+            return idx == null ? null : idx.toStore();
         } catch (final IOException | RuntimeException e) {
-            LOGGER.warning("Cannot load structural code graph from " + storeFile + ": " + e.getMessage());
+            LOGGER.warning("Cannot load binary code graph index from " + indexFile + ": " + e.getMessage());
             return null;
         }
     }
@@ -553,10 +619,113 @@ public class StructuralCodeGraph {
     private void persist(final GraphStore store) {
         try {
             Files.createDirectories(storeRoot);
-            Files.writeString(storeFile, mapper.toString(store), StandardCharsets.UTF_8);
+            if (configuration.structuralCodeGraph().indexEnabled()) {
+                CodeGraphIndexWriter.write(toIndexGraph(store), indexFile);
+                writeIndexMeta(store);
+            }
             WiringGraphWriter.write(mapper, storeRoot, store, docEnricher.cache());
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
+        }
+    }
+
+    /** Bridge the core {@link GraphStore} into the shared, framework-free {@link IndexGraph} binary format. */
+    private static IndexGraph toIndexGraph(final GraphStore store) {
+        return new IndexGraph(
+                store.symbols().stream()
+                        .map(s -> new IndexSymbol(
+                                s.fqn(), s.kind().ordinal(), s.file(), s.startLine(), s.endLine(), s.signature()))
+                        .toList(),
+                store.edges().stream()
+                        .map(e -> new IndexEdge(e.from(), e.to(), e.type().ordinal()))
+                        .toList(),
+                store.fingerprints(),
+                store.builtAt());
+    }
+
+    /** Persist a small {@code rel \t lastModifiedMillis} sidecar used by the timestamp-first freshness gate. */
+    private void writeIndexMeta(final GraphStore store) throws IOException {
+        final var buf = new StringBuilder(store.fingerprints().size() * 48);
+        for (final var entry : store.fingerprints().entrySet()) {
+            final var mtime = lastModified(projectDir.resolve(entry.getKey()));
+            if (mtime >= 0) {
+                buf.append(entry.getKey()).append('\t').append(mtime).append('\n');
+            }
+        }
+        Files.writeString(indexMetaFile, buf, StandardCharsets.UTF_8);
+    }
+
+    private long lastModified(final Path p) {
+        try {
+            return Files.getLastModifiedTime(p).toMillis();
+        } catch (final IOException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Timestamp-first freshness gate for the cached {@code index.bin}. Compares each indexed file's
+     * {@code lastModified} against the stored sidecar value - a cheap stat per file. Only when a timestamp
+     * actually differs (or the sidecar is missing) is the index considered stale and a SHA-verified incremental
+     * re-index triggered. This avoids the previous full-tree SHA walk on every session start.
+     */
+    private boolean indexIsFresh() {
+        if (indexMetaFile == null || !Files.isRegularFile(indexMetaFile)) {
+            return false;
+        }
+        try {
+            for (var line : Files.readAllLines(indexMetaFile, StandardCharsets.UTF_8)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                final var tab = line.indexOf('\t');
+                if (tab < 0) {
+                    return false;
+                }
+                final var rel = line.substring(0, tab);
+                final long stored;
+                try {
+                    stored = Long.parseLong(line.substring(tab + 1));
+                } catch (final NumberFormatException e) {
+                    return false;
+                }
+                final var mtime = lastModified(projectDir.resolve(rel));
+                if (mtime != stored) {
+                    return false;
+                }
+            }
+            return true;
+        } catch (final IOException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Load a current binary index from disk into memory (memory-mapped when configured). Serves as the session-start
+     * fast path in {@link #ensureReady()}: when present and current it avoids the full-tree re-scan / index.bin
+     * deserialisation. Returns {@code true} on success.
+     */
+    private boolean loadIndex() {
+        final var conf = configuration.structuralCodeGraph();
+        if (!conf.indexEnabled() || indexFile == null || !Files.isRegularFile(indexFile)) {
+            return false;
+        }
+        if (!indexIsFresh()) {
+            return false;
+        }
+        try {
+            index = conf.indexMemoryMap() ? CodeGraphIndex.mmap(indexFile) : CodeGraphIndex.load(indexFile);
+            return true;
+        } catch (final IOException | RuntimeException e) {
+            LOGGER.warning("Cannot load binary code graph index from " + indexFile + ": " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Re-read the index file after the in-memory {@link GraphStore} has been mutated by {@link #persist}. */
+    private void reloadIndex() {
+        if (!loadIndex()) {
+            index = null;
         }
     }
 

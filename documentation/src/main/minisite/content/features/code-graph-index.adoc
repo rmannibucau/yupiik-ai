@@ -1,0 +1,110 @@
+= Compact binary code graph index
+:minisite-breadcrumb: Home[index.html] > Features > Compact binary code graph index
+:minisite-keywords: code graph, index, binary, memory-map, performance
+
+Both the structural code graph (project sources) and the maven repository
+knowledge feature (dependency jars) share a single, compact, memory-mapped
+binary index so the agent's symbol lookups stay *insanely fast* at runtime. The
+index is built once at indexation time and read directly by the tools - never
+re-parsed per query.
+
+This page describes that binary format and how freshness is guarded.
+
+== The format
+
+The on-disk layout is hand-rolled, JDK-only (no third-party dependency), and
+shared by project-source and dependency-jar indexes. It is written by
+`CodeGraphIndexWriter` and read by `CodeGraphIndex` (both in the framework-free
+`io.yupiik.codegraph.index` module), and is byte-stable: rebuilding an unchanged
+store produces a byte-identical file:
+
+* a 4-byte `YCAG` magic + format version and a `builtAt` timestamp;
+* a deduplicated UTF-8 *string pool* (FQNs, file paths and signatures repeat
+  heavily, so the pool is what makes the file compact);
+* *symbols*: one fixed-size row per symbol (fqn, kind, file, line span,
+  signature) referencing the pool;
+* *edges*: one fixed-size row per edge (from, to, edge type);
+* optional file *fingerprints* (relative path + SHA-256) used for the source
+  incremental re-index;
+* a precomputed, columnar *adjacency* structure (CSR) with out/in neighbor
+  arrays, so a neighbor lookup is a single O(degree) array read with no per-query
+  graph build.
+
+The index is loaded read-only via `FileChannel.map` (memory-mapped) so only the
+touched pages are resident; the process never holds a full decoded graph in
+memory on the hot path.
+
+== Project source index
+
+The canonical persisted form of the structural code graph is `index.bin` under
+`yca.structuralCodeGraph.storeDir` (default `.yca/generated/code-graph`). A
+sibling `index.meta` lists each source file with its `lastModifiedMillis` for the
+freshness guard.
+
+The tools (`code_check_graph`, `code_trace_calls`, `code_resolve`) read the
+memory-mapped `index.bin` directly; they do not materialize a full `GraphStore`
+at query time.
+
+== Dependency jar sidecar
+
+When the maven repository knowledge feature indexes an artifact, it writes a
+sibling `<artifactId>-<version>-codegraph.bin` next to the `-knowledge-*.md`
+files in the Maven version directory `<repo>/<g>/<a>/<v>/`. The public/protected
+class + method surface is derived with the JDK Class-File API
+(`java.lang.classfile`, the same code used for `-knowledge-api.md`), so even
+source-less jars get a compact structural index. Edges express `extends` /
+`implements` between classes; external (non-resolved) endpoints are dropped.
+
+At runtime `MavenRepositoryKnowledgeService` keeps the dependency sidecars in a
+size-bounded, least-recently-used memory-mapped cache. `code_resolve` consults it
+via an O(1) FQN lookup before falling back to scanning the markdown knowledge.
+
+== Standalone CLI
+
+A headless `code-graph-index` command builds an index from a local jar (or a
+comma-separated list of jars merged into one index) into a `code-graph-index`
+binary file, without needing a Maven repository or a project:
+
+[source,sh]
+----
+yca code-graph-index \
+  --code-graph-index-jars /path/to/lib.jar \
+  --code-graph-index-output /tmp/lib.index.bin \
+  --code-graph-index-exclude "com.example.internal"
+----
+
+* `--code-graph-index-jars` (required) - input jar path, or comma-separated jars
+  to merge into one index.
+* `--code-graph-index-output` (required) - target binary file.
+* `--code-graph-index-exclude` (optional) - comma-separated package prefixes; a
+  class is skipped when its FQN equals the prefix or starts with `prefix + '.'`.
+
+The command derives the public/protected class + method surface with the same
+JDK Class-File API as the dependency sidecar, so it produces a byte-compatible
+index (the format on this page) that the tools can memory-map anywhere.
+
+== Freshness guard
+
+Refreshing is *timestamp-first*: only files or jars whose `lastModified`/size
+changed since the last index get their fingerprint recomputed, and only those
+individual units are re-indexed. An unchanged tree never re-runs the full
+SHA-256 walk at session start; the memory-mapped index is loaded as-is. A source
+edit re-indexes just that file; a changed SNAPSHOT jar re-indexes just that
+artifact.
+
+== Configuration
+
+The following options control the index:
+
+* `yca.structuralCodeGraph.index.enabled` (default `true`) - serve tool queries
+  from `index.bin`.
+* `yca.structuralCodeGraph.index.memoryMap` (default `true`) - read `index.bin`
+  read-only via `FileChannel.map`.
+* `yca.mavenRepositoryKnowledge.codegraphIndexEnabled` (default `true`) - serve
+  dependency lookups from the binary sidecars.
+* `yca.mavenRepositoryKnowledge.codegraphIndexCacheBytes` (default
+  `134217728` = 128 MB) - upper bound of resident memory-mapped dependency index,
+  LRU-evicted once exceeded; `0`/negative = unbounded.
+
+See xref:../configuration.adoc[Configuration] for the full `yca.structuralCodeGraph`
+and `yca.mavenRepositoryKnowledge` option sets.

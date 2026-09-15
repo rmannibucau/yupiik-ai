@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -24,7 +25,6 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.EnumSet;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -98,35 +98,33 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         final var edgeTypes = parseEdgeTypes(arg(args, "edgeTypes"));
         final var depth = optInt(args, "depth", 0);
         final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
-        final var g = codeGraph.graph();
-        if (g.symbols().isEmpty() && g.edges().isEmpty()) {
+        final var idx = codeGraph.queryIndex();
+        if (idx == null || idx.symbolCount() == 0) {
             return ToolResult.ok("Structural code graph is empty.");
         }
         final var dir = direction == null ? "both" : direction.toLowerCase(java.util.Locale.ROOT);
-        final var target = resolveExact(symbol, g);
-        if (target == null) {
+        final var targetOrd = resolveOrd(symbol, idx);
+        if (targetOrd < 0) {
             return ToolResult.error("Symbol not found: " + symbol + ". List candidate symbols with the code_find_code "
                     + "tool, then retrace using the fully-qualified name (or grep the graph docs at path="
                     + codeGraph.storeRoot().resolve("docs") + ").");
         }
-        final var neighborIndex = buildNeighborIndex(g, edgeTypes, dir);
-        final var byFqn = new HashMap<String, GraphModel.Symbol>();
-        for (final var s : g.symbols()) {
-            byFqn.put(s.fqn(), s);
-        }
+        final var wantOut = dir.equals("callees") || dir.equals("both");
+        final var wantIn = dir.equals("callers") || dir.equals("both");
 
         final var sb = new StringBuilder();
         var count = 0;
         final var found = new ArrayList<String>();
-        final var visited = new HashSet<String>();
-        final Deque<String[]> queue = new ArrayDeque<>();
-        queue.add(new String[] {target, "0"});
-        visited.add(target);
+        final var visited = new java.util.HashSet<Integer>();
+        final Deque<int[]> queue = new ArrayDeque<>(); // {ordinal, level}
+        queue.add(new int[] {targetOrd, 0});
+        visited.add(targetOrd);
         while (!queue.isEmpty() && count < max) {
             final var cur = queue.poll();
-            final var name = cur[0];
-            final var level = Integer.parseInt(cur[1]);
+            final int ord = cur[0];
+            final int level = cur[1];
             if (level > 0) {
+                final var name = idx.symbol(ord).fqn();
                 sb.repeat("  ", level - 1).append('-').append(name).append('\n');
                 found.add(name);
                 count++;
@@ -137,9 +135,19 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             if (depth > 0 && level >= depth) {
                 continue;
             }
-            for (final var n : neighborIndex.getOrDefault(name, Set.of())) {
+            var neighbors = wantOut ? idx.neighbors(ord, edgeTypes, CodeGraphIndex.Direction.OUT) : new int[0];
+            if (wantIn) {
+                final var in = idx.neighbors(ord, edgeTypes, CodeGraphIndex.Direction.IN);
+                if (neighbors.length == 0) {
+                    neighbors = in;
+                } else if (in.length > 0) {
+                    neighbors = java.util.Arrays.copyOf(neighbors, neighbors.length + in.length);
+                    System.arraycopy(in, 0, neighbors, neighbors.length - in.length, in.length);
+                }
+            }
+            for (final var n : neighbors) {
                 if (visited.add(n)) {
-                    queue.add(new String[] {n, Integer.toString(level + 1)});
+                    queue.add(new int[] {n, level + 1});
                 }
             }
         }
@@ -151,7 +159,8 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                 .append(found.size())
                 .append(" distinct symbol(s) found:\n");
         for (final var name : found) {
-            final var s = byFqn.get(name);
+            final var ord = idx.indexOfFqn(name);
+            final GraphModel.Symbol s = ord >= 0 ? idx.symbol(ord) : null;
             if (s == null || s.file() == null) {
                 sb.append("- ").append(name).append('\n');
                 continue;
@@ -174,51 +183,21 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         return ToolResult.ok(sb.toString());
     }
 
+    /** Resolve {@code symbol} to a symbol ordinal in {@code idx}: exact FQN first, then a unique simple-name suffix. */
+    private int resolveOrd(final String symbol, final CodeGraphIndex idx) {
+        final var exact = idx.indexOfFqn(symbol);
+        if (exact >= 0) {
+            return exact;
+        }
+        return idx.resolveSuffix(symbol);
+    }
+
     private String edgeTypesLabel(final Set<GraphModel.EdgeType> edgeTypes) {
         return edgeTypes.stream()
                 .map(t -> t.name().toLowerCase(java.util.Locale.ROOT))
                 .sorted()
                 .reduce((a, b) -> a + ", " + b)
                 .orElse("-");
-    }
-
-    private String resolveExact(final String symbol, final GraphStore g) {
-        for (final var s : g.symbols()) {
-            if (symbol.equals(s.fqn())) {
-                return s.fqn();
-            }
-        }
-        final var candidates = new ArrayList<String>();
-        for (final var s : g.symbols()) {
-            final var fqn = s.fqn();
-            if (fqn != null && fqn.endsWith("." + symbol)) {
-                candidates.add(fqn);
-            }
-        }
-        return candidates.size() == 1 ? candidates.get(0) : null;
-    }
-
-    /**
-     * Build a symbol-to-neighbors index in a single pass over the edges, so each BFS level is an O(1) lookup
-     * instead of re-scanning the whole edge list. Caller/callee adjacency is deduped by construction via {@link Set}.
-     */
-    private Map<String, Set<String>> buildNeighborIndex(
-            final GraphStore g, final Set<GraphModel.EdgeType> edgeTypes, final String direction) {
-        final var wantCallers = "callers".equals(direction) || "both".equals(direction);
-        final var wantCallees = "callees".equals(direction) || "both".equals(direction);
-        final var index = new HashMap<String, Set<String>>();
-        for (final var e : g.edges()) {
-            if (!edgeTypes.contains(e.type())) {
-                continue;
-            }
-            if (wantCallers && e.to() != null && e.from() != null) {
-                index.computeIfAbsent(e.to(), name -> new HashSet<>()).add(e.from());
-            }
-            if (wantCallees && e.from() != null && e.to() != null) {
-                index.computeIfAbsent(e.from(), name -> new HashSet<>()).add(e.to());
-            }
-        }
-        return index;
     }
 
     private Set<GraphModel.EdgeType> parseEdgeTypes(final String raw) {

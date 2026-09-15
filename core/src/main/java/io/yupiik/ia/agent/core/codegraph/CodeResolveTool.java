@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -209,21 +210,22 @@ public class CodeResolveTool implements EmbeddedTool {
             final Set<GraphModel.EdgeType> edgeTypes,
             final int depth,
             final int max) {
-        final var g = codeGraph.graph();
-        if (g.symbols().isEmpty() && g.edges().isEmpty()) {
+        final var idx = codeGraph.queryIndex();
+        if (idx == null || idx.symbolCount() == 0) {
             sb.append("code graph: empty (nothing indexed for this project).\n");
             return 0;
         }
-        final var target = resolveExact(symbol, g);
-        if (target == null) {
+        final var targetOrd = resolveOrd(symbol, idx);
+        if (targetOrd < 0) {
             sb.append("code graph: symbol not found locally: ").append(symbol).append('\n');
             return 0;
         }
-        final var targetSymbol = symbolOf(g, target);
+        final var targetName = idx.symbol(targetOrd).fqn();
+        final var targetSymbol = idx.symbol(targetOrd);
         final var onlyImplements = "implements".equalsIgnoreCase(relation != null ? relation.trim() : "");
-        if (onlyImplements && targetSymbol != null && targetSymbol.kind() != GraphModel.Kind.INTERFACE) {
+        if (onlyImplements && targetSymbol.kind() != GraphModel.Kind.INTERFACE) {
             sb.append("code graph: ")
-                    .append(target)
+                    .append(targetName)
                     .append(" is a ")
                     .append(targetSymbol.kind().name().toLowerCase(Locale.ROOT))
                     .append(", not an interface, so nothing implements it directly; trace the interfaces it "
@@ -231,23 +233,20 @@ public class CodeResolveTool implements EmbeddedTool {
             return 0;
         }
         final var direction = directionFor(relation, edgeTypes);
-        final var neighborIndex = buildNeighborIndex(g, edgeTypes, direction);
-        final var byFqn = new HashMap<String, GraphModel.Symbol>();
-        for (final var s : g.symbols()) {
-            byFqn.put(s.fqn(), s);
-        }
+        final var wantOut = "callees".equals(direction) || "both".equals(direction);
+        final var wantIn = "callers".equals(direction) || "both".equals(direction);
         final var found = new ArrayList<String>();
-        final var visited = new HashSet<String>();
-        final var queue = new ArrayDeque<String[]>();
+        final var visited = new HashSet<Integer>();
+        final var queue = new ArrayDeque<int[]>();
         var count = 0;
-        visited.add(target);
-        queue.add(new String[] {target, "0"});
+        visited.add(targetOrd);
+        queue.add(new int[] {targetOrd, 0});
         while (!queue.isEmpty() && count < max) {
             final var cur = queue.removeFirst();
-            final var name = cur[0];
-            final var level = Integer.parseInt(cur[1]);
+            final int ord = cur[0];
+            final int level = cur[1];
             if (level > 0) {
-                found.add(name);
+                found.add(idx.symbol(ord).fqn());
                 count++;
                 if (count >= max) {
                     break;
@@ -256,9 +255,19 @@ public class CodeResolveTool implements EmbeddedTool {
             if (depth > 0 && level >= depth) {
                 continue;
             }
-            for (final var n : neighborIndex.getOrDefault(name, Set.of())) {
+            var neighbors = wantOut ? idx.neighbors(ord, edgeTypes, CodeGraphIndex.Direction.OUT) : new int[0];
+            if (wantIn) {
+                final var in = idx.neighbors(ord, edgeTypes, CodeGraphIndex.Direction.IN);
+                if (neighbors.length == 0) {
+                    neighbors = in;
+                } else if (in.length > 0) {
+                    neighbors = java.util.Arrays.copyOf(neighbors, neighbors.length + in.length);
+                    System.arraycopy(in, 0, neighbors, neighbors.length - in.length, in.length);
+                }
+            }
+            for (final var n : neighbors) {
                 if (visited.add(n)) {
-                    queue.add(new String[] {n, String.valueOf(level + 1)});
+                    queue.add(new int[] {n, level + 1});
                 }
             }
         }
@@ -270,7 +279,8 @@ public class CodeResolveTool implements EmbeddedTool {
                 .append(found.size())
                 .append(" distinct symbol(s) found:\n");
         for (final var name : found) {
-            final var s = byFqn.get(name);
+            final var ord = idx.indexOfFqn(name);
+            final GraphModel.Symbol s = ord >= 0 ? idx.symbol(ord) : null;
             if (s == null || s.file() == null) {
                 sb.append("- ").append(name).append('\n');
             } else {
@@ -293,6 +303,15 @@ public class CodeResolveTool implements EmbeddedTool {
         return found.size();
     }
 
+    /** Resolve {@code symbol} to an index ordinal: exact FQN first, then a unique simple-name suffix. */
+    private static int resolveOrd(final String symbol, final CodeGraphIndex idx) {
+        final var exact = idx.indexOfFqn(symbol);
+        if (exact >= 0) {
+            return exact;
+        }
+        return idx.resolveSuffix(symbol);
+    }
+
     /**
      * Append a bounded note about which indexed dependency (if any) provides {@code symbol}, matching by
      * package/fqn containment against the indexed artifacts' knowledge index entry points.
@@ -302,12 +321,23 @@ public class CodeResolveTool implements EmbeddedTool {
         if (!knowledgeLive()) {
             return;
         }
+        final var want = symbol.trim();
+        final var fast = knowledge.codeGraphProvider(want, artifactHint);
+        if (fast != null) {
+            sb.append("artifact knowledge: ")
+                    .append(symbol)
+                    .append(" is provided/listed by ")
+                    .append(fast)
+                    .append(". Read it with maven_knowledge_content (gav=")
+                    .append(fast)
+                    .append(").\n");
+            return;
+        }
         final var gavs = knowledge.indexedArtifacts();
         if (gavs.isEmpty()) {
             return;
         }
         String match = null;
-        final var want = symbol.trim();
         final var cap = Math.min(gavs.size(), 60);
         for (var i = 0; i < cap && match == null; i++) {
             final var gav = gavs.get(i);
@@ -369,18 +399,9 @@ public class CodeResolveTool implements EmbeddedTool {
                 .orElse("-");
     }
 
-    private static GraphModel.Symbol symbolOf(final GraphStore g, final String fqn) {
-        for (final var s : g.symbols()) {
-            if (fqn.equals(s.fqn())) {
-                return s;
-            }
-        }
-        return null;
-    }
-
     /**
      * For a hierarchy (children) relation we must walk only the direction that maps a supertype to its
-     * subtypes ({@code e.to() == current -> e.from()}, the "callers" branch of {@code buildNeighborIndex}).
+     * subtypes ({@code e.to() == current -> e.from()}, the "callers" branch of the adjacency index).
      * Walking "both" also follows the reverse direction and pulls in a subtype's own unrelated supertype
      * interfaces (e.g. {@code java.io.Serializable}), inflating the result. A "callers"/"callees" relation
      * keeps its natural single direction; the ambiguous/use/import relations fall back to "both".
@@ -405,41 +426,6 @@ public class CodeResolveTool implements EmbeddedTool {
             return "both";
         }
         return "callers";
-    }
-
-    private static String resolveExact(final String symbol, final GraphStore g) {
-        for (final var s : g.symbols()) {
-            if (symbol.equals(s.fqn())) {
-                return s.fqn();
-            }
-        }
-        final var candidates = new ArrayList<String>();
-        for (final var s : g.symbols()) {
-            final var fqn = s.fqn();
-            if (fqn != null && fqn.endsWith('.' + symbol)) {
-                candidates.add(fqn);
-            }
-        }
-        return candidates.size() == 1 ? candidates.get(0) : null;
-    }
-
-    private static Map<String, Set<String>> buildNeighborIndex(
-            final GraphStore g, final Set<GraphModel.EdgeType> edgeTypes, final String direction) {
-        final var wantCallers = "callers".equals(direction) || "both".equals(direction);
-        final var wantCallees = "callees".equals(direction) || "both".equals(direction);
-        final var index = new HashMap<String, Set<String>>();
-        for (final var e : g.edges()) {
-            if (!edgeTypes.contains(e.type())) {
-                continue;
-            }
-            if (wantCallers && e.to() != null && e.from() != null) {
-                index.computeIfAbsent(e.to(), n -> new HashSet<>()).add(e.from());
-            }
-            if (wantCallees && e.from() != null && e.to() != null) {
-                index.computeIfAbsent(e.from(), n -> new HashSet<>()).add(e.to());
-            }
-        }
-        return index;
     }
 
     private static String arg(final Map<String, Object> args, final String key) {

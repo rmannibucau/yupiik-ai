@@ -93,9 +93,9 @@ class StructuralCodeGraphTest {
                 built.symbols().stream().allMatch(s -> s.endLine() >= s.startLine()),
                 "expected each symbol end line to not precede its start line");
 
-        // store must have been persisted
-        final var storeFile = project.resolve(".yca/generated/graph/graph.json");
-        assertTrue(Files.isRegularFile(storeFile));
+        // store must have been persisted as the canonical compact binary index
+        final var indexFile = project.resolve(".yca/generated/graph/index.bin");
+        assertTrue(Files.isRegularFile(indexFile));
 
         // the hidden per-symbol wiring graph must be written alongside, byte-stable and sorted,
         // with graft-style path-scoped node ids and enrichment state
@@ -331,17 +331,19 @@ class StructuralCodeGraphTest {
             assertTrue(status.startsWith("symbols="), "expected status to report symbols, got: " + status);
             assertTrue(status.contains("files="), "expected status to report parsed files, got: " + status);
 
-            // the enum-backed graph must round-trip through persist() without "codec is null"
-            final var storeFile = project.resolve(".yca/generated/graph/graph.json");
-            assertTrue(Files.isRegularFile(storeFile), "expected graph store to be persisted");
+            // the canonical compact binary index must be persisted
+            final var indexFile = project.resolve(".yca/generated/graph/index.bin");
+            assertTrue(Files.isRegularFile(indexFile), "expected binary code graph index to be persisted");
 
-            final var stored = mapper.read(GraphStore.class, Files.newBufferedReader(storeFile));
+            // the enum-backed graph must round-trip through the binary index (no codec / graph.json involved)
+            final var idx = io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex.load(indexFile);
+            final var stored = idx.toStore();
             assertTrue(
                     stored.symbols().stream().anyMatch(s -> s.kind() == GraphModel.Kind.ENUM),
-                    "expected an enum symbol to round-trip through the real JsonMapper");
+                    "expected an enum symbol to round-trip through the binary index");
             assertEquals(graph.graph().symbols().size(), stored.symbols().size());
 
-            // a fresh instance re-loaded from the same store must not hit the null codec either
+            // a fresh instance re-loaded from the same binary index must reproduce the same symbols
             final var reloaded = new StructuralCodeGraph(
                     config,
                     List.of(new JavaGraphParser()),

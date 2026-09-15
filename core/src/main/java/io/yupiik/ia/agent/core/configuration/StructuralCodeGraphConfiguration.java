@@ -66,6 +66,21 @@ public record StructuralCodeGraphConfiguration(
         @Property(
                 defaultValue = "true",
                 documentation =
+                        "Persist the structural graph as a compact hand-rolled binary index (index.bin) and serve tool queries "
+                                + "directly off it, instead of materializing a full graph store in memory. The index is built "
+                                + "at indexation time, memory-mapped at runtime and re-synced incrementally only on changed files/deps.")
+        boolean indexEnabled,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Memory-map the binary index file (read-only) when loading, minimising the resident working set for "
+                                + "very large graphs. Unchanged files are detected by a cheap timestamp check before any SHA-256.")
+        boolean indexMemoryMap,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
                         "Emit a per-source-file markdown doc tree under the graph store, mirroring the project source layout. The docs are deterministic structural extracts (symbols and edges) that agents can grep instead of reading the graph. When 'enrich' is enabled, each doc also gains an async LLM summary.")
         boolean docs,
 

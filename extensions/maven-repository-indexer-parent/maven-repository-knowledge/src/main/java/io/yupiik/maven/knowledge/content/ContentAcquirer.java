@@ -17,6 +17,7 @@ package io.yupiik.maven.knowledge.content;
 
 import io.yupiik.htmltomarkdown.HtmlLightParser;
 import io.yupiik.maven.knowledge.bytecode.BytecodeAnalyzer;
+import io.yupiik.maven.knowledge.bytecode.ClassApiCodeGraphs;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -168,6 +169,26 @@ public class ContentAcquirer {
             return bytecodeIndex(main);
         } catch (final RuntimeException e) {
             return "";
+        }
+    }
+
+    /**
+     * Compact binary code-graph for an artifact, derived from its main jar bytecode (no LLM, no ASM): one
+     * {@link io.yupiik.codegraph.index.IndexSymbol} per public/protected top-level class and per public method,
+     * plus {@code EXTENDS}/{@code IMPLEMENTS} edges. Serialized with the shared {@code code-graph-index} format
+     * so the runtime can mmap it; empty array when no main jar is present. Kind/type ordinals follow the shared
+     * scheme ({@code TYPE=0, METHOD=1, ENUM=4, INTERFACE=6, ANNOTATION=7}; {@code EXTENDS=2, IMPLEMENTS=3}).
+     */
+    public byte[] codeGraph(final io.yupiik.maven.knowledge.Gav gav) {
+        final var artifact = repository.resolve(gav);
+        final var main = artifact == null ? null : artifact.mainJar();
+        if (main == null || !Files.isRegularFile(main)) {
+            return new byte[0];
+        }
+        try {
+            return ClassApiCodeGraphs.toBytes(bytecode.analyze(main), null);
+        } catch (final RuntimeException e) {
+            return new byte[0];
         }
     }
 

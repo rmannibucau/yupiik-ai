@@ -233,7 +233,10 @@ public class Indexer {
         if (config.useLlm() && llm.available()) {
             skills.addAll(LlmRefinement.refine(gav, acquired, entryPoints, apiMarkdown, llm));
         }
-        return factory.writeArtifact(gav, acquirer.contentParts(gav), apiMarkdown, moduleConfig, entryPoints, skills);
+        final var path =
+                factory.writeArtifact(gav, acquirer.contentParts(gav), apiMarkdown, moduleConfig, entryPoints, skills);
+        writer.writeCodeGraph(gav, acquirer.codeGraph(gav));
+        return path;
     }
 
     /**

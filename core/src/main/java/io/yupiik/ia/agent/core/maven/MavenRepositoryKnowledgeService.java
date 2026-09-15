@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.maven;
 
+import io.yupiik.codegraph.index.CodeGraphIndex;
 import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
@@ -37,6 +38,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -60,6 +63,7 @@ public class MavenRepositoryKnowledgeService {
     private final AtomicBoolean sessionSkillsRequested = new AtomicBoolean();
     private final AtomicReference<IndexRun> runningIndex = new AtomicReference<>();
     private volatile String lastSummary;
+    private final CodeGraphIndexCache codeGraphCache = new CodeGraphIndexCache();
 
     /** How many coordinates are previewed in the {@code starting to index ...} acknowledgement. */
     private static final int STARTING_LIST_CAP = 20;
@@ -505,6 +509,53 @@ public class MavenRepositoryKnowledgeService {
     }
 
     /**
+     * Resolve {@code symbol} against the compact per-jar {@code -codegraph.bin} sidecars and return the first
+     * indexed dependency coordinate that provides it. This is the fast path for {@code code_resolve}: an O(1)
+     * {@link CodeGraphIndex#indexOfFqn} hit instead of a per-artifact markdown substring scan. Returns
+     * {@code null} when the code graph cache is disabled, the artifact has no sidecar, or no provider matches.
+     *
+     * @param symbol the fully-qualified symbol (or unique simple name) to find.
+     * @param artifactHint optional {@code group:artifact} (or artifact) hint to narrow the scan; may be null/blank.
+     */
+    public String codeGraphProvider(final String symbol, final String artifactHint) {
+        if (!enabled()
+                || configuration == null
+                || configuration.mavenRepositoryKnowledge() == null
+                || !configuration.mavenRepositoryKnowledge().codegraphIndexEnabled()) {
+            return null;
+        }
+        final var want = symbol == null ? null : symbol.strip();
+        if (want == null || want.isEmpty()) {
+            return null;
+        }
+        final var config = knowledgeConfig();
+        final var repo = new LocalRepository(config.localRepository());
+        final var writer = new KnowledgeWriter(config.localRepository());
+        for (final var gav : projectDependencies()) {
+            if (artifactHint != null
+                    && !artifactHint.isBlank()
+                    && !gav.coordinate().contains(artifactHint)) {
+                continue;
+            }
+            if (repo.resolve(gav).mainJar() == null) {
+                continue;
+            }
+            final var file = writer.codeGraphFile(gav);
+            if (!Files.isRegularFile(file)) {
+                continue;
+            }
+            final var idx = codeGraphCache.get(file);
+            if (idx != null) {
+                final boolean hit = idx.indexOfFqn(want) >= 0 || idx.resolveSuffix(want) >= 0;
+                if (hit) {
+                    return gav.coordinate();
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Read generated knowledge on demand. With only a {@code coordinate} ({@code g:a:v}) the artifact's
      * {@code -knowledge-index.md} is returned; pass a {@code shortName} (e.g. {@code api},
      * {@code sources-0}, {@code javadoc-<class>}) to read the referenced sibling file instead, so the index
@@ -745,5 +796,61 @@ public class MavenRepositoryKnowledgeService {
         public String summary() {
             return summary;
         }
+    }
+
+    /**
+     * A size-bounded, least-recently-used cache of memory-mapped dependency code graph sidecars
+     * ({@code -codegraph.bin}), keyed by file path. Once the cumulative mapped bytes exceed the configured cap
+     * the least-recently-used entries are evicted (their mappings are eligible for GC). Bound is taken from
+     * {@code yca.mavenRepositoryKnowledge.codegraphIndexCacheBytes}; a non-positive bound keeps the cache
+     * unbounded.
+     */
+    private final class CodeGraphIndexCache {
+        private final LinkedHashMap<Path, Entry> entries;
+        private long mappedBytes;
+
+        private CodeGraphIndexCache() {
+            this.entries = new LinkedHashMap<>(16, 0.75f, true); // access-order LRU
+        }
+
+        private long bound() {
+            if (configuration == null || configuration.mavenRepositoryKnowledge() == null) {
+                return 0;
+            }
+            return configuration.mavenRepositoryKnowledge().codegraphIndexCacheBytes();
+        }
+
+        private synchronized CodeGraphIndex get(final Path file) {
+            final var cached = entries.get(file);
+            if (cached != null) {
+                return cached.index;
+            }
+            final long size;
+            final CodeGraphIndex index;
+            try {
+                size = Files.size(file);
+                index = CodeGraphIndex.mmap(file);
+            } catch (final IOException e) {
+                return null;
+            }
+            mappedBytes += size;
+            entries.put(file, new Entry(index, size));
+            final var bound = bound();
+            if (bound > 0) {
+                evict(bound);
+            }
+            return index;
+        }
+
+        private void evict(final long bound) {
+            final Iterator<Map.Entry<Path, Entry>> it = entries.entrySet().iterator();
+            while (it.hasNext() && mappedBytes > bound) {
+                final var e = it.next().getValue();
+                mappedBytes -= e.bytes;
+                it.remove();
+            }
+        }
+
+        private record Entry(CodeGraphIndex index, long bytes) {}
     }
 }

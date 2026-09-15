@@ -56,9 +56,11 @@ For example `src/main/java/acme/Order.java` produces
 `<storeDir>/docs/src/main/java/acme/Order.java.md`. Symbols and relations are
 exposed as plain text, so they can be searched by simply grepping the docs
 directory (for instance with the built-in `grep` tool and
-`path=<storeDir>/docs`) instead of reading the graph store. `graph.json`
+`path=<storeDir>/docs`) instead of reading the graph store. `index.bin`
 remains the source of truth for call-graph tracing (`code_trace_calls`) and for
-the incremental fingerprint re-indexing.
+the incremental fingerprint re-indexing. See
+xref:features/code-graph-index.adoc[Compact binary code graph index] for the
+on-disk format and the memory-mapped dependency-jar sidecars.
 
 == Custom agents
 

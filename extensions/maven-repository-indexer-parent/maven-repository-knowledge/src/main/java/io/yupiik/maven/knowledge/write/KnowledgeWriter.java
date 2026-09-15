@@ -95,6 +95,43 @@ public final class KnowledgeWriter {
     }
 
     /**
+     * {@code <repo>/<g>/<a>/<v>/<a>-<v>-codegraph.bin}: the compact binary code-graph sidecar for the artifact's
+     * main jar, written at index time so the runtime can mmap it without re-parsing bytecode.
+     */
+    public Path codeGraphFile(final Gav gav) {
+        return versionDir(gav).resolve(filePrefix(gav) + "-codegraph.bin");
+    }
+
+    /**
+     * Atomically write the compact binary code-graph sidecar ({@code -codegraph.bin}) under the artifact version
+     * dir. A zero-length payload removes the file. Returns the written path (or {@code null} when removed).
+     */
+    public Path writeCodeGraph(final Gav gav, final byte[] bytes) {
+        final var file = codeGraphFile(gav);
+        try {
+            if (bytes == null || bytes.length == 0) {
+                Files.deleteIfExists(file);
+                return null;
+            }
+            Files.createDirectories(file.getParent());
+            final var tmp = file.resolveSibling(file.getFileName() + ".tmp");
+            Files.write(tmp, bytes);
+            try {
+                Files.move(
+                        tmp,
+                        file,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            return file;
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /**
      * The sidecar file holding the build-declaration fingerprint captured when the artifact was last indexed:
      * {@code <repo>/<g>/<a>/<v>/.maven-knowledge-fingerprint}. Used to re-index only dependencies whose declaring
      * build files changed.

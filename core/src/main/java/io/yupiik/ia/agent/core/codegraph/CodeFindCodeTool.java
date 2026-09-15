@@ -77,26 +77,19 @@ public class CodeFindCodeTool implements EmbeddedTool {
             return ToolResult.error("query is required");
         }
         final var kind = arg(args, "kind");
-        final var qKind = kind == null || kind.isBlank() ? null : kind.toUpperCase(Locale.ROOT);
+        final var qKind = parseKind(kind);
         final var max = (int) Math.max(1, Math.min(200, optInt(args, "max", 40)));
-        final var q = query.toLowerCase(Locale.ROOT);
-        final var g = codeGraph.graph();
+        final var idx = codeGraph.queryIndex();
+        if (idx == null) {
+            return ToolResult.ok("Structural code graph is empty.");
+        }
+        final var found = idx.find(query, qKind, max);
+        if (found.isEmpty()) {
+            return ToolResult.ok("No symbol matching '" + query + "'.");
+        }
         final var sb = new StringBuilder();
         var count = 0;
-        for (final var s : g.symbols()) {
-            if (count >= max) {
-                break;
-            }
-            if (qKind != null && s.kind() != null && !s.kind().name().equals(qKind)) {
-                continue;
-            }
-            final var fqn = s.fqn();
-            final var fqnLower = fqn == null ? "" : fqn.toLowerCase(Locale.ROOT);
-            final var simpleLower = simple(fqn) == null ? "" : simple(fqn).toLowerCase(Locale.ROOT);
-            if (!fqnLower.contains(q) && !simpleLower.contains(q)) {
-                continue;
-            }
-            count++;
+        for (final var s : found) {
             sb.append(s.kind())
                     .append("  ")
                     .append(s.fqn())
@@ -107,9 +100,7 @@ public class CodeFindCodeTool implements EmbeddedTool {
                     .append('-')
                     .append(s.endLine())
                     .append(")\n");
-        }
-        if (count == 0) {
-            return ToolResult.ok("No symbol matching '" + query + "'.");
+            count++;
         }
         if (count >= max) {
             sb.append("... capped at ").append(max).append('\n');
@@ -117,12 +108,15 @@ public class CodeFindCodeTool implements EmbeddedTool {
         return ToolResult.ok(count + " symbol(s)\n" + sb);
     }
 
-    private String simple(final String fqn) {
-        if (fqn == null) {
+    private GraphModel.Kind parseKind(final String kind) {
+        if (kind == null || kind.isBlank()) {
             return null;
         }
-        final var dot = fqn.lastIndexOf('.');
-        return dot >= 0 ? fqn.substring(dot + 1) : fqn;
+        try {
+            return GraphModel.Kind.valueOf(kind.toUpperCase(Locale.ROOT));
+        } catch (final IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private String file(final GraphModel.Symbol s) {

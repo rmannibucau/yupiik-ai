@@ -118,4 +118,20 @@ public record MavenRepositoryKnowledgeConfiguration(
                                 + "knowledge index for the project's artifacts is fully provisioned, instead of returning "
                                 + "immediately from the async executor. Intended for tests/benchmarks that must ensure the "
                                 + "index is completely built (and mounted into the session prompt) before the prompt starts.")
-        boolean synchronous) {}
+        boolean synchronous,
+
+        @Property(
+                defaultValue = "true",
+                documentation = "Serve dependency symbol lookups from the compact binary per-jar code graph sidecars "
+                        + "(-codegraph.bin) that the indexer writes next to the -knowledge-*.md files, memory-mapped "
+                        + "and bounded by codegraphIndexCacheBytes. When disabled, knowledge matching falls back to "
+                        + "scanning the -knowledge-index.md text.")
+        boolean codegraphIndexEnabled,
+
+        @Property(
+                defaultValue = "134217728L",
+                documentation =
+                        "Upper bound, in bytes, of the resident memory-mapped dependency code graph cache. The cache "
+                                + "evicts least-recently-used jars once the total mapped size exceeds this limit. 0 or a "
+                                + "negative value keeps the cache unbounded.")
+        long codegraphIndexCacheBytes) {}
