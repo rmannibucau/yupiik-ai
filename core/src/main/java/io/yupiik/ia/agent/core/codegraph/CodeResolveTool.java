@@ -111,7 +111,10 @@ public class CodeResolveTool implements EmbeddedTool {
         return "Resolve a symbol against " + String.join(" and ", bases) + ". "
                 + "Use op=list to enumerate available indexed artifacts, and op=resolve to get the relations "
                 + "of a symbol (children/implementors, callers, callees, usages) with file locations so you do "
-                + "not need to re-trace. On demand, read a specific artifact's knowledge with maven_knowledge_content.";
+                + "not need to re-trace. The returned graph relations are complete and authoritative for the "
+                + "requested relation: do not grep or re-read the referenced sources just to confirm membership, "
+                + "only read a file if you need method/body detail. On demand, read a specific artifact's "
+                + "knowledge with maven_knowledge_content.";
     }
 
     @Override
@@ -137,7 +140,8 @@ public class CodeResolveTool implements EmbeddedTool {
                 Schemas.str("Relation to follow (op=resolve only): implements, extends, callers, callees, uses. "
                         + "Default: implements+extends."));
         props.put("artifact", Schemas.str("Optional artifact coordinate (g:a:v) hint to narrow the knowledge lookup."));
-        props.put("depth", Schemas.intProp("Max BFS depth, default 3."));
+        props.put(
+                "depth", Schemas.intProp("Max BFS depth. Unlimited (0) by default; set a positive value to bound it."));
         props.put("max", Schemas.intProp("Max number of results, default 80."));
         return Schemas.object(props, "op");
     }
@@ -176,7 +180,7 @@ public class CodeResolveTool implements EmbeddedTool {
         final var relation = arg(args, "relation");
         final var artifact = arg(args, "artifact");
         final var edgeTypes = relationsToEdgeTypes(relation);
-        final var depth = (int) Math.clamp(optInt(args, "depth", 3), 1, 8);
+        final var depth = optInt(args, "depth", 0);
         final var max = (int) Math.clamp(optInt(args, "max", 80), 1, 500);
 
         final var sb = new StringBuilder();
@@ -249,7 +253,7 @@ public class CodeResolveTool implements EmbeddedTool {
                     break;
                 }
             }
-            if (level >= depth) {
+            if (depth > 0 && level >= depth) {
                 continue;
             }
             for (final var n : neighborIndex.getOrDefault(name, Set.of())) {

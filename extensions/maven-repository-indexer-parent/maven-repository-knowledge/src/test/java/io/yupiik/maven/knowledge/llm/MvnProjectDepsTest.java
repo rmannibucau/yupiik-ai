@@ -102,14 +102,15 @@ class MvnProjectDepsTest {
         Files.createDirectories(project);
         // a build file exists so a fingerprint can be computed; mvn would fail (no real pom) - the cache bypasses it
         Files.writeString(project.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
-        final var cacheDir = tmp.resolve("repo");
         final var cached = List.of(Gav.of("com.ex", "cached", "1"), Gav.of("com.ex", "second", "2"));
-        final var cacheFile =
-                cacheDir.resolve(".yca").resolve("project-deps").resolve(MvnProjectDeps.fingerprint(project) + ".deps");
+        // the cache lives under the project tree at .yca/maven.dependency.list with a fingerprint header
+        final var cacheFile = project.resolve(".yca").resolve("maven.dependency.list");
         Files.createDirectories(cacheFile.getParent());
-        Files.writeString(cacheFile, "com.ex:cached:1\ncom.ex:second:2\n");
+        Files.writeString(
+                cacheFile,
+                "# fingerprint=" + MvnProjectDeps.fingerprint(project) + "\ncom.ex:cached:1\ncom.ex:second:2\n");
 
-        assertEquals(cached, MvnProjectDeps.resolve(project, 120_000, cacheDir), "cache hit must skip mvn");
+        assertEquals(cached, MvnProjectDeps.resolve(project, 120_000), "cache hit must skip mvn");
     }
 
     @Test
@@ -117,19 +118,18 @@ class MvnProjectDepsTest {
         final var project = tmp.resolve("project");
         Files.createDirectories(project);
         Files.writeString(project.resolve("pom.xml"), "<project/>");
-        // an entry for the OLD fingerprint (mismatch) -> cache must be ignored and mvn re-run (fails -> empty)
-        final var cacheDir = tmp.resolve("repo");
-        final var cacheFile =
-                cacheDir.resolve(".yca").resolve("project-deps").resolve(MvnProjectDeps.fingerprint(project) + ".deps");
+        // a cache entry for the OLD fingerprint (computed before the change below) -> a mismatch means the
+        // stale entry must be ignored and mvn re-run (the fake `mvn` emits a constant dependency:list output)
+        final var cacheFile = project.resolve(".yca").resolve("maven.dependency.list");
         Files.createDirectories(cacheFile.getParent());
-        Files.writeString(cacheFile, "com.ex:cached:1\n");
+        Files.writeString(cacheFile, "# fingerprint=" + MvnProjectDeps.fingerprint(project) + "\ncom.ex:cached:1\n");
 
         // change a build file so the fingerprint no longer matches the stale cache entry; the stale entry
         // must not be reused - resolution runs the fake `mvn` and returns its constant output instead
         Files.writeString(project.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
         assertEquals(
                 List.of(Gav.of("io.yupiik.fake", "fake-util", "2.0"), Gav.of("io.yupiik.fake", "fake-lib", "1.0")),
-                MvnProjectDeps.resolve(project, 120_000, cacheDir),
+                MvnProjectDeps.resolve(project, 120_000),
                 "a stale cache entry (different fingerprint) must not be reused");
     }
 }

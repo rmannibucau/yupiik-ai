@@ -51,7 +51,9 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         return "Trace relations of a symbol in the structural code graph (breadth-first, optional depth limit): "
                 + "callers/callees via calls, implementors (edgeTypes=implements), extensions (extends), usages (uses) "
                 + "or imports. Default follows calls; narrow with the edgeTypes parameter (eg. edgeTypes=implements). "
-                + "Returns each found symbol resolved to its kind and file location so you do not need to re-trace.";
+                + "Returns each found symbol resolved to its kind and file location. The returned list is complete and "
+                + "authoritative for the traced relation: do not grep or re-read the referenced sources simply to "
+                + "confirm membership, only read a file if you need method/body detail beyond the trace.";
     }
 
     @Override
@@ -79,7 +81,9 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                                         "Comma-separated relation types to follow, default `calls`. Accepted: calls, "
                                                 + "implements, extends, uses, imports, all. Eg. `implements` finds "
                                                 + "implementors of an interface."),
-                        "depth", Schemas.intProp("Maximum traversal depth, default 3."),
+                        "depth",
+                                Schemas.intProp(
+                                        "Maximum traversal depth. Unlimited (0) by default; set a positive value to bound it."),
                         "max", Schemas.intProp("Maximum number of edges to report, default 80.")),
                 "symbol");
     }
@@ -92,7 +96,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         }
         final var direction = arg(args, "direction");
         final var edgeTypes = parseEdgeTypes(arg(args, "edgeTypes"));
-        final var depth = Math.clamp(optInt(args, "depth", 3), 1, 8);
+        final var depth = optInt(args, "depth", 0);
         final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
         final var g = codeGraph.graph();
         if (g.symbols().isEmpty() && g.edges().isEmpty()) {
@@ -130,7 +134,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                     break;
                 }
             }
-            if (level >= depth) {
+            if (depth > 0 && level >= depth) {
                 continue;
             }
             for (final var n : neighborIndex.getOrDefault(name, Set.of())) {
