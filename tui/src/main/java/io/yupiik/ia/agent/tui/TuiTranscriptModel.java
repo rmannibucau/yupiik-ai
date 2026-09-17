@@ -128,7 +128,8 @@ public class TuiTranscriptModel {
                     .append(" applied (")
                     .append(mode.toLowerCase(java.util.Locale.ROOT))
                     .append(")\n");
-        } else if (event instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message)) {
+        } else if (event
+                instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message, String finishReason)) {
             final var tag =
                     switch (level) {
                         case ERROR -> "⚠ error";

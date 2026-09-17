@@ -45,12 +45,16 @@ public sealed interface AgentEvent {
      * status bar) so feedback survives and is understandable in all cases,
      * including failures that would otherwise be silent.
      */
-    record Notice(Level level, String message) implements AgentEvent {
+    record Notice(Level level, String message, String finishReason) implements AgentEvent {
 
         public enum Level {
             INFO,
             WARN,
             ERROR
+        }
+
+        public Notice(final Level level, final String message) {
+            this(level, message, null);
         }
 
         public static Notice info(final String message) {

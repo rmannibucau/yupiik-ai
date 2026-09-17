@@ -319,7 +319,7 @@ public class AgentLoop {
                     emit(new AgentEvent.TurnDone(content));
                     return content;
                 }
-                final var todos = unfinishedTodosNotice(toolsRanThisTurn);
+                final var todos = unfinishedTodosNotice(toolsRanThisTurn, reason);
                 if (todos != null) {
                     emit(todos);
                 }
@@ -350,9 +350,12 @@ public class AgentLoop {
     /**
      * A turn that ran tools but ends text-only while the todo list still has pending items looks
      * finished to the loop while the work is not: surface it so the user can resume explicitly
-     * instead of silently losing the remaining steps.
+     * instead of silently losing the remaining steps. The notice is emitted with the normalized
+     * {@code finish_reason} so a rich frontend can tell a deliberate, clean stop (the model chose
+     * to end its turn despite pending work) apart from a truncation or an error, which are reported
+     * by separate events.
      */
-    private AgentEvent.Notice unfinishedTodosNotice(final boolean toolsRanThisTurn) {
+    private AgentEvent.Notice unfinishedTodosNotice(final boolean toolsRanThisTurn, final String finishReason) {
         if (!toolsRanThisTurn || todoStore == null) {
             return null;
         }
@@ -365,8 +368,11 @@ public class AgentLoop {
         if (pending == 0) {
             return null;
         }
-        return AgentEvent.Notice.warn(
-                "turn ended with " + pending + '/' + todos.size() + " todos still pending - send 'continue' to resume");
+        return new AgentEvent.Notice(
+                AgentEvent.Notice.Level.WARN,
+                "model ended its turn (finish_reason=" + finishReason + ") with " + pending + '/' + todos.size()
+                        + " todos still pending - send 'continue' to resume, or review why it stopped",
+                finishReason);
     }
 
     private void executeTool(final String sessionId, final List<Message> messages, final ToolCall call) {

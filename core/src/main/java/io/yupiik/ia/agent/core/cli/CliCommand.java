@@ -613,7 +613,8 @@ public class CliCommand implements Runnable {
             stopSpinner();
             System.err.println(MarkdownColorizer.status(symbols.infoMarker() + "context " + kind + " applied ("
                     + mode.toLowerCase(java.util.Locale.ROOT) + ")"));
-        } else if (event instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message)) {
+        } else if (event
+                instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message, String finishReason)) {
             stopSpinner();
             final var marker =
                     switch (level) {

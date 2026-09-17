@@ -214,10 +214,12 @@ class AgentLoopTest {
         final var notices =
                 events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
         assertEquals(1, notices.size());
-        assertEquals(AgentEvent.Notice.Level.WARN, ((AgentEvent.Notice) notices.getFirst()).level());
+        final var notice = (AgentEvent.Notice) notices.getFirst();
+        assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
         assertEquals(
-                "turn ended with 2/3 todos still pending - send 'continue' to resume",
-                ((AgentEvent.Notice) notices.getFirst()).message());
+                "model ended its turn (finish_reason=stop) with 2/3 todos still pending - send 'continue' to resume, or review why it stopped",
+                notice.message());
+        assertEquals("stop", notice.finishReason());
     }
 
     @Test
