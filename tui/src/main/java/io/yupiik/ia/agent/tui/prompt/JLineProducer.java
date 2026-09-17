@@ -43,9 +43,10 @@ public class JLineProducer {
 
     @Bean
     @ApplicationScoped
-    public LineReader lineReader(final Terminal terminal) {
+    public LineReader lineReader(final Terminal terminal, final SlashCommandCompleter completer) {
         return LineReaderBuilder.builder()
                 .terminal(terminal)
+                .completer(completer)
                 .option(LineReader.Option.DISABLE_EVENT_EXPANSION, true)
                 .build();
     }
