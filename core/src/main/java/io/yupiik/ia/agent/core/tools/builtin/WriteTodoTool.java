@@ -25,20 +25,20 @@ import java.util.List;
 import java.util.Map;
 
 @ApplicationScoped
-public class TodoWriteTool implements EmbeddedTool {
+public class WriteTodoTool implements EmbeddedTool {
     private final TodoStore todoStore;
 
-    public TodoWriteTool(final TodoStore todoStore) {
+    public WriteTodoTool(final TodoStore todoStore) {
         this.todoStore = todoStore;
     }
 
-    protected TodoWriteTool() {
+    protected WriteTodoTool() {
         this.todoStore = null;
     }
 
     @Override
     public String name() {
-        return "todo_write";
+        return "write_todo";
     }
 
     @Override

@@ -50,7 +50,7 @@ public final class ToolPresenter {
             case "grep" -> "Search(" + shortString(str(args, "pattern")) + " in " + compact(str(args, "path")) + ")";
             case "glob" -> "Find(" + compact(str(args, "pattern")) + ")";
             case "list_dir" -> "List(" + compact(str(args, "path")) + ")";
-            case "todo_write" -> "Todos(" + todoCount(argsJson) + ")";
+            case "write_todo" -> "Todos(" + todoCount(argsJson) + ")";
             case "memory_write" -> "Memory(" + compact(str(args, "phase")) + ")";
             case "ask_user" -> "Ask(" + shortString(str(args, "question")) + ")";
             case "" -> "(unknown tool)";

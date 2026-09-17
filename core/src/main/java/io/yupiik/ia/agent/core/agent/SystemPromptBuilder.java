@@ -115,7 +115,7 @@ public class SystemPromptBuilder {
             sb.append(
                     "Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
             sb.append(
-                    "Use todo_write to record the plan: one pending item per concrete implementation step, in execution order. todo_write is the only state-changing tool allowed in this mode.\n");
+                    "Use write_todo to record the plan: one pending item per concrete implementation step, in execution order. write_todo is the only state-changing tool allowed in this mode.\n");
             appendTodoGuidance(sb);
             sb.append('\n');
         } else {
@@ -125,7 +125,7 @@ public class SystemPromptBuilder {
             sb.append("Rules:\n");
             sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
             sb.append("- Read files before editing them; keep edits minimal and focused.\n");
-            sb.append("- Use todo_write to track multi-step work and keep it up to date.\n");
+            sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
             sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
             sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
             sb.append(

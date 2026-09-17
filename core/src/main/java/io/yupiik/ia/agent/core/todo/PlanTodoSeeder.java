@@ -31,7 +31,7 @@ import java.util.logging.Logger;
 /**
  * Seeds the todo list from the last assistant message (the plan) when the session
  * switches from PLAN mode to BUILD mode and the model did not record the plan
- * with todo_write itself.
+ * with write_todo itself.
  */
 @ApplicationScoped
 public class PlanTodoSeeder {

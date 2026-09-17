@@ -49,7 +49,7 @@ public class TodoPromptResolver {
 
     private static final String OPENAI = """
             Task Management:
-            Use the todo_write tool to manage and plan tasks. Use it frequently so your todos track your
+            Use the write_todo tool to manage and plan tasks. Use it frequently so your todos track your
             progress and give the user visibility into it. It is also very useful to break a larger task down
             into smaller concrete steps.
             It is critical that you mark a todo as completed as soon as the task it describes is actually done,
@@ -59,7 +59,7 @@ public class TodoPromptResolver {
 
     private static final String ANTHROPIC = """
             Task Management:
-            You have access to the todo_write tool to help you manage and plan tasks. Use it VERY frequently to
+            You have access to the write_todo tool to help you manage and plan tasks. Use it VERY frequently to
             ensure you are tracking your tasks and giving the user visibility into your progress. It is also
             EXTREMELY helpful for planning, and for breaking down larger complex tasks into smaller steps; if you
             do not use it when planning you may forget to do important tasks - and that is unacceptable.
@@ -68,7 +68,7 @@ public class TodoPromptResolver {
 
     private static final String GEMINI = """
             Task Management:
-            Use the todo_write tool to keep a structured task list for multi-step work. Mark each item in_progress
+            Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress
             as you start it and completed as soon as it is really done; keep a single in_progress item and do not
             batch completion updates. Prefer writing a todo when the request involves several distinct steps.""";
 

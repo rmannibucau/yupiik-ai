@@ -21,7 +21,7 @@
 - Plan/build access modes: `plan` is the default and is read-only (read tools plus
   MCP tools whitelisted as read-only); `build` uses every tool and any action.
   Switchable at runtime with `/mode` (or `--yca-run-mode` for `run`). In `plan`
-  mode the plan steps are recorded with `todo_write` as pending todos, and
+  mode the plan steps are recorded with `write_todo` as pending todos, and
   switching back to `build` seeds the todo list from the last plan when the model
   did not record it itself
 - MCP server health shown in the TUI sidebar with status dots (enabled / disabled / failing)

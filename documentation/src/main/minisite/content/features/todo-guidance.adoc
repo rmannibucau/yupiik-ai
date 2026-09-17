@@ -1,7 +1,7 @@
 = Todo and plan guidance
 :minisite-breadcrumb: Home[index.html] > Features > Todo and plan guidance
 
-The `todo_write` tool is the single way the model records and updates the todo
+The `write_todo` tool is the single way the model records and updates the todo
 list, replacing it entirely on each call. yca treats todos the way opencode does:
 as a voluntary, self-reported progress mechanism, not a hard gate. In `plan`
 mode the model records its plan as pending todos; on the switch to `build` the
@@ -21,7 +21,7 @@ yca makes this tunable per provider through `yca.provider.<id>.prompt.todo`:
 |Value |Effect
 |`auto` (default) |Detects the model family from the provider `baseUrl` and injects a matching guidance block; when the family is unknown it falls back to the OpenAI wording.
 |any other non-empty string |Injected verbatim into the system prompt as the todo-guidance appendix, opencode-style.
-|empty or `false` |Disables the extra guidance entirely; only the base prompt rules about `todo_write` remain.
+|empty or `false` |Disables the extra guidance entirely; only the base prompt rules about `write_todo` remain.
 |===
 
 For example, to override the guidance text for a provider:
@@ -29,7 +29,7 @@ For example, to override the guidance text for a provider:
 [source,properties]
 ----
 yca.provider.anthropic.baseUrl=https://api.anthropic.com
-yca.provider.anthropic.prompt.todo=Use todo_write every few steps to reflect current progress.
+yca.provider.anthropic.prompt.todo=Use write_todo every few steps to reflect current progress.
 ----
 
 The resolved block is appended as a `<todo-guidance>` section in both `plan` and

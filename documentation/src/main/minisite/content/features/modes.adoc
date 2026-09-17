@@ -9,5 +9,5 @@ yca access modes shape how the agent works:
 
 The active mode can be switched at runtime with `/mode`, or set headlessly with
 `--yca-run-mode build|plan` on `run`. In `plan` mode write tools are denied and
-`todo_write` records the planned steps; switching back to `build` seeds the todo
+`write_todo` records the planned steps; switching back to `build` seeds the todo
 list from the last plan when the model did not record it itself.

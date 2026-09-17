@@ -170,7 +170,7 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
         assertTrue(service.check("grep", ToolCategory.READ, Map.of()).allowed());
-        assertTrue(service.check("todo_write", ToolCategory.AGENT, Map.of()).allowed());
+        assertTrue(service.check("write_todo", ToolCategory.AGENT, Map.of()).allowed());
     }
 
     @Test

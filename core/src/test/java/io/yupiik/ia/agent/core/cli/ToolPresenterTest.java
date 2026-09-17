@@ -57,7 +57,7 @@ class ToolPresenterTest {
     @Test
     void summarizesTodosAndUnknown() {
         assertEquals(
-                "Todos(2)", presenter.summarize("todo_write", "{\"todos\":[{\"content\":\"a\"},{\"content\":\"b\"}]}"));
+                "Todos(2)", presenter.summarize("write_todo", "{\"todos\":[{\"content\":\"a\"},{\"content\":\"b\"}]}"));
         final var unknown = presenter.summarize("some_mcp_tool", "{\"query\":\"hello world\"}");
         assertTrue(unknown.startsWith("some_mcp_tool("));
     }
