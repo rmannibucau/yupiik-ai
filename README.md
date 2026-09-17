@@ -61,6 +61,13 @@ java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatja
 `--yca-run-permitAll` (and `--yca-tui-permitAll` for the `tui` command) bypass
 permission prompts and allow every tool call without asking.
 
+The `cli` command gets full line editing when the fatjar is used: Up/Down browse
+the in-memory history, Alt-b/Alt-f move by word, Alt-Backspace and Ctrl-W delete
+a word, Ctrl-A/Ctrl-E/Ctrl-U/Ctrl-K edit the line, Left/Right/Delete move and
+Ctrl-L clears the screen. `/shortcuts` lists the active keys. When only the
+`core` jar is on the classpath the prompt falls back to a plain, non-editing
+`stdin` reader (Ctrl-C/Ctrl-D still work).
+
 Argument keys may be given with or without the `yca.` prefix, so both
 `--provider-model` and `--yca-provider-model` work.
 

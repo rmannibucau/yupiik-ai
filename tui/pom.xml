@@ -39,6 +39,10 @@
       <artifactId>tamboui-jline3-backend</artifactId>
     </dependency>
     <dependency>
+      <groupId>org.jline</groupId>
+      <artifactId>jline</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.commonmark</groupId>
       <artifactId>commonmark</artifactId>
       <version>0.28.0</version>

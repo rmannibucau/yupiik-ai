@@ -24,6 +24,8 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.cli.prompt.Prompt;
+import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
@@ -42,11 +44,8 @@ import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
 import java.lang.reflect.Proxy;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -84,6 +83,7 @@ public class CliCommand implements Runnable {
     private final ReplSlashCommands replSlashCommands;
     private final ModelStyleService modelStyleService;
     private final Clock clock;
+    private final Prompt prompt;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
     private static final long CLEANUP_AWAIT_NANOS = 1_000_000_000L;
@@ -108,7 +108,6 @@ public class CliCommand implements Runnable {
     private volatile long turnStartNanos;
     private volatile int toolsRun;
     private volatile AgentEvent.UsageUpdated lastUsageEvent;
-    private BufferedReader stdin;
     private String sessionId;
     private String activeAgent = "";
     private Path contextPath;
@@ -131,6 +130,7 @@ public class CliCommand implements Runnable {
             final JsonMapper mapper,
             final ReplSlashCommands replSlashCommands,
             final ModelStyleService modelStyleService,
+            final Prompt prompt,
             final Clock clock) {
         this.conf = conf;
         this.agentLoop = agentLoop;
@@ -147,6 +147,7 @@ public class CliCommand implements Runnable {
         this.mavenKnowledgeService = mavenKnowledgeService;
         this.replSlashCommands = replSlashCommands;
         this.modelStyleService = modelStyleService;
+        this.prompt = prompt;
         this.clock = clock;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
@@ -212,7 +213,6 @@ public class CliCommand implements Runnable {
 
     @Override
     public void run() {
-        stdin = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         installInterruptHandler();
         sessionId = resolveSessionId();
         contextPath = sessionStore.path(sessionId);
@@ -410,8 +410,16 @@ public class CliCommand implements Runnable {
         try {
             while (true) {
                 println(dividingRule());
-                print(promptLine());
-                final var line = stdin.readLine();
+                final String line;
+                try {
+                    line = prompt.readLine(promptLine());
+                } catch (final PromptInterruptException e) {
+                    onInterrupt();
+                    if (quitRequested) {
+                        break;
+                    }
+                    continue;
+                }
                 if (line == null || quitRequested) {
                     break;
                 }
@@ -437,15 +445,27 @@ public class CliCommand implements Runnable {
         }
     }
 
+    /**
+     * Reads a line for a non-REPL interaction. A Ctrl-C is treated as a
+     * cancellation (returns {@code null}) after notifying the interrupt handler.
+     */
+    private String readLineOrNull(final String promptText) throws IOException {
+        try {
+            return prompt.readLine(promptText);
+        } catch (final PromptInterruptException e) {
+            onInterrupt();
+            return null;
+        }
+    }
+
     private boolean mavenIndexingBlocking() {
         final var run = mavenKnowledgeService.currentIndex();
         if (run == null || !run.inFlight()) {
             return false;
         }
-        print(MarkdownColorizer.status("maven knowledge index still running (" + run.doneCount() + "/" + run.total()
-                + ") - send the prompt anyway? [y/N] "));
         try {
-            final var answer = stdin.readLine();
+            final var answer = readLineOrNull(MarkdownColorizer.status("maven knowledge index still running ("
+                    + run.doneCount() + "/" + run.total() + ") - send the prompt anyway? [y/N] "));
             if (answer == null) {
                 return false;
             }
@@ -948,9 +968,9 @@ public class CliCommand implements Runnable {
             println((i + 1) + ". " + MarkdownColorizer.accent(s.id()) + "  (" + s.sizeBytes() + " bytes)"
                     + (title.isBlank() ? "" : " -- " + MarkdownColorizer.status(cap(title, RESUME_SUMMARY_WIDTH))));
         }
-        print(MarkdownColorizer.accent("select session [1-" + sessions.size() + "] or Enter/c to cancel: "));
         try {
-            final var line = stdin.readLine();
+            final var line = readLineOrNull(
+                    MarkdownColorizer.accent("select session [1-" + sessions.size() + "] or Enter/c to cancel: "));
             if (line == null) {
                 return false;
             }
@@ -1152,7 +1172,7 @@ public class CliCommand implements Runnable {
         println(MarkdownColorizer.status(
                 "edit the file (# Plan and # Todos sections), then press Enter to reload, or type 'c' to cancel"));
         try {
-            final var input = stdin.readLine();
+            final var input = readLineOrNull("");
             if (input != null) {
                 final var decision = input.trim();
                 if (decision.equalsIgnoreCase("c") || decision.equalsIgnoreCase("cancel")) {
@@ -1176,9 +1196,9 @@ public class CliCommand implements Runnable {
         return (title, detail, toolName, args) -> {
             stopSpinner();
             printApprovalBox(title, detail);
-            print(MarkdownColorizer.accent("allow? [y/n/a] (y=once, n=no, a=always this session) "));
             try {
-                final var line = stdin.readLine();
+                final var line = readLineOrNull(
+                        MarkdownColorizer.accent("allow? [y/n/a] (y=once, n=no, a=always this session) "));
                 if (line != null) {
                     final var c = line.strip().toLowerCase(Locale.ROOT);
                     if (c.equals("y") || c.equals("yes") || c.equals("o") || c.equals("ok")) {
@@ -1263,14 +1283,13 @@ public class CliCommand implements Runnable {
             if (questions == null || questions.isEmpty()) {
                 return Map.of();
             }
-            final var reader = stdin;
             final Map<String, Object> answers = new HashMap<>();
             boolean restart;
             do {
                 restart = false;
                 answers.clear();
                 for (final var question : questions) {
-                    final var answer = askOne(reader, question);
+                    final var answer = askOne(question);
                     if (answer == null) {
                         return null;
                     }
@@ -1281,9 +1300,9 @@ public class CliCommand implements Runnable {
                 for (final var question : questions) {
                     println("- " + question.prompt() + " -> " + answers.get(question.id()));
                 }
-                print(MarkdownColorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "));
                 try {
-                    final var line = reader.readLine();
+                    final var line =
+                            readLineOrNull(MarkdownColorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "));
                     if (line != null) {
                         final var c = line.strip().toLowerCase(Locale.ROOT);
                         if (c.equals("e") || c.equals("edit") || c.equals("restart")) {
@@ -1300,7 +1319,7 @@ public class CliCommand implements Runnable {
         };
     }
 
-    private Object askOne(final BufferedReader reader, final Question question) {
+    private Object askOne(final Question question) {
         println();
         println(MarkdownColorizer.accent(question.prompt()));
         final var options = question.options() == null ? List.<String>of() : question.options();
@@ -1315,9 +1334,8 @@ public class CliCommand implements Runnable {
             println("  " + (ownIndex + 1) + ". (type your own answer)");
             println(MarkdownColorizer.status("enter a number, or " + (ownIndex + 1) + " then your text"));
         }
-        print(MarkdownColorizer.status("> "));
         try {
-            final var line = reader.readLine();
+            final var line = readLineOrNull(MarkdownColorizer.status("> "));
             if (line == null) {
                 return null;
             }
@@ -1342,8 +1360,7 @@ public class CliCommand implements Runnable {
                     if (id >= 1 && id <= options.size()) {
                         values.add(options.get(id - 1));
                     } else if (id == ownIndex + 1) {
-                        print(MarkdownColorizer.status("your answer> "));
-                        final var own = reader.readLine();
+                        final var own = readLineOrNull(MarkdownColorizer.status("your answer> "));
                         if (own != null && !own.isBlank()) {
                             values.add(own);
                         }
@@ -1361,8 +1378,7 @@ public class CliCommand implements Runnable {
                 return options.get(id - 1);
             }
             if (id == ownIndex + 1) {
-                print(MarkdownColorizer.status("your answer> "));
-                final var own = reader.readLine();
+                final var own = readLineOrNull(MarkdownColorizer.status("your answer> "));
                 return own == null ? "" : own;
             }
             return "";
@@ -1399,6 +1415,15 @@ public class CliCommand implements Runnable {
     private void printShortcuts() {
         println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - keys"));
         println(MarkdownColorizer.accent("  editing:"));
+        if (prompt.editing()) {
+            println("    Up/Down      browse the in-memory history");
+            println("    Left/Right   move by one character; Delete removes the next character");
+            println("    Alt-b/Alt-f  move back/forward by one word");
+            println("    Alt-Backspace, Ctrl-W  delete the previous word");
+            println("    Ctrl-A/Ctrl-E  go to the beginning/end of the line");
+            println("    Ctrl-U/Ctrl-K  delete to the beginning/end of the line");
+            println("    Ctrl-L       clear the screen");
+        }
         println("    Ctrl-C   interrupt the running turn; pressed twice when idle (within 2s) it quits");
         println("    Ctrl-D   exit");
     }
