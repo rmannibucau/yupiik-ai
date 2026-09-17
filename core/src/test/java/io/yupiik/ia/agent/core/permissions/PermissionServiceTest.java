@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.permissions;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -129,7 +130,7 @@ class PermissionServiceTest {
     }
 
     @Test
-    void planModeAsksThroughGate() {
+    void planModeHardDeniesStateChangingToolsRegardlessOfGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final AtomicReference<String> asked = new AtomicReference<>();
         service.setMode(AgentMode.PLAN);
@@ -137,18 +138,26 @@ class PermissionServiceTest {
             asked.set(title);
             return ApprovalGate.Result.ALLOW_ONCE;
         });
-        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"))
-                .allowed());
-        assertTrue(asked.get().contains("cd /somewhere && doThing"));
+        // non-readonly bash is hard-denied in plan mode: the gate is never consulted
+        final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"));
+        assertFalse(decision.allowed());
+        assertTrue(decision.reason().contains("plan mode"));
+        assertNull(asked.get(), "the approval gate must not be invoked in plan mode");
     }
 
     @Test
-    void planModeGateCanDeny() {
+    void planModeHardDeniesEditEvenWithGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
+        final AtomicReference<String> asked = new AtomicReference<>();
         service.setMode(AgentMode.PLAN);
-        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
-        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"))
-                .allowed());
+        service.setGate((title, detail, tool, args) -> {
+            asked.set(title);
+            return ApprovalGate.Result.ALLOW_ONCE;
+        });
+        final var decision = service.check("edit_file", ToolCategory.EDIT, Map.of("path", "a.txt"));
+        assertFalse(decision.allowed());
+        assertTrue(decision.reason().contains("plan mode"));
+        assertNull(asked.get(), "the approval gate must not be invoked for edit tools in plan mode");
     }
 
     @Test

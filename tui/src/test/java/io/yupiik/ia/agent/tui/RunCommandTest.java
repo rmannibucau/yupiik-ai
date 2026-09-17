@@ -142,12 +142,52 @@ class RunCommandTest {
     }
 
     @Test
-    void deniedApprovalExplainsHeadlessMode() {
+    void deniedApprovalExplainsHeadlessBuildMode() {
         final var configuration = MockLlmServer.configuration(
                 "http://localhost:1/v1",
                 temp.toString(),
                 new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
         final var permissions = new PermissionService(configuration);
+        permissions.setMode(AgentMode.BUILD);
+        final var allowed = new AtomicBoolean(true);
+        final var bridge = new AgentEventBridge();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                final var decision = permissions.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"));
+                allowed.set(decision.allowed());
+                return "ok";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, false, "build", false, "", ""),
+                agentLoop,
+                bridge,
+                permissions,
+                new UserFeedbackService(),
+                sessionStore(),
+                new AgentProvider(configuration));
+
+        command.run();
+
+        assertFalse(allowed.get(), "headless gate must deny the tool call");
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[denied]"));
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("headless mode"));
+    }
+
+    @Test
+    void planModeHeadlessDeniesStateChangingToolInPermissionService() {
+        final var configuration = MockLlmServer.configuration(
+                "http://localhost:1/v1",
+                temp.toString(),
+                new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
+        final var permissions = new PermissionService(configuration);
+        // default mode, falls back to PLAN
         final var allowed = new AtomicBoolean(true);
         final var bridge = new AgentEventBridge();
         final var agentLoop = new AgentLoop() {
@@ -174,9 +214,7 @@ class RunCommandTest {
 
         command.run();
 
-        assertFalse(allowed.get(), "headless gate must deny the tool call");
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[denied]"));
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("headless mode"));
+        assertFalse(allowed.get(), "plan mode must hard-deny the tool call without consulting the gate");
     }
 
     @Test
@@ -218,7 +256,7 @@ class RunCommandTest {
                 temp.toString(),
                 new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
         final var permissions = new PermissionService(configuration);
-        final var allowed = new AtomicBoolean(true);
+        final var reason = new AtomicReference<String>();
         final var bridge = new AgentEventBridge();
         final var agentLoop = new AgentLoop() {
             @Override
@@ -229,7 +267,7 @@ class RunCommandTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 final var decision = permissions.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"));
-                allowed.set(decision.allowed());
+                reason.set(decision.reason());
                 return "ok";
             }
         };
@@ -244,8 +282,10 @@ class RunCommandTest {
 
         command.run();
 
-        assertFalse(allowed.get(), "headless gate must deny non-readonly tools in plan mode");
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("--yca-run-mode build"));
+        assertFalse(reason.get().contains("[denied]"));
+        assertTrue(
+                reason.get().contains("--yca-run-mode build"),
+                "plan-mode denial must suggest build mode: " + reason.get());
     }
 
     @Test

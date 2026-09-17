@@ -149,14 +149,8 @@ public class RunCommand implements Runnable {
             permissionService.setMode(AgentMode.fromConfigurationString(conf.mode()));
         }
         permissionService.setGate((title, detail, tool, args) -> {
-            if (permissionService.mode() == AgentMode.PLAN) {
-                System.err.println(
-                        "[denied] " + title + " requires build mode in headless mode (" + detail
-                                + "); pass --yca-run-mode build (or set yca.mode=build) to allow it, or use --yca-run-permitAll.");
-            } else {
-                System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
-                        + "); set yca.permissions.mode=yolo to auto allow.");
-            }
+            System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
+                    + "); set yca.permissions.mode=yolo to auto allow.");
             return ApprovalGate.Result.DENY;
         });
         userFeedbackService.setGate(questions -> {

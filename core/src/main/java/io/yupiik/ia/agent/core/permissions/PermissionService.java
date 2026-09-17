@@ -116,7 +116,9 @@ public class PermissionService {
                     && permissions.isPlanBash(command)) {
                 return Decision.allow();
             }
-            return approve(toolName, args);
+            return Decision.deny(
+                    "this " + (category == ToolCategory.BASH ? "command" : "tool")
+                            + " modifies the repository and is not allowed in plan mode (switch to build mode with /mode build or --yca-run-mode build)");
         }
         if (permissions.isDenied(toolName)) {
             return Decision.deny("tool " + toolName + " is denied by configuration");
