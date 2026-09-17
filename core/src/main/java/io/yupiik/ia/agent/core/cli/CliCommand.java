@@ -1416,6 +1416,7 @@ public class CliCommand implements Runnable {
         println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - keys"));
         println(MarkdownColorizer.accent("  editing:"));
         if (prompt.editing()) {
+            println("    Tab          complete slash commands and their arguments");
             println("    Up/Down      browse the in-memory history");
             println("    Left/Right   move by one character; Delete removes the next character");
             println("    Alt-b/Alt-f  move back/forward by one word");
