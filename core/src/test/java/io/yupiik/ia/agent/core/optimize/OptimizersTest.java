@@ -49,6 +49,34 @@ class OptimizersTest {
     }
 
     @Test
+    void matchesHeadHandlesPreamble() {
+        // plain head (existing behavior)
+        assertTrue(Optimizers.matchesHead("mvn clean install", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("./mvnw test", "mvnw"));
+        assertTrue(Optimizers.matchesHead("/usr/bin/mvn.cmd -q package", "mvn"));
+        assertFalse(Optimizers.matchesHead("git status", "mvn", "mvnd"));
+
+        // leading env assignments
+        assertTrue(Optimizers.matchesHead("MY_FLAG=1 mvn -q test", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("HTTP_PROXY=http://x JAVA_HOME=/jdk mvn install", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("FOO=1 ./mvnw -q package", "mvnw"));
+        // env-prefixed but not an env var (a flag/option) must not be skipped as env
+        assertFalse(Optimizers.matchesHead("-DskipTests mvn install", "mvn", "mvnd"));
+
+        // leading cd <dir> && segments
+        assertTrue(Optimizers.matchesHead("cd /opt/dev/project && mvn -q test", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("cd /opt/dev/project && git status", "git"));
+        assertTrue(Optimizers.matchesHead("cd /a && cd /b && mvn install", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("cd \"/my path\" && mvn -q test", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("cd /a && FOO=1 mvn install", "mvn", "mvnd"));
+        assertTrue(Optimizers.matchesHead("FOO=1 cd /a && mvn install", "mvn", "mvnd"));
+
+        // cd without the target command afterwards
+        assertFalse(Optimizers.matchesHead("cd /somewhere", "mvn", "mvnd"));
+        assertFalse(Optimizers.matchesHead("cd /somewhere &&", "mvn", "mvnd"));
+    }
+
+    @Test
     void isDisabledMatchesConfiguredNames() {
         final var maven = new OptimizeConfiguration(true, 400, 20, List.of("mvn"));
         assertTrue(maven.isDisabled(List.of("mvn", "mvnd", "mvnw")));

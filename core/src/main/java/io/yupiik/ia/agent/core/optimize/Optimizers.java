@@ -15,7 +15,9 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Pattern;
@@ -81,13 +83,79 @@ public final class Optimizers {
     }
 
     public static boolean matchesHead(final String command, final String... names) {
-        final var token = baseName(firstToken(command));
+        final var tokens = tokenize(command);
+        // skip a leading preamble made of env assignments (FOO=bar ...) and `cd <dir> &&` segments,
+        // in any order and possibly repeated, eg. `cd /path && MY_FLAG=1 mvn ...`
+        var i = 0;
+        boolean progressed;
+        do {
+            progressed = false;
+            while (i < tokens.size() && isEnvAssignment(tokens.get(i))) {
+                i++;
+                progressed = true;
+            }
+            if (i + 1 < tokens.size() && "cd".equals(tokens.get(i)) && !"&&".equals(tokens.get(i + 1))) {
+                i += 2; // cd + its directory argument (quoted paths collapse to a single token)
+                if (i < tokens.size() && "&&".equals(tokens.get(i))) {
+                    i++;
+                }
+                progressed = true;
+            }
+        } while (progressed);
+        if (i >= tokens.size()) {
+            return false;
+        }
+        final var token = baseName(tokens.get(i));
         for (final var n : names) {
             if (token.equals(n) || token.equals(n + ".cmd") || token.equals(n + ".bat")) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean isEnvAssignment(final String token) {
+        return token.matches("[A-Za-z_][A-Za-z0-9_]*=.*");
+    }
+
+    /**
+     * Splits a command line into tokens, keeping double- and single-quoted segments together
+     * (quotes themselves are dropped).
+     */
+    private static List<String> tokenize(final String command) {
+        final var tokens = new ArrayList<String>();
+        if (command == null) {
+            return tokens;
+        }
+        final var sb = new StringBuilder();
+        char quote = 0;
+        var started = false;
+        for (var idx = 0; idx < command.length(); idx++) {
+            final var c = command.charAt(idx);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                } else {
+                    sb.append(c);
+                }
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+                started = true;
+            } else if (Character.isWhitespace(c)) {
+                if (started) {
+                    tokens.add(sb.toString());
+                    sb.setLength(0);
+                    started = false;
+                }
+            } else {
+                sb.append(c);
+                started = true;
+            }
+        }
+        if (started) {
+            tokens.add(sb.toString());
+        }
+        return tokens;
     }
 
     public static boolean containsFlag(final String command, final String... flags) {

@@ -29,7 +29,10 @@ class MavenOutputProcessorTest {
     void supportsMavenOnly() {
         assertTrue(processor.supports("mvn clean install"));
         assertTrue(processor.supports("mvnd test"));
+        assertTrue(processor.supports("cd /opt/dev/project && mvn clean install"));
+        assertTrue(processor.supports("MY_FLAG=1 mvn -q test"));
         assertFalse(processor.supports("git status"));
+        assertFalse(processor.supports("cd /somewhere && git status"));
     }
 
     @Test
