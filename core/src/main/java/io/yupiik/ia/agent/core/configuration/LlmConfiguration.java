@@ -44,4 +44,10 @@ public record LlmConfiguration(
                 defaultValue = "250",
                 documentation =
                         "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. The turn is stopped with an error when exceeded.")
-        int maxIterations) {}
+        int maxIterations,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "When a reply ends truncated by the output token limit (finish_reason=length) without tool calls, automatically ask the model to continue instead of ending the turn (up to 3 continuations, then the turn is ended with an error notice).")
+        boolean continueOnTruncation) {}

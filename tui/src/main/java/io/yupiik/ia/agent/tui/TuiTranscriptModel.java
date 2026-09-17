@@ -33,6 +33,7 @@ public class TuiTranscriptModel {
     public static final String TOOL_END = "<<<yca:/tool>>>";
 
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
+    private static final int MAX_EMBEDDED_TOOL_CHARS = 1600;
 
     private final StringBuilder transcript = new StringBuilder();
     private final StringBuilder pending = new StringBuilder();
@@ -66,8 +67,8 @@ public class TuiTranscriptModel {
         } else if (event instanceof AgentEvent.ToolStream(String name, String fragment)) {
             if (name.equals(runningTool)) {
                 toolStream.append(fragment).append('\n');
-                if (toolStream.length() > 1600) {
-                    toolStream.delete(0, toolStream.length() - 1600);
+                if (toolStream.length() > MAX_EMBEDDED_TOOL_CHARS) {
+                    toolStream.delete(0, toolStream.length() - MAX_EMBEDDED_TOOL_CHARS);
                 }
             }
         } else if (event instanceof AgentEvent.ToolFinished(String name, String output, boolean success)) {
@@ -76,17 +77,20 @@ public class TuiTranscriptModel {
             runningTool = null;
             runningToolCommand = null;
             final var elapsedMs = Math.max(0, (System.nanoTime() - toolStartedNanos) / 1_000_000);
-            if (running != null && !toolStream.isEmpty()) {
+            if (running != null && (!toolStream.isEmpty() || (success && output != null && !output.isBlank()))) {
                 final var header = command == null || command.isBlank()
                         ? "*streaming `" + running + "`* (" + elapsedMs + " ms)"
                         : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (" + elapsedMs + " ms)";
+                final var captured = toolStream.isEmpty()
+                        ? capToolOutput(output == null ? "" : output)
+                        : toolStream.toString().stripTrailing();
                 transcript
                         .append("\n\n")
                         .append(TOOL_BEGIN)
                         .append('\n')
                         .append(header)
                         .append("\n\n```text\n")
-                        .append(toolStream.toString().stripTrailing())
+                        .append(captured)
                         .append("\n```\n")
                         .append(TOOL_END)
                         .append('\n');
@@ -313,6 +317,15 @@ public class TuiTranscriptModel {
             sb.append(stripped, quote + 1, end).append(' ');
         }
         return sb.toString().strip();
+    }
+
+    /** Caps a non-streamed tool output before it is written into the transcript, mirroring the streaming cap. */
+    private static String capToolOutput(final String output) {
+        final var text = output.stripTrailing();
+        if (text.length() <= MAX_EMBEDDED_TOOL_CHARS) {
+            return text;
+        }
+        return text.substring(0, MAX_EMBEDDED_TOOL_CHARS) + "\n... output truncated";
     }
 
     public synchronized void clearConversation() {

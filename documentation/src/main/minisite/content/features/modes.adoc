@@ -3,8 +3,11 @@
 
 yca access modes shape how the agent works:
 
-* `build` makes every tool available;
-* `plan` is read-only: it inspects the codebase and records its approach as
-  pending todos instead of making changes.
+* `plan` (the default) is read-only: it inspects the codebase and records its
+  approach as pending todos instead of making changes;
+* `build` makes every tool available.
 
-The active mode can be switched at runtime with `/mode`.
+The active mode can be switched at runtime with `/mode`, or set headlessly with
+`--yca-run-mode build|plan` on `run`. In `plan` mode write tools are denied and
+`todo_write` records the planned steps; switching back to `build` seeds the todo
+list from the last plan when the model did not record it itself.

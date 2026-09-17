@@ -78,7 +78,7 @@ public class PermissionService {
             return m;
         }
         final var configured = configuration.mode();
-        return configured != null ? configured : AgentMode.BUILD;
+        return configured != null ? configured : AgentMode.PLAN;
     }
 
     public record Decision(boolean allowed, String reason) {

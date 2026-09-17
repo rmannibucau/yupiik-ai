@@ -195,7 +195,9 @@ class AgentSessionServiceTest {
 
     @Test
     void exportPlanErrorsOutsidePlanMode() {
-        final var service = service(new PermissionService(cfg()));
+        final var permissions = new PermissionService(cfg());
+        permissions.setMode(AgentMode.BUILD);
+        final var service = service(permissions);
 
         final var export = service.exportPlan("s1", "", "plan");
 

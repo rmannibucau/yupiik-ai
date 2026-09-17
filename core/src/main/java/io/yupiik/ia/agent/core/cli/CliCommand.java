@@ -105,6 +105,7 @@ public class CliCommand implements Runnable {
     private volatile long lastInterruptAt;
     private volatile boolean quitRequested;
     private volatile String lastToolArgs;
+    private volatile boolean toolStreamed;
     private volatile long turnStartNanos;
     private volatile int toolsRun;
     private volatile AgentEvent.UsageUpdated lastUsageEvent;
@@ -592,8 +593,10 @@ public class CliCommand implements Runnable {
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();
+            toolStreamed = false;
             onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
+            toolStreamed = true;
             if (verbosity == CliVerbosity.RAW) {
                 System.err.print(t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n");
             } else if (verbosity == CliVerbosity.VERBOSE) {
@@ -656,6 +659,15 @@ public class CliCommand implements Runnable {
         final var result = presenter.result(t.name(), t.output(), t.success());
         System.err.println(MarkdownColorizer.dim(indent + symbols.resultPrefix())
                 + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
+        if (verbosity == CliVerbosity.VERBOSE) {
+            // show the full result for tools that did not stream their output live (e.g. bash streams,
+            // most other tools only surface their output through ToolFinished)
+            if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
+                for (final var line : t.output().stripTrailing().split("\n")) {
+                    System.err.println(MarkdownColorizer.dim("  " + line));
+                }
+            }
+        }
         if (verbosity == CliVerbosity.COMPACT) {
             final var diff = presenter.diff(t.name(), lastToolArgs, DIFF_MAX_LINES);
             for (final var line : diff) {

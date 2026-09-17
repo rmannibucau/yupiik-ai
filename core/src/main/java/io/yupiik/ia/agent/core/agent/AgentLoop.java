@@ -26,12 +26,14 @@ import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
+import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
@@ -50,6 +52,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @ApplicationScoped
@@ -58,6 +61,14 @@ public class AgentLoop {
 
     /** Anti-thrash: stop auto-compacting when the context refills right after compaction this many turns in a row. */
     private static final int MAX_CONSECUTIVE_COMPACTIONS = 5;
+
+    /** Max times a truncated reply (finish_reason=length) is auto-continued before giving up. */
+    private static final int MAX_TRUNCATION_CONTINUES = 3;
+
+    /** Nudge sent to the model after a truncated reply so it resumes instead of restarting. */
+    private static final String TRUNCATION_CONTINUE_PROMPT =
+            "Your previous reply was cut off by the output token limit before you could finish."
+                    + " Continue exactly where you stopped; do not repeat content you already produced.";
 
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
@@ -77,6 +88,7 @@ public class AgentLoop {
     private final AgentProvider agentProvider;
     private final Clock clock;
     private final SnapshotStore snapshotStore;
+    private final TodoStore todoStore;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -96,7 +108,8 @@ public class AgentLoop {
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
             final Clock clock,
-            final SnapshotStore snapshotStore) {
+            final SnapshotStore snapshotStore,
+            final TodoStore todoStore) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -115,6 +128,7 @@ public class AgentLoop {
         this.agentProvider = agentProvider;
         this.clock = clock;
         this.snapshotStore = snapshotStore;
+        this.todoStore = todoStore;
     }
 
     protected AgentLoop() {
@@ -136,6 +150,7 @@ public class AgentLoop {
         this.agentProvider = null;
         this.clock = null;
         this.snapshotStore = null;
+        this.todoStore = null;
     }
 
     public String run(
@@ -156,6 +171,14 @@ public class AgentLoop {
         messages.add(Message.user(prompt));
         sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", prompt, null, null));
         statusReporter.setSink(message -> emitter.emit(new AgentEvent.Status(message)));
+        if (chatClient != null) {
+            // surface provider throttles and retry backoffs: without this the UI only shows a
+            // spinner while the resilience layer can silently wait up to minutes between attempts
+            chatClient.setPauseListener(pause -> emit(
+                    pause.kind() == PauseEvent.Pause.THROTTLE
+                            ? new AgentEvent.Status(pause.message())
+                            : AgentEvent.Notice.info(pause.message())));
+        }
 
         try {
             return loop(sessionId, messages, cancelled);
@@ -166,7 +189,14 @@ public class AgentLoop {
             Thread.currentThread().interrupt();
             emit(new AgentEvent.Error("Interrupted"));
             return null;
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.SEVERE, "agent turn failed", e);
+            emit(new AgentEvent.Error("unexpected failure: " + e));
+            return null;
         } finally {
+            if (chatClient != null) {
+                chatClient.setPauseListener(null);
+            }
             statusReporter.setSink(null);
             memoryExtractor.maybeExtract(messages);
         }
@@ -187,6 +217,8 @@ public class AgentLoop {
         var overflowRetried = false;
         var consecutiveCompactions = 0;
         var autoNoticeEmitted = false;
+        var truncationContinues = 0;
+        var toolsRanThisTurn = false;
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
             var compactedThisTurn = false;
             if (contextManager.pruneNeeded(messages, toolsTokens)) {
@@ -224,9 +256,10 @@ public class AgentLoop {
 
             final var request = new ChatCompletionRequest(model, messages, null, null, tools, "auto", null, null, null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
+            final var finishReason = new String[] {null};
             final Message assistant;
             try {
-                assistant = chatClient.stream(request, delta -> dispatch(delta, usage), cancelled);
+                assistant = chatClient.stream(request, delta -> dispatch(delta, usage, finishReason), cancelled);
             } catch (final ContextWindowExceededException e) {
                 if (!retryOnOverflow || overflowRetried) {
                     throw e;
@@ -267,11 +300,35 @@ public class AgentLoop {
 
             if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
                 final var content = str(assistant.content());
+                final var reason = finishReason[0];
+                if (isTruncation(reason)) {
+                    if (configuration.llm().continueOnTruncation() && truncationContinues < MAX_TRUNCATION_CONTINUES) {
+                        truncationContinues++;
+                        emit(AgentEvent.Notice.warn("Response truncated by the output token limit (finish_reason="
+                                + reason + "); asking the model to continue (" + truncationContinues + '/'
+                                + MAX_TRUNCATION_CONTINUES + ")."));
+                        messages.add(Message.user(TRUNCATION_CONTINUE_PROMPT));
+                        continue;
+                    }
+                    emit(AgentEvent.Notice.error("Response truncated by the output token limit (finish_reason="
+                            + reason + "); the reply may be incomplete."
+                            + (configuration.llm().continueOnTruncation()
+                                    ? " Gave up after " + truncationContinues + " continuation"
+                                            + (truncationContinues == 1 ? "" : "s") + "."
+                                    : " Enable yca.llm.continueOnTruncation to auto-continue.")));
+                    emit(new AgentEvent.TurnDone(content));
+                    return content;
+                }
+                final var todos = unfinishedTodosNotice(toolsRanThisTurn);
+                if (todos != null) {
+                    emit(todos);
+                }
                 emit(new AgentEvent.TurnDone(content));
                 return content;
             }
             for (final var call : assistant.toolCalls()) {
                 executeTool(sessionId, messages, call);
+                toolsRanThisTurn = true;
             }
         }
         if (cancelled.getAsBoolean()) {
@@ -280,6 +337,36 @@ public class AgentLoop {
             emit(new AgentEvent.Error("Maximum iterations reached (" + maxIterations + ")"));
         }
         return null;
+    }
+
+    /**
+     * Whether a normalized stream finish reason means the reply was cut by the output token budget:
+     * the dialects map Anthropic {@code max_tokens} and OpenAI {@code length} to {@code length}.
+     */
+    private static boolean isTruncation(final String finishReason) {
+        return "length".equalsIgnoreCase(finishReason) || "max_tokens".equalsIgnoreCase(finishReason);
+    }
+
+    /**
+     * A turn that ran tools but ends text-only while the todo list still has pending items looks
+     * finished to the loop while the work is not: surface it so the user can resume explicitly
+     * instead of silently losing the remaining steps.
+     */
+    private AgentEvent.Notice unfinishedTodosNotice(final boolean toolsRanThisTurn) {
+        if (!toolsRanThisTurn || todoStore == null) {
+            return null;
+        }
+        final var todos = todoStore.all();
+        if (todos.isEmpty()) {
+            return null;
+        }
+        final var pending =
+                todos.stream().filter(t -> !"completed".equals(t.status())).count();
+        if (pending == 0) {
+            return null;
+        }
+        return AgentEvent.Notice.warn(
+                "turn ended with " + pending + '/' + todos.size() + " todos still pending - send 'continue' to resume");
     }
 
     private void executeTool(final String sessionId, final List<Message> messages, final ToolCall call) {
@@ -326,12 +413,16 @@ public class AgentLoop {
                 + " Run /tools to list the valid tools; only exact names from the request's tools field are accepted.";
     }
 
-    private void dispatch(final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage) {
+    private void dispatch(
+            final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage, final String[] finishReason) {
         if (delta instanceof TextDelta(final String text)) {
             emit(new AgentEvent.TextDelta(text));
         } else if (delta instanceof ReasoningDelta(final String text)) {
             emit(new AgentEvent.ThinkingDelta(text));
-        } else if (delta instanceof End(final String __, final Usage upper)) {
+        } else if (delta instanceof End(final String reason, final Usage upper)) {
+            if (reason != null) {
+                finishReason[0] = reason;
+            }
             final var converted = upper == null
                     ? io.yupiik.ia.agent.core.llm.Usage.EMPTY
                     : new io.yupiik.ia.agent.core.llm.Usage(

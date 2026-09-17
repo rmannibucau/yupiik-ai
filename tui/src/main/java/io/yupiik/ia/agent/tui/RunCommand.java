@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
@@ -50,6 +51,7 @@ public class RunCommand implements Runnable {
     private final UserFeedbackService userFeedbackService;
     private final SessionStore sessionStore;
     private final AgentProvider agentProvider;
+    private volatile boolean toolStreamed;
 
     public RunCommand(
             final RunConf conf,
@@ -91,6 +93,20 @@ public class RunCommand implements Runnable {
             boolean permitAll,
 
             @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Agent access mode for this run: build or plan (defaults to the configured yca.mode).")
+            String mode,
+
+            @Property(
+                    value = "show-tool-output",
+                    defaultValue = "false",
+                    documentation =
+                            "Print each successful tool's output (result of the tool call) on stderr. Tools that streamed "
+                                    + "their output live (e.g. bash) are not re-printed since their output was already shown.")
+            boolean showToolOutput,
+
+            @Property(
                     value = "metrics-output-file",
                     defaultValue = "\"\"",
                     documentation =
@@ -122,16 +138,25 @@ public class RunCommand implements Runnable {
         final var started = System.nanoTime();
         final var detailLog = Detail.of(conf.metricsDetailFile());
         bridge.sink(event -> {
-            print(event, conf.showThinking());
+            print(event, conf.showThinking(), conf.showToolOutput());
             metrics.accept(event, started, detailLog);
             if (event instanceof final AgentEvent.Error e) {
                 failed.set(true);
                 lastError.set(e.message());
             }
         });
+        if (conf.mode() != null && !conf.mode().isBlank()) {
+            permissionService.setMode(AgentMode.fromConfigurationString(conf.mode()));
+        }
         permissionService.setGate((title, detail, tool, args) -> {
-            System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
-                    + "); set yca.permissions.mode=yolo to auto allow.");
+            if (permissionService.mode() == AgentMode.PLAN) {
+                System.err.println(
+                        "[denied] " + title + " requires build mode in headless mode (" + detail
+                                + "); pass --yca-run-mode build (or set yca.mode=build) to allow it, or use --yca-run-permitAll.");
+            } else {
+                System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
+                        + "); set yca.permissions.mode=yolo to auto allow.");
+            }
             return ApprovalGate.Result.DENY;
         });
         userFeedbackService.setGate(questions -> {
@@ -354,7 +379,7 @@ public class RunCommand implements Runnable {
         }
     }
 
-    private void print(final AgentEvent event, final boolean showThinking) {
+    private void print(final AgentEvent event, final boolean showThinking, final boolean showToolOutput) {
         if (event instanceof final AgentEvent.TextDelta t) {
             System.out.print(t.delta());
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
@@ -362,12 +387,21 @@ public class RunCommand implements Runnable {
                 System.err.print(t.delta());
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
+            toolStreamed = false;
             System.err.println("[tool] " + t.name());
         } else if (event instanceof final AgentEvent.ToolStream t) {
+            toolStreamed = true;
             System.err.println("[" + t.name() + "] " + t.fragment());
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             if (!t.success()) {
                 System.err.println("[tool failed] " + t.name());
+            } else if (showToolOutput
+                    && !toolStreamed
+                    && t.output() != null
+                    && !t.output().isBlank()) {
+                for (final var line : t.output().stripTrailing().split("\n")) {
+                    System.err.println("[" + t.name() + "] " + line);
+                }
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
             System.err.println(

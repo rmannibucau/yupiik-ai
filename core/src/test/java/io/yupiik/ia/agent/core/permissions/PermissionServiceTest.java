@@ -40,7 +40,11 @@ class PermissionServiceTest {
                 "yca.permissions.allow", String.join(",", allow),
                 "yca.permissions.deny", String.join(",", deny),
                 "yca.permissions.planBash", String.join(",", planBash)));
-        return new PermissionService(configuration);
+        final var service = new PermissionService(configuration);
+        // these build-mode behaviour tests rely on a BUILD baseline; plan mode is
+        // exercised explicitly via setMode(AgentMode.PLAN) in dedicated tests
+        service.setMode(AgentMode.BUILD);
+        return service;
     }
 
     @Test
@@ -48,6 +52,14 @@ class PermissionServiceTest {
         final var decision =
                 service(PermissionMode.ASK, List.of(), List.of()).check("grep", ToolCategory.READ, Map.of());
         assertTrue(decision.allowed());
+    }
+
+    @Test
+    void defaultModeIsPlanWhenConfigUnset() {
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                Map.of("yca.storageHome", "/tmp/yca-test"));
+        final var service = new PermissionService(configuration);
+        assertEquals(AgentMode.PLAN, service.mode());
     }
 
     @Test

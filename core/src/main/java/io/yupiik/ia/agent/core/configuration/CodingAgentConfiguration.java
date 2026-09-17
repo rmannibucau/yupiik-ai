@@ -92,7 +92,7 @@ public record CodingAgentConfiguration(
         List<AgentConfiguration> agents,
 
         @Property(
-                defaultValue = "io.yupiik.ia.agent.core.configuration.AgentMode.BUILD",
+                defaultValue = "io.yupiik.ia.agent.core.configuration.AgentMode.PLAN",
                 documentation =
                         "Agent access mode: build (all tools, any action) or plan (read-only tools only). Can be switched at runtime with /mode.")
         AgentMode mode,

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -91,7 +92,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, true, "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, true, "", false, "", ""),
                 agentLoop,
                 bridge,
                 new PermissionService(null),
@@ -125,7 +126,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "s-2", "", false, true, "", ""),
+                new RunCommand.RunConf("say hi", "s-2", "", false, true, "", false, "", ""),
                 agentLoop,
                 bridge,
                 new PermissionService(null),
@@ -163,7 +164,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, false, "", false, "", ""),
                 agentLoop,
                 bridge,
                 permissions,
@@ -179,11 +180,147 @@ class RunCommandTest {
     }
 
     @Test
+    void planModeFlagPutsRunInPlanMode() {
+        final var configuration = MockLlmServer.configuration("http://localhost:1/v1", temp.toString());
+        final var permissions = new PermissionService(configuration);
+        final var modeSeen = new AtomicReference<AgentMode>();
+        final var bridge = new AgentEventBridge();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                modeSeen.set(permissions.mode());
+                return "ok";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, false, "plan", false, "", ""),
+                agentLoop,
+                bridge,
+                permissions,
+                new UserFeedbackService(),
+                sessionStore(),
+                new AgentProvider(configuration));
+
+        command.run();
+
+        assertEquals(AgentMode.PLAN, modeSeen.get(), "the run --mode plan flag must switch to plan mode");
+    }
+
+    @Test
+    void planModeDenialSuggestsBuildMode() {
+        final var configuration = MockLlmServer.configuration(
+                "http://localhost:1/v1",
+                temp.toString(),
+                new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
+        final var permissions = new PermissionService(configuration);
+        final var allowed = new AtomicBoolean(true);
+        final var bridge = new AgentEventBridge();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                final var decision = permissions.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"));
+                allowed.set(decision.allowed());
+                return "ok";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, false, "plan", false, "", ""),
+                agentLoop,
+                bridge,
+                permissions,
+                new UserFeedbackService(),
+                sessionStore(),
+                new AgentProvider(configuration));
+
+        command.run();
+
+        assertFalse(allowed.get(), "headless gate must deny non-readonly tools in plan mode");
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("--yca-run-mode build"));
+    }
+
+    @Test
+    void showToolOutputPrintsNonStreamedSuccess() {
+        final var bridge = new AgentEventBridge();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                bridge.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}"));
+                bridge.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
+                bridge.onEvent(new AgentEvent.TurnDone("done"));
+                return "ok";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, false, "", true, "", ""),
+                agentLoop,
+                bridge,
+                new PermissionService(null),
+                new UserFeedbackService(),
+                sessionStore(),
+                null);
+
+        command.run();
+
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[read_file] line1"));
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[read_file] line2"));
+    }
+
+    @Test
+    void showToolOutputSkipsStreamedTools() {
+        final var bridge = new AgentEventBridge();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                bridge.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}"));
+                bridge.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+                bridge.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true));
+                bridge.onEvent(new AgentEvent.TurnDone("done"));
+                return "ok";
+            }
+        };
+        final var command = new RunCommand(
+                new RunCommand.RunConf("say hi", "", "", false, false, "", true, "", ""),
+                agentLoop,
+                bridge,
+                new PermissionService(null),
+                new UserFeedbackService(),
+                sessionStore(),
+                null);
+
+        command.run();
+
+        // streamed tool output must not be re-printed from ToolFinished.output
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        assertTrue(stderr.contains("[bash] streamed line"));
+        assertEquals(1, stderr.split("\\[bash\\] streamed line", -1).length - 1);
+    }
+
+    @Test
     void unknownAgentIsRejected() {
         final var configuration = MockLlmServer.configuration("http://localhost:1/v1", temp.toString());
         final var bridge = new AgentEventBridge();
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "nope", false, true, "", ""),
+                new RunCommand.RunConf("say hi", "", "nope", false, true, "", false, "", ""),
                 stubAgentLoop(bridge),
                 bridge,
                 new PermissionService(null),

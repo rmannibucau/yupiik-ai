@@ -21,7 +21,7 @@ public enum AgentMode {
 
     public static AgentMode fromConfigurationString(final String value) {
         if (value == null || value.isBlank()) {
-            return BUILD;
+            return PLAN;
         }
         return "plan".equals(value.strip().toLowerCase()) ? PLAN : BUILD;
     }

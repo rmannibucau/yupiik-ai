@@ -18,11 +18,12 @@
   (pruning/compaction can use a dedicated smaller model)
 - Sessions (JSONL) with resume, todo list, global and per-project auto memory
 - Permission modes: `ask`, `auto_edit`, `yolo` plus allow/deny glob lists
-- Plan/build access modes: `build` uses every tool and any action, `plan` is
-  read-only (read tools plus MCP tools whitelisted as read-only); switchable at
-  runtime with `/mode`. In `plan` mode the plan steps are recorded with
-  `todo_write` as pending todos, and switching back to `build` seeds the todo
-  list from the last plan when the model did not record it itself
+- Plan/build access modes: `plan` is the default and is read-only (read tools plus
+  MCP tools whitelisted as read-only); `build` uses every tool and any action.
+  Switchable at runtime with `/mode` (or `--yca-run-mode` for `run`). In `plan`
+  mode the plan steps are recorded with `todo_write` as pending todos, and
+  switching back to `build` seeds the todo list from the last plan when the model
+  did not record it itself
 - MCP server health shown in the TUI sidebar with status dots (enabled / disabled / failing)
 - Rate limiting, retries and concurrency limits for LLM calls
 - Custom agents (`yca.agents`): named prompts injected on top of the base system
@@ -54,12 +55,16 @@ is printed and terminal handling can degrade).
 ```bash
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar tui
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --provider-model gpt-5-mini
-java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-permitAll
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "produce a plan to add auth" --provider-model gpt-5-mini --yca-run-mode plan
+java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-mode build --yca-run-show-tool-output
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
 ```
 
-`--yca-run-permitAll` (and `--yca-tui-permitAll` for the `tui` command) bypass
-permission prompts and allow every tool call without asking.
+Plan mode is the default for every command. `run` is read-only by default; pass
+`--yca-run-mode build` to allow applying changes, or `--yca-run-permitAll`
+(`--yca-tui-permitAll` for the `tui` command) to bypass permission prompts and
+allow every tool call without asking. `--yca-run-show-tool-output` prints each
+successful tool's output (non-streamed tools) on stderr.
 
 The `cli` command gets full line editing when the fatjar is used: Up/Down browse
 the in-memory history, Alt-b/Alt-f move by word, Alt-Backspace and Ctrl-W delete
@@ -130,7 +135,7 @@ Configuration is resolved from (highest priority first): CLI arguments
         { "name": "remote", "url": "https://example.com/mcp", "apiKey": "...", "readonly": [] }
       ]
     },
-    "mode": "build",
+    "mode": "plan",
     "model": { "compact": "", "prune": "" },
     "agents": [
       { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md" },
@@ -188,7 +193,7 @@ models, providerSpecificOptions),
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 (disabled processors and tools, matched loosely - `mvn`, `./mvnw`,
 `git.exe` and `git` all match the git/maven processors), `permissions` (mode, allow, deny, planBash), `sessions`
-(retentionDays, compressDays), `mode` (build or plan), `skills` (enabled),
+(retentionDays, compressDays), `mode` (plan by default, or build), `skills` (enabled),
 `mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir), `agents`
 (name, prompt - inline text or a file path). The
 `workingDir` option (default `.`) is the directory from
@@ -216,7 +221,9 @@ read-only. In `plan` mode only the `READ`/`AGENT` tools, these read-only MCP
 tools, and `bash` commands starting with one of the `permissions.planBash`
 prefixes (defaults to read-only commands like `git status`, `git diff`,
 `ls`, `cat`, `grep`...) are allowed - everything else is denied. `build` mode
-(the default) has full access and respects the `permissions` allow/deny lists.
+(full access, respecting the `permissions` allow/deny lists) is opt-in: switch
+to it with `/mode build`, set `yca.mode=build`, or pass `--yca-run-mode build`
+for `run`.
 
 ## Structural code graph
 
