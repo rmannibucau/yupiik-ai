@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -54,6 +55,7 @@ public record TuiDeps(
         PlanTodoSeeder planTodoSeeder,
         PlanFileService planFileService,
         ChatClient chatClient,
+        ModelStyleService modelStyleService,
         MemoryStore memoryStore,
         SystemPromptBuilder systemPromptBuilder,
         McpManager mcpManager,

@@ -38,6 +38,7 @@ import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -81,6 +82,7 @@ public class CliCommand implements Runnable {
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final UsageTracker usageTracker;
     private final ReplSlashCommands replSlashCommands;
+    private final ModelStyleService modelStyleService;
     private final Clock clock;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
@@ -128,6 +130,7 @@ public class CliCommand implements Runnable {
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final JsonMapper mapper,
             final ReplSlashCommands replSlashCommands,
+            final ModelStyleService modelStyleService,
             final Clock clock) {
         this.conf = conf;
         this.agentLoop = agentLoop;
@@ -143,6 +146,7 @@ public class CliCommand implements Runnable {
         this.agentSessionService = agentSessionService;
         this.mavenKnowledgeService = mavenKnowledgeService;
         this.replSlashCommands = replSlashCommands;
+        this.modelStyleService = modelStyleService;
         this.clock = clock;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
@@ -321,7 +325,7 @@ public class CliCommand implements Runnable {
             sb.append('[').append(modeColor(mode));
             final var model = chatClient.model();
             if (model != null && !model.isBlank()) {
-                sb.append(MarkdownColorizer.dim("@")).append(MarkdownColorizer.bold(model));
+                sb.append(MarkdownColorizer.dim("@")).append(styledModel(model));
             }
             sb.append(']');
             if (permissionLabel != null) {
@@ -348,6 +352,11 @@ public class CliCommand implements Runnable {
             return MarkdownColorizer.accent(mode);
         }
         return MarkdownColorizer.success(mode);
+    }
+
+    private String styledModel(final String model) {
+        final var style = modelStyleService.resolve(chatClient.currentProvider(), model);
+        return style.ansiPrefix() + model + "\u001b[0m";
     }
 
     private Function<String, String> permissionColor(final boolean permitAll, final PermissionMode mode) {
@@ -391,7 +400,7 @@ public class CliCommand implements Runnable {
                 .append(sessionId);
         final var model = chatClient.model();
         if (model != null && !model.isBlank()) {
-            sb.append(" · ").append(model);
+            sb.append(" · ").append(colorizer.isEnabled() ? styledModel(model) : model);
         }
         sb.append(" · type /help for commands");
         println(MarkdownColorizer.status(sb.toString()));

@@ -99,7 +99,11 @@ Configuration is resolved from (highest priority first): CLI arguments
           "apiKey": "",
           "model": "gpt-5-mini",
           "api": "auto",
-          "contextWindow": 128000
+          "contextWindow": 128000,
+          "models": [
+            { "model": "gpt-5", "style": { "color": "#7aa2f7", "bold": "true" }, "behavior": { "reasoningEffort": "high", "outputTokens": 32000 } },
+            { "model": "gpt-5-mini", "behavior": { "outputTokens": 16000 } }
+          ]
         },
         {
           "id": "ollama",
@@ -134,13 +138,42 @@ expected (main model, `model.compact`, `model.prune`, code graph enrichment).
 `defaultProvider` selects the active one; when it is blank it falls back to the
 first provider (or to the implicit `default` provider). For single-provider
 setups the legacy flat scalars (`baseUrl`, `apiKey`, `model`, `api`,
-`reasoningField`, `contextWindow`, `timeoutSeconds`) are still accepted and
-build the implicit `default` provider. A provider's optional
-`providerSpecificOptions` (a JSON object, empty by default) is merged into
-every API call payload for that provider (e.g. `variant` or thinking effort).
+`reasoningField`, `contextWindow`, `outputTokens`, `timeoutSeconds`, `color`)
+are still accepted and build the implicit `default` provider. A provider's
+optional `providerSpecificOptions` (a JSON object, empty by default) is merged
+into every API call payload for that provider (e.g. `variant` or thinking
+effort).
+
+Each provider can declare its known models through `models`, a list of
+`{ model, style, behavior }` entries. `model` is the model id (or a fragment:
+matching is exact first, then by `contains`, with a `*` acting as a wildcard
+ignored during the comparison - so `qwen3-coder` and `qwen*` both match
+`qwen3-coder-32b`). `style` is `{ color, bold }`: `color` is an optional
+`#rrggbb` tone (only the hue/chroma is taken, the shade still follows the
+model position) and `bold` is an optional `"true"`/`"false"` (as a string,
+so that an unset value falls back to the default). `behavior` is
+`{ reasoningEffort, outputTokens }`: `reasoningEffort` is a free-form string
+sent as `reasoning_effort` (blank means "not set") and `outputTokens` overrides
+the provider `outputTokens` for that model (`0` or a negative value means "use
+the provider default"). Unset fields fall back to the provider defaults
+(`outputTokens`, `reasoningEffort`, `color`) and then to the implicit rules.
+`reasoningEffort` is only injected when neither the request nor
+`providerSpecificOptions` already sets `reasoning_effort`.
+
+Models are colour-coded in the CLI prompt and TUI so several models can be told
+apart: the first two models of a provider are bold and use bright colors, later
+ones are dimmer, and the tone rotates across a palette driven by the provider
+position (the implicit flat provider is position `0`, `providers.0` is `1`, and
+so on). Models used but not listed get a deterministic shade derived from their
+name, and the whole scheme adjusts its lightness to the current background
+(dark or light, following the persisted theme). An explicit `style.color` /
+`style.bold` always wins; the resolved style can be set per model as above.
+`model.prune` defaults to `model.compact` when blank, and both fall back to the
+active provider model when unset.
 
 Main groups: `provider` (providers, defaultProvider, baseUrl, apiKey, model,
-api, reasoningField, contextWindow, timeoutSeconds, providerSpecificOptions),
+api, reasoningField, contextWindow, outputTokens, timeoutSeconds, color,
+models, providerSpecificOptions),
 `llm` (retries, rpm throttle, maxConcurrent, retryOnContextOverflow),
 `compaction` (thresholdPercent, enabled), `pruning` (thresholdPercent,
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`

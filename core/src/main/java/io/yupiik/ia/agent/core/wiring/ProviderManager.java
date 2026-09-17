@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -93,6 +94,16 @@ public class ProviderManager {
         return p == null ? (providers().isEmpty() ? null : providers().get(0)) : p;
     }
 
+    /** Position of a provider for styling: 0 for the implicit flat-scalar default provider, {@code 1 + index} within the configured {@code providers} list. */
+    public int providerPosition(final ProviderConfiguration provider) {
+        final var configured = configuration.provider().providers();
+        if (configured == null || configured.isEmpty()) {
+            return 0;
+        }
+        final int idx = provider == null ? -1 : configured.indexOf(provider);
+        return idx < 0 ? 0 : 1 + idx;
+    }
+
     /** Look up a provider by id; falls back to the default provider when not found. */
     public ProviderConfiguration provider(final String id) {
         if (id == null || id.isBlank()) {
@@ -161,52 +172,61 @@ public class ProviderManager {
     }
 
     /**
-     * Resolve the effective output token budget override for a model of a provider: an exact id
-     * match in the provider {@code outputs} wins, then the first matching glob ({@code *} wildcard),
-     * else 0 when no override applies. The provider {@code outputTokens} default is not folded in
-     * here so the caller can distinguish "override" from "default".
+     * Resolve the effective output token budget override for a model of a provider: the {@code behavior.outputTokens}
+     * of the first matching model entry - exact id first, then first pattern contained in the model name - else 0 when
+     * no override applies. The provider {@code outputTokens} default is not folded in here so the caller can
+     * distinguish "override" from "default".
      */
     public int outputTokensOverride(final ProviderConfiguration provider, final String model) {
-        if (provider == null || provider.outputs() == null || model == null) {
+        final var entry = matchModel(provider, model);
+        if (entry == null || entry.behavior() == null || entry.behavior().outputTokens() == null) {
             return 0;
         }
-        Integer exact = null;
-        Integer glob = null;
-        for (final var limit : provider.outputs()) {
-            if (limit.tokens() <= 0) {
-                continue;
-            }
-            final var pattern = limit.model() == null ? "" : limit.model();
-            if (pattern.equals(model)) {
-                if (exact == null) {
-                    exact = limit.tokens();
-                }
-                continue;
-            }
-            final var regex = glob(pattern);
-            if (regex != null && regex.matcher(model).matches() && glob == null) {
-                glob = limit.tokens();
-            }
-        }
-        if (exact != null) {
-            return exact;
-        }
-        return glob == null ? 0 : glob;
+        final var tokens = entry.behavior().outputTokens();
+        return tokens <= 0 ? 0 : tokens;
     }
 
-    private static java.util.regex.Pattern glob(final String pattern) {
-        if (pattern == null || !pattern.contains("*")) {
+    /** Resolve the per-model reasoning effort default: {@code behavior.reasoningEffort} of the first matching entry, or null. */
+    public String reasoningEffort(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        return entry == null
+                        || entry.behavior() == null
+                        || entry.behavior().reasoningEffort() == null
+                        || entry.behavior().reasoningEffort().isBlank()
+                ? null
+                : entry.behavior().reasoningEffort();
+    }
+
+    /** Index of the first matching model entry within the provider {@code models} list, or -1 when the model is unlisted. */
+    public int modelIndex(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry == null || provider == null || provider.models() == null) {
+            return -1;
+        }
+        return provider.models().indexOf(entry);
+    }
+
+    /** The first matching model entry: an exact id wins over the first contains match, else null. */
+    private ProviderModelConfiguration matchModel(final ProviderConfiguration provider, final String model) {
+        if (provider == null || provider.models() == null || model == null || model.isBlank()) {
             return null;
         }
-        final var sb = new StringBuilder();
-        for (int i = 0; i < pattern.length(); i++) {
-            final char c = pattern.charAt(i);
-            if (c == '*') {
-                sb.append(".*");
-            } else {
-                sb.append(java.util.regex.Pattern.quote(String.valueOf(c)));
+        for (final var entry : provider.models()) {
+            if (model.equals(entry.model())) {
+                return entry;
             }
         }
-        return java.util.regex.Pattern.compile(sb.toString());
+        for (final var entry : provider.models()) {
+            if (contains(entry.model(), model)) {
+                return entry;
+            }
+        }
+        return null;
+    }
+
+    /** True when {@code model} contains the {@code pattern} (asterisks are ignored) and the pattern is not blank. */
+    private static boolean contains(final String pattern, final String model) {
+        final var needle = pattern == null ? "" : pattern.replace("*", "");
+        return !needle.isEmpty() && model.contains(needle);
     }
 }

@@ -112,7 +112,7 @@ public class CompactionCoordinator {
                 "prune",
                 configSystemPrompt("prune"),
                 chunks,
-                configuration.model().prune());
+                configuration.model().resolvedPrune());
         if (!outcome.summary().isBlank()) {
             final var out = new ArrayList<Message>();
             if (system != null) {

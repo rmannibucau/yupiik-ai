@@ -79,16 +79,16 @@ public record ProviderListConfiguration(
         int outputTokens,
 
         @Property(
-                defaultValue = "java.util.List.of()",
-                documentation =
-                        "Convenience shorthand for the default provider per-model output token overrides (used only when no providers are listed).")
-        List<ProviderConfiguration.OutputLimit> outputs,
-
-        @Property(
-                defaultValue = "120",
+                defaultValue = "300",
                 documentation =
                         "Convenience shorthand for the default provider timeout (used only when no providers are listed).")
-        int timeoutSeconds) {
+        int timeoutSeconds,
+
+        @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Convenience shorthand for the default provider base display tone (hex, used only when no providers are listed).")
+        String color) {
 
     public String resolvedDefaultProvider() {
         final var explicit = defaultProvider;
@@ -116,10 +116,11 @@ public record ProviderListConfiguration(
                 reasoningField,
                 contextWindow,
                 outputTokens,
-                outputs == null ? List.of() : outputs,
+                List.of(),
                 timeoutSeconds,
                 "",
                 Map.of(),
+                color == null ? "" : color,
                 new PromptConfiguration("auto"));
     }
 }

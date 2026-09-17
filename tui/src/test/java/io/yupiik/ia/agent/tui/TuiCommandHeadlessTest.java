@@ -110,6 +110,7 @@ class TuiCommandHeadlessTest {
                     d.sessionStore(),
                     d.todoStore(),
                     d.chatClient(),
+                    d.modelStyleService(),
                     d.mcpManager(),
                     d.executor(),
                     d.providerManager(),

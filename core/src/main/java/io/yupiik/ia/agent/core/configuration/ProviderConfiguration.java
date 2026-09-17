@@ -63,16 +63,16 @@ public record ProviderConfiguration(
         @Property(
                 defaultValue = "-1",
                 documentation =
-                        "Default output token budget (the max_tokens parameter for providers that require it, such as Anthropic). Zero or negative (the default) auto-detects it from the provider /v1/models max_tokens, cached one day per provider and model under the storage home, and falls back to 32000. This is the per-provider default; a per-model value configured in the outputs field wins over it.")
+                        "Default output token budget (the max_tokens parameter for providers that require it, such as Anthropic). Zero or negative (the default) auto-detects it from the provider /v1/models max_tokens, cached one day per provider and model under the storage home, and falls back to 32000. This is the per-provider default; a per-model value configured in the models behavior field wins over it.")
         int outputTokens,
 
         @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
-                        "Per-model output token budget overrides for this provider. Each entry applies to a model id matched exactly or, when the model starts with a glob like claude-*, by pattern. The strongest override is an exact id match, then the first matching glob, then the provider outputTokens default. This lets a provider serve models with different output budgets (eg. claude-sonnet-5 with 128000 and claude-haiku-4-5 with 64000).")
-        List<OutputLimit> outputs,
+                        "Per-model entries for this provider (display style and behavior). Each entry applies to a model id matched exactly or, when the configured id is a substring of the actual model name, by containment. The strongest override is an exact id match, then the first substring match, then the provider defaults (color, outputTokens and the implicit scheme). The list order also defines the implicit display scheme within this provider: the first two listed models are bold.")
+        List<ProviderModelConfiguration> models,
 
-        @Property(defaultValue = "120", documentation = "HTTP request timeout in seconds.")
+        @Property(defaultValue = "300", documentation = "HTTP request timeout in seconds (5 minutes).")
         int timeoutSeconds,
 
         @Property(
@@ -86,6 +86,12 @@ public record ProviderConfiguration(
                 documentation =
                         "Extra HTTP headers added to every request to this provider (eg. beta headers, org identifiers or service tiers). Values are empty-string ignored.")
         Map<String, String> headers,
+
+        @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Base display tone (hex, eg. #e0a458) for every model of this provider. When blank the provider keeps the position-based tone. Per-model styles in the models field may override this tone for individual models.")
+        String color,
 
         @Property(documentation = "Provider-tunable system prompt sections (todo/plan guidance).")
         PromptConfiguration prompt) {
@@ -103,7 +109,4 @@ public record ProviderConfiguration(
         final var p = prompt;
         return p == null || p.todo() == null || p.todo().isBlank() ? "auto" : p.todo();
     }
-
-    /** A per-model output token budget override: {@code model} is matched exactly or as a glob (eg. {@code claude-*}). */
-    public record OutputLimit(String model, int tokens) {}
 }

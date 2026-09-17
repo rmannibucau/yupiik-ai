@@ -25,5 +25,12 @@ public record ModelConfiguration(
 
         @Property(
                 defaultValue = "\"\"",
-                documentation = "Model used to prune the context. Defaults to the provider model when empty.")
-        String prune) {}
+                documentation =
+                        "Model used to prune the context. When empty the compact model is used, then the provider model when both are empty.")
+        String prune) {
+
+    /** Falls back to the compact model when prune is empty. */
+    public String resolvedPrune() {
+        return prune == null || prune.isBlank() ? compact : prune;
+    }
+}

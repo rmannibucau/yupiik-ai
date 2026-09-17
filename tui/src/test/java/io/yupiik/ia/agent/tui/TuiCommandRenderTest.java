@@ -242,6 +242,7 @@ class TuiCommandRenderTest {
                 sessionStore,
                 todoStore,
                 chatClient,
+                new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
                 mcpManager,
                 new VirtualThreadExecutor(),
                 new ProviderManager(configuration, mapper),

@@ -136,6 +136,7 @@ public class TuiCommand implements Runnable {
     private final SessionStore sessionStore;
     private final TodoStore todoStore;
     private final ChatClient chatClient;
+    private final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService;
     private final McpManager mcpManager;
     private final VirtualThreadExecutor executor;
     private final ProviderManager providerManager;
@@ -148,6 +149,7 @@ public class TuiCommand implements Runnable {
     private volatile Style toolStyle;
     private final TranscriptRenderer transcriptRenderer = new TranscriptRenderer();
     private volatile Palette palette;
+    private volatile String theme = "dark";
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
     private final TuiSlashCommands slashCommands;
@@ -168,6 +170,7 @@ public class TuiCommand implements Runnable {
             final SessionStore sessionStore,
             final TodoStore todoStore,
             final ChatClient chatClient,
+            final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService,
             final McpManager mcpManager,
             final VirtualThreadExecutor executor,
             final ProviderManager providerManager,
@@ -188,6 +191,7 @@ public class TuiCommand implements Runnable {
         this.sessionStore = sessionStore;
         this.todoStore = todoStore;
         this.chatClient = chatClient;
+        this.modelStyleService = modelStyleService;
         this.mcpManager = mcpManager;
         this.executor = executor;
         this.providerManager = providerManager;
@@ -326,6 +330,7 @@ public class TuiCommand implements Runnable {
 
     private void applyTheme(final String theme) {
         final var normalized = "light".equalsIgnoreCase(theme) ? "light" : "dark";
+        this.theme = normalized;
         this.palette = Palette.from(normalized, tuiConfiguration);
         final var opacity = Math.clamp(tuiConfiguration.thinkingOpacity(), 0.05, 1.0);
         final var thought = TuiColors.blend(palette.text(), palette.backgroundPanel(), opacity);
@@ -2101,6 +2106,13 @@ public class TuiCommand implements Runnable {
         state.screenGrid = SelectionState.snapshot(frame.buffer());
     }
 
+    private Style modelNameStyle() {
+        final var style = modelStyleService.resolve(
+                chatClient.currentProvider(), chatClient.model(), !"light".equalsIgnoreCase(theme));
+        final var base = Style.EMPTY.fg(Color.hex(style.hex()));
+        return style.bold() ? base.bold() : base;
+    }
+
     private void renderSidebar(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
         final var title =
                 state.title == null || state.title.isBlank() ? " yca " : " " + ellipsize(state.title, 24) + " ";
@@ -2122,7 +2134,8 @@ public class TuiCommand implements Runnable {
                 Span.styled("yca", Style.EMPTY.fg(Color.hex(palette.accent())).bold()),
                 Span.styled(" coding agent", label)));
         text.add(Line.empty());
-        text.add(Line.from(Span.styled("model ", label), Span.styled(ellipsize(chatClient.model(), width - 6), value)));
+        text.add(Line.from(
+                Span.styled("model ", label), Span.styled(ellipsize(chatClient.model(), width - 6), modelNameStyle())));
         text.add(Line.from(
                 Span.styled("provider ", label), Span.styled(ellipsize(chatClient.providerId(), width - 9), value)));
         text.add(Line.from(
@@ -2530,7 +2543,7 @@ public class TuiCommand implements Runnable {
         final var frameStyle = state.model.runningTool() != null ? SpinnerStyle.SQUARE_CORNERS : activeWait(state);
         final var prefix = frameStyle == null ? "" : spinnerFrame(frameStyle, state.spinnerTick) + " ";
         parts.add(Span.styled(" " + prefix + state.model.status() + "  ", Style.EMPTY.fg(statusColor)));
-        parts.add(Span.styled("model " + ellipsize(chatClient.model(), 40) + "  ", muted));
+        parts.add(Span.styled("model " + ellipsize(chatClient.model(), 40) + "  ", modelNameStyle()));
         parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
         parts.add(Span.styled(modeName(), Style.EMPTY.fg(modeColor())));
         if (conf.bindings() == KeyBindingPreset.VIM) {

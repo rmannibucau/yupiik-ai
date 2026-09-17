@@ -43,6 +43,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -245,6 +246,16 @@ public class ChatClient implements AutoCloseable {
         return providerManager.currentProviderId();
     }
 
+    /** The currently active provider configuration (may be null when nothing is configured). */
+    public ProviderConfiguration currentProvider() {
+        return providerManager == null ? null : providerManager.current();
+    }
+
+    /** Position of a provider for styling: 0 for the flat-scalar default, {@code 1 + index} within {@code providers}. */
+    public int providerPosition(final ProviderConfiguration provider) {
+        return providerManager == null ? 0 : providerManager.providerPosition(provider);
+    }
+
     /**
      * The resolved context window (tokens) for the current provider + model: an explicit per-provider
      * {@code contextWindow} wins, then the value detected from {@code /v1/models}/cached; {@code 0} when
@@ -337,7 +348,10 @@ public class ChatClient implements AutoCloseable {
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
         final var model = resolveModel();
         final var others = mergeOptions(request.others());
-        if (model.equals(request.model()) && others == request.others()) {
+        final var reasoningEffort = resolveReasoningEffort(request, others, model);
+        if (model.equals(request.model())
+                && others == request.others()
+                && Objects.equals(reasoningEffort, request.reasoningEffort())) {
             return request;
         }
         return new ChatCompletionRequest(
@@ -348,8 +362,26 @@ public class ChatClient implements AutoCloseable {
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                request.reasoningEffort(),
+                reasoningEffort,
                 others);
+    }
+
+    /**
+     * Resolve the effective {@code reasoning_effort} for a request with a put-if-absent semantic: an
+     * explicit value carried by the request wins, then a value already merged in the extra payload
+     * (eg. from {@code providerSpecificOptions}) is left untouched, and only then the per-model
+     * behavior default applies. When the request and the payload already carry one, null keeps the
+     * dedicated field unset so the provider option flows to the wire through the extras.
+     */
+    private String resolveReasoningEffort(
+            final ChatCompletionRequest request, final Map<String, Object> merged, final String model) {
+        if (request.reasoningEffort() != null && !request.reasoningEffort().isBlank()) {
+            return request.reasoningEffort();
+        }
+        if (merged != null && merged.containsKey("reasoning_effort")) {
+            return null;
+        }
+        return providerManager.reasoningEffort(target(), model);
     }
 
     /**
@@ -431,6 +463,7 @@ public class ChatClient implements AutoCloseable {
         if (otherOptions != null) {
             base.putAll(otherOptions);
         }
+        final var reasoningEffort = resolveReasoningEffort(request, base, model);
         final var plainReq = new ChatCompletionRequest(
                 model,
                 request.messages(),
@@ -439,7 +472,7 @@ public class ChatClient implements AutoCloseable {
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                request.reasoningEffort(),
+                reasoningEffort,
                 base);
         final var structuredReq = new ChatCompletionRequest(
                 model,
@@ -449,7 +482,7 @@ public class ChatClient implements AutoCloseable {
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                request.reasoningEffort(),
+                reasoningEffort,
                 withStructuredField(base, flavor, schemaName, schema));
         if (structuredOutputUnsupported) {
             return new StructuredResult(chatInternal(plainReq), false);
@@ -531,6 +564,7 @@ public class ChatClient implements AutoCloseable {
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var model = resolveModel();
+        final var others = mergeOptions(request.others());
         final var effective = new ChatCompletionRequest(
                 model,
                 request.messages(),
@@ -539,8 +573,8 @@ public class ChatClient implements AutoCloseable {
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                request.reasoningEffort(),
-                mergeOptions(request.others()));
+                resolveReasoningEffort(request, others, model),
+                others);
         return doWithFallback(effective, cancelled, true, onDelta);
     }
 
