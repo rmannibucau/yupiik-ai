@@ -37,6 +37,12 @@ public record OptimizeConfiguration(
         int maxEntries,
 
         @Property(
+                defaultValue = "10",
+                documentation =
+                        "Minimum size reduction, in percent, for an optimized tool output to replace the original one; smaller wins are ignored to avoid pointless rewrites.")
+        int minReductionPercent,
+
+        @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Processor or tool names to disable. Processors: mvn, mvnd, mvnw, gradle, gradlew, git, gh, npm, pnpm, prettier, generic. Matched loosely: './' and path prefixes are dropped, only the file name is kept, known extensions (.cmd, .exe, .sh) are ignored and comparison is case insensitive.")

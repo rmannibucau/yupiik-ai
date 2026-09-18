@@ -21,27 +21,28 @@ import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.FileIgnore;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystems;
+import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
-import java.util.stream.Stream;
 
 @ApplicationScoped
 public class GrepTool implements EmbeddedTool {
 
-    private static final PathMatcher SKIP = p -> {
-        final var n = p.toString();
-        return n.contains("/target/") || n.contains("/.git/") || n.contains("/node_modules/") || n.contains("/build/");
-    };
+    private static final List<String> SKIP_PARTS = List.of("/target/", "/.git/", "/node_modules/", "/build/", "/.yca/");
 
     @Override
     public String name() {
@@ -50,7 +51,10 @@ public class GrepTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Search a regex in file contents, returns `path:line: text` matches.";
+        return "Fast content search tool that works with any codebase size: searches file contents with a regex, "
+                + "skipping build output, VCS directories and ignored paths, and returns `path:line: text` matches. "
+                + "Use this instead of bash grep/rg. Filter files by name with the include parameter (eg. `*.java`). "
+                + "When several searches are independent, batch them in the same reply.";
     }
 
     @Override
@@ -82,48 +86,85 @@ public class GrepTool implements EmbeddedTool {
         final var includeMatcher =
                 include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);
         final var max = (int) Math.min(1000, Math.max(1, optInt(args, "maxResults", 80)));
-        final var sb = new StringBuilder();
-        final var count = new AtomicInteger();
-        final var filesScanned = new AtomicInteger();
-        try (final Stream<Path> walk = Files.isRegularFile(base) ? Stream.of(base) : Files.walk(base)) {
-            walk.filter(Files::isRegularFile)
-                    .filter(p -> !SKIP.matches(p))
-                    .filter(p -> includeMatcher == null || includeMatcher.matches(p.getFileName()))
-                    .forEach(p -> {
-                        if (count.get() >= max) {
-                            return;
+        final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
+        final var matches = new ArrayList<String>();
+        final var filesScanned = new int[] {0};
+        final var capped = new boolean[] {false};
+        try {
+            if (Files.isRegularFile(base)) {
+                searchFile(base, regex, includeMatcher, matches, max, filesScanned);
+            } else {
+                Files.walkFileTree(base, new SimpleFileVisitor<>() {
+                    @Override
+                    public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                        if (!dir.equals(base) && skip(dir, ignore)) {
+                            return FileVisitResult.SKIP_SUBTREE;
                         }
-                        try {
-                            if (Files.size(p) > 2_000_000) {
-                                return;
-                            }
-                            filesScanned.incrementAndGet();
-                            final var lines = Files.readAllLines(p, StandardCharsets.UTF_8);
-                            for (var i = 0; i < lines.size() && count.get() < max; i++) {
-                                if (regex.matcher(lines.get(i)).find()) {
-                                    count.incrementAndGet();
-                                    final var text = lines.get(i).strip();
-                                    sb.append(p)
-                                            .append(':')
-                                            .append(i + 1)
-                                            .append(": ")
-                                            .append(text.length() > 300 ? text.substring(0, 300) + "..." : text)
-                                            .append('\n');
-                                }
-                            }
-                        } catch (final IOException e) {
-                            // skip unreadable/binary
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
+                        if (matches.size() >= max) {
+                            capped[0] = true;
+                            return FileVisitResult.TERMINATE;
                         }
-                    });
+                        if (!skip(file, ignore)
+                                && (includeMatcher == null || includeMatcher.matches(file.getFileName()))) {
+                            searchFile(file, regex, includeMatcher, matches, max, filesScanned);
+                        }
+                        return matches.size() >= max ? FileVisitResult.TERMINATE : FileVisitResult.CONTINUE;
+                    }
+                });
+            }
         } catch (final IOException e) {
             return ToolResult.error("Cannot search " + base + ": " + e.getMessage());
         }
-        if (count.get() == 0) {
-            return ToolResult.ok("No match (" + filesScanned.get() + " files scanned)");
+        if (matches.isEmpty()) {
+            return ToolResult.ok("No match (" + filesScanned[0] + " files scanned)");
         }
-        if (count.get() >= max) {
+        final var sb = new StringBuilder(matches.size() + " match(es)\n");
+        for (final var m : matches) {
+            sb.append(m).append('\n');
+        }
+        if (capped[0] || matches.size() >= max) {
             sb.append("... results capped at ").append(max).append('\n');
         }
-        return ToolResult.ok(count.get() + " match(es)\n" + sb);
+        return ToolResult.ok(sb.toString());
+    }
+
+    private static boolean skip(final Path p, final FileIgnore ignore) {
+        final var n = p.toString();
+        for (final var part : SKIP_PARTS) {
+            if (n.contains(part)) {
+                return true;
+            }
+        }
+        return ignore.isIgnored(p.toAbsolutePath().normalize());
+    }
+
+    private static void searchFile(
+            final Path file,
+            final Pattern regex,
+            final PathMatcher includeMatcher,
+            final List<String> matches,
+            final int max,
+            final int[] filesScanned) {
+        try {
+            if (!Files.isRegularFile(file) || Files.size(file) > 2_000_000) {
+                return;
+            }
+            filesScanned[0]++;
+            final var lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+            for (var i = 0; i < lines.size() && matches.size() < max; i++) {
+                if (regex.matcher(lines.get(i)).find()) {
+                    final var text = lines.get(i).strip();
+                    matches.add(file + ":" + (i + 1) + ": "
+                            + (text.length() > 300 ? text.substring(0, 300) + "..." : text));
+                }
+            }
+        } catch (final IOException | RuntimeException e) {
+            // skip unreadable/binary
+        }
     }
 }

@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -36,13 +37,17 @@ import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
@@ -52,10 +57,13 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -470,6 +478,563 @@ class AgentLoopTest {
                 .toList();
     }
 
+    @Test
+    void consecutiveReadonlyToolsRunConcurrentlyAndResultsKeepCallOrder() {
+        final var barrier = new CyclicBarrier(2);
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(
+                requests,
+                List.of(
+                        new ToolCall("t1", "function", new ToolCall.FunctionCall("slow_read_a", "{}"), 0),
+                        new ToolCall("t2", "function", new ToolCall.FunctionCall("slow_read_b", "{}"), 1)));
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        barrierRegistry(barrier, "slow_read_a", "slow_read_b"),
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("all done", result);
+        final var tools =
+                requests.get(1).stream().filter(m -> "tool".equals(m.role())).toList();
+        assertEquals(2, tools.size(), "both tool results must reach the next request");
+        assertEquals("t1", tools.get(0).toolCallId());
+        assertEquals("done-a", tools.get(0).content());
+        assertEquals("t2", tools.get(1).toolCallId());
+        assertEquals("done-b", tools.get(1).content());
+    }
+
+    @Test
+    void parallelReadonlyCanBeDisabledByConfiguration() {
+        final var barrier = new CyclicBarrier(2);
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(
+                requests,
+                List.of(
+                        new ToolCall("t1", "function", new ToolCall.FunctionCall("slow_read_a", "{}"), 0),
+                        new ToolCall("t2", "function", new ToolCall.FunctionCall("slow_read_b", "{}"), 1)));
+        final var config = configuration(true, Map.of("yca.tools.parallelReadonly", "false"));
+        loop(
+                        client,
+                        null,
+                        config,
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        barrierRegistry(barrier, "slow_read_a", "slow_read_b"),
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run("do it", null, "s1", null, () -> false);
+
+        final var tools =
+                requests.get(1).stream().filter(m -> "tool".equals(m.role())).toList();
+        assertEquals(2, tools.size());
+        assertTrue(
+                String.valueOf(tools.get(0).content()).contains("not concurrent"),
+                "with the feature off the barrier is never satisfied: "
+                        + tools.get(0).content());
+    }
+
+    @Test
+    void stateChangingToolKeepsSurroundingCallsSequentialInOrder() {
+        final var order = Collections.synchronizedList(new ArrayList<String>());
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(
+                requests,
+                List.of(
+                        new ToolCall("t1", "function", new ToolCall.FunctionCall("read_a", "{}"), 0),
+                        new ToolCall("t2", "function", new ToolCall.FunctionCall("agent_x", "{}"), 1),
+                        new ToolCall("t3", "function", new ToolCall.FunctionCall("read_b", "{}"), 2)));
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                if (!List.of("read_a", "agent_x", "read_b").contains(name)) {
+                    return null;
+                }
+                final var readonly = !"agent_x".equals(name);
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return name;
+                    }
+
+                    @Override
+                    public String description() {
+                        return "test tool";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        // agent-category and not readonly: allowed by the permission service but
+                        // never eligible for a parallel run
+                        return readonly ? ToolCategory.READ : ToolCategory.AGENT;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return readonly;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        order.add(name);
+                        return ToolResult.ok("ran " + name);
+                    }
+                };
+            }
+        };
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        registry,
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("all done", result);
+        assertEquals(List.of("read_a", "agent_x", "read_b"), order, "a state-changing call must never be overtaken");
+        final var tools =
+                requests.get(1).stream().filter(m -> "tool".equals(m.role())).toList();
+        assertEquals(
+                List.of("t1", "t2", "t3"),
+                tools.stream().map(Message::toolCallId).toList());
+    }
+
+    @Test
+    void thirdIdenticalConsecutiveToolCallIsRefusedWithGuidance() {
+        final var executions = new AtomicInteger();
+        final var requests = new ArrayList<List<Message>>();
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                final var round = calls.incrementAndGet();
+                if (round <= 3) {
+                    return Message.assistant(
+                            null,
+                            List.of(new ToolCall(
+                                    "t" + round,
+                                    "function",
+                                    new ToolCall.FunctionCall("probe", "{\"q\":\"same\"}"),
+                                    0)));
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("gave up looping", null);
+            }
+
+            @Override
+            public void setPauseListener(final Consumer<PauseEvent> listener) {}
+        };
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                if (!"probe".equals(name)) {
+                    return null;
+                }
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "probe";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "test tool";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.READ;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return true;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        executions.incrementAndGet();
+                        return ToolResult.ok("probe result");
+                    }
+                };
+            }
+        };
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        registry,
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("gave up looping", result);
+        assertEquals(2, executions.get(), "only the first two identical calls must execute");
+        // request 4 carries the accumulated history: its last tool message is the round-3 refusal
+        final var toolMessages =
+                requests.get(3).stream().filter(m -> "tool".equals(m.role())).toList();
+        final var refusal = toolMessages.get(toolMessages.size() - 1);
+        assertTrue(
+                String.valueOf(refusal.content()).contains("3 times in a row"),
+                "the refused call must explain the doom loop: " + refusal.content());
+    }
+
+    @Test
+    void staleReadsAreInvalidatedAfterAWriteToTheSamePath() {
+        final var requests = new ArrayList<List<Message>>();
+        final var calls = new AtomicInteger();
+        final var file = "/tmp/opencode/stale-target.txt";
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                return switch (calls.incrementAndGet()) {
+                    case 1 ->
+                        Message.assistant(
+                                null,
+                                List.of(new ToolCall(
+                                        "t1",
+                                        "function",
+                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"" + file + "\"}"),
+                                        0)));
+                    case 2 ->
+                        Message.assistant(
+                                null,
+                                List.of(new ToolCall(
+                                        "t2",
+                                        "function",
+                                        new ToolCall.FunctionCall(
+                                                "write_file", "{\"path\":\"" + file + "\",\"content\":\"new\"}"),
+                                        0)));
+                    default -> {
+                        onDelta.accept(new End("stop", null));
+                        yield Message.assistant("written", null);
+                    }
+                };
+            }
+
+            @Override
+            public void setPauseListener(final Consumer<PauseEvent> listener) {}
+        };
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true, Map.of("yca.mode", "build", "yca.permissions.mode", "yolo")),
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        fileToolsRegistry(),
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run("edit the file", null, "s1", null, () -> false);
+
+        assertEquals("written", result);
+        final var beforeWrite = requests.get(1).stream()
+                .filter(m -> "tool".equals(m.role()) && "t1".equals(m.toolCallId()))
+                .findFirst()
+                .orElseThrow();
+        assertEquals("old content", beforeWrite.content(), "the read result must be intact before the write lands");
+        final var afterWrite = requests.get(2).stream()
+                .filter(m -> "tool".equals(m.role()) && "t1".equals(m.toolCallId()))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(
+                String.valueOf(afterWrite.content()).contains("stale read cleared"),
+                "the read result must be invalidated after the write: " + afterWrite.content());
+    }
+
+    @Test
+    void staleReadsFromPreviousTurnsAreIndexedFromHistory() {
+        final var requests = new ArrayList<List<Message>>();
+        final var calls = new AtomicInteger();
+        final var file = "/tmp/opencode/stale-history.txt";
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                if (calls.incrementAndGet() == 1) {
+                    return Message.assistant(
+                            null,
+                            List.of(new ToolCall(
+                                    "t2",
+                                    "function",
+                                    new ToolCall.FunctionCall(
+                                            "write_file", "{\"path\":\"" + file + "\",\"content\":\"new\"}"),
+                                    0)));
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("written", null);
+            }
+
+            @Override
+            public void setPauseListener(final Consumer<PauseEvent> listener) {}
+        };
+        final var history = List.of(
+                Message.user("show me the file"),
+                Message.assistant(
+                        null,
+                        List.of(new ToolCall(
+                                "h1",
+                                "function",
+                                new ToolCall.FunctionCall("read_file", "{\"path\":\"" + file + "\"}"),
+                                0))),
+                Message.tool("h1", "old content"));
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true, Map.of("yca.mode", "build", "yca.permissions.mode", "yolo")),
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        fileToolsRegistry(),
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run("rewrite it", null, "s1", history, () -> false);
+
+        assertEquals("written", result);
+        final var previousRead = requests.get(1).stream()
+                .filter(m -> "tool".equals(m.role()) && "h1".equals(m.toolCallId()))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(
+                String.valueOf(previousRead.content()).contains("stale read cleared"),
+                "reads from previous turns must be invalidated too: " + previousRead.content());
+    }
+
+    /** A registry serving {@code read_file} (READ/readonly) and {@code write_file} (EDIT) fakes. */
+    private ToolRegistry fileToolsRegistry() {
+        return new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                final var read = "read_file".equals(name);
+                if (!read && !"write_file".equals(name)) {
+                    return null;
+                }
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return name;
+                    }
+
+                    @Override
+                    public String description() {
+                        return "test tool";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return read ? ToolCategory.READ : ToolCategory.EDIT;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return read;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        return ToolResult.ok(read ? "old content" : "written");
+                    }
+                };
+            }
+        };
+    }
+
+    /** Two readonly tools meeting on a barrier: the barrier only passes when both are in flight together. */
+    private ToolRegistry barrierRegistry(final CyclicBarrier barrier, final String... names) {
+        return new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                if (!List.of(names).contains(name)) {
+                    return null;
+                }
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return name;
+                    }
+
+                    @Override
+                    public String description() {
+                        return "test tool";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.READ;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return true;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        try {
+                            barrier.await(2, TimeUnit.SECONDS);
+                        } catch (final Exception e) {
+                            return ToolResult.error("not concurrent: " + e);
+                        }
+                        return ToolResult.ok("done-" + name.substring(name.length() - 1));
+                    }
+                };
+            }
+        };
+    }
+
+    private ToolExecutionService directExecutions() {
+        return new ToolExecutionService() {
+            @Override
+            public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
+                return tool.execute(args);
+            }
+        };
+    }
+
+    @Test
+    void resumeRerunsTheLoopWithoutAddingAnyUserMessage() {
+        final var requests = new ArrayList<List<Message>>();
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("resumed answer", "stop", false)));
+        final var client = chatClient(replies, requests);
+        final var appended = new ArrayList<SessionEntry>();
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                appended.add(entry);
+            }
+        };
+        final var history = new ArrayList<Message>();
+        history.add(Message.user("original question"));
+        history.add(Message.assistant("partial answer", null));
+        final var loop = loop(client, new TodoStore() {}, configuration(true), noPruningManager(), store, null);
+        loop.resume(null, "s1", history, () -> false);
+        assertEquals(1, requests.size());
+        final var sent = requests.get(0);
+        assertEquals(3, sent.size(), "system + history verbatim, no extra user message");
+        assertEquals("system", sent.get(0).role());
+        assertEquals("original question", sent.get(1).content());
+        assertEquals("partial answer", sent.get(2).content());
+        assertTrue(
+                appended.stream().noneMatch(e -> "user".equals(e.role())),
+                "resume must not persist any new input (only the assistant reply is appended)");
+    }
+
+    @Test
+    void resumeAliasesAreConfigurableAndCaseInsensitive() {
+        final var cfg = configuration(true, Map.of("yca.resumeAliases", "continue,vas-y"));
+        assertTrue(cfg.isResumeAlias("  Continue "));
+        assertTrue(cfg.isResumeAlias("VAS-Y"));
+        assertFalse(cfg.isResumeAlias("go"), "defaults are replaced, not merged");
+        assertFalse(cfg.isResumeAlias(""));
+        assertFalse(cfg.isResumeAlias(null));
+    }
+
+    private ChatClient scriptedToolClient(final List<List<Message>> requests, final List<ToolCall> firstReplyCalls) {
+        final var calls = new AtomicInteger();
+        return new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                if (calls.incrementAndGet() == 1) {
+                    return Message.assistant(null, firstReplyCalls);
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("all done", null);
+            }
+
+            @Override
+            public void setPauseListener(final Consumer<PauseEvent> listener) {}
+        };
+    }
+
+    private ContextManager noPruningManager() {
+        return new ContextManager() {
+            @Override
+            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+        };
+    }
+
+    private SessionStore noopStore() {
+        return new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {}
+        };
+    }
+
     private CodingAgentConfiguration configuration(final boolean continueOnTruncation) {
         return configuration(continueOnTruncation, Map.of());
     }
@@ -523,10 +1088,22 @@ class AgentLoopTest {
             final ContextManager contextManager,
             final SessionStore sessionStore,
             final ContextView contextView) {
+        return loop(client, todoStore, config, contextManager, sessionStore, contextView, null, null, null);
+    }
+
+    private AgentLoop loop(
+            final ChatClient client,
+            final TodoStore todoStore,
+            final CodingAgentConfiguration config,
+            final ContextManager contextManager,
+            final SessionStore sessionStore,
+            final ContextView contextView,
+            final ToolRegistry registry,
+            final ToolExecutionService executions,
+            final VirtualThreadExecutor executor) {
         events.clear();
-        return new AgentLoop(
-                client,
-                new ToolRegistry(null) {
+        final var resolvedRegistry = registry == null
+                ? new ToolRegistry(null) {
                     @Override
                     public List<Tool> toWireTools() {
                         return List.of();
@@ -536,10 +1113,15 @@ class AgentLoopTest {
                     public io.yupiik.ia.agent.core.tools.EmbeddedTool tool(final String name) {
                         return null;
                     }
-                },
-                new ToolExecutionService() {},
+                }
+                : registry;
+        final var resolvedExecutions = executions == null ? new ToolExecutionService() {} : executions;
+        return new AgentLoop(
+                client,
+                resolvedRegistry,
+                resolvedExecutions,
                 config,
-                new PermissionService(null),
+                new PermissionService(config),
                 new UsageTracker() {
                     @Override
                     public void record(final io.yupiik.ia.agent.core.llm.Usage usage) {}
@@ -581,10 +1163,12 @@ class AgentLoopTest {
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
-                        events.add((AgentEvent) event);
+                        synchronized (events) {
+                            events.add((AgentEvent) event);
+                        }
                     }
                 },
-                null,
+                new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> java.util.Optional.empty()),
                 new io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph() {
                     @Override
                     public void ensureReadyAsync() {}
@@ -598,7 +1182,8 @@ class AgentLoopTest {
                 null,
                 Clock.systemUTC(),
                 (SnapshotStore) null,
-                todoStore);
+                todoStore,
+                executor);
     }
 
     /**

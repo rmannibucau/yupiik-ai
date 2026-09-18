@@ -41,8 +41,7 @@ public class GhOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        final var filtered = lines.filter(l -> !l.isBlank() || !isNoise(l));
-        return filtered;
+        return lines.filter(l -> !isNoise(l));
     }
 
     private boolean isNoise(final String line) {

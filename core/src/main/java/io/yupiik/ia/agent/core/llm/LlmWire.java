@@ -29,7 +29,6 @@ import io.yupiik.llm.client.model.LlmToolCall;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -142,9 +141,11 @@ final class LlmWire {
             return Usage.EMPTY;
         }
         return new Usage(
-                Math.toIntExact(usage.promptTokens()),
-                Math.toIntExact(usage.completionTokens()),
-                Math.toIntExact(usage.totalTokens()));
+                Math.toIntExact(usage.prompt()),
+                Math.toIntExact(usage.completion()),
+                Math.toIntExact(usage.total()),
+                Math.toIntExact(usage.cacheRead()),
+                Math.toIntExact(usage.cacheWrite()));
     }
 
     static Message pump(
@@ -165,6 +166,9 @@ final class LlmWire {
         // non-conformant and delivers fragments concurrently.
         final var byId = new HashMap<String, PartialToolCall>();
         final var byIndex = new HashMap<Integer, PartialToolCall>();
+        // lookup maps carry no ordering, so the emission order of the logical calls is tracked
+        // separately: partials are appended once, when they are created
+        final var creationOrder = new ArrayList<PartialToolCall>();
         final var mergeLock = new Object();
         // a transport failure after fragments were delivered (connection cut mid-chunk) is a
         // MidStreamFailureException so the caller can retry the whole request, while a failure
@@ -196,7 +200,7 @@ final class LlmWire {
                         onDelta.accept(event);
                     } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
                         delivered[0] = true;
-                        final var partial = resolvePartial(byId, byIndex, index, id);
+                        final var partial = resolvePartial(byId, byIndex, index, id, creationOrder);
                         if (id != null) {
                             byId.put(id, partial);
                         }
@@ -221,15 +225,13 @@ final class LlmWire {
             public void onError(final Throwable throwable) {
                 synchronized (mergeLock) {
                     if (delivered[0]) {
-                        final var partials = new LinkedHashSet<>(byId.values());
-                        partials.addAll(byIndex.values());
                         done.completeExceptionally(new MidStreamFailureException(
                                 "stream interrupted after " + text.length() + " chars of partial content: " + throwable,
                                 throwable,
                                 text.toString(),
-                                partials.isEmpty()
+                                creationOrder.isEmpty()
                                         ? null
-                                        : partials.stream()
+                                        : creationOrder.stream()
                                                 .map(PartialToolCall::toToolCall)
                                                 .toList()));
                     } else {
@@ -241,10 +243,9 @@ final class LlmWire {
             @Override
             public void onComplete() {
                 synchronized (mergeLock) {
-                    final var partials = new LinkedHashSet<>(byId.values());
-                    partials.addAll(byIndex.values());
-                    toolCalls.addAll(
-                            partials.stream().map(PartialToolCall::toToolCall).toList());
+                    toolCalls.addAll(creationOrder.stream()
+                            .map(PartialToolCall::toToolCall)
+                            .toList());
                     done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
                 }
             }
@@ -269,9 +270,32 @@ final class LlmWire {
             final Map<String, PartialToolCall> byId,
             final Map<Integer, PartialToolCall> byIndex,
             final int index,
-            final String id) {
+            final String id,
+            final List<PartialToolCall> creationOrder) {
         final var fromId = id != null ? byId.get(id) : null;
         final var fromIndex = byIndex.get(index);
+        if (fromId != null
+                && fromIndex != null
+                && fromIndex != fromId
+                && fromIndex.id != null
+                && !fromIndex.id.equals(id)) {
+            // a fragment of a known call arriving under an index slot taken over by a newer call:
+            // follow the id and re-point the slot, never concatenating the other call's arguments
+            byIndex.put(index, fromId);
+            return fromId;
+        }
+        if (fromId == null && fromIndex != null && fromIndex.id != null && id != null && !fromIndex.id.equals(id)) {
+            // some OpenAI-compatible servers (llama.cpp style) reuse the fragment index across
+            // parallel tool calls: the id is authoritative, so keep the calls separate and take
+            // the index slot over - the id-less continuation fragments of the newest call then
+            // attach to it instead of bleeding into the previous call's arguments
+            final var created = new PartialToolCall(index);
+            created.id = id;
+            creationOrder.add(created);
+            byId.put(id, created);
+            byIndex.put(index, created);
+            return created;
+        }
         if (fromId != null) {
             if (fromIndex != null && fromIndex != fromId) {
                 // same logical call surfaced under both identities: merge the grouping so later
@@ -296,6 +320,7 @@ final class LlmWire {
             return fromIndex;
         }
         final var created = new PartialToolCall(index);
+        creationOrder.add(created);
         if (id != null) {
             byId.put(id, created);
         }

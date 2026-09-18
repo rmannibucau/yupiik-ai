@@ -15,7 +15,9 @@
  */
 package io.yupiik.ia.agent.core.todo;
 
+import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.io.IOException;
@@ -49,6 +51,25 @@ public class TodoStore {
         todos = items == null ? List.of() : List.copyOf(items);
         persist();
         return all();
+    }
+
+    public void onStart(@OnEvent final Start start) {
+        load();
+    }
+
+    public synchronized void load() {
+        final var path = Path.of(configuration.resolveStorageHome(), "todos.json");
+        if (!Files.isReadable(path)) {
+            return;
+        }
+        try {
+            final var loaded = mapper.fromString(TodoItem[].class, Files.readString(path));
+            if (loaded != null && loaded.length > 0) {
+                todos = List.of(loaded);
+            }
+        } catch (final IOException | RuntimeException e) {
+            // corrupted/legacy file: ignore and keep the in-memory list
+        }
     }
 
     private void persist() {

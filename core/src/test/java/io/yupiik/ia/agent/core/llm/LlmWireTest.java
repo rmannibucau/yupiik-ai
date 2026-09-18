@@ -239,4 +239,69 @@ class LlmWireTest {
         assertEquals("bash", bashCall.function().name());
         assertEquals("{\"command\":\"ls\"}", bashCall.function().arguments());
     }
+
+    /**
+     * llama.cpp-style servers reuse the fragment index (0) across parallel tool calls while giving
+     * each call its own id: without the id-first collision rule the second call's arguments were
+     * appended to the first call, producing concatenated JSON objects that providers reject with a
+     * 500 when they re-parse the arguments of the assistant history.
+     */
+    @Test
+    void reusedFragmentIndexWithDistinctIdsKeepsParallelCallsSeparate() throws Exception {
+        final var events = List.<LlmStreamEvent>of(
+                new LlmStreamEvent.ToolCallDelta(0, "call_a", "grep", "{\"query\":\"foo\",\"max\":10}"),
+                new LlmStreamEvent.ToolCallDelta(0, "call_b", "read_file", "{\"path\":\"pom.xml\"}"));
+
+        final var message = LlmWire.pump(publisher(events), ignored -> {}, null);
+
+        final var calls = message.toolCalls();
+        assertNotNull(calls);
+        assertEquals(2, calls.size());
+
+        final var first = calls.get(0);
+        assertEquals("call_a", first.id());
+        assertEquals("grep", first.function().name());
+        assertEquals("{\"query\":\"foo\",\"max\":10}", first.function().arguments());
+
+        final var second = calls.get(1);
+        assertEquals("call_b", second.id());
+        assertEquals("read_file", second.function().name());
+        assertEquals("{\"path\":\"pom.xml\"}", second.function().arguments());
+    }
+
+    @Test
+    void continuationFragmentsAfterIndexReuseAttachToTheNewestCall() throws Exception {
+        final var events = List.<LlmStreamEvent>of(
+                new LlmStreamEvent.ToolCallDelta(0, "a", "grep", "{\"query\":"),
+                new LlmStreamEvent.ToolCallDelta(0, null, null, "\"x\"}"),
+                new LlmStreamEvent.ToolCallDelta(0, "b", "read_file", "{\"path\":"),
+                new LlmStreamEvent.ToolCallDelta(0, null, null, "\"y\"}"));
+
+        final var message = LlmWire.pump(publisher(events), ignored -> {}, null);
+
+        final var calls = message.toolCalls();
+        assertNotNull(calls);
+        assertEquals(2, calls.size());
+        assertEquals("{\"query\":\"x\"}", calls.get(0).function().arguments());
+        assertEquals("{\"path\":\"y\"}", calls.get(1).function().arguments());
+    }
+
+    private static Flow.Publisher<LlmStreamEvent> publisher(final List<LlmStreamEvent> events) {
+        return subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+            private int cursor = -1;
+
+            @Override
+            public void request(final long n) {
+                while (cursor + 1 < events.size()) {
+                    subscriber.onNext(events.get(++cursor));
+                }
+                subscriber.onComplete();
+            }
+
+            @Override
+            public void cancel() {
+                // no-op
+            }
+        });
+    }
 }

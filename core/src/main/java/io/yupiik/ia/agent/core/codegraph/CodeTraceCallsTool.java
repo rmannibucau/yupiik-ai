@@ -22,7 +22,6 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayDeque;
-import java.util.ArrayList;
 import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashSet;
@@ -51,7 +50,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         return "Trace relations of a symbol in the structural code graph (breadth-first, optional depth limit): "
                 + "callers/callees via calls, implementors (edgeTypes=implements), extensions (extends), usages (uses) "
                 + "or imports. Default follows calls; narrow with the edgeTypes parameter (eg. edgeTypes=implements). "
-                + "Returns each found symbol resolved to its kind and file location. The returned list is complete and "
+                + "Returns an indented tree of symbols with their file locations. The trace is complete and "
                 + "authoritative for the traced relation: do not grep or re-read the referenced sources simply to "
                 + "confirm membership, only read a file if you need method/body detail beyond the trace.";
     }
@@ -107,8 +106,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         final var targetOrd = resolveOrd(symbol, idx);
         if (targetOrd < 0) {
             return ToolResult.error("Symbol not found: " + symbol + ". List candidate symbols with the code_find_code "
-                    + "tool, then retrace using the fully-qualified name (or grep the graph docs at path="
-                    + codeGraph.storeRoot().resolve("docs") + ").");
+                    + "tool, then retrace using the fully-qualified name.");
         }
         // Terminal verdict for concrete-class implements trace (mirrors CodeResolveTool)
         if (edgeTypes.equals(EnumSet.of(GraphModel.EdgeType.IMPLEMENTS))) {
@@ -134,7 +132,6 @@ public class CodeTraceCallsTool implements EmbeddedTool {
 
         final var sb = new StringBuilder();
         var count = 0;
-        final var found = new ArrayList<String>();
         final var visited = new java.util.HashSet<Integer>();
         final Deque<int[]> queue = new ArrayDeque<>(); // {ordinal, level}
         queue.add(new int[] {targetOrd, 0});
@@ -144,9 +141,20 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             final int ord = cur[0];
             final int level = cur[1];
             if (level > 0) {
-                final var name = idx.symbol(ord).fqn();
-                sb.repeat("  ", level - 1).append('-').append(name).append('\n');
-                found.add(name);
+                final var sym = idx.symbol(ord);
+                sb.repeat("  ", level - 1)
+                        .append("- ")
+                        .append(sym.fqn())
+                        .append(" (")
+                        .append(sym.kind().name().toLowerCase(java.util.Locale.ROOT))
+                        .append(")")
+                        .append(" [")
+                        .append(sym.file())
+                        .append(':')
+                        .append(sym.startLine())
+                        .append('-')
+                        .append(sym.endLine())
+                        .append("]\n");
                 count++;
                 if (count >= max) {
                     break;
@@ -170,32 +178,6 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                     queue.add(new int[] {n, level + 1});
                 }
             }
-        }
-        sb.append("\nresolved ")
-                .append(symbol)
-                .append(" (")
-                .append(edgeTypesLabel(edgeTypes))
-                .append("), ")
-                .append(found.size())
-                .append(" distinct symbol(s) found:\n");
-        for (final var name : found) {
-            final var ord = idx.indexOfFqn(name);
-            final GraphModel.Symbol s = ord >= 0 ? idx.symbol(ord) : null;
-            if (s == null || s.file() == null) {
-                sb.append("- ").append(name).append('\n');
-                continue;
-            }
-            sb.append("- ")
-                    .append(s.kind().name().toLowerCase(java.util.Locale.ROOT))
-                    .append(' ')
-                    .append(name)
-                    .append(" (")
-                    .append(s.file())
-                    .append(':')
-                    .append(s.startLine())
-                    .append('-')
-                    .append(s.endLine())
-                    .append(")\n");
         }
         if (count >= max) {
             sb.append("(truncated to ").append(max).append(" edges; raise max and narrow edgeTypes for more)\n");

@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
@@ -47,6 +48,7 @@ public class MemoryExtractor {
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private final Emitter emitter;
     private final Clock clock;
+    private final UsageTracker usageTracker;
 
     public MemoryExtractor(
             final ChatClient chatClient,
@@ -55,7 +57,8 @@ public class MemoryExtractor {
             final JsonMapper mapper,
             final VirtualThreadExecutor executor,
             final Emitter emitter,
-            final Clock clock) {
+            final Clock clock,
+            final UsageTracker usageTracker) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
@@ -63,6 +66,7 @@ public class MemoryExtractor {
         this.executor = executor;
         this.emitter = emitter;
         this.clock = clock;
+        this.usageTracker = usageTracker;
     }
 
     protected MemoryExtractor() {
@@ -73,6 +77,7 @@ public class MemoryExtractor {
         this.executor = null;
         this.emitter = null;
         this.clock = null;
+        this.usageTracker = null;
     }
 
     public void maybeExtract(final List<Message> messages) {
@@ -121,6 +126,9 @@ public class MemoryExtractor {
                     null,
                     null);
             final var res = chatClient.chatStructured(request, "memory_facts", factsSchema());
+            if (usageTracker != null && res.result() != null) {
+                usageTracker.recordAuxiliary(res.result().usage());
+            }
             if (res.structured()) {
                 final var content =
                         res.result().message() == null || res.result().message().content() == null
@@ -242,6 +250,9 @@ public class MemoryExtractor {
                 null,
                 null,
                 null));
+        if (usageTracker != null) {
+            usageTracker.recordAuxiliary(res.usage());
+        }
         final var content = res.message() == null || res.message().content() == null
                 ? ""
                 : String.valueOf(res.message().content());

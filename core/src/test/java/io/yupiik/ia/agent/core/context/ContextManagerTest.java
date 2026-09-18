@@ -133,6 +133,32 @@ class ContextManagerTest {
     }
 
     @Test
+    void compactionSummarizerSpendIsTrackedAsAuxiliary() {
+        final var digest = "summary: kept";
+        final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) {
+                return new ChatResult(Message.assistant(digest, null), new Usage(11, 7, 18));
+            }
+        };
+        final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());
+        final var manager = new ContextManager(
+                cfg, tracker, new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 9; i++) {
+            messages.add(Message.user("step " + i + " " + "x".repeat(400)));
+        }
+        final var result = manager.compact(messages);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        assertEquals(1, tracker.auxiliaryRequests(), "exactly one summarizer call must be recorded");
+        assertEquals(11, tracker.auxiliaryPromptTokens());
+        assertEquals(7, tracker.auxiliaryCompletionTokens());
+        assertEquals(11, tracker.promptTokens(), "auxiliary spend must also feed the session totals");
+    }
+
+    @Test
     void toolSchemasCountTowardTheTriggers() {
         final var cfg = config(6);
         final var manager = new ContextManager(

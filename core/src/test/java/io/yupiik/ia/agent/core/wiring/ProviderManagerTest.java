@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -100,5 +101,20 @@ class ProviderManagerTest {
         assertEquals("low", manager.reasoningEffort(provider, "claude-opus-4"));
         assertNull(manager.reasoningEffort(provider, "haiku-4-5"));
         assertNull(manager.reasoningEffort(provider, "gpt-5"));
+    }
+
+    @Test
+    void providerOptionsAreCachedPerProviderInstance() {
+        final var manager = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}")));
+        final var provider = manager.providers().get(0);
+        final var first = manager.providerOptions(provider);
+        final var second = manager.providerOptions(provider);
+        assertSame(first, second, "parsed providerSpecificOptions must be cached, not re-parsed per request");
+        assertEquals(0.2, ((Number) first.get("temperature")).doubleValue());
     }
 }

@@ -431,21 +431,76 @@ public class ChatClient implements AutoCloseable {
         final var model = resolveModel();
         final var others = mergeOptions(request.others());
         final var reasoningEffort = resolveReasoningEffort(request, others, model);
+        final ChatCompletionRequest effective;
         if (model.equals(request.model())
                 && others == request.others()
                 && Objects.equals(reasoningEffort, request.reasoningEffort())) {
+            effective = request;
+        } else {
+            effective = new ChatCompletionRequest(
+                    model,
+                    request.messages(),
+                    request.temperature(),
+                    request.stream(),
+                    request.tools(),
+                    request.toolChoice(),
+                    request.maxTokens(),
+                    reasoningEffort,
+                    others);
+        }
+        return withPromotedExtras(effective);
+    }
+
+    /**
+     * Promote the well-known generic options carried in the request extras ({@code temperature} and
+     * {@code max_tokens}/{@code max_output_tokens}, eg. from {@code providerSpecificOptions}) into the
+     * typed request fields so every dialect honours them - notably the output-budget resolution which
+     * only reads the typed field - and strip them from the extras so the wire payload never carries
+     * duplicate keys. A typed field wins when both are set.
+     */
+    private static ChatCompletionRequest withPromotedExtras(final ChatCompletionRequest request) {
+        final var extras = request.others();
+        if (extras == null
+                || extras.isEmpty()
+                || (!extras.containsKey("temperature")
+                        && !extras.containsKey("max_tokens")
+                        && !extras.containsKey("max_output_tokens"))) {
             return request;
         }
+        Double temperature = request.temperature();
+        if (temperature == null && extras.get("temperature") instanceof Number n) {
+            temperature = n.doubleValue();
+        }
+        Integer maxTokens = request.maxTokens();
+        if (maxTokens == null) {
+            maxTokens = extrasNumber(extras, "max_tokens", "max_output_tokens");
+        }
+        final var stripped = new LinkedHashMap<String, Object>(extras.size());
+        extras.forEach((k, v) -> {
+            if (!"temperature".equals(k) && !"max_tokens".equals(k) && !"max_output_tokens".equals(k)) {
+                stripped.put(k, v);
+            }
+        });
         return new ChatCompletionRequest(
-                model,
+                request.model(),
                 request.messages(),
-                request.temperature(),
+                temperature,
                 request.stream(),
                 request.tools(),
                 request.toolChoice(),
-                request.maxTokens(),
-                reasoningEffort,
-                others);
+                maxTokens,
+                request.reasoningEffort(),
+                stripped);
+    }
+
+    private static Integer extrasNumber(final Map<String, Object> extras, final String... keys) {
+        for (final var key : keys) {
+            if (extras.get(key) instanceof Number n) {
+                final var value = n.intValue();
+                return value > 0 ? value : null;
+            }
+        }
+        return null;
     }
 
     /**
@@ -567,7 +622,7 @@ public class ChatClient implements AutoCloseable {
             base.putAll(otherOptions);
         }
         final var reasoningEffort = resolveReasoningEffort(request, base, model);
-        final var plainReq = new ChatCompletionRequest(
+        final var plainReq = withPromotedExtras(new ChatCompletionRequest(
                 model,
                 request.messages(),
                 request.temperature(),
@@ -576,8 +631,8 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 request.maxTokens(),
                 reasoningEffort,
-                base);
-        final var structuredReq = new ChatCompletionRequest(
+                base));
+        final var structuredReq = withPromotedExtras(new ChatCompletionRequest(
                 model,
                 request.messages(),
                 request.temperature(),
@@ -586,7 +641,7 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 request.maxTokens(),
                 reasoningEffort,
-                withStructuredField(base, flavor, schemaName, schema));
+                withStructuredField(base, flavor, schemaName, schema)));
         if (structuredOutputUnsupported) {
             return new StructuredResult(chatInternal(plainReq), false);
         }
@@ -668,7 +723,7 @@ public class ChatClient implements AutoCloseable {
             throws IOException, InterruptedException {
         final var model = resolveModel();
         final var others = mergeOptions(request.others());
-        final var effective = new ChatCompletionRequest(
+        final var effective = withPromotedExtras(new ChatCompletionRequest(
                 model,
                 request.messages(),
                 request.temperature(),
@@ -677,7 +732,7 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 request.maxTokens(),
                 resolveReasoningEffort(request, others, model),
-                others);
+                others));
         return doWithFallback(effective, cancelled, true, onDelta);
     }
 

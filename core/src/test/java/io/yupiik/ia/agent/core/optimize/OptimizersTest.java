@@ -78,17 +78,17 @@ class OptimizersTest {
 
     @Test
     void isDisabledMatchesConfiguredNames() {
-        final var maven = new OptimizeConfiguration(true, 400, 20, List.of("mvn"));
+        final var maven = new OptimizeConfiguration(true, 400, 20, 10, List.of("mvn"));
         assertTrue(maven.isDisabled(List.of("mvn", "mvnd", "mvnw")));
         assertFalse(maven.isDisabled(List.of("git")));
 
-        final var mvnw = new OptimizeConfiguration(true, 400, 20, List.of("./mvnw.cmd"));
+        final var mvnw = new OptimizeConfiguration(true, 400, 20, 10, List.of("./mvnw.cmd"));
         assertTrue(mvnw.isDisabled(List.of("mvn", "mvnd", "mvnw")));
 
-        final var tools = new OptimizeConfiguration(true, 400, 20, List.of("bash"));
+        final var tools = new OptimizeConfiguration(true, 400, 20, 10, List.of("bash"));
         assertTrue(tools.isDisabled(List.of("bash")));
 
-        final var none = new OptimizeConfiguration(true, 400, 20, List.of());
+        final var none = new OptimizeConfiguration(true, 400, 20, 10, List.of());
         assertFalse(none.isDisabled(List.of("mvn")));
     }
 

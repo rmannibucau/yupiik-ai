@@ -32,11 +32,13 @@ import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -48,11 +50,15 @@ import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import io.yupiik.llm.client.model.Usage;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -99,6 +105,7 @@ public class AgentLoop {
     private final Clock clock;
     private final SnapshotStore snapshotStore;
     private final TodoStore todoStore;
+    private final VirtualThreadExecutor executor;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -120,7 +127,8 @@ public class AgentLoop {
             final AgentProvider agentProvider,
             final Clock clock,
             final SnapshotStore snapshotStore,
-            final TodoStore todoStore) {
+            final TodoStore todoStore,
+            final VirtualThreadExecutor executor) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -141,6 +149,7 @@ public class AgentLoop {
         this.clock = clock;
         this.snapshotStore = snapshotStore;
         this.todoStore = todoStore;
+        this.executor = executor;
     }
 
     protected AgentLoop() {
@@ -164,10 +173,35 @@ public class AgentLoop {
         this.clock = null;
         this.snapshotStore = null;
         this.todoStore = null;
+        this.executor = null;
     }
 
     public String run(
             final String prompt,
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled) {
+        return doRun(prompt, prompt, agentName, sessionId, history, cancelled);
+    }
+
+    /**
+     * Re-runs the agent loop on the existing history without adding any user message: nothing is
+     * appended to the conversation and nothing is persisted as input, so resuming costs zero extra
+     * prompt tokens. The last real user message (when found) still drives prompt building (memory
+     * ranking, todo hints) so the rebuilt system prompt stays relevant to the ongoing task.
+     */
+    public String resume(
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled) {
+        return doRun(lastUserPrompt(history), null, agentName, sessionId, history, cancelled);
+    }
+
+    private String doRun(
+            final String promptForBuilding,
+            final String userMessage,
             final String agentName,
             final String sessionId,
             final List<Message> history,
@@ -177,12 +211,15 @@ public class AgentLoop {
                 : agentProvider.byName(agentName);
         structuralCodeGraph.ensureReadyAsync();
         final var messages = new ArrayList<Message>();
-        messages.add(Message.system(systemPromptBuilder.build(prompt, agent) + snapshotBlock(sessionId)));
+        messages.add(Message.system(systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
+                + snapshotBlock(sessionId)));
         if (history != null) {
             messages.addAll(history);
         }
-        messages.add(Message.user(prompt));
-        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", prompt, null, null));
+        if (userMessage != null) {
+            messages.add(Message.user(userMessage));
+            sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", userMessage, null, null));
+        }
         statusReporter.setSink(message -> emitter.emit(new AgentEvent.Status(message)));
         if (chatClient != null) {
             // surface provider throttles and retry backoffs: without this the UI only shows a
@@ -215,6 +252,30 @@ public class AgentLoop {
         }
     }
 
+    /**
+     * Content of the last real user message in the history, skipping compaction digests and
+     * truncation nudges; {@code null} when the history carries none.
+     */
+    private String lastUserPrompt(final List<Message> history) {
+        if (history == null) {
+            return null;
+        }
+        for (var i = history.size() - 1; i >= 0; i--) {
+            final var m = history.get(i);
+            if (!"user".equals(m.role()) || !(m.content() instanceof String content)) {
+                continue;
+            }
+            if (content.contains("<compacted-context>")
+                    || content.contains("<pruned-context>")
+                    || content.startsWith("... output truncated")
+                    || content.startsWith("Continue from this summary.")) {
+                continue;
+            }
+            return content;
+        }
+        return null;
+    }
+
     private void emit(final AgentEvent event) {
         emitter.emit(event);
     }
@@ -233,6 +294,8 @@ public class AgentLoop {
         var truncationContinues = 0;
         var toolsRanThisTurn = false;
         var toolDirectiveApplied = false;
+        final var repeats = new ToolRepeats();
+        final var staleReads = new StaleReads(readsFromHistory(messages));
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
             if (contextView != null) {
                 contextView.publish(snapshot(messages, toolsTokens));
@@ -351,10 +414,8 @@ public class AgentLoop {
                 emit(new AgentEvent.TurnDone(content));
                 return content;
             }
-            for (final var call : assistant.toolCalls()) {
-                executeTool(sessionId, messages, call);
-                toolsRanThisTurn = true;
-            }
+            executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads);
+            toolsRanThisTurn = true;
             if (!toolDirectiveApplied && contextView != null) {
                 final var directive = contextView.poll();
                 if (directive != null) {
@@ -528,7 +589,280 @@ public class AgentLoop {
                 finishReason);
     }
 
-    private void executeTool(final String sessionId, final List<Message> messages, final ToolCall call) {
+    /**
+     * Outcome of a single tool call, decoupled from message/session mutation so calls can run
+     * concurrently while results still land in the conversation in the model's call order.
+     * {@code paths} carries the file paths a read or write tool touched, for stale-read invalidation.
+     */
+    private record ToolOutcome(
+            String callId, String name, String output, boolean success, boolean persist, List<String> paths) {
+
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist) {
+            this(callId, name, output, success, persist, List.of());
+        }
+    }
+
+    /**
+     * Executes the tool calls of one model reply. Maximal runs of consecutive read-only calls run
+     * concurrently on virtual threads (they cannot invalidate each other's inputs), while
+     * state-changing tools stay sequential: a read never overtakes a preceding edit issued in the
+     * same reply. Message and session order always follow the model's call order.
+     */
+    private void executeToolCalls(
+            final String sessionId,
+            final List<Message> messages,
+            final List<ToolCall> calls,
+            final ToolRepeats repeats,
+            final StaleReads staleReads)
+            throws InterruptedException {
+        var i = 0;
+        while (i < calls.size()) {
+            if (isParallelizable(calls.get(i))) {
+                var end = i + 1;
+                while (end < calls.size() && isParallelizable(calls.get(end))) {
+                    end++;
+                }
+                if (end - i > 1 && executor != null && parallelReadonlyEnabled()) {
+                    // tool events (started/finished) are emitted from the worker threads as they
+                    // happen: bridges tolerate that, results order is still enforced below
+                    final var futures = new ArrayList<Future<ToolOutcome>>(end - i);
+                    for (var j = i; j < end; j++) {
+                        final var call = calls.get(j);
+                        // doom-loop check happens in call order, before the worker starts
+                        final var repeated = repeats.rejectIfRepeated(call);
+                        if (repeated != null) {
+                            emit(new AgentEvent.ToolFinished(repeated.name(), repeated.output(), false));
+                            futures.add(executor.submit(() -> repeated));
+                        } else {
+                            futures.add(executor.submit(() -> runTool(call)));
+                        }
+                    }
+                    for (final var future : futures) {
+                        appendToolResult(sessionId, messages, awaitTool(future), staleReads);
+                    }
+                } else {
+                    for (var j = i; j < end; j++) {
+                        appendToolResult(sessionId, messages, runGuarded(calls.get(j), repeats), staleReads);
+                    }
+                }
+                i = end;
+            } else {
+                appendToolResult(sessionId, messages, runGuarded(calls.get(i), repeats), staleReads);
+                i++;
+            }
+        }
+    }
+
+    private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats) {
+        final var repeated = repeats.rejectIfRepeated(call);
+        if (repeated != null) {
+            emit(new AgentEvent.ToolFinished(repeated.name(), repeated.output(), false));
+            return repeated;
+        }
+        return runTool(call);
+    }
+
+    /** File tools whose results participate in stale-read invalidation. */
+    private static final Set<String> FILE_READ_TOOLS = Set.of("read_file");
+
+    private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file", "apply_patch");
+
+    private static final String STALE_READ_MARKER =
+            "[stale read cleared: the file changed after this read; re-read it to get the current content]";
+
+    /**
+     * Tracks which {@code read_file} results sit in the conversation and by which path, so a later
+     * successful write to the same path can replace them with a short marker instead of letting the
+     * model reason over superseded file snapshots until prune/compaction eventually drops them.
+     * All mutation happens on the loop thread (worker threads only produce outcomes), so no
+     * synchronization is needed.
+     */
+    private static final class StaleReads {
+        private final Map<String, Path> readByCallId;
+
+        StaleReads(final Map<String, Path> readByCallId) {
+            this.readByCallId = new LinkedHashMap<>(readByCallId);
+        }
+
+        /** Returns how many older read results were invalidated by this outcome (0 when none). */
+        int onLanded(final List<Message> messages, final ToolOutcome outcome) {
+            if (outcome.paths().isEmpty()) {
+                return 0;
+            }
+            final var touched = new ArrayList<Path>(outcome.paths().size());
+            for (final var raw : outcome.paths()) {
+                touched.add(Path.of(raw).toAbsolutePath().normalize());
+            }
+            if (FILE_READ_TOOLS.contains(outcome.name())) {
+                if (outcome.success()) {
+                    for (final var path : touched) {
+                        readByCallId.put(outcome.callId(), path);
+                    }
+                }
+                return 0;
+            }
+            if (!FILE_WRITE_TOOLS.contains(outcome.name()) || !outcome.success()) {
+                return 0;
+            }
+            final var written = Set.copyOf(touched);
+            var invalidated = 0;
+            for (var i = 0; i < messages.size() - 1; i++) { // last message is the write result itself
+                final var message = messages.get(i);
+                if (!"tool".equals(message.role())) {
+                    continue;
+                }
+                final var read = readByCallId.get(message.toolCallId());
+                if (read == null || !written.contains(read)) {
+                    continue;
+                }
+                if (String.valueOf(message.content()).contains(STALE_READ_MARKER)) {
+                    continue; // already invalidated
+                }
+                messages.set(i, Message.tool(message.toolCallId(), STALE_READ_MARKER));
+                invalidated++;
+            }
+            return invalidated;
+        }
+    }
+
+    /** Rebuilds the {@code callId -> path} index of past {@code read_file} calls from the conversation. */
+    private Map<String, Path> readsFromHistory(final List<Message> messages) {
+        if (messages.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, Path> out = null;
+        for (final var message : messages) {
+            if (message.toolCalls() == null || message.toolCalls().isEmpty()) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                final var fn = call.function();
+                if (fn == null || !"read_file".equals(fn.name()) || fn.arguments() == null) {
+                    continue;
+                }
+                try {
+                    final var parsed = mapper.fromString(Object.class, fn.arguments());
+                    if (parsed instanceof final Map<?, ?> m
+                            && m.get("path") instanceof final String p
+                            && !p.isBlank()) {
+                        if (out == null) {
+                            out = new LinkedHashMap<>();
+                        }
+                        out.put(call.id(), Path.of(p).toAbsolutePath().normalize());
+                    }
+                } catch (final RuntimeException ignored) {
+                    // unreadable arguments in history are simply not indexed
+                }
+            }
+        }
+        return out == null ? Map.of() : out;
+    }
+
+    /** Extracts the file paths a file tool touched: the {@code path} arg, or {@code +++} headers for patches. */
+    private static List<String> touchedPaths(final String name, final Map<String, Object> args) {
+        if ("apply_patch".equals(name)) {
+            if (!(args.get("patch") instanceof final String patch)) {
+                return List.of();
+            }
+            final var out = new ArrayList<String>();
+            for (final var line : patch.split("\n", -1)) {
+                final var stripped = line.strip();
+                if (!stripped.startsWith("+++ ")) {
+                    continue;
+                }
+                var file = stripped.substring(4).strip();
+                final var tab = file.indexOf('\t');
+                if (tab >= 0) {
+                    file = file.substring(0, tab).strip();
+                }
+                if (file.startsWith("b/")) {
+                    file = file.substring(2);
+                }
+                if (!file.isBlank() && !"/dev/null".equals(file)) {
+                    out.add(file);
+                }
+            }
+            return out;
+        }
+        if ((FILE_READ_TOOLS.contains(name) || FILE_WRITE_TOOLS.contains(name))
+                && args.get("path") instanceof final String path
+                && !path.isBlank()) {
+            return List.of(path);
+        }
+        return List.of();
+    }
+
+    /**
+     * Doom-loop breaker: counts consecutive executions of the same tool with identical arguments across the whole
+     * turn. The third identical call in a row is refused with guidance instead of burning another model round-trip
+     * on the exact same output (mirrors opencode's doom-loop detection).
+     */
+    private static final class ToolRepeats {
+        private static final int THRESHOLD = 3;
+
+        private String lastKey;
+        private int count;
+
+        ToolOutcome rejectIfRepeated(final ToolCall call) {
+            final var fn = call.function();
+            final var name = fn == null || fn.name() == null ? "" : fn.name();
+            final var args = fn == null || fn.arguments() == null ? "{}" : fn.arguments();
+            final var key = name + '\n' + args;
+            if (key.equals(lastKey)) {
+                count++;
+            } else {
+                lastKey = key;
+                count = 1;
+            }
+            if (count < THRESHOLD) {
+                return null;
+            }
+            final var diagnostic = "Tool " + name + " was called " + count + " times in a row with exactly the same "
+                    + "arguments: repeating it adds no information. Change strategy - narrow or widen the query, "
+                    + "use another tool, or answer from what you already collected.";
+            return new ToolOutcome(call.id(), name, diagnostic, false, false);
+        }
+    }
+
+    /** A call can join a parallel run only if its tool is known and cannot mutate state. */
+    private boolean isParallelizable(final ToolCall call) {
+        if (toolRegistry == null) {
+            return false;
+        }
+        final var fn = call.function();
+        final EmbeddedTool tool = toolRegistry.tool(fn == null || fn.name() == null ? "" : fn.name());
+        return tool != null && (tool.readonly() || tool.category() == ToolCategory.READ);
+    }
+
+    private boolean parallelReadonlyEnabled() {
+        if (configuration == null || configuration.tools() == null) {
+            return true; // conservative default: the feature is on unless explicitly disabled
+        }
+        return configuration.tools().parallelReadonly();
+    }
+
+    private ToolOutcome awaitTool(final Future<ToolOutcome> future) throws InterruptedException {
+        try {
+            return future.get();
+        } catch (final ExecutionException e) {
+            final var cause = e.getCause() == null ? e : e.getCause();
+            if (cause instanceof RuntimeException runtime) {
+                throw runtime;
+            }
+            if (cause instanceof Error error) {
+                throw error;
+            }
+            throw new IllegalStateException("parallel tool execution failed", cause);
+        }
+    }
+
+    /** Runs one tool call (lookup, arguments parsing, permission gate, execution) without touching the conversation. */
+    private ToolOutcome runTool(final ToolCall call) {
         final var name = call.function() == null || call.function().name() == null
                 ? ""
                 : call.function().name();
@@ -537,18 +871,18 @@ public class AgentLoop {
                 : call.function().arguments();
         final EmbeddedTool tool = toolRegistry.tool(name);
         if (tool == null) {
-            messages.add(Message.tool(call.id(), "Unknown tool: " + name));
+            final var diagnostic = "Unknown tool: " + name;
             emit(new AgentEvent.ToolFinished(name, unknownToolDiagnostic(name), false));
-            return;
+            return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         final Map<String, Object> args;
         try {
             final var parsed = mapper.fromString(Object.class, argsJson.isBlank() ? "{}" : argsJson);
             args = parsed instanceof Map<?, ?> m ? cast(m) : new LinkedHashMap<>();
         } catch (final RuntimeException e) {
-            messages.add(Message.tool(call.id(), "Invalid tool arguments JSON: " + argsJson));
-            emit(new AgentEvent.ToolFinished(name, "invalid arguments", false));
-            return;
+            final var diagnostic = "Invalid tool arguments JSON: " + argsJson;
+            emit(new AgentEvent.ToolFinished(name, diagnostic, false));
+            return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         emit(new AgentEvent.ToolStarted(name, argsJson));
         final PermissionService.Decision decision =
@@ -556,15 +890,29 @@ public class AgentLoop {
         if (!decision.allowed()) {
             final var denial =
                     "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason());
-            messages.add(Message.tool(call.id(), denial));
             emit(new AgentEvent.ToolFinished(name, denial, false));
-            return;
+            return new ToolOutcome(call.id(), name, denial, false, false);
         }
         final ToolResult result = toolExecutionService.execute(tool, args);
-        messages.add(Message.tool(
-                call.id(), result.output() == null || result.output().isBlank() ? "(no output)" : result.output()));
-        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool", result.output(), null, name));
         emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
+        return new ToolOutcome(call.id(), name, result.output(), result.success(), true, touchedPaths(name, args));
+    }
+
+    /** Lands an executed outcome in the conversation and the session store, in call order. */
+    private void appendToolResult(
+            final String sessionId,
+            final List<Message> messages,
+            final ToolOutcome outcome,
+            final StaleReads staleReads) {
+        final var output = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
+        messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
+        if (outcome.persist()) {
+            sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool", output, null, outcome.callId()));
+        }
+        final var invalidated = staleReads.onLanded(messages, outcome);
+        if (invalidated > 0) {
+            emit(new AgentEvent.Status("invalidated " + invalidated + " stale read(s) of modified files"));
+        }
     }
 
     private static String unknownToolDiagnostic(final String name) {
@@ -587,9 +935,12 @@ public class AgentLoop {
                     : new io.yupiik.ia.agent.core.llm.Usage(
                             Math.toIntExact(upper.promptTokens()),
                             Math.toIntExact(upper.completionTokens()),
-                            Math.toIntExact(upper.totalTokens()));
+                            Math.toIntExact(upper.totalTokens()),
+                            upper.cacheRead(),
+                            upper.cacheWrite());
             usage[0] = converted;
-            usageTracker.record(converted);
+            // usage is recorded once per request after the stream completes (single record point,
+            // otherwise requests and tokens are double counted)
         }
     }
 
@@ -598,8 +949,11 @@ public class AgentLoop {
         emit(new AgentEvent.UsageUpdated(
                 usageTracker.promptTokens() > 0
                         ? new io.yupiik.ia.agent.core.llm.Usage(
-                                (int) usageTracker.promptTokens(), (int) usageTracker.completionTokens(), (int)
-                                        (usageTracker.promptTokens() + usageTracker.completionTokens()))
+                                (int) usageTracker.promptTokens(),
+                                (int) usageTracker.completionTokens(),
+                                (int) (usageTracker.promptTokens() + usageTracker.completionTokens()),
+                                usageTracker.cacheReadTokens(),
+                                0)
                         : io.yupiik.ia.agent.core.llm.Usage.EMPTY,
                 effective,
                 usageTracker.contextPercent(effective)));

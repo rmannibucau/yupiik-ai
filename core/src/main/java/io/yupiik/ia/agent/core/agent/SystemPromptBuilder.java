@@ -115,8 +115,10 @@ public class SystemPromptBuilder {
             sb.append(
                     "Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
             sb.append(
-                    "Use write_todo to record the plan: one pending item per concrete implementation step, in execution order. write_todo is the only state-changing tool allowed in this mode.\n");
+                    "Use write_todo to record the plan: one item per concrete implementation step, in execution order. write_todo is the only state-changing tool allowed in this mode.\n");
             appendTodoGuidance(sb);
+            sb.append(
+                    "In this mode todos are the plan, not a progress report: every item must keep status 'pending'. Never mark an item 'completed' or 'in_progress' while planning - statuses are only advanced in build mode, after each step is actually executed.\n");
             sb.append('\n');
         } else {
             sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
@@ -140,6 +142,18 @@ public class SystemPromptBuilder {
                 + "If the task needs a capability none of the provided tools offers, tell the user "
                 + "and propose the closest available tool instead of calling an unknown one.\n");
         sb.append('\n');
+        sb.append("Tool usage policy:\n");
+        sb.append("- Use the dedicated search tools for code exploration: grep for content search, glob for file name "
+                + "patterns, read_file to read files, list_dir to list directories. Do NOT use bash for these "
+                + "(no `grep`/`rg`/`find`/`cat`/`ls`/`head`/`tail`/`sed` in bash): the dedicated tools are faster, "
+                + "skip build output and ignored directories, and return self-describing results. Reserve bash for "
+                + "actual system commands (git, mvn, npm, docker...).\n");
+        sb.append("- Batch independent tool calls in a single reply: when several searches or reads do not depend on "
+                + "each other, issue them all at once - consecutive read-only calls run concurrently, so N independent "
+                + "calls cost one round-trip. Only sequence calls that need previous results as inputs.\n");
+        sb.append(
+                "- Avoid tiny repeated slices: when you need more context around a hit, read a larger window instead of many 30-line chunks.\n");
+        sb.append('\n');
         final var workingDir = configuration.resolveWorkingDir();
         final var projectDir = configuration.resolveProjectDir();
         sb.append("Environment:\n");
@@ -153,10 +167,6 @@ public class SystemPromptBuilder {
                 .append(System.getProperty("os.version"))
                 .append('\n');
         sb.append("- Java: ").append(System.getProperty("java.version")).append('\n');
-        sb.append("- Date: ").append(LocalDate.now()).append('\n');
-        sb.append("- Current todo list:\n")
-                .append(todoStore == null ? "(empty)" : todoStore.render())
-                .append('\n');
         final var project = projectContext(projectDir);
         if (!project.isBlank()) {
             sb.append('\n').append(project).append('\n');
@@ -174,10 +184,6 @@ public class SystemPromptBuilder {
                 }
             }
         }
-        final var memory = memoryStore == null ? "" : memoryStore.promptSection(prompt);
-        if (!memory.isBlank()) {
-            sb.append('\n').append(memory).append('\n');
-        }
         if (agent != null && agentProvider != null) {
             final var agentPrompt = agentProvider.resolvePrompt(agent);
             if (agentPrompt != null && !agentPrompt.isBlank()) {
@@ -188,13 +194,24 @@ public class SystemPromptBuilder {
                         .append("\n</agent>\n");
             }
         }
+        // volatile session state last: everything above stays byte-stable across turns so
+        // provider-side prompt caches (implicit or explicit breakpoints) keep hitting
+        sb.append('\n').append("Session state:\n");
+        sb.append("- Date: ").append(LocalDate.now()).append('\n');
+        sb.append("- Current todo list:\n")
+                .append(todoStore == null ? "(empty)" : todoStore.render())
+                .append('\n');
+        final var memory = memoryStore == null ? "" : memoryStore.promptSection(prompt);
+        if (!memory.isBlank()) {
+            sb.append('\n').append(memory).append('\n');
+        }
         return capSystemPrompt(sb.toString());
     }
 
     /**
      * Keeps the assembled system prompt within {@link #SYSTEM_PROMPT_CAP} characters, trimming the
      * front (the generic preamble) and keeping the tail (environment, project context, skills,
-     * memory and agent) which carry the most load-bearing durable instructions.
+     * agent instructions and session state) which carries the most load-bearing durable instructions.
      */
     private static String capSystemPrompt(final String prompt) {
         if (prompt.length() <= SYSTEM_PROMPT_CAP) {

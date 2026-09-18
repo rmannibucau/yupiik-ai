@@ -115,23 +115,8 @@ public class McpManager {
     private void startLocal() {
         close("yca");
         toolsByServer.remove("yca");
-        final var local = new LocalMcpServer(localTools);
-        try {
-            local.initialize();
-            clients.put("yca", local);
-            final var imported = new ArrayList<EmbeddedTool>();
-            for (final var tool : local.listTools()) {
-                imported.add(new LocalMcpTool(
-                        local,
-                        localTools.stream()
-                                .filter(t -> t.name().equals(tool.name()))
-                                .findFirst()
-                                .orElseThrow()));
-            }
-            toolsByServer.put("yca", imported);
-        } catch (final RuntimeException e) {
-            LOGGER.warning("Local tool server registration failed: " + e.getMessage());
-        }
+        // Built-in tools are served in-process: no MCP round-trip, error ToolResult(s) keep their exact output.
+        toolsByServer.put("yca", new ArrayList<>(localTools == null ? List.of() : localTools));
     }
 
     private void startServer(final McpServerConfiguration server) {
@@ -223,11 +208,7 @@ public class McpManager {
         final var out = new ArrayList<ServerStatus>();
         final var mcp = configuration.mcp();
         if (configuration.tools().builtin().enabled()) {
-            if (clients.containsKey("yca")) {
-                out.add(new ServerStatus("yca", ServerState.ENABLED));
-            } else {
-                out.add(new ServerStatus("yca", ServerState.FAILED));
-            }
+            out.add(new ServerStatus("yca", ServerState.ENABLED));
         }
         if (mcp != null && mcp.servers() != null) {
             for (final var server : mcp.servers()) {

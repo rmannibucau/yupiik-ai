@@ -161,7 +161,25 @@ public class OpenAICompletionsDialect extends AbstractDialect {
                 null,
                 request.reasoningEffort(),
                 request.responseFormat(),
-                request.extensions() == null ? Map.of() : request.extensions());
+                streamExtras(request, stream));
+    }
+
+    /**
+     * Builds the passthrough extras for the request. When streaming, asks the provider to include
+     * a usage summary in the final chunk ({@code stream_options.include_usage}) unless the caller
+     * explicitly set {@code "includeUsage": false} or provided their own {@code stream_options}.
+     */
+    private static Map<String, Object> streamExtras(final LlmRequest request, final boolean stream) {
+        final Map<String, Object> extras = new java.util.LinkedHashMap<>();
+        if (request.extensions() != null) {
+            extras.putAll(request.extensions());
+        }
+        final var explicit = extras.remove("includeUsage");
+        final var disabled = explicit != null && !Boolean.parseBoolean(String.valueOf(explicit));
+        if (stream && !disabled && !extras.containsKey("stream_options")) {
+            extras.put("stream_options", Map.of("include_usage", true));
+        }
+        return extras;
     }
 
     private static CompletionsTool toWireTool(final LlmTool tool) {

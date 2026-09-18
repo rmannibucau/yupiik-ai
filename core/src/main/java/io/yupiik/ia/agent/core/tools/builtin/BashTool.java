@@ -52,7 +52,12 @@ public class BashTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Run a shell command (sh -c) and return its combined stdout/stderr. Output is optimized to save tokens.";
+        return "Run a shell command (sh -c) and return its combined stdout/stderr. "
+                + "IMPORTANT: this tool is for terminal operations only (git, mvn, gradle, npm, docker...). "
+                + "Do NOT use it for file operations - reading, writing, editing, searching or finding files: "
+                + "use the dedicated read_file, grep, glob and list_dir tools instead, they are faster and filtered. "
+                + "Avoid `cd <dir> && <cmd>`: use the workdir parameter. Prefer && for dependent commands and "
+                + "batch independent commands as separate bash calls in the same reply.";
     }
 
     @Override

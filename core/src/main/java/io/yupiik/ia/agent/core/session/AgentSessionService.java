@@ -155,6 +155,11 @@ public class AgentSessionService {
 
     public record ModeChange(String message, String seedMessage, String seedError) {}
 
+    /** Whether the typed input matches a resume alias ({@code yca.resumeAliases}). */
+    public boolean isResumeAlias(final String input) {
+        return configuration.isResumeAlias(input);
+    }
+
     /**
      * Switches the agent working mode and, when entering {@code BUILD} mode,
      * attempts to seed the todo list from the last assistant plan.

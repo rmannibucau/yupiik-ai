@@ -77,6 +77,7 @@ class StructuralCodeGraphTest {
                 Clock.systemUTC());
 
         graph.ensureReady();
+        graph.flushPersist();
         final var built = graph.graph();
         assertEquals(4, built.symbols().size(), "expected Foo + Foo.add + Bar + Bar.go symbols");
         final var types = built.symbols().stream()
@@ -426,6 +427,7 @@ class StructuralCodeGraphTest {
                     Clock.systemUTC());
 
             final String status = graph.resync();
+            graph.flushPersist();
 
             assertTrue(status.startsWith("symbols="), "expected status to report symbols, got: " + status);
             assertTrue(status.contains("files="), "expected status to report parsed files, got: " + status);
@@ -574,6 +576,7 @@ class StructuralCodeGraphTest {
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
+        graph.flushPersist();
         assertTrue(
                 graph.graph().symbols().stream().anyMatch(s -> s.fqn().equals("demo.sub.Bar")),
                 "expected Bar symbols before the deletion");
@@ -581,6 +584,7 @@ class StructuralCodeGraphTest {
         // delete a file offline (no refreshFile event): a resync must fully reconcile the store
         Files.delete(project.resolve("other/Bar.java"));
         graph.resync();
+        graph.flushPersist();
 
         final var after = graph.graph();
         assertTrue(
@@ -674,6 +678,7 @@ class StructuralCodeGraphTest {
                 providerManager(config, mapper),
                 Clock.systemUTC());
         built.ensureReady();
+        built.flushPersist();
 
         // touch without a content change: the gate must fail once, the hash-identical patch must refresh
         // the sidecar mtimes (snapshot taken while hashing, never after the whole build) ...

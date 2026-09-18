@@ -77,7 +77,28 @@ public record ResponsesInput(
      * @return the input item.
      */
     public static ResponsesInput functionCallOutput(final String callId, final String output) {
-        return new ResponsesInput("function_call_output", null, null, null, callId, output, null, null, null);
+        return functionCallOutput(callId, output, false);
+    }
+
+    /**
+     * Creates a function call output input item, answering a call the model made.
+     *
+     * @param callId function call identifier.
+     * @param output JSON function result.
+     * @param isError whether the tool call failed.
+     * @return the input item.
+     */
+    public static ResponsesInput functionCallOutput(final String callId, final String output, final boolean isError) {
+        return new ResponsesInput(
+                "function_call_output",
+                null,
+                null,
+                null,
+                callId,
+                output,
+                null,
+                null,
+                isError ? Map.of("is_error", true) : null);
     }
 
     /**

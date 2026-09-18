@@ -52,11 +52,6 @@ public record ProviderConfiguration(
         ApiFlavor api,
 
         @Property(
-                defaultValue = "io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO",
-                documentation = "Reasoning content flavor of the provider: auto, reasoning, reasoning_content or none.")
-        ReasoningField reasoningField,
-
-        @Property(
                 defaultValue = "-1",
                 documentation =
                         "Context window size in tokens, used by the usage gauges and thresholds. Zero or negative (the default) auto-detects it from the provider /v1/models vendor extensions (context_window, model_context_window, context_length, max_model_len, max_input_tokens, llama.cpp meta.n_ctx, or meta.n_ctx_train when smaller than the default), caches it one day per provider and model under the storage home and falls back to 128000. Detected values are totals (prompt + completion combined); the pruning and compaction thresholds keep headroom for completions.")

@@ -21,10 +21,17 @@ package io.yupiik.llm.client.model;
  * @param promptTokens input tokens, may be {@code null} when the provider omits it.
  * @param completionTokens output tokens, may be {@code null} when the provider omits it.
  * @param totalTokens total tokens, may be {@code null} when the provider omits it.
+ * @param cacheReadTokens prompt tokens served from a provider-side prompt cache, when reported.
+ * @param cacheWriteTokens prompt tokens written to a provider-side prompt cache, when reported.
  */
-public record Usage(Long promptTokens, Long completionTokens, Long totalTokens) {
+public record Usage(
+        Long promptTokens, Long completionTokens, Long totalTokens, Long cacheReadTokens, Long cacheWriteTokens) {
 
-    public static final Usage EMPTY = new Usage(0L, 0L, 0L);
+    public static final Usage EMPTY = new Usage(0L, 0L, 0L, 0L, 0L);
+
+    public Usage(final Long promptTokens, final Long completionTokens, final Long totalTokens) {
+        this(promptTokens, completionTokens, totalTokens, null, null);
+    }
 
     /**
      * The prompt token count.
@@ -51,5 +58,23 @@ public record Usage(Long promptTokens, Long completionTokens, Long totalTokens) 
      */
     public long total() {
         return totalTokens == null ? 0 : totalTokens;
+    }
+
+    /**
+     * The prompt-cache read token count.
+     *
+     * @return the cache read token count, 0 when absent.
+     */
+    public long cacheRead() {
+        return cacheReadTokens == null ? 0 : cacheReadTokens;
+    }
+
+    /**
+     * The prompt-cache write token count.
+     *
+     * @return the cache write token count, 0 when absent.
+     */
+    public long cacheWrite() {
+        return cacheWriteTokens == null ? 0 : cacheWriteTokens;
     }
 }

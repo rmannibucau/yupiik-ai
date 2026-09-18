@@ -171,7 +171,9 @@ class SystemPromptBuilderTest {
         assertTrue(prompt.contains("must NOT modify the repository"));
         assertFalse(prompt.contains("edit files"));
         assertTrue(prompt.contains("Use write_todo to record the plan"));
-        assertTrue(prompt.contains("one pending item per concrete implementation step"));
+        assertTrue(prompt.contains("one item per concrete implementation step"));
+        assertTrue(prompt.contains("every item must keep status 'pending'"));
+        assertTrue(prompt.contains("Never mark an item 'completed' or 'in_progress' while planning"));
     }
 
     @Test

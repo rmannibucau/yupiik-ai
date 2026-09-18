@@ -16,8 +16,17 @@
 package io.yupiik.ia.agent.core.cli.slash;
 
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public interface SlashCommands {
 
     List<SlashCommandSpec> commands();
+
+    /** Catalog keyed by bare command name (no leading '/'). */
+    default Map<String, SlashCommandSpec> byName() {
+        return commands().stream()
+                .collect(Collectors.toUnmodifiableMap(SlashCommandSpec::command, Function.identity()));
+    }
 }

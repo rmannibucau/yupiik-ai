@@ -17,8 +17,10 @@ package io.yupiik.ia.agent.core.runtime;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 @ApplicationScoped
 public class VirtualThreadExecutor {
@@ -26,6 +28,10 @@ public class VirtualThreadExecutor {
 
     public void execute(final Runnable task) {
         delegate.execute(task);
+    }
+
+    public <T> Future<T> submit(final Callable<T> task) {
+        return delegate.submit(task);
     }
 
     @Destroy

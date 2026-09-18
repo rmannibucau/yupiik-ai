@@ -22,7 +22,13 @@ import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 public record Usage(
         @JsonProperty("prompt_tokens") int promptTokens,
         @JsonProperty("completion_tokens") int completionTokens,
-        @JsonProperty("total_tokens") int totalTokens) {
+        @JsonProperty("total_tokens") int totalTokens,
+        @JsonProperty("cache_read_tokens") long cacheReadTokens,
+        @JsonProperty("cache_write_tokens") long cacheWriteTokens) {
 
-    public static Usage EMPTY = new Usage(0, 0, 0);
+    public static Usage EMPTY = new Usage(0, 0, 0, 0, 0);
+
+    public Usage(final int promptTokens, final int completionTokens, final int totalTokens) {
+        this(promptTokens, completionTokens, totalTokens, 0, 0);
+    }
 }

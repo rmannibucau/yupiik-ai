@@ -50,7 +50,7 @@ include::content/_partials/generated/documentation.core.adoc[]
 == Structural code graph doc tree
 
 When `yca.structuralCodeGraph.docs` is enabled (default), the agent writes a
-per-source-file markdown doc tree under the graph store (`yca.structuralCodeGraph.docStoreDir`),
+per-source-file markdown doc tree under the graph store (`yca.structuralCodeGraph.storeDir`),
 mirroring the project source layout. With `yca.structuralCodeGraph.enrich`, each
 doc also gains an asynchronous, serialized LLM `## Summary` section.
 

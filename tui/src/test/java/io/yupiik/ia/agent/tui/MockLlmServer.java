@@ -22,18 +22,10 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
 import io.yupiik.ia.agent.core.configuration.StructuralCodeGraphConfiguration;
-import io.yupiik.ia.agent.core.llm.ChatChunk$ChunkChoice$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ChatChunk$ChunkDelta$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ChatChunk$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ChatCompletionResponse$Choice$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ChatCompletionResponse$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ResponsesInput$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ResponsesRequest$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ResponsesTool$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec;
@@ -135,14 +127,6 @@ public final class MockLlmServer implements AutoCloseable {
                         new ToolCall$FunctionCall$FusionJsonCodec(),
                         new Usage$FusionJsonCodec(),
                         new ChatCompletionRequest$FusionJsonCodec(),
-                        new ChatCompletionResponse$FusionJsonCodec(),
-                        new ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new ChatChunk$FusionJsonCodec(),
-                        new ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new ResponsesRequest$FusionJsonCodec(),
-                        new ResponsesInput$FusionJsonCodec(),
-                        new ResponsesTool$FusionJsonCodec(),
                         new ModelsResponse$FusionJsonCodec(),
                         new ModelsResponse$Model$FusionJsonCodec()),
                 key -> Optional.empty());
@@ -200,7 +184,6 @@ public final class MockLlmServer implements AutoCloseable {
             map.put("yca.structuralCodeGraph.languageExtensions", String.join(",", codeGraph.languageExtensions()));
             map.put("yca.structuralCodeGraph.storeDir", codeGraph.storeDir());
             map.put("yca.structuralCodeGraph.docs", String.valueOf(codeGraph.docs()));
-            map.put("yca.structuralCodeGraph.docStoreDir", codeGraph.docStoreDir());
             map.put("yca.structuralCodeGraph.deep", String.valueOf(codeGraph.deep()));
             map.put("yca.structuralCodeGraph.noRefresh", String.valueOf(codeGraph.noRefresh()));
         }

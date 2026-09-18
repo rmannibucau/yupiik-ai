@@ -26,4 +26,9 @@ public record SlashCommandSpec(String name, String usage, String description, Sl
     public String display() {
         return usage == null || usage.isBlank() ? name : name + " " + usage;
     }
+
+    /** Command name without the leading '/': "help" for "/help". */
+    public String command() {
+        return name.startsWith("/") ? name.substring(1) : name;
+    }
 }

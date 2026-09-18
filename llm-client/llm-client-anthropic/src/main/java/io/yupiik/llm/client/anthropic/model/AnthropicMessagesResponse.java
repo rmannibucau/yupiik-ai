@@ -78,9 +78,13 @@ public record AnthropicMessagesResponse(
      *
      * @param inputTokens prompt tokens consumed.
      * @param outputTokens completion tokens produced.
+     * @param cacheReadInputTokens prompt tokens served from the prompt cache.
+     * @param cacheCreationInputTokens prompt tokens written to the prompt cache.
      */
     @JsonModel
     public record AnthropicUsage(
             @JsonProperty("input_tokens") Long inputTokens,
-            @JsonProperty("output_tokens") Long outputTokens) {}
+            @JsonProperty("output_tokens") Long outputTokens,
+            @JsonProperty("cache_read_input_tokens") Long cacheReadInputTokens,
+            @JsonProperty("cache_creation_input_tokens") Long cacheCreationInputTokens) {}
 }

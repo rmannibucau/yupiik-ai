@@ -186,12 +186,17 @@ public final class AnthropicDialect extends AbstractDialect {
                     }
                     messages.add(new AnthropicMessage("assistant", content));
                 } else if ("tool".equals(message.role())) {
-                    messages.add(new AnthropicMessage(
-                            "user",
-                            List.of(Map.of(
-                                    "type", "tool_result",
-                                    "tool_use_id", message.toolCallId(),
-                                    "content", textOf(message.content())))));
+                    final var extensions = message.extensions();
+                    final var isError = extensions != null && Boolean.TRUE.equals(extensions.get("is_error"));
+                    final var content = new ArrayList<Map<String, Object>>();
+                    content.add(Map.of(
+                            "type", "tool_result",
+                            "tool_use_id", message.toolCallId(),
+                            "content", textOf(message.content())));
+                    if (isError) {
+                        content.get(0).put("is_error", true);
+                    }
+                    messages.add(new AnthropicMessage("user", content));
                 } else {
                     messages.add(AnthropicMessage.from(message));
                 }
@@ -204,10 +209,22 @@ public final class AnthropicDialect extends AbstractDialect {
             }
         }
         final var maxTokens = request.maxTokens() == null ? 4096 : request.maxTokens();
+        final Map<String, Object> extensions = request.extensions() == null ? Map.of() : request.extensions();
+        final var promptCache = !"false".equals(extensions.get("promptCache"));
+        Map<String, Object> passthrough = extensions;
+        if (extensions.containsKey("promptCache")) {
+            final var stripped = new java.util.HashMap<String, Object>();
+            extensions.forEach((k, v) -> {
+                if (!"promptCache".equals(k)) {
+                    stripped.put(k, v);
+                }
+            });
+            passthrough = stripped;
+        }
         return new AnthropicMessagesRequest(
                 request.model(),
                 maxTokens,
-                system,
+                system == null ? null : toSystemBlocks(system, promptCache),
                 messages,
                 request.temperature(),
                 request.topP(),
@@ -217,7 +234,19 @@ public final class AnthropicDialect extends AbstractDialect {
                 tools.isEmpty() ? null : tools,
                 toolChoice,
                 null,
-                request.extensions() == null ? Map.of() : request.extensions());
+                passthrough);
+    }
+
+    /**
+     * Anthropic caches the tools + system prefix: sending the system prompt as content blocks with an
+     * ephemeral {@code cache_control} breakpoint makes the stable system prompt (rules, project
+     * context, skills) a cache hit across turns instead of a full re-read every request.
+     */
+    private static Object toSystemBlocks(final String system, final boolean promptCache) {
+        if (!promptCache) {
+            return system;
+        }
+        return List.of(Map.of("type", "text", "text", system, "cache_control", Map.of("type", "ephemeral")));
     }
 
     private Object parseRaw(final String raw) {
@@ -262,15 +291,7 @@ public final class AnthropicDialect extends AbstractDialect {
                     new LlmMessage("assistant", text.toString(), null, null, null, null),
                     finishReason(wire.stopReason()));
         }
-        final var usage = wire.usage() == null
-                ? Usage.EMPTY
-                : new Usage(
-                        wire.usage().inputTokens() == null ? 0 : wire.usage().inputTokens(),
-                        wire.usage().outputTokens() == null ? 0 : wire.usage().outputTokens(),
-                        (wire.usage().inputTokens() == null ? 0 : wire.usage().inputTokens())
-                                + (wire.usage().outputTokens() == null
-                                        ? 0
-                                        : wire.usage().outputTokens()));
+        final var usage = wire.usage() == null ? Usage.EMPTY : toUsage(wire.usage());
         return new LlmResponse(wire.id(), wire.model(), null, List.of(choice), usage, null);
     }
 
@@ -311,6 +332,12 @@ public final class AnthropicDialect extends AbstractDialect {
                         if (thinking != null && !thinking.isEmpty()) {
                             result.add(new LlmStreamEvent.ReasoningDelta(thinking));
                         }
+                        if ("input_json_delta".equals(wire.delta().type())
+                                && wire.delta().partialJson() != null) {
+                            final var index = wire.index() == null ? 0 : wire.index();
+                            result.add(new LlmStreamEvent.ToolCallDelta(
+                                    index, null, null, wire.delta().partialJson()));
+                        }
                     }
                 }
                 case "content_block_start" -> {
@@ -321,13 +348,6 @@ public final class AnthropicDialect extends AbstractDialect {
                                 wire.contentBlock().id(),
                                 wire.contentBlock().name(),
                                 ""));
-                    }
-                }
-                case "content_block_delta_tool" -> {
-                    if (wire.delta() != null && wire.delta().partialJson() != null) {
-                        final var index = wire.index() == null ? 0 : wire.index();
-                        result.add(new LlmStreamEvent.ToolCallDelta(
-                                index, null, null, wire.delta().partialJson()));
                     }
                 }
                 case "message_delta" -> {
@@ -352,6 +372,6 @@ public final class AnthropicDialect extends AbstractDialect {
         }
         final var in = usage.inputTokens() == null ? 0 : usage.inputTokens();
         final var out = usage.outputTokens() == null ? 0 : usage.outputTokens();
-        return new Usage(in, out, in + out);
+        return new Usage(in, out, in + out, usage.cacheReadInputTokens(), usage.cacheCreationInputTokens());
     }
 }

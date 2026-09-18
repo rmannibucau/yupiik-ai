@@ -182,6 +182,66 @@ class PermissionServiceTest {
     }
 
     @Test
+    void planModeBashSegmentsCompoundCommands() {
+        final var service = service(
+                PermissionMode.ASK, List.of(), List.of(), List.of("git status", "git diff", "ls", "grep", "cat"));
+        service.setMode(AgentMode.PLAN);
+        // cd prefix is tolerated, every other segment must be allowlisted
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cd core && grep -n foo pom.xml"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status && git diff HEAD"))
+                .allowed());
+        // a harmful segment anywhere denies the whole command
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "git diff HEAD && rm -rf /"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "ls; git push"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "cat pom.xml | sh"))
+                .allowed());
+    }
+
+    @Test
+    void planModeBashRejectsRedirectionAndSubstitution() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("grep", "echo", "git diff"));
+        service.setMode(AgentMode.PLAN);
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "grep foo bar > out.txt"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "echo $(rm -rf /)"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "echo `rm -rf /`"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "cd $(git rev-parse) && ls"))
+                .allowed());
+        // harmless stderr silencing stays allowed
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "grep foo bar 2>/dev/null"))
+                .allowed());
+    }
+
+    @Test
+    void planModeBashToleratesEnvPrefixes() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("grep"));
+        service.setMode(AgentMode.PLAN);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "LC_ALL=C grep foo bar"))
+                .allowed());
+        // env prefix does not whitelist a non allowlisted command
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "LC_ALL=C rm -rf /"))
+                .allowed());
+    }
+
+    @Test
+    void planModeBashAllowsReadOnlySedButNotInPlace() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("sed -n"));
+        service.setMode(AgentMode.PLAN);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "sed -n 1,30p pom.xml"))
+                .allowed());
+        // -i rewrites files even behind a `sed -n` prefix
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "sed -n -i 's/a/b/p' pom.xml"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "sed -i 's/a/b/' pom.xml"))
+                .allowed());
+    }
+
+    @Test
     void planModeAllowsReadAndAgent() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);

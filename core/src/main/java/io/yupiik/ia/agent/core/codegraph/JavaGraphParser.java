@@ -71,21 +71,50 @@ public class JavaGraphParser implements GraphParser {
 
     @Override
     public GraphModel parse(final Path file) {
+        return parseBatch(List.of(file)).getOrDefault(file, GraphModel.empty("java"));
+    }
+
+    /**
+     * Parses multiple Java files in a single {@link JavacTask} for better performance.
+     * Returns a map from file path to its {@link GraphModel}.
+     */
+    public Map<Path, GraphModel> parseBatch(final List<Path> files) {
+        final var result = new HashMap<Path, GraphModel>();
+        if (files.isEmpty()) {
+            return result;
+        }
         final var compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
-            return GraphModel.empty("java");
+            for (final var file : files) {
+                result.put(file, GraphModel.empty("java"));
+            }
+            return result;
         }
         try (final StandardJavaFileManager fm =
                 compiler.getStandardFileManager(new DiagnosticCollector<>(), null, null)) {
-            final Iterable<? extends JavaFileObject> units = fm.getJavaFileObjects(file.toFile());
+            final var fileObjects = new ArrayList<JavaFileObject>(files.size());
+            for (final var file : files) {
+                for (final var fo : fm.getJavaFileObjects(file.toFile())) {
+                    fileObjects.add(fo);
+                }
+            }
             final JavacTask task = (JavacTask)
-                    compiler.getTask(null, fm, new DiagnosticCollector<>(), List.of("-proc:none"), null, units);
-            final var unit = task.parse().iterator().next();
-            final var positions = Trees.instance(task).getSourcePositions();
-            final var collector = new Collector(unit, positions);
-            unit.accept(collector, null);
-            return new GraphModel(
-                    "java", collector.nodes, collector.edges.stream().distinct().toList());
+                    compiler.getTask(null, fm, new DiagnosticCollector<>(), List.of("-proc:none"), null, fileObjects);
+            final var units = task.parse();
+            final var trees = Trees.instance(task);
+            for (final var unit : units) {
+                final var positions = trees.getSourcePositions();
+                final var collector = new Collector(unit, positions);
+                unit.accept(collector, null);
+                final var path = Path.of(unit.getSourceFile().getName());
+                result.put(
+                        path,
+                        new GraphModel(
+                                "java",
+                                collector.nodes,
+                                collector.edges.stream().distinct().toList()));
+            }
+            return result;
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }

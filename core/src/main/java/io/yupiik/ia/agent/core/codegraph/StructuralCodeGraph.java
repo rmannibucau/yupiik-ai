@@ -29,16 +29,21 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.tools.FileIgnore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.ClosedWatchServiceException;
 import java.nio.file.FileSystems;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.PathMatcher;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardWatchEventKinds;
+import java.nio.file.WatchEvent;
+import java.nio.file.WatchKey;
+import java.nio.file.WatchService;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -53,15 +58,16 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
-import java.util.stream.Stream;
 
 /**
  * The structural code graph of the agent: a symbol-and-edge graph extracted from the working tree by the
@@ -107,17 +113,23 @@ public class StructuralCodeGraph {
     private final ProviderManager providerManager;
     private final Path projectDir;
     private final Clock clock;
-    private final List<IgnoreRule> ignoreRules;
+    private final List<FileIgnore.Rule> ignoreRules;
     private final boolean configNoRefresh;
     private final long refreshAwaitMs;
     private final ExecutorService refreshExecutor;
+    private final ScheduledExecutorService persistScheduler;
     private final AtomicLong refreshPending = new AtomicLong();
     private volatile long latestRefreshJob;
     private volatile GraphStore graph;
     private volatile CodeGraphIndex index;
-    private volatile String pendingRefreshPath;
+    private volatile List<String> pendingRefreshPaths = List.of();
     private final AtomicBoolean readyStarted = new AtomicBoolean();
     private volatile CompletableFuture<Void> readyFuture;
+    private final ConcurrentLinkedQueue<PersistJob> persistQueue = new ConcurrentLinkedQueue<>();
+    private final AtomicBoolean persistScheduled = new AtomicBoolean();
+    private volatile WatchService watchService;
+    private volatile Thread watchThread;
+    private final AtomicBoolean watching = new AtomicBoolean();
 
     public StructuralCodeGraph(
             final CodingAgentConfiguration configuration,
@@ -142,11 +154,16 @@ public class StructuralCodeGraph {
         this.indexFile = storeRoot.resolve("index.bin");
         this.indexMetaFile = storeRoot.resolve("index.meta");
         final var scg = configuration.structuralCodeGraph();
-        this.ignoreRules = buildIgnoreMatchers(projectDir, scg.effectiveIgnoreGlobs());
+        this.ignoreRules = FileIgnore.of(projectDir, scg.effectiveIgnoreGlobs()).rules();
         this.configNoRefresh = scg.noRefresh();
         this.refreshAwaitMs = 3000L; // bound for ensureRefreshedReady() when a background refresh is pending
         this.refreshExecutor = Executors.newSingleThreadExecutor(r -> {
             final var t = new Thread(r, "yca-graph-refresher");
+            t.setDaemon(true);
+            return t;
+        });
+        this.persistScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            final var t = new Thread(r, "yca-graph-persist");
             t.setDaemon(true);
             return t;
         });
@@ -172,6 +189,7 @@ public class StructuralCodeGraph {
         this.configNoRefresh = true;
         this.refreshAwaitMs = 0;
         this.refreshExecutor = testRefreshExecutor();
+        this.persistScheduler = testPersistScheduler();
         this.docWriter = null;
         this.docEnricher = null;
     }
@@ -184,12 +202,27 @@ public class StructuralCodeGraph {
         });
     }
 
+    private static ScheduledExecutorService testPersistScheduler() {
+        return Executors.newSingleThreadScheduledExecutor(r -> {
+            final var t = new Thread(r, "yca-graph-persist-test");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    private record PersistJob(GraphStore store, Map<String, Long> mtimes) {}
+
     public boolean enabled() {
         return configuration != null && configuration.structuralCodeGraph().enabled() && !parsers.isEmpty();
     }
 
     public Path storeRoot() {
         return storeRoot;
+    }
+
+    /** Absolute, normalized project root the graph is indexed from; symbol {@code file()} paths are relative to it. */
+    public Path projectDir() {
+        return projectDir;
     }
 
     @Destroy
@@ -199,6 +232,80 @@ public class StructuralCodeGraph {
         }
         if (refreshExecutor != null) {
             refreshExecutor.shutdownNow();
+        }
+        if (persistScheduler != null) {
+            persistScheduler.shutdownNow();
+        }
+        stopWatchService();
+        flushPersist();
+    }
+
+    private void startWatchService() {
+        if (!configuration.structuralCodeGraph().watch() || watching.get() || projectDir == null) {
+            return;
+        }
+        try {
+            watchService = FileSystems.getDefault().newWatchService();
+            projectDir.register(
+                    watchService,
+                    StandardWatchEventKinds.ENTRY_CREATE,
+                    StandardWatchEventKinds.ENTRY_DELETE,
+                    StandardWatchEventKinds.ENTRY_MODIFY);
+            watching.set(true);
+            watchThread = new Thread(this::watchLoop, "yca-graph-watcher");
+            watchThread.setDaemon(true);
+            watchThread.start();
+            LOGGER.info("File watcher started for " + projectDir);
+        } catch (final IOException e) {
+            LOGGER.warning("Cannot start file watcher: " + e.getMessage());
+        }
+    }
+
+    private void stopWatchService() {
+        if (!watching.compareAndSet(true, false)) {
+            return;
+        }
+        try {
+            if (watchService != null) {
+                watchService.close();
+            }
+            if (watchThread != null) {
+                watchThread.interrupt();
+                watchThread.join(1000);
+            }
+        } catch (final IOException | InterruptedException e) {
+            LOGGER.fine("Stopping file watcher: " + e.getMessage());
+        }
+    }
+
+    private void watchLoop() {
+        while (watching.get()) {
+            WatchKey key;
+            try {
+                key = watchService.take();
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (final ClosedWatchServiceException e) {
+                return;
+            }
+            for (final WatchEvent<?> event : key.pollEvents()) {
+                final var kind = event.kind();
+                if (kind == StandardWatchEventKinds.OVERFLOW) {
+                    continue;
+                }
+                final var path = (Path) event.context();
+                final var absolute = projectDir.resolve(path);
+                if (Files.isRegularFile(absolute) && absolute.toString().endsWith(".java")) {
+                    final var rel = rel(absolute);
+                    if (!isIgnored(rel, absolute)) {
+                        refreshExecutor.execute(() -> refreshFile(absolute));
+                    }
+                }
+            }
+            if (!key.reset()) {
+                break;
+            }
         }
     }
 
@@ -260,6 +367,7 @@ public class StructuralCodeGraph {
         if (configNoRefresh && loadIndex()) {
             LOGGER.info("CodeGraph ensureReady fast-path took " + (System.nanoTime() - t0) / 1_000_000L
                     + "ms (session-start load)");
+            startWatchService();
             return;
         }
         // For a fresh or non-code target directory (e.g. scaffolding a new project) there is nothing
@@ -270,6 +378,7 @@ public class StructuralCodeGraph {
         if (!configNoRefresh && loadIndex()) {
             LOGGER.info("CodeGraph ensureReady fast-path took " + (System.nanoTime() - t0) / 1_000_000L
                     + "ms (session-start load)");
+            startWatchService();
             return;
         }
         final var loaded = load();
@@ -278,12 +387,14 @@ public class StructuralCodeGraph {
             final var patched = patch(loaded);
             graph = patched;
             assignIndexFrom(patched);
+            startWatchService();
             return;
         }
         LOGGER.info("CodeGraph ensureReady slow-path(rebuild) took " + (System.nanoTime() - t0) / 1_000_000L + "ms");
         final var built = rebuild();
         graph = built;
         assignIndexFrom(built);
+        startWatchService();
     }
 
     /** A3: after a slow-path (patch/rebuild) indexation, assign the in-memory index directly from the in-memory store so
@@ -414,7 +525,7 @@ public class StructuralCodeGraph {
 
     public void onBeforeTool(@OnEvent final BeforeToolExecutionEvent event) {
         if (enabled() && isFileTool(event.tool())) {
-            pendingRefreshPath = extractPath(event.args());
+            pendingRefreshPaths = extractPaths(event.tool(), event.args());
         }
     }
 
@@ -422,11 +533,49 @@ public class StructuralCodeGraph {
         if (!enabled() || !isFileTool(event.tool()) || !event.success()) {
             return;
         }
-        final var path = pendingRefreshPath;
-        pendingRefreshPath = null;
-        if (path != null && !path.isBlank()) {
-            enqueueRefresh(Path.of(path));
+        final var paths = pendingRefreshPaths;
+        pendingRefreshPaths = List.of();
+        for (final var path : paths) {
+            if (path != null && !path.isBlank()) {
+                enqueueRefresh(Path.of(path));
+            }
         }
+    }
+
+    /** Target files of a write/edit/patch tool call: the {@code path} arg, or the diff headers of a patch. */
+    private static List<String> extractPaths(final String tool, final Map<String, Object> args) {
+        if (args == null) {
+            return List.of();
+        }
+        if (args.get("path") instanceof final String path) {
+            return List.of(path);
+        }
+        if ("apply_patch".equals(tool) && args.get("patch") instanceof final String patch) {
+            final var out = new ArrayList<String>();
+            for (final var line : patch.replace("\r\n", "\n").split("\n", -1)) {
+                final var l = line.strip();
+                if (l.startsWith("+++ ")) {
+                    final var file = patchHeaderFile(l.substring(4));
+                    if (file != null && !out.contains(file)) {
+                        out.add(file);
+                    }
+                }
+            }
+            return out;
+        }
+        return List.of();
+    }
+
+    private static String patchHeaderFile(final String raw) {
+        var file = raw.strip();
+        if (file.isEmpty() || file.equals("/dev/null")) {
+            return null;
+        }
+        if (file.startsWith("b/")) {
+            file = file.substring(2);
+        }
+        final var tab = file.indexOf('\t');
+        return (tab >= 0 ? file.substring(0, tab) : file).strip();
     }
 
     /**
@@ -477,15 +626,7 @@ public class StructuralCodeGraph {
     }
 
     private boolean isFileTool(final String name) {
-        return "write_file".equals(name) || "edit_file".equals(name);
-    }
-
-    private String extractPath(final Map<String, Object> args) {
-        if (args == null) {
-            return null;
-        }
-        final var v = args.get("path");
-        return v == null ? null : v.toString();
+        return "write_file".equals(name) || "edit_file".equals(name) || "apply_patch".equals(name);
     }
 
     /** Synchronous refresh body (used by the async executor; a test seam may call it directly). Public for tests. */
@@ -610,6 +751,10 @@ public class StructuralCodeGraph {
         final var mtimes = new HashMap<String, Long>();
         var changed = false;
         final var visited = new HashSet<String>();
+
+        // Collect files to parse in batch
+        final var filesToParse = new ArrayList<Path>();
+        final var fileRels = new HashMap<Path, String>();
         for (final Path file : candidateFiles()) {
             final var rel = rel(file);
             visited.add(rel);
@@ -635,14 +780,45 @@ public class StructuralCodeGraph {
                 docEnricher.drop(rel);
                 continue;
             }
-            try {
-                final var model = relativizeModel(parser.parse(file), rel);
-                symbols.addAll(model.symbols());
-                edges.addAll(model.edges());
-                docWriter.write(rel, model);
-                docEnricher.maybeEnrich(rel, model);
-            } catch (final RuntimeException e) {
-                LOGGER.warning("Cannot re-index " + rel + ": " + e.getMessage());
+            filesToParse.add(file);
+            fileRels.put(file, rel);
+        }
+
+        // Batch parse all changed files
+        if (!filesToParse.isEmpty()) {
+            final var javaParser = (JavaGraphParser) parsers.stream()
+                    .filter(p -> p instanceof JavaGraphParser)
+                    .findFirst()
+                    .orElse(null);
+            if (javaParser != null) {
+                final var batchResults = javaParser.parseBatch(filesToParse);
+                for (final var entry : batchResults.entrySet()) {
+                    final var file = entry.getKey();
+                    final var model = entry.getValue();
+                    final var rel = fileRels.get(file);
+                    if (rel != null && model != null) {
+                        final var relModel = relativizeModel(model, rel);
+                        symbols.addAll(relModel.symbols());
+                        edges.addAll(relModel.edges());
+                        docWriter.write(rel, relModel);
+                        docEnricher.maybeEnrich(rel, relModel);
+                    }
+                }
+            } else {
+                // Fallback to individual parsing
+                for (final var file : filesToParse) {
+                    final var rel = fileRels.get(file);
+                    final var parser = parserFor(file);
+                    try {
+                        final var model = relativizeModel(parser.parse(file), rel);
+                        symbols.addAll(model.symbols());
+                        edges.addAll(model.edges());
+                        docWriter.write(rel, model);
+                        docEnricher.maybeEnrich(rel, model);
+                    } catch (final RuntimeException e) {
+                        LOGGER.warning("Cannot re-index " + rel + ": " + e.getMessage());
+                    }
+                }
             }
         }
         // Offline deletions: files present in the previous store but gone from disk are never visited by the
@@ -670,7 +846,7 @@ public class StructuralCodeGraph {
         persist(updated, mtimes);
         statusReporter.report(
                 "structural code graph refreshed (" + updated.symbols().size() + " symbols)");
-        enrichConceptsIfEnabled();
+        enqueueConceptEnrichment();
         return updated;
     }
 
@@ -681,6 +857,10 @@ public class StructuralCodeGraph {
         // mtimes snapshotted when each file is hashed, never after the whole build (see patch())
         final var mtimes = new HashMap<String, Long>();
         var count = 0;
+
+        // Collect all files to parse in batch
+        final var filesToParse = new ArrayList<Path>();
+        final var fileRels = new HashMap<Path, String>();
         for (final Path file : candidateFiles()) {
             final var rel = rel(file);
             final var fp = fingerprint(file);
@@ -695,15 +875,47 @@ public class StructuralCodeGraph {
                 docEnricher.drop(rel);
                 continue;
             }
-            try {
-                final var model = relativizeModel(parser.parse(file), rel);
-                symbols.addAll(model.symbols());
-                edges.addAll(model.edges());
-                docWriter.write(rel, model);
-                docEnricher.maybeEnrich(rel, model);
-                count++;
-            } catch (final RuntimeException e) {
-                LOGGER.warning("Cannot parse " + rel + ": " + e.getMessage());
+            filesToParse.add(file);
+            fileRels.put(file, rel);
+        }
+
+        // Batch parse all files
+        if (!filesToParse.isEmpty()) {
+            final var javaParser = (JavaGraphParser) parsers.stream()
+                    .filter(p -> p instanceof JavaGraphParser)
+                    .findFirst()
+                    .orElse(null);
+            if (javaParser != null) {
+                final var batchResults = javaParser.parseBatch(filesToParse);
+                for (final var entry : batchResults.entrySet()) {
+                    final var file = entry.getKey();
+                    final var model = entry.getValue();
+                    final var rel = fileRels.get(file);
+                    if (rel != null && model != null) {
+                        final var relModel = relativizeModel(model, rel);
+                        symbols.addAll(relModel.symbols());
+                        edges.addAll(relModel.edges());
+                        docWriter.write(rel, relModel);
+                        docEnricher.maybeEnrich(rel, relModel);
+                        count++;
+                    }
+                }
+            } else {
+                // Fallback to individual parsing
+                for (final var file : filesToParse) {
+                    final var rel = fileRels.get(file);
+                    final var parser = parserFor(file);
+                    try {
+                        final var model = relativizeModel(parser.parse(file), rel);
+                        symbols.addAll(model.symbols());
+                        edges.addAll(model.edges());
+                        docWriter.write(rel, model);
+                        docEnricher.maybeEnrich(rel, model);
+                        count++;
+                    } catch (final RuntimeException e) {
+                        LOGGER.warning("Cannot parse " + rel + ": " + e.getMessage());
+                    }
+                }
             }
         }
         final var built =
@@ -711,7 +923,7 @@ public class StructuralCodeGraph {
         persist(built, mtimes);
         statusReporter.report(
                 "structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
-        enrichConceptsIfEnabled();
+        enqueueConceptEnrichment();
         return built;
     }
 
@@ -832,95 +1044,15 @@ public class StructuralCodeGraph {
         if (rel == null || rel.isEmpty()) {
             return false;
         }
-        final var relSlash = rel.replace('\\', '/');
-        final Path relP = Path.of(relSlash);
+        final Path relP = Path.of(rel.replace('\\', '/'));
         boolean ignored = false;
         for (final var rule : ignoreRules) {
-            if (matches(rule, relP, absolute)) {
+            if (FileIgnore.matchesRule(rule, relP)) {
                 ignored = !rule.negated();
             }
         }
         return ignored;
     }
-
-    private static boolean matches(final IgnoreRule rule, final Path relP, final Path absolute) {
-        if (rule.rootAnchored()) {
-            return rule.matcher().matches(relP);
-        }
-        // unanchored pattern should match at any depth: try the relative path and, as a fallback, a synthetic
-        // '/' + rel so a leading-**-style glob resolves; the glob normalized with ** already covers depth
-        return rule.matcher().matches(relP) || rule.matcher().matches(Path.of("/", relP.toString()));
-    }
-
-    /** A1: build ignore rules from the effective glob list merged with the project-root .gitignore (last-match-wins). */
-    private static List<IgnoreRule> buildIgnoreMatchers(final Path projectDir, final List<String> globs) {
-        final List<String> patterns = new ArrayList<>();
-        if (globs != null) {
-            patterns.addAll(globs);
-        }
-        appendGitignore(projectDir, patterns);
-        final List<IgnoreRule> rules = new ArrayList<>();
-        for (final String raw : patterns) {
-            if (raw == null || raw.isBlank()) {
-                continue;
-            }
-            final String p = raw.trim();
-            if (p.startsWith("#")) {
-                continue;
-            }
-            final boolean negation = p.startsWith("!");
-            final String body = negation ? p.substring(1) : p;
-            if (body.isBlank()) {
-                continue;
-            }
-            final boolean rootAnchored = body.startsWith("/");
-            final String glob = normalizeGitignoreToGlob(rootAnchored ? body.substring(1) : body, rootAnchored);
-            rules.add(new IgnoreRule(negation, FileSystems.getDefault().getPathMatcher("glob:" + glob), rootAnchored));
-            // A dir-only rule like "target/**" matches paths under target but not the bare "target"
-            // directory itself, so the tree-walk's preVisitDirectory SKIP_SUBTREE would never prune it.
-            // Register a companion rule for the bare directory so the whole subtree is pruned fast.
-            if (glob.endsWith("/**")) {
-                final String dirGlob = glob.substring(0, glob.length() - 3); // drop the trailing "/**"
-                if (!dirGlob.isEmpty()) {
-                    rules.add(new IgnoreRule(
-                            negation, FileSystems.getDefault().getPathMatcher("glob:" + dirGlob), rootAnchored));
-                }
-            }
-        }
-        return rules;
-    }
-
-    /** Append the project-root .gitignore lines (after the configured globs; git semantic = later rules override). */
-    private static void appendGitignore(final Path projectDir, final List<String> patterns) {
-        if (projectDir == null) {
-            return;
-        }
-        final var gitignore = projectDir.resolve(".gitignore");
-        if (!Files.isRegularFile(gitignore)) {
-            return;
-        }
-        try (final Stream<String> lines = Files.lines(gitignore)) {
-            lines.forEach(patterns::add);
-        } catch (final IOException e) {
-            LOGGER.fine(() -> "Cannot read " + gitignore + ": " + e.getMessage());
-        }
-    }
-
-    // Convert a gitignore pattern to a single java.nio glob: a bare name (no slash) becomes '**/name' so it
-    // matches at any depth; a leading '/' marks root-anchored; a trailing '/' marks directory-only.
-    private static String normalizeGitignoreToGlob(final String body, final boolean rootAnchored) {
-        var g = body.chars().filter(c -> c != '/').count() == 0 ? body : body;
-        final String trimmed = g.endsWith("/") && g.length() > 1 ? g.substring(0, g.length() - 1) : g;
-        final boolean noSlash = !trimmed.contains("/");
-        String out = noSlash ? "**/" + trimmed : trimmed;
-        if (rootAnchored) {
-            out = trimmed.startsWith("**") ? trimmed : trimmed;
-        }
-        return out;
-    }
-
-    /** A1: an ignore rule; {@code rootAnchored} and {@code negated} mirror gitignore semantics. */
-    public record IgnoreRule(boolean negated, PathMatcher matcher, boolean rootAnchored) {}
 
     private String extension(final Path p) {
         final var name = p.getFileName().toString();
@@ -973,15 +1105,57 @@ public class StructuralCodeGraph {
         }
     }
 
-    private void persist(final GraphStore store) {
-        persist(store, Map.of());
+    /** Enqueues the concept enrichment to run asynchronously on the enricher's executor. */
+    private void enqueueConceptEnrichment() {
+        if (!enabled() || !configuration.structuralCodeGraph().enrich()) {
+            return;
+        }
+        docEnricher.enqueueConceptEnrichment();
     }
 
     /**
-     * @param mtimeSnapshot per-file {@code lastModified} captured when each file was hashed/parsed; entries
-     *        missing from it (unchanged files carried over from a previous build) fall back to a stat at write time.
+     * Queues a persist job to be written asynchronously with debouncing.
+     * Multiple rapid calls are coalesced into a single write.
      */
     private void persist(final GraphStore store, final Map<String, Long> mtimeSnapshot) {
+        if (configNoRefresh) {
+            return;
+        }
+        persistQueue.offer(new PersistJob(store, mtimeSnapshot));
+        schedulePersist();
+    }
+
+    /** Flushes any pending persist job immediately (used on shutdown and resync). */
+    public void flushPersist() {
+        PersistJob job;
+        while ((job = persistQueue.poll()) != null) {
+            writePersist(job.store(), job.mtimes());
+        }
+    }
+
+    private void schedulePersist() {
+        if (persistScheduled.compareAndSet(false, true)) {
+            persistScheduler.schedule(this::drainPersistQueue, 500, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    private void drainPersistQueue() {
+        persistScheduled.set(false);
+        PersistJob last = null;
+        PersistJob job;
+        while ((job = persistQueue.poll()) != null) {
+            last = job;
+        }
+        if (last != null) {
+            writePersist(last.store(), last.mtimes());
+        }
+        // If more jobs arrived while we were writing, schedule another round
+        if (!persistQueue.isEmpty()) {
+            schedulePersist();
+        }
+    }
+
+    private void writePersist(final GraphStore store, final Map<String, Long> mtimeSnapshot) {
         try {
             Files.createDirectories(storeRoot);
             if (configuration.structuralCodeGraph().indexEnabled()) {

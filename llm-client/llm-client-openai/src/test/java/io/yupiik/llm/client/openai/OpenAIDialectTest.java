@@ -132,6 +132,10 @@ class OpenAIDialectTest {
     }
 
     private static LlmRequest request(final boolean stream) {
+        return request(stream, java.util.Map.of());
+    }
+
+    private static LlmRequest request(final boolean stream, final java.util.Map<String, Object> extensions) {
         return new LlmRequest(
                 "m",
                 List.of(LlmMessage.system("be concise"), LlmMessage.user("hi")),
@@ -144,7 +148,7 @@ class OpenAIDialectTest {
                 null,
                 null,
                 stream,
-                java.util.Map.of());
+                extensions);
     }
 
     private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
@@ -256,6 +260,84 @@ class OpenAIDialectTest {
     }
 
     @Test
+    void completionsStreamAsksForIncludedUsage() throws Exception {
+        final var sse = String.join(
+                "\n",
+                "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},"
+                        + "\"finish_reason\":\"stop\"}]}",
+                "",
+                "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":3,"
+                        + "\"completion_tokens\":1,\"total_tokens\":4}}",
+                "",
+                "data: [DONE]",
+                "");
+        server.createContext("/v1/chat/completions", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "text/event-stream", sse);
+        });
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        assertTrue(reqBody.get().contains("\"stream_options\""), reqBody.get());
+        assertTrue(reqBody.get().contains("\"include_usage\":true"), reqBody.get());
+        assertTrue(
+                events.stream().anyMatch(e -> e instanceof LlmStreamEvent.End end && end.usage() != null),
+                "usage chunk must surface an End with usage, got: " + events);
+    }
+
+    @Test
+    void completionsStreamUsageCanBeDisabledOrOverridden() throws Exception {
+        final var sse = String.join(
+                "\n",
+                "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},"
+                        + "\"finish_reason\":\"stop\"}]}",
+                "",
+                "data: [DONE]",
+                "");
+        server.createContext("/v1/chat/completions", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            if (reqBody.get().contains("\"stream\":true")) {
+                respond(exchange, 200, "text/event-stream", sse);
+            } else {
+                respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,"
+                                + "\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}");
+            }
+        });
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        dialect.stream(request(true, java.util.Map.of("includeUsage", false)), () -> false)
+                .toCompletableFuture()
+                .get(30, TimeUnit.SECONDS);
+        assertTrue(!reqBody.get().contains("stream_options"), "disabled by includeUsage=false: " + reqBody.get());
+        assertTrue(!reqBody.get().contains("includeUsage"), "control key must not leak: " + reqBody.get());
+
+        dialect.stream(
+                        request(true, java.util.Map.of("stream_options", java.util.Map.of("include_usage", false))),
+                        () -> false)
+                .toCompletableFuture()
+                .get(30, TimeUnit.SECONDS);
+        assertTrue(
+                reqBody.get().contains("\"include_usage\":false"),
+                "explicit stream_options must win: " + reqBody.get());
+
+        dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        assertTrue(!reqBody.get().contains("stream_options"), "non-stream must not ask for usage: " + reqBody.get());
+    }
+
+    @Test
     void completionsDialectListsModelsFromDerivedEndpoint() throws Exception {
         server.createContext(
                 "/v1/models",
@@ -317,6 +399,32 @@ class OpenAIDialectTest {
                 dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
         assertEquals("hello", response.text());
         assertTrue(reqBody.get().contains("\"max_output_tokens\":64"), reqBody.get());
+    }
+
+    @Test
+    void responsesDialectKeepsAllNonStreamToolCalls() throws Exception {
+        server.createContext(
+                "/v1/responses",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"r1\",\"model\":\"m\",\"output\":["
+                                + "{\"type\":\"function_call\",\"id\":\"f1\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"},"
+                                + "{\"type\":\"function_call\",\"id\":\"f2\",\"name\":\"grep\",\"arguments\":\"{\\\"pattern\\\":\\\"x\\\"}\"}],"
+                                + "\"usage\":{}}"));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final var calls = response.first().message().toolCalls();
+        assertEquals(2, calls.size(), () -> "both parallel calls must survive, got " + calls);
+        assertEquals("read", calls.get(0).function().name());
+        assertEquals("grep", calls.get(1).function().name());
+        assertEquals("{\"path\":\"a\"}", calls.get(0).function().arguments());
+        assertEquals("{\"pattern\":\"x\"}", calls.get(1).function().arguments());
     }
 
     @Test

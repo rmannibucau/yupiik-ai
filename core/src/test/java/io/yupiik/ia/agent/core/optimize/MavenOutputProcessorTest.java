@@ -60,9 +60,26 @@ class MavenOutputProcessorTest {
         assertTrue(out.contains("Failing tests:"));
         assertTrue(out.stream().anyMatch(l -> l.contains("FAIL io.my.BrokenTest")));
         assertTrue(out.contains("Warnings (1):"));
-        assertTrue(out.contains("Passing tests (1): io.my.AppTest"));
+        assertTrue(out.contains("Passing tests (1):"));
+        assertTrue(out.contains("  io.my.AppTest"));
         assertFalse(out.contains("Scanning for projects..."));
         assertFalse(out.contains("Building yca-core"));
+    }
+
+    @Test
+    void wrapsPassingTestsInsteadOfOneUnboundedLine() {
+        final var lines = new java.util.ArrayList<String>();
+        for (var i = 0; i < 40; i++) {
+            lines.add("[INFO] Running io.my.VeryLongTestClassName" + String.format("%04d", i));
+            lines.add("[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0");
+        }
+        lines.add("[INFO] BUILD SUCCESS");
+        final var out = processor.process("mvn test", lines.stream()).toList();
+
+        assertTrue(out.stream().anyMatch(l -> l.startsWith("Passing tests (40):")));
+        // every rendered line must stay bounded so the generic line cap remains meaningful
+        assertTrue(out.stream().filter(l -> l.startsWith("  ")).allMatch(l -> l.length() <= 115));
+        assertTrue(out.stream().filter(l -> l.startsWith("  ")).count() > 1, "long lists must wrap on several lines");
     }
 
     @Test

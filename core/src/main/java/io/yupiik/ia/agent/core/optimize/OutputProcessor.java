@@ -26,6 +26,15 @@ public interface OutputProcessor {
 
     Set<String> names();
 
+    /**
+     * Whether this processor may run on results of the given tool. Processors target shell output by
+     * default; tools with their own truncation discipline (read_file, grep, ...) are left alone so
+     * their outputs are not re-truncated a second time.
+     */
+    default boolean appliesToTool(final String toolName) {
+        return "bash".equals(toolName);
+    }
+
     default String displayName() {
         final var simple = getClass().getSimpleName();
         final var fusion = simple.indexOf("$Fusion");

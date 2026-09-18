@@ -94,6 +94,7 @@ public class CompactionCoordinator {
     private final UsageTracker usageTracker;
     private final ProviderManager providerManager;
     private final Emitter emitter;
+    private volatile boolean warnedCompactModel;
 
     public CompactionCoordinator(
             final CodingAgentConfiguration configuration,
@@ -460,6 +461,7 @@ public class CompactionCoordinator {
             final String focus,
             final String modelOverride) {
         final var summary = new StringBuilder();
+        warnOnceWhenNoCompactModel();
         for (var c = 0; c < chunks.size(); c++) {
             final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus);
             String part = null;
@@ -477,6 +479,9 @@ public class CompactionCoordinator {
                             null,
                             null,
                             null));
+                    if (usageTracker != null) {
+                        usageTracker.recordAuxiliary(res.usage());
+                    }
                     part = res.message() == null ? "" : str(res.message().content());
                     if (part != null && !part.isBlank()) {
                         break;
@@ -632,6 +637,25 @@ public class CompactionCoordinator {
 
     private String resolveModel(final String override) {
         return providerManager.resolveModel(override);
+    }
+
+    /**
+     * Surfaces, once per session, that no dedicated compact model is configured: compaction
+     * summarizer calls then run on the (usually flagship) conversation model, which works but
+     * costs more than a cheap summarizer would. A log hint is enough - a wrong hard-coded
+     * default would break compaction entirely, so the fallback stays the current model.
+     */
+    private void warnOnceWhenNoCompactModel() {
+        if (warnedCompactModel || configuration == null) {
+            return;
+        }
+        warnedCompactModel = true;
+        final var compact =
+                configuration.model() == null ? null : configuration.model().compact();
+        if (compact == null || compact.isBlank()) {
+            LOGGER.info("No yca.model.compact configured: context compaction summarizes with the current "
+                    + "conversation model. Set yca.model.compact to a cheaper model to reduce background spend.");
+        }
     }
 
     private void emit(final AgentEvent event) {

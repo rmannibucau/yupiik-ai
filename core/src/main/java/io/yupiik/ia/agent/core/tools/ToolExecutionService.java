@@ -75,11 +75,14 @@ public class ToolExecutionService {
 
     private String optimizeOutput(final EmbeddedTool tool, final Map<String, Object> args, final String output) {
         final var command = args.get("command") instanceof String s ? s : tool.name();
+        final var optimize = configuration.optimize();
+        final var minReduction = Math.max(0, Math.min(100, optimize.minReductionPercent()));
         final var sorted = processors.stream()
+                .filter(p -> p.appliesToTool(tool.name()))
                 .sorted(Comparator.comparingInt(OutputProcessor::order))
                 .toList();
         for (final var processor : sorted) {
-            if (configuration.optimize().isDisabled(processor.names())) {
+            if (optimize.isDisabled(processor.names())) {
                 continue;
             }
             try {
@@ -87,7 +90,8 @@ public class ToolExecutionService {
                     final var processed = processor
                             .process(command, output.lines())
                             .collect(java.util.stream.Collectors.joining("\n"));
-                    if (processed.length() < output.length()) {
+                    // only accept a meaningful reduction: tiny wins are noise, not optimization
+                    if (processed.length() * 100L <= output.length() * (100L - minReduction)) {
                         statusReporter.report("output optimized by " + processor.displayName() + " (" + output.length()
                                 + " -> " + processed.length() + " chars)");
                         return processed;
@@ -95,7 +99,7 @@ public class ToolExecutionService {
                     return output;
                 }
             } catch (final RuntimeException e) {
-                return output;
+                // this processor failed: fall through to the next candidate
             }
         }
         return output;

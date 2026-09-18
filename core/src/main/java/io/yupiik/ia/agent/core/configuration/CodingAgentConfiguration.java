@@ -109,7 +109,30 @@ public record CodingAgentConfiguration(
                 defaultValue = "10000",
                 documentation =
                         "Maximum line length in characters the TUI syntax highlighter tokenizes. Longer lines render as a single plain un-styled span to avoid pathological cost.")
-        int maxLineLength) {
+        int maxLineLength,
+
+        @Property(
+                defaultValue = "java.util.List.of(\"continue\", \"go\")",
+                documentation =
+                        "Prompts that resume the previous turn instead of sending a message: the agent loop is re-run on the existing history with no user message added or persisted (zero token overhead). Matching is case-insensitive on the stripped input.")
+        List<String> resumeAliases) {
+
+    /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
+    public boolean isResumeAlias(final String input) {
+        if (input == null || resumeAliases == null) {
+            return false;
+        }
+        final var stripped = input.strip();
+        if (stripped.isEmpty()) {
+            return false;
+        }
+        for (final var alias : resumeAliases) {
+            if (alias != null && alias.strip().equalsIgnoreCase(stripped)) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     public String resolveStorageHome() {
         var home = storageHome == null || storageHome.isBlank() ? "~/.yupiik/coding-agent" : storageHome;

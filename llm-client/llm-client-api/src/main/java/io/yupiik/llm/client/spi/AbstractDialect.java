@@ -19,6 +19,7 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.DialectNotSupportedException;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmModel;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
@@ -184,8 +185,10 @@ public abstract class AbstractDialect implements Dialect {
         if (ContextWindowExceededException.isCause(attempt.statusCode(), body)) {
             return failed(new ContextWindowExceededException());
         }
-        return failed(
-                new IOException("LLM request failed (" + attempt.statusCode() + "): " + body + retryAfter(attempt)));
+        return failed(new LlmHttpFailureException(
+                attempt.statusCode(),
+                body,
+                attempt.headers().firstValue("retry-after").orElse(null)));
     }
 
     /**
@@ -366,32 +369,6 @@ public abstract class AbstractDialect implements Dialect {
         return FLAVOR_MISSING_CODES.contains("(" + statusCode + ")");
     }
 
-    /**
-     * Extracts the {@code retry-after} header of a response for error messages.
-     *
-     * @param response the HTTP response.
-     * @return the formatted header value, empty when absent.
-     */
-    protected static String retryAfter(final HttpResponse<?> response) {
-        return response.headers()
-                .firstValue("retry-after")
-                .map(v -> " retry-after=" + v)
-                .orElse("");
-    }
-
-    /**
-     * Extracts the {@code retry-after} header of a stream attempt for error messages.
-     *
-     * @param attempt the stream attempt.
-     * @return the formatted header value, empty when absent.
-     */
-    protected static String retryAfter(final StreamAttempt attempt) {
-        return attempt.headers()
-                .firstValue("retry-after")
-                .map(v -> " retry-after=" + v)
-                .orElse("");
-    }
-
     private CompletionStage<HttpResponse<String>> classify(final HttpResponse<String> response) {
         if (response.statusCode() < 400) {
             return CompletableFuture.completedFuture(response);
@@ -403,8 +380,10 @@ public abstract class AbstractDialect implements Dialect {
         } else if (ContextWindowExceededException.isCause(response.statusCode(), body)) {
             failure = new ContextWindowExceededException();
         } else {
-            failure = new IOException(
-                    "LLM request failed (" + response.statusCode() + "): " + body + retryAfter(response));
+            failure = new LlmHttpFailureException(
+                    response.statusCode(),
+                    body,
+                    response.headers().firstValue("retry-after").orElse(null));
         }
         return failed(failure);
     }

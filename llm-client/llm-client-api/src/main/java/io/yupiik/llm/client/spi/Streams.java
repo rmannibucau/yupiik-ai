@@ -76,7 +76,11 @@ public final class Streams {
             final java.util.function.Consumer<String> onRawLine) {
         return subscriber -> source.subscribe(new Flow.Subscriber<>() {
             private final SseParser parser = new SseParser();
-            private final StringBuilder line = new StringBuilder();
+            // raw pending bytes: UTF-8 sequences split across network chunks stay here until the
+            // next newline arrives, and lines are cut on the byte scan (0x0A never appears inside
+            // a multi-byte UTF-8 sequence, so byte-level splitting is safe)
+            private byte[] pending = new byte[1024];
+            private int pendingLength;
             private volatile boolean aborted;
 
             @Override
@@ -91,9 +95,7 @@ public final class Streams {
                     return;
                 }
                 for (final var buffer : item) {
-                    final var array = new byte[buffer.remaining()];
-                    buffer.get(array);
-                    line.append(new String(array, StandardCharsets.UTF_8));
+                    append(buffer);
                 }
                 processLines(false);
             }
@@ -113,21 +115,45 @@ public final class Streams {
                 subscriber.onComplete();
             }
 
+            private void append(final ByteBuffer src) {
+                final var needed = pendingLength + src.remaining();
+                if (needed > pending.length) {
+                    var capacity = pending.length;
+                    while (capacity < needed) {
+                        capacity = capacity <= 0 ? 1024 : capacity * 2;
+                    }
+                    pending = java.util.Arrays.copyOf(pending, capacity);
+                }
+                src.get(pending, pendingLength, src.remaining());
+                pendingLength = needed;
+            }
+
             private void processLines(final boolean flushRest) {
+                var scan = 0;
                 while (!aborted) {
-                    final var newline = line.indexOf("\n");
+                    var newline = -1;
+                    for (var i = scan; i < pendingLength; i++) {
+                        if (pending[i] == '\n') {
+                            newline = i;
+                            break;
+                        }
+                    }
                     if (newline < 0) {
-                        if (flushRest && line.length() > 0) {
-                            handleRaw(trimCr(line.toString()));
-                            line.setLength(0);
+                        if (flushRest && pendingLength > scan) {
+                            handleRaw(trimCr(new String(pending, scan, pendingLength - scan, StandardCharsets.UTF_8)));
+                            scan = pendingLength;
                         }
                         break;
                     }
-                    handleRaw(trimCr(line.substring(0, newline)));
-                    line.delete(0, newline + 1);
+                    handleRaw(trimCr(new String(pending, scan, newline - scan, StandardCharsets.UTF_8)));
+                    scan = newline + 1;
                     if (cancelled.getAsBoolean()) {
                         aborted = true;
                     }
+                }
+                if (scan > 0) {
+                    System.arraycopy(pending, scan, pending, 0, pendingLength - scan);
+                    pendingLength -= scan;
                 }
             }
 

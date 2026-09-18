@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Central registry of the configured OpenAI compatible providers and their model references.
@@ -40,6 +41,8 @@ public class ProviderManager {
     private final JsonMapper mapper;
 
     private volatile String currentProviderId;
+    private final ConcurrentHashMap<ProviderConfiguration, Map<String, Object>> optionsCache =
+            new ConcurrentHashMap<>();
 
     public ProviderManager(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
         this.configuration = configuration;
@@ -151,7 +154,8 @@ public class ProviderManager {
 
     /**
      * Parse the provider-specific options (JSON object) into an unmodifiable map, or an empty map when
-     * {@code providerSpecificOptions} is blank or does not start with '{'.
+     * {@code providerSpecificOptions} is blank or does not start with '{'. Parsed once per provider
+     * configuration and cached: the options ride on every request, re-deserializing them each call is waste.
      */
     @SuppressWarnings("unchecked")
     public Map<String, Object> providerOptions(final ProviderConfiguration provider) {
@@ -160,15 +164,17 @@ public class ProviderManager {
                 || !provider.providerSpecificOptions().startsWith("{")) {
             return Collections.emptyMap();
         }
-        try {
-            final var parsed = mapper.fromString(Object.class, provider.providerSpecificOptions());
-            if (!(parsed instanceof Map)) {
-                return Collections.emptyMap();
+        return optionsCache.computeIfAbsent(provider, p -> {
+            try {
+                final var parsed = mapper.fromString(Object.class, p.providerSpecificOptions());
+                if (!(parsed instanceof Map)) {
+                    return Collections.emptyMap();
+                }
+                return Collections.unmodifiableMap(new HashMap<>((Map<String, Object>) parsed));
+            } catch (final RuntimeException e) {
+                throw new IllegalArgumentException("Invalid providerSpecificOptions JSON: " + e.getMessage(), e);
             }
-            return Collections.unmodifiableMap(new HashMap<>((Map<String, Object>) parsed));
-        } catch (final RuntimeException e) {
-            throw new IllegalArgumentException("Invalid providerSpecificOptions JSON: " + e.getMessage(), e);
-        }
+        });
     }
 
     /**

@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -86,6 +87,26 @@ class UsageTrackerTest {
         final var cfg = configuration(32000);
         final var tracker = new UsageTracker(new ProviderManager(cfg, mapper), null, null, Clock.systemUTC());
         assertEquals(32000, tracker.contextWindow());
+    }
+
+    @Test
+    void auxiliarySpendIsCountedGloballyAndSeparately() {
+        final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
+        tracker.record(new Usage(100, 20, 120));
+        tracker.recordAuxiliary(new Usage(11, 7, 18));
+        assertEquals(111, tracker.promptTokens());
+        assertEquals(27, tracker.completionTokens());
+        assertEquals(2, tracker.requests());
+        assertEquals(11, tracker.auxiliaryPromptTokens());
+        assertEquals(7, tracker.auxiliaryCompletionTokens());
+        assertEquals(1, tracker.auxiliaryRequests());
+        tracker.reset();
+        assertEquals(0, tracker.promptTokens());
+        assertEquals(0, tracker.completionTokens());
+        assertEquals(0, tracker.requests());
+        assertEquals(0, tracker.auxiliaryPromptTokens());
+        assertEquals(0, tracker.auxiliaryCompletionTokens());
+        assertEquals(0, tracker.auxiliaryRequests());
     }
 
     @Test

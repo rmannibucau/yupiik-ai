@@ -82,6 +82,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 @DefaultScoped
 @Command(name = "tui", description = "Interactive terminal UI session with the yca coding agent.")
@@ -158,6 +159,7 @@ public class TuiCommand implements Runnable {
 
     private static final int MAX_RESUME_LIST = 25;
     private static final int RESUME_SUMMARY_WIDTH = 80;
+    private static final Pattern SPLIT_COMMAND = Pattern.compile("\\s+");
 
     public TuiCommand(
             final TuiConf conf,
@@ -980,6 +982,10 @@ public class TuiCommand implements Runnable {
         if (mavenIndexingBlocks(state)) {
             return;
         }
+        if (agentSessionService.isResumeAlias(text)) {
+            startResumeTurn(state);
+            return;
+        }
         if (state.title == null || state.title.isBlank()) {
             state.title = TuiInputSupport.firstLine(text);
         }
@@ -989,12 +995,31 @@ public class TuiCommand implements Runnable {
         final var override = agentSessionService.agentOverride(text);
         final var agentName = override.agentName() != null ? override.agentName() : state.activeAgent;
         final var prompt = override.prompt();
+        startTurn(state, agentName, prompt);
+    }
+
+    /**
+     * Resume turn: re-runs the agent loop on the persisted history without sending any message
+     * (zero extra prompt tokens), e.g. to continue after a truncated reply or a cancel.
+     */
+    private void startResumeTurn(final UiState state) {
+        state.model.status("resuming previous turn");
+        state.interrupted = false;
+        waiting(state, "thinking...", SpinnerStyle.CLOCK);
+        startTurn(state, state.activeAgent, null);
+    }
+
+    private void startTurn(final UiState state, final String agentName, final String prompt) {
         final var history = sessionStore.load(state.sessionId);
         final var inFlight = new CompletableFuture<Void>();
         state.inFlight = inFlight;
         executor.execute(() -> {
             try {
-                agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted);
+                if (prompt == null) {
+                    agentLoop.resume(agentName, state.sessionId, history, () -> state.interrupted);
+                } else {
+                    agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted);
+                }
             } finally {
                 inFlight.complete(null);
             }
@@ -1019,98 +1044,98 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    @FunctionalInterface
+    interface SlashAction {
+        void run(String arg, TuiRunner runner, UiState state);
+    }
+
     private void slash(final String text, final TuiRunner runner, final UiState state) {
         state.model.transcript().append("\n\n---\n\n**You**\n\n`").append(text).append("`\n");
-        switch (text) {
-            case "/help" -> state.model.transcript().append(help());
-            case "/shortcuts" -> state.model.transcript().append(SHORTCUTS);
-            case "/new" -> {
-                state.sessionId = sessionStore.create();
-                state.model.clearConversation();
-                state.activeAgent = "";
-                state.model.status("new session " + state.sessionId);
+        final var value = text.substring(1);
+        final var parts = SPLIT_COMMAND.split(value, 2);
+        final var name = parts[0].toLowerCase(Locale.ROOT);
+        final var arg = parts.length > 1 ? parts[1].strip() : "";
+        final var action = tuiSlashHandlers().get(name);
+        if (action == null) {
+            state.model.status("unknown command: " + text + " (/help)");
+            return;
+        }
+        action.run(arg, runner, state);
+    }
+
+    // dispatch table: keys are the bare command names of TuiSlashCommands (SlashCommandSpec.command());
+    // adding a command means adding its spec to the catalog AND its action here (enforced by tests).
+    private Map<String, SlashAction> tuiSlashHandlers() {
+        if (tuiSlashHandlers == null) {
+            tuiSlashHandlers = createTuiSlashHandlers();
+        }
+        return tuiSlashHandlers;
+    }
+
+    private Map<String, SlashAction> tuiSlashHandlers;
+
+    private Map<String, SlashAction> createTuiSlashHandlers() {
+        return Map.ofEntries(
+                Map.entry(
+                        "help", (arg, runner, state) -> state.model.transcript().append(help())),
+                Map.entry(
+                        "shortcuts",
+                        (arg, runner, state) -> state.model.transcript().append(SHORTCUTS)),
+                Map.entry("new", (arg, runner, state) -> {
+                    state.sessionId = sessionStore.create();
+                    state.model.clearConversation();
+                    state.activeAgent = "";
+                    state.model.status("new session " + state.sessionId);
+                }),
+                Map.entry("resume", (arg, runner, state) -> resume(state)),
+                Map.entry("editplan", (arg, runner, state) -> editPlan(arg, runner, state)),
+                Map.entry("compact", (arg, runner, state) -> compact(runner, state)),
+                Map.entry("snapshot", (arg, runner, state) -> snapshot(arg, state)),
+                Map.entry("session-id", (arg, runner, state) -> sessionIdInfo(state)),
+                Map.entry("session-flush", (arg, runner, state) -> sessionFlush(state)),
+                Map.entry("session-housekeeping", (arg, runner, state) -> sessionHousekeeping(runner, state)),
+                Map.entry("model", (arg, runner, state) -> modelCommand(arg, runner, state)),
+                Map.entry("provider", (arg, runner, state) -> providerCommand(arg, runner, state)),
+                Map.entry("agent", (arg, runner, state) -> agentCommand(arg, runner, state)),
+                Map.entry("memory", (arg, runner, state) -> memoryCommand(state)),
+                Map.entry("context", (arg, runner, state) -> context(arg, state)),
+                Map.entry("tools", (arg, runner, state) -> toolsCommand(arg, runner, state)),
+                Map.entry("structural-code-graph", (arg, runner, state) -> resyncGraph(runner, state)),
+                Map.entry(
+                        "maven-repository-knowledge",
+                        (arg, runner, state) -> mavenRepositoryKnowledge(arg, runner, state)),
+                Map.entry("mcp", (arg, runner, state) -> mcpCommand(arg, runner, state)),
+                Map.entry("theme", (arg, runner, state) -> themeCommand(arg, state)),
+                Map.entry("thinking", (arg, runner, state) -> thinkingCommand(arg, state)),
+                Map.entry("tool-output", (arg, runner, state) -> toolOutputCommand(arg, state)),
+                Map.entry("clear", (arg, runner, state) -> state.model.clearConversation()),
+                Map.entry("quit", (arg, runner, state) -> {
+                    awaitInFlight(state);
+                    runner.quit();
+                }),
+                Map.entry("exit", (arg, runner, state) -> {
+                    awaitInFlight(state);
+                    runner.quit();
+                }),
+                Map.entry("mode", (arg, runner, state) -> mode(arg, runner, state)),
+                Map.entry("permissions", (arg, runner, state) -> permissions(arg, state)));
+    }
+
+    private void memoryCommand(final UiState state) {
+        final var memory = agentSessionService.memory();
+        final var sb = new StringBuilder("\n```text\n");
+        if (memory.global().isBlank() && memory.project().isBlank()) {
+            sb.append("(empty memory)");
+        } else {
+            if (!memory.global().isBlank()) {
+                sb.append("-- global memory --\n").append(memory.global()).append('\n');
             }
-            case "/resume" -> resume(state);
-            case "/editplan" -> editPlan("", runner, state);
-            case "/compact" -> compact(runner, state);
-            case "/snapshot" -> snapshot("", state);
-            case "/session-id" -> sessionIdInfo(state);
-            case "/session-flush" -> sessionFlush(state);
-            case "/session-housekeeping" -> sessionHousekeeping(runner, state);
-            case "/model" -> modelCommand(text, runner, state);
-            case "/provider" -> providerCommand(text, runner, state);
-            case "/agent" -> agentCommand(text, runner, state);
-            case "/memory" -> {
-                final var memory = agentSessionService.memory();
-                final var sb = new StringBuilder("\n```text\n");
-                if (memory.global().isBlank() && memory.project().isBlank()) {
-                    sb.append("(empty memory)");
-                } else {
-                    if (!memory.global().isBlank()) {
-                        sb.append("-- global memory --\n")
-                                .append(memory.global())
-                                .append('\n');
-                    }
-                    if (!memory.project().isBlank()) {
-                        sb.append("-- project memory --\n")
-                                .append(memory.project())
-                                .append('\n');
-                    }
-                }
-                sb.append("\n```\n");
-                state.model.transcript().append(sb).append('\n');
-            }
-            case "/context" -> context("", state);
-            case "/tools" -> toolsCommand(text, runner, state);
-            case "/structural-code-graph" -> resyncGraph(runner, state);
-            case "/maven-repository-knowledge" -> mavenRepositoryKnowledge("", runner, state);
-            case "/mcp" -> mcpCommand("", runner, state);
-            case "/theme" -> themeCommand("", state);
-            case "/thinking" -> thinkingCommand("", state);
-            case "/tool-output" -> toolOutputCommand("", state);
-            case "/clear" -> state.model.clearConversation();
-            case "/quit", "/exit" -> {
-                awaitInFlight(state);
-                runner.quit();
-            }
-            default -> {
-                if (text.startsWith("/model ")) {
-                    modelCommand(text, runner, state);
-                } else if (text.startsWith("/provider ")) {
-                    providerCommand(text, runner, state);
-                } else if (text.startsWith("/mode ")) {
-                    mode(text.substring("/mode ".length()).strip(), runner, state);
-                } else if (text.startsWith("/editplan ")) {
-                    editPlan(text.substring("/editplan ".length()).strip(), runner, state);
-                } else if (text.startsWith("/snapshot")) {
-                    snapshot(text.substring("/snapshot".length()).strip(), state);
-                } else if (text.startsWith("/context ")) {
-                    context(text.substring("/context ".length()).strip(), state);
-                } else if (text.startsWith("/permissions ")) {
-                    permissions(text.substring("/permissions ".length()).strip(), state);
-                } else if (text.startsWith("/thinking ")) {
-                    thinkingCommand(text.substring("/thinking ".length()).strip(), state);
-                } else if (text.startsWith("/tool-output ")) {
-                    toolOutputCommand(text.substring("/tool-output ".length()).strip(), state);
-                } else if (text.startsWith("/theme")) {
-                    themeCommand(text.substring("/theme".length()).strip(), state);
-                } else if (text.startsWith("/agent ")) {
-                    agentCommand(text, runner, state);
-                } else if (text.startsWith("/tools ")) {
-                    toolsCommand(text, runner, state);
-                } else if (text.startsWith("/maven-repository-knowledge ")) {
-                    mavenRepositoryKnowledge(
-                            text.substring("/maven-repository-knowledge".length())
-                                    .strip(),
-                            runner,
-                            state);
-                } else if (text.startsWith("/mcp ")) {
-                    mcpCommand(text.substring("/mcp ".length()).strip(), runner, state);
-                } else {
-                    state.model.status("unknown command: " + text + " (/help)");
-                }
+            if (!memory.project().isBlank()) {
+                sb.append("-- project memory --\n").append(memory.project()).append('\n');
             }
         }
+        sb.append("\n```\n");
+        state.model.transcript().append(sb).append('\n');
     }
 
     private void themeCommand(final String arg, final UiState state) {
@@ -1287,8 +1312,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private void modelCommand(final String text, final TuiRunner runner, final UiState state) {
-        final var arg = text.substring("/model".length()).strip();
+    private void modelCommand(final String arg, final TuiRunner runner, final UiState state) {
         if (arg.isEmpty()) {
             models(runner, state);
             return;
@@ -1297,8 +1321,7 @@ public class TuiCommand implements Runnable {
         state.model.status("model: " + model);
     }
 
-    private void providerCommand(final String text, final TuiRunner runner, final UiState state) {
-        final var arg = text.substring("/provider".length()).strip();
+    private void providerCommand(final String arg, final TuiRunner runner, final UiState state) {
         final var providers = providerManager.providers();
         if (!arg.isEmpty()) {
             final var id = agentSessionService.setProvider(arg);
@@ -1317,8 +1340,7 @@ public class TuiCommand implements Runnable {
                 () -> state.model.status("provider cancelled"));
     }
 
-    private void agentCommand(final String text, final TuiRunner runner, final UiState state) {
-        final var arg = text.substring("/agent".length()).strip();
+    private void agentCommand(final String arg, final TuiRunner runner, final UiState state) {
         if (arg.isEmpty()) {
             final var names = agentProvider.agents().stream()
                     .map(AgentConfiguration::name)
@@ -1344,8 +1366,7 @@ public class TuiCommand implements Runnable {
         state.model.status("agent: " + name);
     }
 
-    private void toolsCommand(final String text, final TuiRunner runner, final UiState state) {
-        final var arg = text.substring("/tools".length()).strip();
+    private void toolsCommand(final String arg, final TuiRunner runner, final UiState state) {
         executor.execute(() -> {
             try {
                 final var listing = agentSessionService.tools(arg);

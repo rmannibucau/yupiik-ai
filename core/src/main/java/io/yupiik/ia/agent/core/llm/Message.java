@@ -45,4 +45,8 @@ public record Message(
     public static Message tool(final String toolCallId, final String content) {
         return new Message("tool", content, null, null, toolCallId, null);
     }
+
+    public static Message tool(final String toolCallId, final String content, final boolean isError) {
+        return new Message("tool", content, null, null, toolCallId, isError ? Map.of("is_error", true) : null);
+    }
 }

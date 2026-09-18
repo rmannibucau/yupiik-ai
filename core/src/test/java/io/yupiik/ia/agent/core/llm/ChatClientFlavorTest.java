@@ -134,14 +134,6 @@ class ChatClientFlavorTest {
                         new ToolCall$FunctionCall$FusionJsonCodec(),
                         new Usage$FusionJsonCodec(),
                         new ChatCompletionRequest$FusionJsonCodec(),
-                        new ChatCompletionResponse$FusionJsonCodec(),
-                        new ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new ChatChunk$FusionJsonCodec(),
-                        new ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new ResponsesRequest$FusionJsonCodec(),
-                        new ResponsesInput$FusionJsonCodec(),
-                        new ResponsesTool$FusionJsonCodec(),
                         new ModelsResponse$FusionJsonCodec(),
                         new ModelsResponse$Model$FusionJsonCodec(),
                         new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
@@ -291,5 +283,64 @@ class ChatClientFlavorTest {
         assertEquals("hello there", client.chat(request()).message().content());
         assertEquals(ApiFlavor.RESPONSES, client.flavor());
         assertTrue(bodies.getLast().contains("\"max_output_tokens\":1234"), bodies.getLast());
+    }
+
+    @Test
+    void providerSpecificTemperatureIsPromotedAndSentExactlyOnce() throws Exception {
+        final var cfg =
+                configuration(Map.of("yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(1, occurrences(bodies.getLast(), "\"temperature\":0.2"), bodies.getLast());
+    }
+
+    @Test
+    void providerSpecificMaxTokensIsPromotedWithoutDuplicateWireKeys() throws Exception {
+        final var cfg =
+                configuration(Map.of("yca.provider.providers.0.providerSpecificOptions", "{\"max_tokens\":777}"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(1, occurrences(bodies.getLast(), "\"max_tokens\":777"), bodies.getLast());
+    }
+
+    @Test
+    void extrasTemperatureIsPromotedOnTheStreamPath() throws Exception {
+        final var cfg =
+                configuration(Map.of("yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        client.stream(request(), delta -> {
+            // no-op consumer: the assertion is on the wire body below
+        });
+        assertEquals(1, occurrences(bodies.getLast(), "\"temperature\":0.2"), bodies.getLast());
+    }
+
+    @Test
+    void providerSpecificTemperatureIsPromotedForResponsesFlavor() throws Exception {
+        stop();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello there"}]}],"usage":{}}""", "application/json");
+        });
+        server.start();
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.api", "responses",
+                "yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(1, occurrences(bodies.getLast(), "\"temperature\":0.2"), bodies.getLast());
+    }
+
+    private static int occurrences(final String body, final String needle) {
+        var count = 0;
+        for (var idx = body.indexOf(needle); idx >= 0; idx = body.indexOf(needle, idx + needle.length())) {
+            count++;
+        }
+        return count;
     }
 }

@@ -159,8 +159,12 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                             }
                         }
                     }
-                    case "tool" ->
-                        input.add(ResponsesInput.functionCallOutput(message.toolCallId(), str(message.content())));
+                    case "tool" -> {
+                        final var extensions = message.extensions();
+                        final var isError = extensions != null && Boolean.TRUE.equals(extensions.get("is_error"));
+                        input.add(ResponsesInput.functionCallOutput(
+                                message.toolCallId(), str(message.content()), isError));
+                    }
                     default -> input.add(ResponsesInput.message(message.role(), str(message.content())));
                 }
             }
@@ -192,8 +196,7 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
 
     private LlmResponse toLlmResponse(final Map<String, Object> root) {
         final var messageText = new StringBuilder();
-        final var toolCalls = new ArrayList<LlmMessage>(); // not used; tool calls are separate output items
-        final var choices = new ArrayList<LlmResponse.LlmChoice>();
+        final var calls = new ArrayList<LlmToolCall>();
         if (root.get("output") instanceof List<?> output) {
             final var index = new AtomicInteger();
             for (final Object item : output) {
@@ -211,29 +214,26 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                             }
                         }
                     } else if ("function_call".equals(type)) {
-                        toolCalls.add(new LlmMessage(
-                                "assistant",
-                                null,
-                                null,
-                                List.of(new LlmToolCall(
-                                        str(map.get("id")),
-                                        "function",
-                                        new LlmToolCall.FunctionCall(str(map.get("name")), str(map.get("arguments"))),
-                                        index.getAndIncrement())),
-                                null,
-                                null));
+                        // keep every call: parallel tool calls must land in one assistant message
+                        calls.add(new LlmToolCall(
+                                str(map.get("id")),
+                                "function",
+                                new LlmToolCall.FunctionCall(str(map.get("name")), str(map.get("arguments"))),
+                                index.getAndIncrement()));
                     }
                 }
             }
         }
-        if (!toolCalls.isEmpty()) {
-            choices.add(new LlmResponse.LlmChoice(0, toolCalls.get(0), "tool_calls"));
+        final LlmResponse.LlmChoice choice;
+        if (!calls.isEmpty()) {
+            choice = new LlmResponse.LlmChoice(
+                    0, new LlmMessage("assistant", messageText.toString(), null, calls, null, null), "tool_calls");
         } else {
-            choices.add(new LlmResponse.LlmChoice(
-                    0, new LlmMessage("assistant", messageText.toString(), null, null, null, null), "stop"));
+            choice = new LlmResponse.LlmChoice(
+                    0, new LlmMessage("assistant", messageText.toString(), null, null, null, null), "stop");
         }
         final var usage = usage(root.get("usage"));
-        return new LlmResponse(str(root.get("id")), str(root.get("model")), null, choices, usage, null);
+        return new LlmResponse(str(root.get("id")), str(root.get("model")), null, List.of(choice), usage, null);
     }
 
     private List<LlmStreamEvent> mapEvent(final SseParser.Event event) {
@@ -317,8 +317,16 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
 
     private static Usage usage(final Object value) {
         if (value instanceof Map<?, ?> map) {
+            final Long cacheRead = map.get("input_tokens_details") instanceof Map<?, ?> details
+                            && details.get("cached_tokens") instanceof Number n
+                    ? n.longValue()
+                    : null;
             return new Usage(
-                    number(map.get("input_tokens")), number(map.get("output_tokens")), number(map.get("total_tokens")));
+                    number(map.get("input_tokens")),
+                    number(map.get("output_tokens")),
+                    number(map.get("total_tokens")),
+                    cacheRead,
+                    null);
         }
         return Usage.EMPTY;
     }

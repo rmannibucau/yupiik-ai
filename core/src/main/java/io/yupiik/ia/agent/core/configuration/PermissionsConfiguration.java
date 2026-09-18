@@ -41,9 +41,12 @@ public record PermissionsConfiguration(
 
         @Property(
                 defaultValue =
-                        "java.util.List.of(\"git status\", \"git diff\", \"git log\", \"git branch\", \"ls\", \"cat\", \"pwd\", \"echo\", \"find\", \"grep\", \"rg\", \"wc\", \"head\", \"tail\")",
+                        "java.util.List.of(\"git status\", \"git diff\", \"git log\", \"git branch\", \"ls\", \"cat\", \"pwd\", \"echo\", \"find\", \"grep\", \"rg\", \"wc\", \"head\", \"tail\", \"sed -n\")",
                 documentation =
-                        "Bash command prefixes allowed in plan (read-only) mode. Comma separated, eg. `git status,git diff`. A plan-mode bash call is allowed when it starts with one of these prefixes.")
+                        "Bash command prefixes allowed in plan (read-only) mode. Comma separated, eg. `git status,git diff`. "
+                                + "The command is split on &&, ||, ;, | and newlines; every segment must start with one of these "
+                                + "prefixes (leading VAR=value assignments and cd segments are tolerated). Redirections and "
+                                + "command substitution are rejected.")
         List<String> planBash) {
 
     public boolean isAllowed(final String name) {
@@ -58,8 +61,68 @@ public record PermissionsConfiguration(
         if (command == null || planBash == null) {
             return false;
         }
-        final var c = command.strip();
-        return planBash.stream().anyMatch(p -> p != null && c.startsWith(p.strip()));
+        for (final var segment : command.strip().split("&&|\\|\\||;|\\||\\n|&")) {
+            if (!isPlanSegment(segment)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean isPlanSegment(final String rawSegment) {
+        final var segment = rawSegment.strip();
+        if (segment.isEmpty()) {
+            return true;
+        }
+        // tolerate stderr silencing/moving; reject other redirections and command substitution
+        final var harmless = segment.replace("2>/dev/null", "")
+                .replace(">/dev/null", "")
+                .replace("2>&1", "")
+                .strip();
+        if (harmless.contains(">") || harmless.contains("$(") || harmless.contains("`") || harmless.contains("<(")) {
+            return false;
+        }
+        final var tokens = harmless.split("\\s+");
+        var i = 0;
+        while (i < tokens.length && isEnvAssignment(tokens[i])) {
+            i++;
+        }
+        if (i >= tokens.length) {
+            return true; // pure env assignments
+        }
+        if (tokens[i].equals("cd")) {
+            return true; // directory change has no repository side effect
+        }
+        final var normalized = String.join(" ", java.util.Arrays.asList(tokens).subList(i, tokens.length));
+        if (normalized.startsWith("sed") && tokensAfter(tokens, i, "-i")) {
+            return false; // in-place sed rewrites files even behind a `sed -n` prefix
+        }
+        return planBash.stream().anyMatch(p -> p != null && normalized.startsWith(p.strip()));
+    }
+
+    private static boolean tokensAfter(final String[] tokens, final int from, final String needle) {
+        for (var j = from; j < tokens.length; j++) {
+            if (tokens[j].equals(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isEnvAssignment(final String token) {
+        if (token.isEmpty() || !Character.isLetterOrDigit(token.charAt(0)) && token.charAt(0) != '_') {
+            return false;
+        }
+        for (var i = 0; i < token.length(); i++) {
+            final var c = token.charAt(i);
+            if (c == '=') {
+                return i > 0 && (Character.isLetterOrDigit(token.charAt(i - 1)) || token.charAt(i - 1) == '_');
+            }
+            if (!Character.isLetterOrDigit(c) && c != '_' && c != '.') {
+                return false;
+            }
+        }
+        return false;
     }
 
     private static boolean matches(final String pattern, final String name) {

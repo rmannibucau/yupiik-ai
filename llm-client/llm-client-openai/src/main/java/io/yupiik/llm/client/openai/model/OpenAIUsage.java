@@ -25,12 +25,23 @@ import io.yupiik.llm.client.model.Usage;
  * @param promptTokens prompt tokens consumed.
  * @param completionTokens completion tokens produced.
  * @param totalTokens total tokens consumed.
+ * @param promptTokensDetails prompt token breakdown (cached tokens, ...).
  */
 @JsonModel
 public record OpenAIUsage(
         @JsonProperty("prompt_tokens") Long promptTokens,
         @JsonProperty("completion_tokens") Long completionTokens,
-        @JsonProperty("total_tokens") Long totalTokens) {
+        @JsonProperty("total_tokens") Long totalTokens,
+        @JsonProperty("prompt_tokens_details") PromptTokensDetails promptTokensDetails) {
+
+    /**
+     * Prompt token breakdown reported by OpenAI endpoints.
+     *
+     * @param cachedTokens prompt tokens served from the automatic prompt cache.
+     */
+    @JsonModel
+    public record PromptTokensDetails(
+            @JsonProperty("cached_tokens") Long cachedTokens) {}
 
     /**
      * Maps the wire usage to the neutral model, summing prompt and completion when the total is absent.
@@ -46,6 +57,8 @@ public record OpenAIUsage(
                 completionTokens == null ? 0 : completionTokens,
                 totalTokens == null
                         ? (promptTokens == null ? 0 : promptTokens) + (completionTokens == null ? 0 : completionTokens)
-                        : totalTokens);
+                        : totalTokens,
+                promptTokensDetails == null ? null : promptTokensDetails.cachedTokens(),
+                null);
     }
 }

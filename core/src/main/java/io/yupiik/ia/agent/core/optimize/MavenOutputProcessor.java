@@ -137,7 +137,22 @@ public class MavenOutputProcessor implements OutputProcessor {
             out.addAll(warns);
         }
         if (!passingTests.isEmpty()) {
-            out.add("Passing tests (" + passingTests.size() + "): " + String.join(", ", passingTests));
+            out.add("Passing tests (" + passingTests.size() + "):");
+            // wrap at ~110 chars so the generic line-based cap stays effective on huge runs
+            final var current = new StringBuilder("  ");
+            for (final var test : passingTests) {
+                if (current.length() > 2 && current.length() + test.length() + 2 > 110) {
+                    out.add(current.toString());
+                    current.setLength(2);
+                }
+                if (current.length() > 2) {
+                    current.append(", ");
+                }
+                current.append(test);
+            }
+            if (current.length() > 2) {
+                out.add(current.toString());
+            }
         }
         return out.stream();
     }

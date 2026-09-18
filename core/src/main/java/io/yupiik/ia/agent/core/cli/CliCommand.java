@@ -58,6 +58,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * Interactive plain-terminal REPL for yca. Requires only a terminal
@@ -92,6 +93,7 @@ public class CliCommand implements Runnable {
     private static final int DIFF_MAX_LINES = 5;
     private static final int MAX_RESUME_LIST = 25;
     private static final int RESUME_SUMMARY_WIDTH = 80;
+    private static final Pattern SPLIT_COMMAND = Pattern.compile("\\s+");
 
     private final AtomicBoolean cancelled = new AtomicBoolean();
     private final AtomicBoolean busy = new AtomicBoolean();
@@ -407,7 +409,7 @@ public class CliCommand implements Runnable {
         if (model != null && !model.isBlank()) {
             sb.append(" · ").append(colorizer.isEnabled() ? styledModel(model) : model);
         }
-        sb.append(" · type /help for commands");
+        sb.append(" · type /help for commands · 'go' resumes the last turn · ctrl-c interrupts, twice quits");
         println(MarkdownColorizer.status(sb.toString()));
     }
 
@@ -440,6 +442,11 @@ public class CliCommand implements Runnable {
                     if (slash(text)) {
                         break;
                     }
+                    continue;
+                }
+                if (agentSessionService.isResumeAlias(text)) {
+                    runResume();
+                    println();
                     continue;
                 }
                 runTurn(text);
@@ -490,6 +497,23 @@ public class CliCommand implements Runnable {
         final var agentName =
                 override.agentName() != null ? override.agentName() : (activeAgent.isBlank() ? null : activeAgent);
         final var prompt = override.prompt();
+        runAgentTurn(agentName, prompt, false);
+    }
+
+    /**
+     * Resume turn: re-runs the agent loop on the persisted history without sending any message,
+     * so continuing an interrupted or truncated turn costs zero extra prompt tokens.
+     */
+    private void runResume() {
+        if (mavenIndexingBlocking()) {
+            println(MarkdownColorizer.status("resume skipped (maven knowledge index still running)"));
+            return;
+        }
+        final var agentName = activeAgent.isBlank() ? null : activeAgent;
+        runAgentTurn(agentName, null, true);
+    }
+
+    private void runAgentTurn(final String agentName, final String prompt, final boolean resume) {
         cancelled.set(false);
         busy.set(true);
         toolsRun = 0;
@@ -501,7 +525,11 @@ public class CliCommand implements Runnable {
         final var history = sessionStore.load(sessionId);
         bridge.sink(this::dispatch);
         try {
-            agentLoop.run(prompt, agentName, sessionId, history, cancelled::get);
+            if (resume) {
+                agentLoop.resume(agentName, sessionId, history, cancelled::get);
+            } else {
+                agentLoop.run(prompt, agentName, sessionId, history, cancelled::get);
+            }
         } finally {
             bridge.sink(null);
             busy.set(false);
@@ -568,6 +596,15 @@ public class CliCommand implements Runnable {
                     usage.estimatedContextTokens(),
                     usage.contextPercent(),
                     usageTracker.contextWindow()));
+            if (usage.usage() != null && usage.usage().cacheReadTokens() > 0) {
+                sb.append(String.format(
+                        Locale.ROOT, " · %,d cache-read tokens", usage.usage().cacheReadTokens()));
+            }
+            final var backgroundTokens =
+                    usageTracker.auxiliaryPromptTokens() + usageTracker.auxiliaryCompletionTokens();
+            if (backgroundTokens > 0) {
+                sb.append(String.format(Locale.ROOT, " · %,d background tokens (compaction/memory)", backgroundTokens));
+            }
         }
         if (toolsRun > 0) {
             if (conf.showUsage()) {
@@ -591,11 +628,13 @@ public class CliCommand implements Runnable {
             textBuffer.reset();
         } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
             if (showThinking) {
-                if (verbosity == CliVerbosity.RAW) {
-                    System.err.print(MarkdownColorizer.thinking(delta));
-                } else {
-                    beginSpinner("thinking");
-                }
+                // the reasoning stream is part of the answer flow: print it dimmed on stderr so
+                // /thinking show visibly works in every verbosity, not only in raw mode
+                stopSpinner();
+                System.err.print(MarkdownColorizer.thinking(delta));
+                System.err.flush();
+            } else {
+                beginSpinner("thinking");
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();
@@ -716,9 +755,11 @@ public class CliCommand implements Runnable {
         }
     }
 
+    private Map<String, Function<String, Boolean>> slashHandlers;
+
     private boolean slash(final String text) {
         final var value = text.substring(1);
-        final var command = value.split("\\s+", 2);
+        final var command = SPLIT_COMMAND.split(value, 2);
         final var name = command[0].toLowerCase(Locale.ROOT);
         final var arg = command.length > 1 ? command[1].strip() : "";
         final var handler = slashHandlers().get(name);
@@ -730,6 +771,15 @@ public class CliCommand implements Runnable {
     }
 
     private Map<String, Function<String, Boolean>> slashHandlers() {
+        if (slashHandlers == null) {
+            slashHandlers = createSlashHandlers();
+        }
+        return slashHandlers;
+    }
+
+    // dispatch table: keys are the bare command names of ReplSlashCommands (SlashCommandSpec.command());
+    // adding a command means adding its spec to the catalog AND its action here (enforced by tests).
+    private Map<String, Function<String, Boolean>> createSlashHandlers() {
         return Map.ofEntries(
                 Map.entry("help", arg -> {
                     printHelp();
@@ -1522,6 +1572,8 @@ public class CliCommand implements Runnable {
     private void onInterrupt() {
         if (busy.get()) {
             cancelled.set(true);
+            System.err.println(
+                    MarkdownColorizer.status("interrupting the current turn (ctrl-c again once idle to quit)..."));
             return;
         }
         final var now = clock.millis();

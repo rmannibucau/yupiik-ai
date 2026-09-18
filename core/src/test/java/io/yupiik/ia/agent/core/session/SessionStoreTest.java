@@ -182,6 +182,46 @@ class SessionStoreTest {
     }
 
     @Test
+    void loadRemapsLegacyToolNameToolCallId() {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "user", "hi", null, null));
+        store.append(
+                id,
+                SessionEntry.of(
+                        2,
+                        "assistant",
+                        "reading",
+                        List.of(
+                                new ToolCall("c1", "function", new FunctionCall("read_file", "{\"path\":\"a\"}"), null),
+                                new ToolCall("c2", "function", new FunctionCall("grep", "{\"pattern\":\"x\"}"), null)),
+                        null));
+        // legacy shape: tool result carrying the tool NAME instead of the call id
+        store.append(id, SessionEntry.of(3, "tool", "ok", null, "read_file"));
+
+        final var loaded = store.load(id);
+        assertEquals(3, loaded.size());
+        assertEquals("c1", loaded.get(2).toolCallId(), "legacy name-based id must remap to the real call id");
+    }
+
+    @Test
+    void loadKeepsRealToolCallId() {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(
+                id,
+                SessionEntry.of(
+                        1,
+                        "assistant",
+                        null,
+                        List.of(new ToolCall("call-9", "function", new FunctionCall("bash", "{}"), null)),
+                        null));
+        store.append(id, SessionEntry.of(2, "tool", "done", null, "call-9"));
+
+        assertEquals("call-9", store.load(id).get(1).toolCallId());
+    }
+
+    @Test
     void listAndLastSession() {
         final var store = newStore();
         final var first = store.create();

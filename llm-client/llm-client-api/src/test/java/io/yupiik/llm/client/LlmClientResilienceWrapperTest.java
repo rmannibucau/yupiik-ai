@@ -126,6 +126,37 @@ class LlmClientResilienceWrapperTest {
     }
 
     @Test
+    void retryAfterSecondsReadsTheTypedHeader() {
+        assertEquals(7L, LlmClientResilienceWrapper.retryAfterSeconds(new LlmHttpFailureException(429, "boom", "7")));
+        assertNull(LlmClientResilienceWrapper.retryAfterSeconds(new LlmHttpFailureException(429, "boom", null)));
+    }
+
+    @Test
+    void typedFailuresAreClassifiedFromTheStatusWithoutMessageParsing() {
+        final var typed429 = new LlmHttpFailureException(429, "boom", null);
+        final var typed400 = new LlmHttpFailureException(400, "boom", null);
+        final var dial = new ScriptedDialect(typed429);
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4), null);
+        assertEquals(
+                "ok",
+                wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join()
+                        .text());
+        assertEquals(2, dial.calls.get(), "typed 429 must be retried");
+
+        final var dial400 = new ScriptedDialect(typed400);
+        final var wrapper400 = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+        assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> wrapper400
+                        .chat(dial400, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+        assertEquals(1, dial400.calls.get(), "typed 400 must not be retried");
+    }
+
+    @Test
     void http400IsNotRetried() {
         final var dial = new ScriptedDialect(new IOException("LLM request failed (400): bad request"));
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);

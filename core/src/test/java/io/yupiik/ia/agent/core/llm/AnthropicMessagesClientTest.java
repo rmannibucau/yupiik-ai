@@ -166,7 +166,8 @@ class AnthropicMessagesClientTest {
         assertEquals("authz=null|x-api-key:sk-test|anthropic-version:2023-06-01", headers);
         final var body = reqBody.get();
         assertTrue(body.contains("\"max_tokens\":64"));
-        assertTrue(body.contains("\"system\":\"be concise\""));
+        assertTrue(body.contains("be concise"), body);
+        assertTrue(body.contains("cache_control"), "system carries a prompt-cache breakpoint:\n" + body);
         assertTrue(body.contains("\"model\":\"deepseek-v4-flash\""));
     }
 

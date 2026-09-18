@@ -26,18 +26,18 @@ the freshness guard.
 == Documentation doc tree
 
 With `yca.structuralCodeGraph.docs` enabled (the default), the agent writes a
-per-source-file Markdown doc tree under the graph doc store
-(`yca.structuralCodeGraph.docStoreDir`), mirroring the project source layout.
+per-source-file Markdown doc tree under the graph store
+(`yca.structuralCodeGraph.storeDir`), mirroring the project source layout.
 With `yca.structuralCodeGraph.enrich` the graph can optionally be enriched, for
 example using a model, so the generated docs carry more useful context for the
 agent.
 
 == Mapping from the agent
 
-The `code_trace_calls` tool consults the graph and, to help the agent locate a
-symbol, also points to the generated doc tree under `.../docs`.
+The `code_trace_calls` tool consults the graph and points the agent to the
+generated doc tree at the graph store root when a symbol cannot be resolved.
 
 Configuration lives under the `yca.structuralCodeGraph` prefix; see
 xref:../configuration.adoc[Configuration] for the full option set, including
 `enabled`, `deep`, `enrich`, `docs`, `languageExtensions`, `maxFileBytes`,
-`storeDir`/`docStoreDir`.
+`storeDir`.

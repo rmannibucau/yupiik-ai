@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.anthropic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -180,7 +181,7 @@ class AnthropicDialectTest {
                     200,
                     "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
                             + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
-                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}");
         });
         server.start();
         final var dialect =
@@ -190,10 +191,47 @@ class AnthropicDialectTest {
         assertEquals("x-api-key:sk-test|anthropic-version:2023-06-01", reqHeaders.get());
         assertEquals("hello", response.text());
         assertEquals(6, response.usage().totalTokens());
+        assertEquals(3L, response.usage().cacheRead());
+        assertEquals(2l, response.usage().cacheWrite());
         final var body = reqBody.get();
         assertTrue(body.contains("\"max_tokens\":64"));
-        assertTrue(body.contains("\"system\":\"be concise\""));
+        assertTrue(body.contains("be concise"), body);
+        assertTrue(body.contains("cache_control"), "system must carry a cache breakpoint:\n" + body);
         assertTrue(body.contains("\"model\":\"m\""));
+    }
+
+    @Test
+    void promptCacheCanBeDisabledViaExtensions() throws Exception {
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\","
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect =
+                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(LlmMessage.system("be concise"), LlmMessage.user("hi")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                java.util.Map.of("promptCache", "false"));
+        dialect.chat(request).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"system\":\"be concise\""), "plain string system expected:\n" + body);
+        assertFalse(body.contains("cache_control"), body);
+        assertFalse(body.contains("promptCache"), "the kill-switch key must not leak to the payload:\n" + body);
     }
 
     @Test
@@ -227,6 +265,40 @@ class AnthropicDialectTest {
                         new LlmStreamEvent.TextDelta("hel"),
                         new LlmStreamEvent.TextDelta("lo"),
                         new LlmStreamEvent.End("stop", new Usage(5L, 2L, 7L))),
+                events);
+    }
+
+    @Test
+    void streamEmitsToolArgumentDeltasPerOfficialProtocol() throws Exception {
+        // the real API streams tool JSON as content_block_delta with delta.type=input_json_delta
+        final var sse = String.join(
+                "\n",
+                "event: content_block_start",
+                "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\"}}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"ls\\\"}\"}}",
+                "",
+                "event: message_delta",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}",
+                "",
+                "");
+        server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
+        server.start();
+        final var dialect =
+                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        assertEquals(
+                List.of(
+                        new LlmStreamEvent.ToolCallDelta(1, "t1", "bash", ""),
+                        new LlmStreamEvent.ToolCallDelta(1, null, null, "{\"command\":"),
+                        new LlmStreamEvent.ToolCallDelta(1, null, null, "\"ls\"}"),
+                        new LlmStreamEvent.End("tool_calls", new Usage(5L, 3L, 8L))),
                 events);
     }
 

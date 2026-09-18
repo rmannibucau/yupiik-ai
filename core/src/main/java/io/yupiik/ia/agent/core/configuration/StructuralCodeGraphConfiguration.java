@@ -87,12 +87,6 @@ public record StructuralCodeGraphConfiguration(
         boolean docs,
 
         @Property(
-                defaultValue = "\"docs\"",
-                documentation =
-                        "Sub-directory (under the graph store dir) where the mirrored per-file markdown doc tree is written.")
-        String docStoreDir,
-
-        @Property(
                 defaultValue = "false",
                 documentation =
                         "Deep enrichment: additionally ask the LLM for a one-line summary and a crux excerpt per symbol, cached by body content hash so only changed symbols are re-sent. Requires 'enrich'.")
@@ -103,6 +97,12 @@ public record StructuralCodeGraphConfiguration(
                 documentation =
                         "Disable the automatic per-query graph refresh that stats the tree against the last build fingerprint. Equivalent to Graft's GRAFT_NO_REFRESH=1.")
         boolean noRefresh,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Watch the project directory for external file changes (IDE saves, git checkout, etc.) and re-index affected files automatically. Uses WatchService; disabled on platforms without support.")
+        boolean watch,
 
         @Property(
                 defaultValue =
@@ -129,10 +129,6 @@ public record StructuralCodeGraphConfiguration(
     public String resolvedStoreDir(final String workingDir) {
         final var value = storeDir == null || storeDir.isBlank() ? ".yca/generated/graph" : storeDir;
         return workingDir + "/" + value;
-    }
-
-    public String resolvedDocStoreDir(final String workingDir) {
-        return resolvedStoreDir(workingDir);
     }
 
     /** The effective ignore list: built-in defaults merged with any config-supplied globs (config wins, appended). */

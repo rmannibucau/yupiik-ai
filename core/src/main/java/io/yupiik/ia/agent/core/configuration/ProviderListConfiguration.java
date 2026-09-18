@@ -63,12 +63,6 @@ public record ProviderListConfiguration(
         ApiFlavor api,
 
         @Property(
-                defaultValue = "io.yupiik.ia.agent.core.configuration.ReasoningField.AUTO",
-                documentation =
-                        "Convenience shorthand for the default provider reasoning field (used only when no providers are listed).")
-        ReasoningField reasoningField,
-
-        @Property(
                 defaultValue = "-1",
                 documentation =
                         "Convenience shorthand for the default provider context window (used only when no providers are listed). Zero or negative auto-detects it from the provider /v1/models vendor extensions, caches it one day per provider and model and falls back to 128000.")
@@ -121,7 +115,6 @@ public record ProviderListConfiguration(
                 apiKey == null ? "" : apiKey,
                 model == null ? "" : model,
                 api,
-                reasoningField,
                 contextWindow,
                 outputTokens,
                 List.of(),

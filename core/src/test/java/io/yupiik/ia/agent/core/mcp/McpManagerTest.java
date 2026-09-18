@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -27,6 +28,9 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -134,6 +138,56 @@ class McpManagerTest {
         assertTrue(disabled.getMessage().contains("disabled"));
     }
 
+    @Test
+    void builtinsAreServedInProcessWithoutMcpWrapping() {
+        final var base = TestConfigs.codingAgent(Map.of());
+        final var manager = new McpManager(
+                base,
+                mapper(),
+                List.of(new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "probe";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "probe tool";
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of("type", "object");
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.READ;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        return ToolResult.error("File not found: nope.txt. Did you mean: nope.md?");
+                    }
+                }),
+                httpClient());
+
+        manager.start();
+        final var tools = manager.tools();
+        assertEquals(1, tools.size());
+        assertEquals("probe", tools.get(0).name());
+        final var result = tools.get(0).execute(Map.of());
+        assertFalse(result.success());
+        assertEquals("File not found: nope.txt. Did you mean: nope.md?", result.output());
+        assertTrue(
+                manager.serverStatuses().contains(new McpManager.ServerStatus("yca", McpManager.ServerState.ENABLED)));
+        assertEquals(
+                List.of("probe"),
+                manager.toolsByServer().get("yca").stream()
+                        .map(EmbeddedTool::name)
+                        .toList());
+    }
+
     private static CodingAgentConfiguration configuration(final List<McpServerConfiguration> servers) {
         final var base = TestConfigs.codingAgent(Map.of("yca.tools.builtin.enabled", "false"));
         return new CodingAgentConfiguration(
@@ -158,7 +212,8 @@ class McpManagerTest {
                 base.mode(),
                 base.httpClient(),
                 base.tools(),
-                base.maxLineLength());
+                base.maxLineLength(),
+                base.resumeAliases());
     }
 
     private static JsonMapper mapper() {

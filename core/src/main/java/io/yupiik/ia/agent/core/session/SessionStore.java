@@ -216,6 +216,10 @@ public class SessionStore {
         }
         try {
             final var out = new ArrayList<Message>();
+            // legacy sessions persisted the tool name as toolCallId: remember assistant call ids by
+            // tool name so such entries can be remapped to the real call id on load
+            final var allCallIds = new java.util.HashSet<String>();
+            final var callIdsByTool = new java.util.HashMap<String, java.util.ArrayDeque<String>>();
             for (final var line : Files.readAllLines(file)) {
                 if (line.isBlank()) {
                     continue;
@@ -229,7 +233,25 @@ public class SessionStore {
                 if (e.role() == null) {
                     continue;
                 }
-                out.add(new Message(e.role(), e.content(), e.name(), e.toolCalls(), e.toolCallId(), null));
+                if (e.toolCalls() != null) {
+                    for (final var call : e.toolCalls()) {
+                        if (call != null && call.id() != null && call.function() != null) {
+                            allCallIds.add(call.id());
+                            callIdsByTool
+                                    .computeIfAbsent(call.function().name(), k -> new java.util.ArrayDeque<>())
+                                    .add(call.id());
+                        }
+                    }
+                }
+                var toolCallId = e.toolCallId();
+                if ("tool".equals(e.role()) && toolCallId != null && !allCallIds.contains(toolCallId)) {
+                    // not a real call id: remap to the first unmatched call of that tool name
+                    final var candidates = callIdsByTool.get(toolCallId);
+                    if (candidates != null) {
+                        toolCallId = candidates.poll();
+                    }
+                }
+                out.add(new Message(e.role(), e.content(), e.name(), e.toolCalls(), toolCallId, null));
             }
             return out;
         } catch (final IOException e) {

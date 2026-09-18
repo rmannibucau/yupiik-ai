@@ -91,13 +91,13 @@ class CodeTraceCallsToolTest {
 
     @Test
     void resolvesFoundSymbolsToKindAndFile() {
-        // decision-grade output links each found symbol to its kind and file:start-end.
+        // decision-grade output links each found symbol to its kind and file:start-end in an indented tree.
         final var result = new CodeTraceCallsTool(fake(store()))
                 .execute(Map.of("symbol", "org.hop.RowSet", "direction", "callers", "edgeTypes", "implements"));
         assertTrue(result.success());
         final var out = result.output();
-        assertTrue(out.contains("resolved org.hop.RowSet (implements), 1 distinct symbol(s) found"), out);
-        assertTrue(out.contains("- type org.hop.RowSetImpl (RowSetImpl.java:1-5)"), out);
+        // Indented tree format: "- fqn (kind) [file:start-end]"
+        assertTrue(out.contains("- org.hop.RowSetImpl (type) [RowSetImpl.java:1-5]"), out);
     }
 
     @Test

@@ -45,7 +45,11 @@ public class UsageTracker {
     private final ContextWindowCache contextWindowCache;
     private final AtomicLong promptTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
+    private final AtomicLong cacheReadTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
+    private final AtomicLong auxiliaryPromptTokens = new AtomicLong();
+    private final AtomicLong auxiliaryCompletionTokens = new AtomicLong();
+    private final AtomicLong auxiliaryRequests = new AtomicLong();
     private final Clock clock;
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
@@ -83,7 +87,27 @@ public class UsageTracker {
         }
         promptTokens.addAndGet(usage.promptTokens());
         completionTokens.addAndGet(usage.completionTokens());
+        cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
+    }
+
+    /**
+     * Records spend of background LLM calls (context compaction summarizer, memory extraction)
+     * which never appear as conversation turns: the tokens are added to the session totals so
+     * the usage line stays honest about real cost, and mirrored into dedicated auxiliary
+     * counters so the UI can break background spend out.
+     */
+    public void recordAuxiliary(final Usage usage) {
+        if (usage == null) {
+            return;
+        }
+        promptTokens.addAndGet(usage.promptTokens());
+        completionTokens.addAndGet(usage.completionTokens());
+        cacheReadTokens.addAndGet(usage.cacheReadTokens());
+        requests.incrementAndGet();
+        auxiliaryPromptTokens.addAndGet(usage.promptTokens());
+        auxiliaryCompletionTokens.addAndGet(usage.completionTokens());
+        auxiliaryRequests.incrementAndGet();
     }
 
     /**
@@ -136,14 +160,33 @@ public class UsageTracker {
         return completionTokens.get();
     }
 
+    public long cacheReadTokens() {
+        return cacheReadTokens.get();
+    }
+
     public long requests() {
         return requests.get();
+    }
+
+    public long auxiliaryPromptTokens() {
+        return auxiliaryPromptTokens.get();
+    }
+
+    public long auxiliaryCompletionTokens() {
+        return auxiliaryCompletionTokens.get();
+    }
+
+    public long auxiliaryRequests() {
+        return auxiliaryRequests.get();
     }
 
     public void reset() {
         promptTokens.set(0);
         completionTokens.set(0);
         requests.set(0);
+        auxiliaryPromptTokens.set(0);
+        auxiliaryCompletionTokens.set(0);
+        auxiliaryRequests.set(0);
         anchor = null;
     }
 

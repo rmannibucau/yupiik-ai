@@ -194,9 +194,13 @@ public final class LlmClientResilienceWrapper {
 
     /**
      * Whether an error is worth retrying: HTTP 408, 429 and 5xx failures are, other explicit
-     * provider rejections (eg. 400) are surfaced to the caller immediately.
+     * provider rejections (eg. 400) are surfaced to the caller immediately. Typed failures are
+     * classified from their status; legacy string-only failures fall back to message parsing.
      */
     private static boolean retryable(final Throwable error) {
+        if (error instanceof LlmHttpFailureException http) {
+            return http.retryableStatus();
+        }
         final var m = error.getMessage();
         if (m == null || !m.startsWith("LLM request failed (")) {
             return true;
@@ -249,14 +253,20 @@ public final class LlmClientResilienceWrapper {
     }
 
     /**
-     * Extracts a {@code retry-after=} delay in seconds from a provider error message, as written by
-     * the dialects on rate-limit responses.
+     * Extracts a {@code retry-after=} delay in seconds from a provider error. Typed failures read
+     * the header directly; legacy string-only failures parse the {@code retry-after=} suffix the
+     * dialects append to the message.
      *
      * @param error the failure to inspect, may be {@code null}.
      * @return the delay in seconds, or {@code null} when absent, not a plain number and not an
      *     HTTP-date header value.
      */
     public static Long retryAfterSeconds(final Throwable error) {
+        if (error instanceof LlmHttpFailureException http
+                && http.retryAfterHeader() != null
+                && !http.retryAfterHeader().isBlank()) {
+            return parseRetryAfter(http.retryAfterHeader().trim());
+        }
         final var message = error == null ? null : error.getMessage();
         if (message == null) {
             return null;
@@ -265,8 +275,11 @@ public final class LlmClientResilienceWrapper {
         if (i < 0) {
             return null;
         }
-        final var token = message.substring(i + "retry-after=".length()).trim();
-        if (token.isEmpty()) {
+        return parseRetryAfter(message.substring(i + "retry-after=".length()).trim());
+    }
+
+    private static Long parseRetryAfter(final String token) {
+        if (token == null || token.isEmpty()) {
             return null;
         }
         final var digits = new StringBuilder();

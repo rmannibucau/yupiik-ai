@@ -96,7 +96,7 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         this.mapper = mapper;
         this.cache = new DocEnricherCache(mapper, storeRoot);
         final var workingDir = configuration.resolveWorkingDir().toString();
-        this.docsRoot = Path.of(configuration.structuralCodeGraph().resolvedDocStoreDir(workingDir))
+        this.docsRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir))
                 .toAbsolutePath()
                 .normalize();
         this.storeRoot = storeRoot;
@@ -196,6 +196,23 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         writer.writeIndex(storeRoot, cards);
         fireRewire();
         return written;
+    }
+
+    /** Enqueues the concept enrichment to run asynchronously on the enricher's executor. */
+    public void enqueueConceptEnrichment() {
+        if (!enabled() || cache == null) {
+            return;
+        }
+        if (cache.files().isEmpty() && storeHasNoSummaries()) {
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                enrichConcepts();
+            } catch (final RuntimeException e) {
+                LOGGER.warning("Async concept enrichment failed: " + e.getMessage());
+            }
+        });
     }
 
     /** Attach the callback that re-emits the wiring graph once enrichment data is available. */

@@ -27,4 +27,13 @@ public record ToolsConfiguration(
         WebSearchConfiguration websearch,
 
         @Property(documentation = "manage_context tool settings (model-driven context management).")
-        ManageContextToolConfiguration manageContext) {}
+        ManageContextToolConfiguration manageContext,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Run consecutive read-only tool calls of a single model reply concurrently on virtual threads"
+                                + " (eg. parallel read_file/grep batches). State-changing tools stay sequential and the"
+                                + " message order always follows the model's call order. Set to false for fully"
+                                + " sequential tool execution.")
+        boolean parallelReadonly) {}

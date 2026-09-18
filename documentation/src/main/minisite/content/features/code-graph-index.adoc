@@ -37,7 +37,7 @@ memory on the hot path.
 == Project source index
 
 The canonical persisted form of the structural code graph is `index.bin` under
-`yca.structuralCodeGraph.storeDir` (default `.yca/generated/code-graph`). A
+`yca.structuralCodeGraph.storeDir` (default `.yca/generated/graph`). A
 sibling `index.meta` lists each source file with its `lastModifiedMillis` for the
 freshness guard.
 
