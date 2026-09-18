@@ -33,6 +33,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -114,7 +115,7 @@ public abstract class AbstractDialect implements Dialect {
                                 && response.headers()
                                         .firstValue("content-type")
                                         .orElse("")
-                                        .toLowerCase()
+                                        .toLowerCase(Locale.ROOT)
                                         .contains("text/event-stream")) {
                             return CompletableFuture.completedFuture(new StreamAttempt(
                                     response.statusCode(), response.headers(), response.body(), null));

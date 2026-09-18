@@ -47,10 +47,26 @@ import java.util.function.Consumer;
  */
 public final class LlmClientResilienceWrapper {
 
+    /** Default wait when a concurrency-limit error carries no {@code retry-after} header. */
+    static final long CONCURRENCY_LIMIT_DEFAULT_WAIT_MS = 10_000L;
+
+    /** Cooldown before relaxing a concurrency limit adapted from a provider response. */
+    static final long CONCURRENCY_LIMIT_RELAX_MS = 60_000L;
+
+    private static final java.util.regex.Pattern CONCURRENCY_LIMIT_JSON =
+            java.util.regex.Pattern.compile("\"limit\"\\s*:\\s*(\\d+)");
+    private static final java.util.regex.Pattern CONCURRENCY_FAILED =
+            java.util.regex.Pattern.compile("concurrency_limit_exceeded");
+    private static final java.time.format.DateTimeFormatter HTTP_DATE =
+            java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
+
     private final LlmResilienceConfig config;
     private final Consumer<PauseEvent> pauseListener;
     private final Semaphore semaphore;
     private final java.util.ArrayDeque<Long> requestTimes;
+    private final Object concurrencyLock = new Object();
+    private int adaptedConcurrency = -1;
+    private long adaptedUntilMs;
 
     /**
      * Creates the wrapper with an explicit pause listener.
@@ -61,7 +77,7 @@ public final class LlmClientResilienceWrapper {
     public LlmClientResilienceWrapper(final LlmResilienceConfig config, final Consumer<PauseEvent> pauseListener) {
         this.config = config == null ? LlmResilienceConfig.defaults() : config;
         this.pauseListener = pauseListener;
-        this.semaphore = new Semaphore(Math.max(1, this.config.maxConcurrent()));
+        this.semaphore = this.config.maxConcurrent() > 0 ? new Semaphore(this.config.maxConcurrent()) : null;
         this.requestTimes = new java.util.ArrayDeque<>();
     }
 
@@ -86,7 +102,7 @@ public final class LlmClientResilienceWrapper {
             final Dialect dialect, final LlmRequest request, final BooleanSupplier cancelled) {
         return acquire()
                 .thenCompose(_ -> attempt(dialect, request, cancelled))
-                .whenComplete((result, error) -> semaphore.release());
+                .whenComplete((result, error) -> release());
     }
 
     /**
@@ -103,7 +119,7 @@ public final class LlmClientResilienceWrapper {
             final var setup = dialect.stream(request, cancelled);
             setup.whenComplete((pub, error) -> {
                 if (error != null) {
-                    semaphore.release();
+                    release();
                 }
             });
             return setup.thenApply(pub -> new ReleaseOnCompletePublisher<>(pub, semaphore));
@@ -117,7 +133,13 @@ public final class LlmClientResilienceWrapper {
      * @return the listed models.
      */
     public CompletionStage<LlmModels> models(final Dialect dialect) {
-        return acquire().thenCompose(_unused -> dialect.models().whenComplete((result, error) -> semaphore.release()));
+        return acquire().thenCompose(_unused -> dialect.models().whenComplete((result, error) -> release()));
+    }
+
+    private void release() {
+        if (semaphore != null) {
+            semaphore.release();
+        }
     }
 
     private CompletionStage<LlmResponse> attempt(
@@ -152,6 +174,7 @@ public final class LlmClientResilienceWrapper {
                         retry = attempt < config.retriesMaxAttempts() && retryable(cause);
                     }
                     if (retry) {
+                        concurrencyLimitDetected(cause);
                         retryAfter(attempt, cause, dialect, request, cancelled)
                                 .whenComplete((r, e) -> completeInto(result, r, e));
                     } else {
@@ -201,15 +224,23 @@ public final class LlmClientResilienceWrapper {
         final var jitter = (long) (ThreadLocalRandom.current().nextDouble(0.5d, 1.0d)
                 * config.retriesBaseDelayMs()
                 * Math.pow(2, attempt - 1));
-        var waitMs = Math.min(jitter, 60_000L);
+        var waitMs = Math.min(jitter, config.retryAfterMaxWaitMs());
+        var waitReason = "backoff";
         if (config.retryAfterEnabled()) {
             final var seconds = retryAfterSeconds(lastError);
             if (seconds != null) {
-                waitMs = Math.min(Math.max(waitMs, seconds * 1000L), 60_000L);
+                waitMs = Math.min(Math.max(waitMs, seconds * 1000L), config.retryAfterMaxWaitMs());
+                waitReason = "retry-after=" + seconds + "s";
+            } else if (isConcurrencyLimit(lastError)) {
+                // no explicit header on a concurrency limit: wait a sensible default so the
+                // provider has time to release the concurrent slots
+                waitMs = Math.min(Math.max(waitMs, CONCURRENCY_LIMIT_DEFAULT_WAIT_MS), config.retryAfterMaxWaitMs());
+                waitReason = "concurrency-limit (no retry-after)";
             }
         }
+        final var reason = lastError.getMessage() + " -> wait " + (waitMs / 1000) + "s (" + waitReason + ")";
         if (pauseListener != null) {
-            pauseListener.accept(new PauseEvent(attempt, lastError.getMessage(), waitMs));
+            pauseListener.accept(new PauseEvent(attempt, reason, waitMs));
         }
         CompletableFuture.delayedExecutor(waitMs, TimeUnit.MILLISECONDS)
                 .execute(() -> retry(dialect, request, cancelled, attempt + 1)
@@ -222,22 +253,118 @@ public final class LlmClientResilienceWrapper {
      * the dialects on rate-limit responses.
      *
      * @param error the failure to inspect, may be {@code null}.
-     * @return the delay in seconds, or {@code null} when absent or not a plain number (date form is
-     *     ignored).
+     * @return the delay in seconds, or {@code null} when absent, not a plain number and not an
+     *     HTTP-date header value.
      */
     public static Long retryAfterSeconds(final Throwable error) {
         final var message = error == null ? null : error.getMessage();
         if (message == null) {
             return null;
         }
-        final var i = message.indexOf("retry-after=");
+        final var i = message.lastIndexOf("retry-after=");
         if (i < 0) {
             return null;
         }
-        try {
-            return Long.parseLong(message.substring(i + "retry-after=".length()).trim());
-        } catch (final NumberFormatException e) {
+        final var token = message.substring(i + "retry-after=".length()).trim();
+        if (token.isEmpty()) {
             return null;
+        }
+        final var digits = new StringBuilder();
+        for (final var c : token.toCharArray()) {
+            if (Character.isDigit(c)) {
+                digits.append(c);
+            } else {
+                break;
+            }
+        }
+        if (!digits.isEmpty()) {
+            try {
+                return Long.parseLong(digits.toString());
+            } catch (final NumberFormatException e) {
+                // fall through to the date parsing below
+            }
+        }
+        // HTTP-date form: retry-after: Sat, 25 Dec 2099 15:00:00 GMT
+        try {
+            final var date = java.time.ZonedDateTime.parse(token, HTTP_DATE);
+            final var delay = date.toInstant().toEpochMilli() - System.currentTimeMillis();
+            return delay > 0 ? (delay + 999) / 1000 : 0L;
+        } catch (final java.time.format.DateTimeParseException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether the provider error is a {@code concurrency_limit_exceeded} response.
+     *
+     * @param error the failure to inspect, may be {@code null}.
+     * @return whether the message carries the concurrency limit marker.
+     */
+    public static boolean isConcurrencyLimit(final Throwable error) {
+        final var message = error == null ? null : error.getMessage();
+        return message != null && CONCURRENCY_FAILED.matcher(message).find();
+    }
+
+    /**
+     * The concurrency limit announced by the provider in a {@code concurrency_limit_exceeded}
+     * response, when the JSON body carries a {@code "limit": N} field.
+     *
+     * @param error the failure to inspect, may be {@code null}.
+     * @return the announced limit, or {@code null} when absent.
+     */
+    public static Integer concurrencyLimit(final Throwable error) {
+        final var message = error == null ? null : error.getMessage();
+        if (message == null || !CONCURRENCY_FAILED.matcher(message).find()) {
+            return null;
+        }
+        final var m = CONCURRENCY_LIMIT_JSON.matcher(message);
+        if (m.find()) {
+            try {
+                return Integer.parseInt(m.group(1));
+            } catch (final NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private void concurrencyLimitDetected(final Throwable error) {
+        final Integer limit = concurrencyLimit(error);
+        if (limit == null || limit <= 0) {
+            return;
+        }
+        synchronized (concurrencyLock) {
+            final var current = semaphore == null ? Integer.MAX_VALUE : semaphore.availablePermits();
+            if (limit < current || limit < config.maxConcurrent()) {
+                if (semaphore != null) {
+                    while (semaphore.availablePermits() > limit) {
+                        semaphore.tryAcquire();
+                    }
+                }
+            }
+            adaptedConcurrency = Math.max(1, limit);
+            adaptedUntilMs = System.currentTimeMillis() + CONCURRENCY_LIMIT_RELAX_MS;
+        }
+        if (pauseListener != null) {
+            pauseListener.accept(new PauseEvent(
+                    0, "concurrency limit " + limit + " detected for this provider, capping concurrent requests", 0));
+        }
+    }
+
+    private void relaxAdaptedConcurrency() {
+        if (semaphore == null || config.maxConcurrent() <= 0) {
+            return;
+        }
+        synchronized (concurrencyLock) {
+            if (adaptedConcurrency <= 0 || System.currentTimeMillis() < adaptedUntilMs) {
+                return;
+            }
+            // restore up to the configured cap
+            while (semaphore.availablePermits() < config.maxConcurrent()) {
+                semaphore.release();
+            }
+            adaptedConcurrency = -1;
+            adaptedUntilMs = 0;
         }
     }
 
@@ -253,7 +380,10 @@ public final class LlmClientResilienceWrapper {
     private CompletionStage<Void> acquire() {
         try {
             throttle(null);
-            semaphore.acquire();
+            relaxAdaptedConcurrency();
+            if (semaphore != null) {
+                semaphore.acquire();
+            }
             return completedFuture(null);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -351,7 +481,7 @@ public final class LlmClientResilienceWrapper {
                 }
 
                 private void release() {
-                    if (released.complete(null)) {
+                    if (released.complete(null) && semaphore != null) {
                         semaphore.release();
                     }
                 }

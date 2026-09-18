@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ class PermissionServiceTest {
             final PermissionMode mode, final List<String> allow, final List<String> deny, final List<String> planBash) {
         final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
                 "yca.storageHome", "/tmp/yca-test",
-                "yca.permissions.mode", mode.name().toLowerCase(),
+                "yca.permissions.mode", mode.name().toLowerCase(Locale.ROOT),
                 "yca.permissions.allow", String.join(",", allow),
                 "yca.permissions.deny", String.join(",", deny),
                 "yca.permissions.planBash", String.join(",", planBash)));

@@ -16,10 +16,12 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.optimize.Optimizers;
 import java.util.Collection;
 import java.util.List;
 
+@JsonModel
 public record OptimizeConfiguration(
         @Property(defaultValue = "true", documentation = "Enable the rtk style tool output optimization.")
         boolean enabled,

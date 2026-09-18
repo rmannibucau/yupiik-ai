@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
+@JsonModel
 public record TuiTranscriptConfiguration(
         @Property(
                 defaultValue = "10000000L",

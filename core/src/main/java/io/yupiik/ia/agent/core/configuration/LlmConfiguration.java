@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
+@JsonModel
 public record LlmConfiguration(
         @Property(defaultValue = "3", documentation = "Maximum retry attempts for 429/5xx and network errors.")
         int retriesMaxAttempts,
@@ -31,8 +33,17 @@ public record LlmConfiguration(
                 documentation = "Client side requests per minute throttle. 0 disables the throttle.")
         int rateLimitRequestsPerMinute,
 
-        @Property(defaultValue = "4", documentation = "Maximum number of concurrent in-flight LLM requests.")
+        @Property(
+                defaultValue = "-1",
+                documentation =
+                        "Maximum number of concurrent in-flight LLM requests for a provider. 0 or negative (the default) is unlimited; a per-provider maxConcurrent overrides this value, and when no limit is configured the concurrency is adapted from the provider 429 concurrency_limit_exceeded responses.")
         int maxConcurrent,
+
+        @Property(
+                defaultValue = "300000L",
+                documentation =
+                        "Maximum wait honored from a provider retry-after header or concurrency-limit response, in milliseconds (default 5 minutes). The provider value is used when below this cap.")
+        long retryAfterMaxWaitMs,
 
         @Property(
                 defaultValue = "true",

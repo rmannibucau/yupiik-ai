@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import java.util.Locale;
+
 public enum PermissionMode {
     ASK,
     AUTO_EDIT,
@@ -24,7 +26,7 @@ public enum PermissionMode {
         if (value == null || value.isBlank()) {
             return ASK;
         }
-        return switch (value.strip().toLowerCase().replace('-', '_')) {
+        return switch (value.strip().toLowerCase(Locale.ROOT).replace('-', '_')) {
             case "auto_edit", "autoedit" -> AUTO_EDIT;
             case "yolo" -> YOLO;
             default -> ASK;

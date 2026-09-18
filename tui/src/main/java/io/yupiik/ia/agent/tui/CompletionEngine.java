@@ -50,6 +50,7 @@ public final class CompletionEngine {
             "/agent",
             "/theme",
             "/structural-code-graph",
+            "/mcp",
             "/clear",
             "/quit",
             "/exit",

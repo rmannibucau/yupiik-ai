@@ -16,11 +16,13 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /**
  * Display style of a model. When {@code color} and/or {@code bold} are unset the value falls back
  * to the provider tone / the implicit position-based scheme.
  */
+@JsonModel
 public record ModelStyleConfiguration(
         @Property(
                 defaultValue = "\"\"",

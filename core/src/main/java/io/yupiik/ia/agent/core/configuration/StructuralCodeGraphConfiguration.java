@@ -16,8 +16,10 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
 
+@JsonModel
 public record StructuralCodeGraphConfiguration(
         @Property(
                 defaultValue = "true",

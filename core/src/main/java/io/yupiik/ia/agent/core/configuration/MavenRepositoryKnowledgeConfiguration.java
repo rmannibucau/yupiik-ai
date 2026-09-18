@@ -16,11 +16,13 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /**
  * Configuration for the embedded maven-repository-knowledge tool / slash command inside yca. Mirrors the
  * knowledge pipeline settings; the embedded tool maps this onto {@link io.yupiik.maven.knowledge.config.KnowledgeConfig}.
  */
+@JsonModel
 public record MavenRepositoryKnowledgeConfiguration(
         @Property(
                 defaultValue = "true",

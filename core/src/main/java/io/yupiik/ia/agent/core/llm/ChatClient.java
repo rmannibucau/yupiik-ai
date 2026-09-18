@@ -68,8 +68,9 @@ public class ChatClient implements AutoCloseable {
     private final Clock clock;
     private final ContextWindowCache contextWindowCache;
     private final ExtendedHttpClient httpClient;
+    private final boolean ownsHttpClient;
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
-    private final LlmClientResilienceWrapper resilience;
+    private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
     private final RoutingLlmClient routing;
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
@@ -81,32 +82,65 @@ public class ChatClient implements AutoCloseable {
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
             final ProviderManager providerManager,
+            final Clock clock,
+            final ExtendedHttpClient httpClient) {
+        this(configuration, mapper, providerManager, clock, httpClient, false);
+    }
+
+    /**
+     * Convenience constructor creating and owning a default {@link ExtendedHttpClient} delegating to a plain
+     * {@link HttpClient#newHttpClient()}. Reserved for tests and programmatic usage; the managed application
+     * path injects the shared client through the constructor above.
+     */
+    public ChatClient(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager,
             final Clock clock) {
+        this(configuration, mapper, providerManager, clock, defaultClient(configuration), true);
+    }
+
+    private ChatClient(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager,
+            final Clock clock,
+            final ExtendedHttpClient httpClient,
+            final boolean ownsHttpClient) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
         this.clock = clock;
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
+        this.httpClient = httpClient;
+        this.ownsHttpClient = ownsHttpClient;
+        // context overflow is handled by the agent loop (context compaction), retries after are
+        // honored by the library resilience layer; per-provider clients get their own resilience
+        // wrapper so the concurrency budget is scoped to one provider base URL
+        this.routing = new RoutingLlmClient(request -> dialectClient(flavorForRouting(), target()));
+    }
+
+    private static ExtendedHttpClient defaultClient(final CodingAgentConfiguration configuration) {
         final var clientConfig = new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient());
         if (configuration.httpClient().debug()) {
             clientConfig.setRequestListeners(List.of(new CurlLoggerListener(
                     new CurlLoggerListener.Configuration(java.util.logging.Logger.getLogger("yca.http"))
                             .setLogPayload(true))));
         }
-        final var httpClient = new ExtendedHttpClient(clientConfig);
-        this.httpClient = httpClient;
-        // context overflow is handled by the agent loop (context compaction), retries after are
-        // honored by the library resilience layer
-        this.resilience = new LlmClientResilienceWrapper(
+        return new ExtendedHttpClient(clientConfig);
+    }
+
+    private LlmClientResilienceWrapper resilience(final int providerBounds) {
+        return new LlmClientResilienceWrapper(
                 new LlmResilienceConfig(
                         configuration.llm().retriesMaxAttempts(),
                         configuration.llm().retriesBaseDelayMs(),
                         configuration.llm().rateLimitRequestsPerMinute(),
-                        configuration.llm().maxConcurrent(),
+                        providerBounds,
                         false,
-                        true),
+                        true,
+                        configuration.llm().retryAfterMaxWaitMs()),
                 this::onLibraryPause);
-        this.routing = new RoutingLlmClient(request -> dialectClient(flavorForRouting(), target()));
     }
 
     protected ChatClient() {
@@ -116,7 +150,7 @@ public class ChatClient implements AutoCloseable {
         this.clock = null;
         this.contextWindowCache = null;
         this.httpClient = null;
-        this.resilience = null;
+        this.ownsHttpClient = false;
         this.routing = null;
     }
 
@@ -166,7 +200,11 @@ public class ChatClient implements AutoCloseable {
                     Duration.ofSeconds(provider.timeoutSeconds()),
                     provider.headers(),
                     null);
-            return new DialectLlmClient(dialect(flavor, spec), resilience);
+            final var bounds = provider.maxConcurrent() >= 0
+                    ? provider.maxConcurrent()
+                    : configuration.llm().maxConcurrent();
+            return new DialectLlmClient(
+                    dialect(flavor, spec), resiliences.computeIfAbsent(key, _n -> resilience(bounds)));
         });
     }
 
@@ -201,18 +239,56 @@ public class ChatClient implements AutoCloseable {
 
     private void onLibraryPause(final io.yupiik.llm.client.PauseEvent event) {
         try {
-            if (event.attempt() <= 0) {
+            if (event.reason() != null && event.reason().startsWith("concurrency limit")) {
+                pauses.accept(PauseEvent.retry(event.reason(), 0));
+            } else if (event.attempt() <= 0) {
                 pauses.accept(PauseEvent.throttle(
                         "Rate limit reached, waiting ~" + (event.waitMs() / 1000) + "s", event.waitMs()));
             } else {
+                final var max = configuration.llm().retriesMaxAttempts();
+                final var summary = failureSummary(event.reason());
+                final var detail = summary.isEmpty() ? "" : " (" + summary + ")";
                 pauses.accept(PauseEvent.retry(
-                        "LLM call failed, retrying in ~" + (event.waitMs() / 1000) + "s (attempt "
-                                + (event.attempt() + 1) + ")",
+                        "LLM call failed" + detail + ", retrying in ~" + (event.waitMs() / 1000) + "s (attempt "
+                                + (event.attempt() + 1) + "/" + max + ")",
                         event.waitMs()));
             }
         } catch (final RuntimeException e) {
             // listener failures must not break the request
         }
+    }
+
+    /** Compact "status + provider message" for the retry notice; empty when not parseable. */
+    private static String failureSummary(final String reason) {
+        if (reason == null || !reason.startsWith("LLM request failed (")) {
+            return "";
+        }
+        final var end = reason.indexOf(')');
+        if (end < 0) {
+            return "";
+        }
+        final var status = reason.substring("LLM request failed (".length(), end);
+        final var body = reason.substring(end + 2).trim();
+        final var cut = bodyName(body);
+        return status + (cut.isEmpty() ? "" : " " + cut);
+    }
+
+    private static String bodyName(final String body) {
+        // keep the provider "message" field when present, else a short head of the payload
+        final var marker = "\"message\":\"";
+        final var i = body.indexOf(marker);
+        if (i >= 0) {
+            final var start = i + marker.length();
+            final var j = body.indexOf('"', start);
+            return j >= 0 ? clamp(body.substring(start, j)) : clamp(body.substring(start));
+        }
+        return clamp(body);
+    }
+
+    private static String clamp(final String value) {
+        return value == null || value.isBlank()
+                ? ""
+                : (value.length() <= 120 ? value : value.substring(0, 117) + "...");
     }
 
     public String model() {
@@ -619,7 +695,7 @@ public class ChatClient implements AutoCloseable {
         if (dialectClients != null) {
             dialectClients.values().forEach(DialectLlmClient::close);
         }
-        if (httpClient != null) {
+        if (ownsHttpClient && httpClient != null) {
             try {
                 httpClient.close();
             } catch (final RuntimeException e) {

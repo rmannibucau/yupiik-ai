@@ -16,10 +16,12 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import java.util.List;
 import java.util.Map;
 
+@JsonModel
 public record ProviderListConfiguration(
         @Property(
                 defaultValue = "java.util.List.of()",
@@ -117,6 +119,7 @@ public record ProviderListConfiguration(
                 contextWindow,
                 outputTokens,
                 List.of(),
+                -1,
                 timeoutSeconds,
                 "",
                 Map.of(),

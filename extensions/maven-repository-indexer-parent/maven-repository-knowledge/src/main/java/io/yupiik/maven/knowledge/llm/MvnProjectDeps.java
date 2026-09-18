@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -95,7 +96,8 @@ public final class MvnProjectDeps {
     }
 
     private static List<Gav> resolveFromMaven(final Path projectDir, final long timeoutMs) {
-        final var isWindows = System.getProperty("os.name", "").toLowerCase().contains("win");
+        final var isWindows =
+                System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
         final var mvnw = projectDir.resolve(isWindows ? "mvnw.cmd" : "mvnw");
         final var mvn = isWindows ? "mvn.cmd" : "mvn";
         // prefer the project's Maven wrapper when present (it pins the Maven/plugin versions the build expects),

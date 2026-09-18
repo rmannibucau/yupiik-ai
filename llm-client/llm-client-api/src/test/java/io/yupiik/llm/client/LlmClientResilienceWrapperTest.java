@@ -1,0 +1,243 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.llm.client;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.llm.client.model.LlmMessage;
+import io.yupiik.llm.client.model.LlmRequest;
+import io.yupiik.llm.client.model.LlmResponse;
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.spi.Dialect;
+import io.yupiik.llm.client.spi.StreamAttempt;
+import java.io.IOException;
+import java.net.http.HttpResponse;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.Test;
+
+class LlmClientResilienceWrapperTest {
+
+    private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
+        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L);
+    }
+
+    @Test
+    void retryAfterSecondsParsesSecondsAndIgnoresTrailingJunk() {
+        final var e = new IOException("LLM request failed (429): {\"error\":{\"message\":\"boom\"}} retry-after=2,");
+        assertEquals(2L, LlmClientResilienceWrapper.retryAfterSeconds(e));
+    }
+
+    @Test
+    void retryAfterSecondsParsesHttpDate() {
+        final var later = ZonedDateTime.now().plusMinutes(5).withNano(0);
+        final var e = new IOException("LLM request failed (429): {\"error\":{}} retry-after="
+                + DateTimeFormatter.RFC_1123_DATE_TIME.format(later));
+        final var seconds = LlmClientResilienceWrapper.retryAfterSeconds(e);
+        assertNotNull(seconds);
+        assertTrue(seconds >= 240 && seconds <= 360, "unexpected delay: " + seconds);
+    }
+
+    @Test
+    void retryAfterSecondsReturnsNullForMissingAndMalformed() {
+        assertNull(LlmClientResilienceWrapper.retryAfterSeconds(new IOException("LLM request failed (400): oops")));
+        assertNull(LlmClientResilienceWrapper.retryAfterSeconds(
+                new IOException("LLM request failed (429): oops retry-after=")));
+        assertNull(LlmClientResilienceWrapper.retryAfterSeconds(new IOException("no marker in here")));
+        assertNull(LlmClientResilienceWrapper.retryAfterSeconds(null));
+    }
+
+    @Test
+    void concurrencyLimitDetectionExtractsTheAnnouncedLimit() {
+        final var e = new IOException(
+                "LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\",\"message\":"
+                        + "\"Too many concurrent requests (limit: 2)\",\"limit\":2,\"role\":\"pro\"}} retry-after=1");
+        assertTrue(LlmClientResilienceWrapper.isConcurrencyLimit(e));
+        assertEquals(2, LlmClientResilienceWrapper.concurrencyLimit(e));
+        assertNull(LlmClientResilienceWrapper.concurrencyLimit(new IOException("LLM request failed (429): plain")));
+    }
+
+    @Test
+    void retryAfterIsHonoredAndSurfacedInThePauseReason() {
+        final var dial = new ScriptedDialect(new IOException("LLM request failed (429): {\"error\":{}} retry-after=2"));
+        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4), pauses::add);
+
+        final var response =
+                wrapper.chat(dial, null, () -> false).toCompletableFuture().join();
+
+        assertEquals("ok", response.text());
+        assertTrue(
+                pauses.stream()
+                        .anyMatch(p -> p.reason().contains("retry-after=2s")
+                                && p.reason().contains("wait")),
+                "the retry notice must surface the honored delay, got: " + pauses);
+    }
+
+    @Test
+    void concurrencyLimitWithoutRetryAfterWaitsADefault() throws Exception {
+        final var dial = new ScriptedDialect(
+                new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
+                        + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
+        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4), pauses::add);
+
+        final var start = System.nanoTime();
+        assertEquals(
+                "ok",
+                wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join()
+                        .text());
+        final var waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+
+        assertTrue(waited >= LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS - 200);
+        assertTrue(
+                pauses.stream().anyMatch(p -> p.reason().contains("concurrency-limit")),
+                "the retry notice must say why it waits, got: " + pauses);
+        assertTrue(
+                pauses.stream()
+                        .anyMatch(p -> p.reason() != null && p.reason().startsWith("concurrency limit 2 detected")),
+                "an explicit concurrency adaptation notice must be emitted, got: " + pauses);
+    }
+
+    @Test
+    void http400IsNotRetried() {
+        final var dial = new ScriptedDialect(new IOException("LLM request failed (400): bad request"));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+
+        final var failure = assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertTrue(
+                failure.getCause() instanceof IOException
+                        && failure.getCause().getMessage().contains("(400): bad request"),
+                "got: " + failure.getCause());
+        assertEquals(1, dial.calls.get(), "a 400 must not be retried");
+    }
+
+    @Test
+    void retriesStopAtMaxAttempts() {
+        final var dial = new ScriptedDialect(
+                new IOException("LLM request failed (500): boom"),
+                new IOException("LLM request failed (500): boom"),
+                new IOException("LLM request failed (500): boom"));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+
+        final var failure = assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(3, dial.calls.get(), "3 attempts max then give up");
+        assertTrue(
+                failure.getCause() instanceof IOException
+                        && failure.getCause().getMessage().contains("LLM request failed (500): boom"),
+                "got: " + failure.getCause());
+    }
+
+    @Test
+    void unlimitedConcurrencyRunsThrough() throws Exception {
+        final var dial = new ScriptedDialect();
+        final var wrapper = new LlmClientResilienceWrapper(config(1, 0, -1), null);
+
+        assertEquals(
+                "ok",
+                wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS)
+                        .text());
+        assertEquals(1, dial.calls.get());
+    }
+
+    private static LlmResponse response() {
+        return new LlmResponse(
+                "id",
+                "model",
+                0L,
+                List.of(new LlmResponse.LlmChoice(
+                        0, new LlmMessage("assistant", "ok", null, null, null, null), "stop")),
+                null,
+                null);
+    }
+
+    private static class ScriptedDialect implements Dialect {
+        private final Throwable[] failures;
+        private final AtomicInteger calls = new AtomicInteger();
+
+        private ScriptedDialect(final Throwable... failures) {
+            this.failures = failures;
+        }
+
+        @Override
+        public String name() {
+            return "scripted";
+        }
+
+        @Override
+        public CompletionStage<LlmResponse> chat(final LlmRequest request) {
+            return chat(request, null);
+        }
+
+        @Override
+        public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
+            final var call = calls.getAndIncrement();
+            return call < failures.length ? failed(failures[call]) : CompletableFuture.completedFuture(response());
+        }
+
+        @Override
+        public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
+                final LlmRequest request, final BooleanSupplier cancelled) {
+            return failed(new UnsupportedOperationException());
+        }
+
+        @Override
+        public CompletionStage<io.yupiik.llm.client.model.LlmModels> models() {
+            return CompletableFuture.completedFuture(new io.yupiik.llm.client.model.LlmModels(List.of()));
+        }
+
+        @Override
+        public CompletionStage<StreamAttempt> streamRaw(final LlmRequest request, final BooleanSupplier cancelled) {
+            return failed(new UnsupportedOperationException());
+        }
+
+        @Override
+        public CompletionStage<HttpResponse<byte[]>> postRaw(final LlmRequest request) {
+            return failed(new UnsupportedOperationException());
+        }
+
+        private static <A> CompletionStage<A> failed(final Throwable error) {
+            final var future = new CompletableFuture<A>();
+            future.completeExceptionally(error);
+            return future;
+        }
+    }
+}

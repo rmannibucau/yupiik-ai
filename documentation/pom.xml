@@ -120,6 +120,12 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
               </configuration>
             </preAction>
             <preAction>
+              <type>io.yupiik.ia.agent.documentation.ConfigurationJsonSchemaGenerator</type>
+              <configuration>
+                <excludedRoots>io.yupiik.ia.agent.core.cli.CliCommand$CliConf,io.yupiik.ia.agent.core.cli.CodeGraphIndexCommand$CodeGraphIndexConf,io.yupiik.ia.agent.tui.RunCommand$RunConf,io.yupiik.ia.agent.tui.TuiCommand$TuiConf</excludedRoots>
+              </configuration>
+            </preAction>
+            <preAction>
               <type>io.yupiik.ia.agent.documentation.CodingAgentDocumentationGenerator</type>
             </preAction>
           </preActions>

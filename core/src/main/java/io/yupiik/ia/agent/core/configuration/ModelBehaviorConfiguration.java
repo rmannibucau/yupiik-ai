@@ -16,11 +16,13 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /**
  * Behavioral overrides of a model. When unset the value falls back to the provider default, then to
  * the implicit scheme.
  */
+@JsonModel
 public record ModelBehaviorConfiguration(
         @Property(
                 defaultValue = "\"\"",

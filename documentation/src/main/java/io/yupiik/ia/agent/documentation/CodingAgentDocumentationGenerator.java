@@ -37,6 +37,7 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.BiPredicate;
 import java.util.stream.Stream;
@@ -93,7 +94,9 @@ public class CodingAgentDocumentationGenerator implements Runnable {
             if (inCategory.isEmpty()) {
                 continue;
             }
-            sb.append("== ").append(capitalize(category.name().toLowerCase())).append(" tools\n\n");
+            sb.append("== ")
+                    .append(capitalize(category.name().toLowerCase(Locale.ROOT)))
+                    .append(" tools\n\n");
             for (final var tool : inCategory) {
                 sb.append("=== `").append(tool.name()).append("`\n\n");
                 sb.append(
@@ -132,7 +135,7 @@ public class CodingAgentDocumentationGenerator implements Runnable {
                         continue;
                     }
                     sb.append("=== ")
-                            .append(capitalize(group.name().toLowerCase()))
+                            .append(capitalize(group.name().toLowerCase(Locale.ROOT)))
                             .append("\n\n");
                     for (final var spec : inGroup) {
                         sb.append("`").append(spec.display()).append("`::\n");

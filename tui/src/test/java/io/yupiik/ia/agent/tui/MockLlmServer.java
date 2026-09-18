@@ -43,6 +43,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -178,7 +179,7 @@ public final class MockLlmServer implements AutoCloseable {
         map.put("yca.llm.retryOnContextOverflow", "true");
         map.put("yca.llm.maxIterations", "250");
         if (permissions != null) {
-            map.put("yca.permissions.mode", permissions.mode().name().toLowerCase());
+            map.put("yca.permissions.mode", permissions.mode().name().toLowerCase(Locale.ROOT));
             map.put("yca.permissions.allow", String.join(",", permissions.allow()));
             map.put("yca.permissions.deny", String.join(",", permissions.deny()));
             map.put("yca.permissions.planBash", String.join(",", permissions.planBash()));

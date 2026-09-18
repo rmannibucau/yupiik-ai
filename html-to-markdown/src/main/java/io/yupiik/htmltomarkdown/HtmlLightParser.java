@@ -17,6 +17,7 @@ package io.yupiik.htmltomarkdown;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -378,7 +379,7 @@ public class HtmlLightParser {
     }
 
     private static String attr(final String attrs, final String name) {
-        final var lower = attrs.toLowerCase();
+        final var lower = attrs.toLowerCase(Locale.ROOT);
         final var marker = name + "=";
         var idx = lower.indexOf(marker);
         while (idx >= 0) {

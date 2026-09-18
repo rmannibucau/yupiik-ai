@@ -7,3 +7,12 @@ client can reuse them.
 Remote MCP servers (over stdio and streamable HTTP) are merged into the same
 tool registry, so the agent can call local and remote tools uniformly while the
 TUI sidebar shows each server's health status.
+
+Just like MCP servers, all yca built-in tools are exposed through the `yca`
+server in the same registry.
+
+[NOTE]
+Sometimes a server collapses in a half-open state (its subprocess died, a
+streamable HTTP connection went stale): use `/mcp status` to check each server
+and `/mcp reset [server]` to reconnect a single server or all of them without
+restarting the session. Both commands are available in the CLI and the TUI.

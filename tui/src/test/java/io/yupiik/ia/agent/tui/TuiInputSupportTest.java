@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
 class TuiInputSupportTest {
     @Test
     void slashCommandsAreComplete() {
-        assertEquals(23, TuiInputSupport.SLASH_COMMANDS.size());
+        assertEquals(24, TuiInputSupport.SLASH_COMMANDS.size());
         assertEquals("/help", TuiInputSupport.SLASH_COMMANDS.get(0));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/quit"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/exit"));

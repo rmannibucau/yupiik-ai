@@ -17,8 +17,10 @@ package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 @RootConfiguration("yca.tui")
+@JsonModel
 public record TuiConfiguration(
         @Property(
                 defaultValue = "\"#9d7cd8\"",

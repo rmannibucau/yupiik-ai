@@ -39,6 +39,7 @@ public final class TuiInputSupport {
             "/tool-output",
             "/structural-code-graph",
             "/maven-repository-knowledge",
+            "/mcp",
             "/tools",
             "/agent",
             "/clear",

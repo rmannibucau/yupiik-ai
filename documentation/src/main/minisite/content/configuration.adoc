@@ -85,3 +85,17 @@ existing regular file (for example
 An agent is selected on `run` with `--agent <name>`, in the TUI with
 `/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt with
 `@<name> `.
+
+== JSON Schema
+
+The full JSON-Schema of `configuration.json` (all `yca.*` options, the TUI
+`yca.tui.*` options and their defaults) is generated at build time. It is
+usable as `$schema` in an editor for autocompletion and validation, and
+downloadable here:
+link:jsonschema/configuration.jsonschema.json[configuration.jsonschema.json,window=_blank].
+
+.Configuration JSON-Schema (generated)
+[source,json]
+----
+include::content/_partials/generated/configuration.jsonschema.json[]
+----

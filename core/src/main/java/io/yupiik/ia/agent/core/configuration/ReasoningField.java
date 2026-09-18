@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import java.util.Locale;
+
 public enum ReasoningField {
     AUTO,
     REASONING,
@@ -25,7 +27,7 @@ public enum ReasoningField {
         if (value == null || value.isBlank()) {
             return AUTO;
         }
-        return switch (value.strip().toLowerCase().replace('-', '_')) {
+        return switch (value.strip().toLowerCase(Locale.ROOT).replace('-', '_')) {
             case "reasoning" -> REASONING;
             case "reasoning_content" -> REASONING_CONTENT;
             case "none" -> NONE;

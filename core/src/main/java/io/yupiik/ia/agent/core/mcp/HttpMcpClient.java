@@ -142,9 +142,11 @@ class HttpMcpClient implements McpClient {
         }
         final var builder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
-                .timeout(Duration.ofSeconds(timeoutSeconds))
                 .header("content-type", "application/json")
                 .header("accept", "application/json, text/event-stream");
+        if (timeoutSeconds > 0) {
+            builder.timeout(Duration.ofSeconds(timeoutSeconds));
+        }
         if (apiKey != null && !apiKey.isBlank()) {
             builder.header("authorization", "Bearer " + apiKey);
         }

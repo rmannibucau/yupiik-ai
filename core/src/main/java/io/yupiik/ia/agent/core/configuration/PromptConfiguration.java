@@ -16,11 +16,13 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /**
  * Provider-tunable system prompt sections. Unlike {@link ProviderConfiguration#providerSpecificOptions()},
  * which is merged raw into the API payload, these values shape the system prompt the agent is given.
  */
+@JsonModel
 public record PromptConfiguration(
         @Property(
                 defaultValue = "\"auto\"",

@@ -24,7 +24,10 @@ package io.yupiik.llm.client;
  * @param maxConcurrent max in-flight requests (default 4).
  * @param retryOnContextOverflow whether a {@link ContextWindowExceededException} retry is attempted.
  * @param retryAfterEnabled whether a {@code retry-after=} delay found on a provider rate-limit error
- *     is honored (raised to from the computed backoff, capped at 60s); default on.
+ *     is honored (raised to from the computed backoff, capped at {@code retryAfterMaxWaitMs}, with a
+ *     10s default wait on concurrency-limit errors that carry no header); default on.
+ * @param retryAfterMaxWaitMs upper bound honored for a provider {@code retry-after} or
+ *     concurrency-limit cooldown (default 5 minutes).
  */
 public record LlmResilienceConfig(
         int retriesMaxAttempts,
@@ -32,15 +35,16 @@ public record LlmResilienceConfig(
         int rateLimitRequestsPerMinute,
         int maxConcurrent,
         boolean retryOnContextOverflow,
-        boolean retryAfterEnabled) {
+        boolean retryAfterEnabled,
+        long retryAfterMaxWaitMs) {
 
     /**
      * The default configuration.
      *
      * @return 3 attempts, 500 ms base delay, throttling off, 4 concurrent, context overflow retry on,
-     *     retry-after honoring on.
+     *     retry-after honoring on capped at 5 minutes.
      */
     public static LlmResilienceConfig defaults() {
-        return new LlmResilienceConfig(3, 500, 0, 4, true, true);
+        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L);
     }
 }

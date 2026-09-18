@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -60,64 +61,129 @@ public class McpManager {
 
     public void start() {
         if (configuration.tools().builtin().enabled()) {
-            final var local = new LocalMcpServer(localTools);
-            try {
-                local.initialize();
-                clients.put("yca", local);
-                final var imported = new ArrayList<EmbeddedTool>();
-                for (final var tool : local.listTools()) {
-                    imported.add(new LocalMcpTool(
-                            local,
-                            localTools.stream()
-                                    .filter(t -> t.name().equals(tool.name()))
-                                    .findFirst()
-                                    .orElseThrow()));
-                }
-                toolsByServer.put("yca", imported);
-            } catch (final RuntimeException e) {
-                LOGGER.warning("Local tool server registration failed: " + e.getMessage());
-            }
+            startLocal();
         }
         for (final var server : configuration.mcp().servers()) {
-            if (!server.enabled()) {
-                continue;
+            if (server.enabled()) {
+                startServer(server);
             }
+        }
+    }
+
+    /**
+     * Restart every enabled {@link McpClient} (built-in local tools included):
+     * the previous client is closed and removed then a fresh one is created and
+     * initialized, and its tools are re-imported.
+     */
+    public void reset() {
+        if (configuration.tools().builtin().enabled()) {
+            startLocal();
+        }
+        for (final var server : configuration.mcp().servers()) {
+            if (server.enabled()) {
+                startServer(server);
+            }
+        }
+    }
+
+    /**
+     * Restart a single server by name (either a configured one or the built-in
+     * {@code yca} one). Existing tools keep working during the swap since they
+     * delegate to {@link #call(String, String, Map)}.
+     *
+     * @param name the server name.
+     */
+    public void reset(final String name) {
+        if ("yca".equals(name)) {
+            if (!configuration.tools().builtin().enabled()) {
+                throw new IllegalArgumentException("the built-in 'yca' MCP server is disabled");
+            }
+            startLocal();
+            return;
+        }
+        final var server = configuration.mcp().servers().stream()
+                .filter(candidate -> name.equals(candidate.name()))
+                .findFirst()
+                .orElseThrow(() ->
+                        new IllegalArgumentException("unable to reset MCP server '" + name + "': no such server"));
+        if (!server.enabled()) {
+            throw new IllegalArgumentException("MCP server '" + name + "' is disabled");
+        }
+        startServer(server);
+    }
+
+    private void startLocal() {
+        close("yca");
+        toolsByServer.remove("yca");
+        final var local = new LocalMcpServer(localTools);
+        try {
+            local.initialize();
+            clients.put("yca", local);
+            final var imported = new ArrayList<EmbeddedTool>();
+            for (final var tool : local.listTools()) {
+                imported.add(new LocalMcpTool(
+                        local,
+                        localTools.stream()
+                                .filter(t -> t.name().equals(tool.name()))
+                                .findFirst()
+                                .orElseThrow()));
+            }
+            toolsByServer.put("yca", imported);
+        } catch (final RuntimeException e) {
+            LOGGER.warning("Local tool server registration failed: " + e.getMessage());
+        }
+    }
+
+    private void startServer(final McpServerConfiguration server) {
+        close(server.name());
+        toolsByServer.remove(server.name());
+        try {
+            final var client = buildClient(server);
+            client.initialize();
+            clients.put(server.name(), client);
+            final var imported = new ArrayList<EmbeddedTool>();
+            for (final var tool : client.listTools()) {
+                imported.add(new McpEmbeddedTool(this, server.name(), tool));
+            }
+            toolsByServer.put(server.name(), imported);
+            LOGGER.info("MCP server " + server.name() + " ready, " + imported.size() + " tool(s)");
+        } catch (final IOException | InterruptedException | RuntimeException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            LOGGER.warning("MCP server " + server.name() + " failed: " + e.getMessage());
+        }
+    }
+
+    private McpClient buildClient(final McpServerConfiguration server) {
+        if (server.url() != null && !server.url().isBlank()) {
+            return new HttpMcpClient(
+                    server.name(),
+                    server.url(),
+                    server.apiKey(),
+                    server.headers(),
+                    configuration.mcp().callTimeoutSeconds(),
+                    mapper,
+                    httpClient);
+        }
+        if (server.command() != null && !server.command().isBlank()) {
+            final var command = new ArrayList<String>();
+            command.add(server.command());
+            if (server.args() != null) {
+                command.addAll(server.args());
+            }
+            return new StdioMcpClient(server.name(), command, server.env() == null ? List.of() : server.env(), mapper);
+        }
+        throw new IllegalArgumentException("MCP server " + server.name() + " has neither url nor command");
+    }
+
+    private void close(final String name) {
+        final var previous = clients.remove(name);
+        if (previous != null) {
             try {
-                final McpClient client;
-                if (server.url() != null && !server.url().isBlank()) {
-                    client = new HttpMcpClient(
-                            server.name(),
-                            server.url(),
-                            server.apiKey(),
-                            server.headers(),
-                            configuration.mcp().callTimeoutSeconds(),
-                            mapper,
-                            httpClient);
-                } else if (server.command() != null && !server.command().isBlank()) {
-                    final var command = new ArrayList<String>();
-                    command.add(server.command());
-                    if (server.args() != null) {
-                        command.addAll(server.args());
-                    }
-                    client = new StdioMcpClient(
-                            server.name(), command, server.env() == null ? List.of() : server.env(), mapper);
-                } else {
-                    LOGGER.warning("MCP server " + server.name() + " has neither url nor command, skipped");
-                    continue;
-                }
-                client.initialize();
-                clients.put(server.name(), client);
-                final var imported = new ArrayList<EmbeddedTool>();
-                for (final var tool : client.listTools()) {
-                    imported.add(new McpEmbeddedTool(this, server.name(), tool));
-                }
-                toolsByServer.put(server.name(), imported);
-                LOGGER.info("MCP server " + server.name() + " ready, " + imported.size() + " tool(s)");
-            } catch (final IOException | InterruptedException | RuntimeException e) {
-                if (e instanceof InterruptedException) {
-                    Thread.currentThread().interrupt();
-                }
-                LOGGER.warning("MCP server " + server.name() + " failed: " + e.getMessage());
+                previous.close();
+            } catch (final RuntimeException e) {
+                LOGGER.warning("MCP server " + name + " close failed: " + e.getMessage());
             }
         }
     }

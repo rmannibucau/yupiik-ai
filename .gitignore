@@ -20,5 +20,11 @@ dependency-reduced-pom.xml
 # generated CLI documentation — regenerable, not committed.
 /documentation/src/main/minisite/content/cli/
 
+# generated json schema artifact — regenerable, not committed.
+/documentation/src/main/minisite/assets/jsonschema/
+
 # structural code graph local cache — regenerable, not committed.
 /.yca/
+
+# bench local scripts
+scripts

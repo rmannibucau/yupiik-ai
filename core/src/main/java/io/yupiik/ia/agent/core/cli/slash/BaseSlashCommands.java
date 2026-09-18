@@ -72,6 +72,11 @@ public abstract class BaseSlashCommands implements SlashCommands {
                         "index local Maven artifacts so "
                                 + "agents do not rediscover library usage (refresh a single gav, or re-run the project baseline; status shows the current/last index run)",
                         SlashGroup.MAINTAIN),
+                new SlashCommandSpec(
+                        "/mcp",
+                        "status|reset [server]",
+                        "show MCP server status, or reset (reconnect) a single server or all of them",
+                        SlashGroup.MAINTAIN),
                 new SlashCommandSpec("/clear", null, "clear the conversation", SlashGroup.SESSION));
     }
 }

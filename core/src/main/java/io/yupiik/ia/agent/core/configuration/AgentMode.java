@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import java.util.Locale;
+
 public enum AgentMode {
     BUILD,
     PLAN;
@@ -23,6 +25,6 @@ public enum AgentMode {
         if (value == null || value.isBlank()) {
             return PLAN;
         }
-        return "plan".equals(value.strip().toLowerCase()) ? PLAN : BUILD;
+        return "plan".equals(value.strip().toLowerCase(Locale.ROOT)) ? PLAN : BUILD;
     }
 }

@@ -86,7 +86,7 @@ class CliCommandTest {
         final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
         final var command = new CliCommand(
                 conf, null, null, null, null, null, null, null, null, null, null, null, null, mapper, null, null, null,
-                null);
+                null, null);
         final Method dispatch = CliCommand.class.getDeclaredMethod("dispatch", AgentEvent.class);
         dispatch.setAccessible(true);
         return event -> {

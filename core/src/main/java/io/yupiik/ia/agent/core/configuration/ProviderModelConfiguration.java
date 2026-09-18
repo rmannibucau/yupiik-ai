@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 
 /**
  * A per-model configuration entry of a provider. The {@code model} id is matched exactly first,
@@ -23,6 +24,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
  * Everything is nullable so each facet falls back to the provider default then to the implicit
  * position-based scheme.
  */
+@JsonModel
 public record ProviderModelConfiguration(
         @Property(
                 documentation =

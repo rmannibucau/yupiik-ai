@@ -33,6 +33,7 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import javax.net.ssl.SSLContext;
@@ -76,7 +77,12 @@ public class HttpClientProducer {
     }
 
     private static HttpClient.Version version(final String value) {
-        if (value != null && value.trim().toUpperCase().replace('-', '_').contains("HTTP_2")) {
+        if (value != null
+                && value.trim()
+                        .toUpperCase(Locale.ROOT)
+                        .replace('-', '_')
+                        .replace('/', '_')
+                        .contains("HTTP_2")) {
             return HttpClient.Version.HTTP_2;
         }
         return HttpClient.Version.HTTP_1_1;

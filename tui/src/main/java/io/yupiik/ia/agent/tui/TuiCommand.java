@@ -1064,6 +1064,7 @@ public class TuiCommand implements Runnable {
             case "/tools" -> toolsCommand(text, runner, state);
             case "/structural-code-graph" -> resyncGraph(runner, state);
             case "/maven-repository-knowledge" -> mavenRepositoryKnowledge("", runner, state);
+            case "/mcp" -> mcpCommand("", runner, state);
             case "/theme" -> themeCommand("", state);
             case "/thinking" -> thinkingCommand("", state);
             case "/tool-output" -> toolOutputCommand("", state);
@@ -1103,6 +1104,8 @@ public class TuiCommand implements Runnable {
                                     .strip(),
                             runner,
                             state);
+                } else if (text.startsWith("/mcp ")) {
+                    mcpCommand(text.substring("/mcp ".length()).strip(), runner, state);
                 } else {
                     state.model.status("unknown command: " + text + " (/help)");
                 }
@@ -1952,6 +1955,52 @@ public class TuiCommand implements Runnable {
         });
     }
 
+    private void mcpCommand(final String arg, final TuiRunner runner, final UiState state) {
+        final var parts = (arg == null ? "" : arg.strip()).split("\\s+", 2);
+        final var sub = parts[0].isEmpty() ? "" : parts[0].toLowerCase(java.util.Locale.ROOT);
+        if (sub.isEmpty() || "status".equals(sub)) {
+            final var sb = new StringBuilder("\n\n**MCP servers**\n\n| server | state |\n|---|---|");
+            String first = "";
+            for (final var status : mcpManager.serverStatuses()) {
+                if (first.isEmpty()) {
+                    first = status.name() + ": " + status.state().name().toLowerCase(java.util.Locale.ROOT);
+                }
+                sb.append("\n| ")
+                        .append(sanitizeCell(status.name()))
+                        .append(" | ")
+                        .append(status.state().name().toLowerCase(java.util.Locale.ROOT))
+                        .append(" |");
+            }
+            state.model.transcript().append(sb).append('\n');
+            state.model.status(first.isEmpty() ? "no MCP servers" : first);
+            return;
+        }
+        if (!"reset".equals(sub)) {
+            state.model.status("usage: /mcp status|reset [server]");
+            return;
+        }
+        waiting(state, "resetting MCP servers...", SpinnerStyle.BOUNCING_BALL);
+        executor.execute(() -> {
+            try {
+                final var server = parts.length > 1 ? parts[1].strip() : "";
+                final String message;
+                if (server.isEmpty()) {
+                    mcpManager.reset();
+                    message = "MCP servers reset";
+                } else {
+                    mcpManager.reset(server);
+                    message = "MCP server " + server + " reset";
+                }
+                runner.runLater(() -> {
+                    state.model.status(message);
+                    state.model.transcript().append("\n\n> ").append(message).append('\n');
+                });
+            } catch (final RuntimeException e) {
+                runner.runLater(() -> modelError(state, "mcp reset failed: " + e.getMessage()));
+            }
+        });
+    }
+
     private void snapshot(final String arg, final UiState state) {
         try {
             final var message = agentSessionService.snapshot(arg, state.sessionId);
@@ -2143,7 +2192,7 @@ public class TuiCommand implements Runnable {
                 Span.styled(ellipsize(state.activeAgent.isBlank() ? "-" : state.activeAgent, width - 7), value)));
         text.add(Line.from(
                 Span.styled("flavor ", label),
-                Span.styled(ellipsize(chatClient.flavor().name().toLowerCase(), width - 7), value)));
+                Span.styled(ellipsize(chatClient.flavor().name().toLowerCase(Locale.ROOT), width - 7), value)));
         text.add(Line.from(Span.styled("cwd ", label), Span.styled(ellipsize(workingDirectory(), width - 4), value)));
         if (branch != null) {
             text.add(Line.from(Span.styled("branch ", label), Span.styled(ellipsize(branch, width - 7), value)));
@@ -2153,7 +2202,7 @@ public class TuiCommand implements Runnable {
                 Span.styled(
                         permissionService.isPermitAll()
                                 ? "⚠"
-                                : permissionService.mode().name().toLowerCase(),
+                                : permissionService.mode().name().toLowerCase(Locale.ROOT),
                         Style.EMPTY.fg(modeColor()))));
         text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
         text.add(Line.from(Span.styled("servers ", label)));
@@ -3091,7 +3140,7 @@ public class TuiCommand implements Runnable {
         if (permissionService.isPermitAll()) {
             return "all";
         }
-        return permissionService.mode().name().toLowerCase();
+        return permissionService.mode().name().toLowerCase(Locale.ROOT);
     }
 
     private Color modeColor() {

@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
@@ -84,6 +85,7 @@ public class CliCommand implements Runnable {
     private final ModelStyleService modelStyleService;
     private final Clock clock;
     private final Prompt prompt;
+    private final McpManager mcpManager;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
     private static final long CLEANUP_AWAIT_NANOS = 1_000_000_000L;
@@ -132,7 +134,8 @@ public class CliCommand implements Runnable {
             final ReplSlashCommands replSlashCommands,
             final ModelStyleService modelStyleService,
             final Prompt prompt,
-            final Clock clock) {
+            final Clock clock,
+            final McpManager mcpManager) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -150,6 +153,7 @@ public class CliCommand implements Runnable {
         this.modelStyleService = modelStyleService;
         this.prompt = prompt;
         this.clock = clock;
+        this.mcpManager = mcpManager;
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
         this.symbols = new Symbols(conf.ascii());
@@ -810,6 +814,10 @@ public class CliCommand implements Runnable {
                     mavenRepositoryKnowledge(arg);
                     return false;
                 }),
+                Map.entry("mcp", arg -> {
+                    mcp(arg);
+                    return false;
+                }),
                 Map.entry("compact", arg -> {
                     compact();
                     return false;
@@ -1140,6 +1148,34 @@ public class CliCommand implements Runnable {
     private void printMavenProgress(final String progress) {
         // progress may arrive from the background indexer thread; PrintStream is thread-safe per call
         println(MarkdownColorizer.status(progress));
+    }
+
+    private void mcp(final String arg) {
+        try {
+            final var value = arg == null ? "" : arg.strip();
+            if (value.isBlank() || value.equalsIgnoreCase("status")) {
+                for (final var status : mcpManager.serverStatuses()) {
+                    println(MarkdownColorizer.status(
+                            status.name() + ": " + status.state().name().toLowerCase(Locale.ROOT)));
+                }
+                return;
+            }
+            final var parts = value.split("\\s+", 2);
+            if (!parts[0].equalsIgnoreCase("reset")) {
+                println(MarkdownColorizer.status("usage: /mcp status|reset [server]"));
+                return;
+            }
+            if (parts.length > 1 && !parts[1].isBlank()) {
+                final var server = parts[1].strip();
+                mcpManager.reset(server);
+                println(MarkdownColorizer.status("MCP server " + server + " reset"));
+            } else {
+                mcpManager.reset();
+                println(MarkdownColorizer.status("MCP servers reset"));
+            }
+        } catch (final RuntimeException e) {
+            println(MarkdownColorizer.error("mcp failed: " + e.getMessage()));
+        }
     }
 
     private void printMavenSummary(final String summary) {

@@ -42,6 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -494,7 +495,7 @@ class AgentSessionServiceTest {
             map.put("yca.storageHome", storageHome);
         }
         if (mode != null) {
-            map.put("yca.mode", mode.name().toLowerCase());
+            map.put("yca.mode", mode.name().toLowerCase(Locale.ROOT));
         }
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
     }

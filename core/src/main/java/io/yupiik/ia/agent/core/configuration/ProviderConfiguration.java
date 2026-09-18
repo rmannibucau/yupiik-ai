@@ -16,10 +16,12 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import java.util.List;
 import java.util.Map;
 
+@JsonModel
 public record ProviderConfiguration(
         @Property(
                 defaultValue = "\"default\"",
@@ -71,6 +73,12 @@ public record ProviderConfiguration(
                 documentation =
                         "Per-model entries for this provider (display style and behavior). Each entry applies to a model id matched exactly or, when the configured id is a substring of the actual model name, by containment. The strongest override is an exact id match, then the first substring match, then the provider defaults (color, outputTokens and the implicit scheme). The list order also defines the implicit display scheme within this provider: the first two listed models are bold.")
         List<ProviderModelConfiguration> models,
+
+        @Property(
+                defaultValue = "-1",
+                documentation =
+                        "Maximum number of concurrent in-flight LLM requests for this provider. 0 or negative (the default) falls back to the global yca.llm.maxConcurrent; when that is also unset the concurrency is unlimited and adapted from the provider 429 concurrency_limit_exceeded responses.")
+        int maxConcurrent,
 
         @Property(defaultValue = "300", documentation = "HTTP request timeout in seconds (5 minutes).")
         int timeoutSeconds,
