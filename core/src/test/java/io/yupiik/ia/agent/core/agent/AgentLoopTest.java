@@ -23,11 +23,14 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
+import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
@@ -43,14 +46,18 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
+import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -137,6 +144,95 @@ class AgentLoopTest {
         assertEquals(1, notices.size());
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getFirst()).level());
         assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("continueOnTruncation"));
+    }
+
+    @Test
+    void truncationCapComesFromConfiguration() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 4; i++) {
+            replies.add(new ScriptedReply("truncated " + i, "length", false));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true, Map.of("yca.llm.truncationContinuesMax", "1")))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("truncated 1", result);
+        assertEquals(2, requests.size(), "1 continuation then a final call");
+        final var notices =
+                events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
+        assertEquals(2, notices.size(), "1 continuation warning then the give-up error");
+        assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
+        assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("Gave up after 1 continuation."));
+        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+    }
+
+    @Test
+    void secondContinuationSwitchesToSplitStrategy() {
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply("truncated 0", "length", false),
+                new ScriptedReply("truncated 1", "length", false),
+                new ScriptedReply("truncated 2", "length", false),
+                new ScriptedReply("finally done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(chatClient(replies, requests), null, configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("finally done", result);
+        assertEquals(4, requests.size());
+        final var firstNudge = requests.get(1).getLast().content().toString();
+        assertTrue(firstNudge.contains("Continue exactly where you stopped"), firstNudge);
+        final var secondNudge = requests.get(2).getLast().content().toString();
+        assertTrue(secondNudge.contains("Change strategy"), secondNudge);
+        assertTrue(secondNudge.contains("Do not continue the same output verbatim"), secondNudge);
+        final var thirdNudge = requests.get(3).getLast().content().toString();
+        assertTrue(thirdNudge.contains("Change strategy"), thirdNudge);
+    }
+
+    @Test
+    void midStreamFailureIsRetriedWithATextReset() {
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply(failure("stream interrupted after 12 chars of partial content: broken pipe")),
+                new ScriptedReply("recovered", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(chatClient(replies, requests), null, configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("recovered", result);
+        assertEquals(2, requests.size(), "the interrupted stream must be replayed once");
+        assertTrue(
+                events.stream().anyMatch(AgentEvent.TextReset.class::isInstance),
+                "frontends must be told to drop the partial buffer");
+        final var notices =
+                events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
+        assertEquals(1, notices.size());
+        final var notice = (AgentEvent.Notice) notices.getFirst();
+        assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
+        assertTrue(notice.message().contains("Stream interrupted (broken pipe)"), notice.message());
+        assertTrue(notice.message().contains("retrying (1/3)"), notice.message());
+        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+    }
+
+    @Test
+    void midStreamFailureExhaustsRetriesAndEndsWithAnError() {
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply(failure("stream interrupted after 3 chars of partial content: reset")),
+                new ScriptedReply(failure("stream interrupted after 3 chars of partial content: reset"))));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true, Map.of("yca.llm.streamRetriesMaxAttempts", "1")))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "the turn must end gracefully when retries are exhausted");
+        assertEquals(2, requests.size(), "initial attempt plus one retry");
+        final var errors =
+                events.stream().filter(AgentEvent.Error.class::isInstance).toList();
+        assertEquals(1, errors.size());
+        assertTrue(((AgentEvent.Error) errors.getFirst()).message().contains("stream interrupted"));
     }
 
     @Test
@@ -248,23 +344,185 @@ class AgentLoopTest {
                 "completed todos and a no-tool turn must stay silent");
     }
 
+    @Test
+    void compactionInsideTheLoopIsPersistedToTheSessionStore() {
+        final var compactRequested = new AtomicBoolean();
+        final List<List<Message>> replaced = new ArrayList<>();
+        final var manager = new ContextManager() {
+            @Override
+            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                return compactRequested.compareAndSet(false, true);
+            }
+
+            @Override
+            public CompactionResult compact(final List<Message> messages) {
+                return new CompactionResult(
+                        List.of(
+                                messages.get(0),
+                                Message.user(
+                                        "<compacted-context>\ndigest\n</compacted-context>\n\nContinue from this summary."),
+                                messages.get(2)),
+                        CompactionResult.Mode.SUMMARY,
+                        "");
+            }
+        };
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {}
+
+            @Override
+            public void replace(final String id, final List<Message> messages) {
+                replaced.add(List.copyOf(messages));
+            }
+        };
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("all done", "stop", false)));
+        loop(chatClient(replies, new ArrayList<>()), null, configuration(true), manager, store, null)
+                .run("do it", null, "s1", List.of(Message.user("old")), () -> false);
+
+        assertEquals(1, replaced.size(), "the compacted context must be persisted exactly once");
+        final var persisted = replaced.get(0);
+        assertTrue(
+                persisted.stream().noneMatch(m -> "system".equals(m.role())),
+                "the system prompt is rebuilt every turn and must not be stored");
+        assertTrue(
+                String.valueOf(persisted.get(0).content()).contains("<compacted-context>"),
+                "the digest must open the persisted history");
+        assertEquals("do it", String.valueOf(persisted.get(persisted.size() - 1).content()));
+        final var compacted = compactedEvents();
+        assertEquals(1, compacted.size());
+        assertEquals("compact", compacted.get(0).kind());
+        assertEquals("SUMMARY", compacted.get(0).mode());
+    }
+
+    @Test
+    void manageContextDirectiveIsAppliedOnceAfterTheToolRound() {
+        final var view = new ContextView();
+        assertTrue(view.request(new ContextView.Directive("compact", null, 0, "manage_context")));
+        final var compactRuns = new AtomicInteger();
+        final var manager = new ContextManager() {
+            @Override
+            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+
+            @Override
+            public CompactionResult compact(final List<Message> messages, final String focus, final int keepLast) {
+                compactRuns.incrementAndGet();
+                return new CompactionResult(
+                        List.of(
+                                messages.get(0),
+                                Message.user("<compacted-context>\ndigest\n</compacted-context>"),
+                                messages.get(messages.size() - 1)),
+                        CompactionResult.Mode.SUMMARY,
+                        "");
+            }
+        };
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {}
+
+            @Override
+            public void replace(final String id, final List<Message> messages) {}
+        };
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                if (calls.incrementAndGet() == 1) {
+                    return Message.assistant(
+                            null, List.of(new ToolCall("t1", "function", new ToolCall.FunctionCall("bash", "{}"), 0)));
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("all done", null);
+            }
+
+            @Override
+            public void setPauseListener(final Consumer<PauseEvent> listener) {}
+        };
+        final var result = loop(client, null, configuration(true), manager, store, view)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("all done", result);
+        assertEquals(1, compactRuns.get(), "the directive must be applied exactly once");
+        final var compacted = compactedEvents();
+        assertEquals(1, compacted.size());
+        assertEquals("tool", compacted.get(0).kind());
+        assertNull(view.poll(), "the directive must be consumed");
+    }
+
+    private List<AgentEvent.Compacted> compactedEvents() {
+        return events.stream()
+                .filter(AgentEvent.Compacted.class::isInstance)
+                .map(AgentEvent.Compacted.class::cast)
+                .toList();
+    }
+
     private CodingAgentConfiguration configuration(final boolean continueOnTruncation) {
-        return TestConfigs.codingAgent(Map.ofEntries(
-                Map.entry("yca.storageHome", storageHome.toString()),
-                Map.entry("yca.provider.providers.length", "1"),
-                Map.entry("yca.provider.providers.0.id", "default"),
-                Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:1/v1"),
-                Map.entry("yca.provider.providers.0.apiKey", "test-key"),
-                Map.entry("yca.provider.providers.0.model", "test-model"),
-                Map.entry("yca.provider.providers.0.api", "auto"),
-                Map.entry("yca.provider.providers.0.timeoutSeconds", "5"),
-                Map.entry("yca.llm.retriesMaxAttempts", "1"),
-                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
-                Map.entry("yca.llm.maxIterations", "10"),
-                Map.entry("yca.llm.continueOnTruncation", Boolean.toString(continueOnTruncation))));
+        return configuration(continueOnTruncation, Map.of());
+    }
+
+    private CodingAgentConfiguration configuration(
+            final boolean continueOnTruncation, final Map<String, String> extra) {
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "default");
+        entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1");
+        entries.put("yca.provider.providers.0.apiKey", "test-key");
+        entries.put("yca.provider.providers.0.model", "test-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "5");
+        entries.put("yca.llm.retriesMaxAttempts", "1");
+        entries.put("yca.llm.retriesBaseDelayMs", "1");
+        entries.put("yca.llm.maxIterations", "10");
+        entries.put("yca.llm.continueOnTruncation", Boolean.toString(continueOnTruncation));
+        entries.putAll(extra);
+        return TestConfigs.codingAgent(entries);
     }
 
     private AgentLoop loop(final ChatClient client, final TodoStore todoStore, final CodingAgentConfiguration config) {
+        return loop(
+                client,
+                todoStore,
+                config,
+                new ContextManager() {
+                    @Override
+                    public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+
+                    @Override
+                    public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+                },
+                new SessionStore() {
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {}
+                },
+                null);
+    }
+
+    private AgentLoop loop(
+            final ChatClient client,
+            final TodoStore todoStore,
+            final CodingAgentConfiguration config,
+            final ContextManager contextManager,
+            final SessionStore sessionStore,
+            final ContextView contextView) {
         events.clear();
         return new AgentLoop(
                 client,
@@ -306,21 +564,9 @@ class AgentLoopTest {
                         return 1000;
                     }
                 },
-                new ContextManager() {
-                    @Override
-                    public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
-                        return false;
-                    }
-
-                    @Override
-                    public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
-                        return false;
-                    }
-                },
-                new SessionStore() {
-                    @Override
-                    public void append(final String id, final SessionEntry entry) {}
-                },
+                contextManager,
+                contextView,
+                sessionStore,
                 new SystemPromptBuilder() {
                     @Override
                     public String build(final String prompt, final AgentConfiguration agent) {
@@ -366,7 +612,8 @@ class AgentLoopTest {
             public Message stream(
                     final ChatCompletionRequest request,
                     final Consumer<LlmStreamEvent> onDelta,
-                    final BooleanSupplier cancelled) {
+                    final BooleanSupplier cancelled)
+                    throws IOException {
                 final var reply = replies.poll();
                 if (reply == null) {
                     throw new IllegalStateException("no scripted reply left");
@@ -379,6 +626,9 @@ class AgentLoopTest {
                 }
                 if (reply.error() != null) {
                     throw reply.error();
+                }
+                if (reply.ioError() != null) {
+                    throw reply.ioError();
                 }
                 if (reply.finishReason() != null) {
                     onDelta.accept(new End(reply.finishReason(), null));
@@ -393,29 +643,40 @@ class AgentLoopTest {
         };
     }
 
+    private static MidStreamFailureException failure(final String message) {
+        return new MidStreamFailureException(message, new IOException("broken pipe"), "partial", null);
+    }
+
     private static class ScriptedReply {
         private final String content;
         private final String finishReason;
         private final boolean firePauses;
         private final RuntimeException error;
+        private final IOException ioError;
 
         private ScriptedReply(
                 final String content,
                 final String finishReason,
                 final boolean firePauses,
-                final RuntimeException error) {
+                final RuntimeException error,
+                final IOException ioError) {
             this.content = content;
             this.finishReason = finishReason;
             this.firePauses = firePauses;
             this.error = error;
+            this.ioError = ioError;
         }
 
         ScriptedReply(final String content, final String finishReason, final boolean firePauses) {
-            this(content, finishReason, firePauses, null);
+            this(content, finishReason, firePauses, null, null);
         }
 
         ScriptedReply(final String content, final String finishReason, final RuntimeException error) {
-            this(content, finishReason, false, error);
+            this(content, finishReason, false, error, null);
+        }
+
+        ScriptedReply(final IOException ioError) {
+            this(null, null, false, null, ioError);
         }
 
         String content() {
@@ -432,6 +693,10 @@ class AgentLoopTest {
 
         RuntimeException error() {
             return error;
+        }
+
+        IOException ioError() {
+            return ioError;
         }
 
         Message toMessage() {

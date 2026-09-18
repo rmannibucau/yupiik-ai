@@ -274,6 +274,7 @@ public class AgentSessionService {
         sessionStore.replace(sessionId, result.messages());
         return switch (result.mode()) {
             case SUMMARY -> new CompactionApplied(true, "context compacted (summarized)", null);
+            case CLEARED -> new CompactionApplied(true, "old tool outputs cleared", null);
             case TRUNCATE ->
                 new CompactionApplied(true, "context truncated locally (summarizer failed)", result.error());
             case NONE -> new CompactionApplied(false, "context already within budget", null);

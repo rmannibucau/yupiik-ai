@@ -33,6 +33,13 @@ import java.util.logging.Logger;
 public class UsageTracker {
     private static final Logger LOGGER = Logger.getLogger(UsageTracker.class.getName());
 
+    /**
+     * Output headroom reserved when converting the provider context window into a usable input
+     * budget: the completion the model is about to produce also lives in the window, so triggers
+     * computed on the usable budget fire before the request actually overflows.
+     */
+    private static final int OUTPUT_RESERVE = 20_000;
+
     private final ProviderManager providerManager;
     private final ChatClient chatClient;
     private final ContextWindowCache contextWindowCache;
@@ -42,6 +49,15 @@ public class UsageTracker {
     private final Clock clock;
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
+    private volatile Anchor anchor;
+
+    /**
+     * Last real API usage observation: the prompt tokens billed by the provider for the exact
+     * message list that was sent, plus the estimate that was computed for that same list. The
+     * ratio between both calibrates later estimates so they stop being over-aggressive against
+     * the ground truth.
+     */
+    private record Anchor(int realPromptTokens, int estimateAtAnchor) {}
 
     public UsageTracker(
             final ProviderManager providerManager,
@@ -70,6 +86,48 @@ public class UsageTracker {
         requests.incrementAndGet();
     }
 
+    /**
+     * Anchors the hybrid usage computation on a real provider observation: {@code realPromptTokens}
+     * is what the provider billed for the request built from the message list whose estimate is
+     * {@code estimateAtAnchor}. Called after each successful LLM call, before the reply is appended.
+     */
+    public void anchor(final int realPromptTokens, final int estimateAtAnchor) {
+        this.anchor =
+                realPromptTokens > 0 && estimateAtAnchor > 0 ? new Anchor(realPromptTokens, estimateAtAnchor) : null;
+    }
+
+    /** Drops the current anchor: usage falls back to the raw estimate until the next LLM call. */
+    public void clearAnchor() {
+        this.anchor = null;
+    }
+    /**
+     * Best known context usage in tokens: the last real prompt token count when available, plus a
+     * calibrated estimate of what was appended since; a raw estimate otherwise (no anchor yet, or
+     * the context shrank after a compaction, which invalidates the anchor). The calibration ratio
+     * (real/estimate at anchor time) is clamped to [0.5, 2.0] so a single outlier never swings the
+     * trigger wildly in either direction.
+     */
+    public int effectiveContext(final List<Message> messages, final int extraToolTokens) {
+        final var current = anchor;
+        final var estimate = estimateContext(messages, extraToolTokens);
+        if (current == null || estimate <= current.estimateAtAnchor()) {
+            return estimate;
+        }
+        final var ratio = Math.clamp((double) current.realPromptTokens() / current.estimateAtAnchor(), 0.5, 2.0);
+        return (int) Math.round(current.realPromptTokens() + ratio * (estimate - current.estimateAtAnchor()));
+    }
+
+    /**
+     * The context window minus the reserved output headroom: the budget the input may actually
+     * grow into before the request risks overflowing. Thresholds compare against this, not the
+     * raw window.
+     */
+    public int usableWindow() {
+        final var window = contextWindow();
+        final var reserve = Math.min(OUTPUT_RESERVE, window / 4);
+        return Math.max(1_024, window - reserve);
+    }
+
     public long promptTokens() {
         return promptTokens.get();
     }
@@ -86,6 +144,7 @@ public class UsageTracker {
         promptTokens.set(0);
         completionTokens.set(0);
         requests.set(0);
+        anchor = null;
     }
 
     public int estimateContext(final List<Message> messages) {
@@ -169,9 +228,12 @@ public class UsageTracker {
         return window;
     }
 
+    /**
+     * Usage percentage against the {@link #usableWindow()} (context window minus the reserved
+     * output headroom), so display and triggers agree on the same denominator.
+     */
     public double contextPercent(final int estimatedTokens) {
-        final var window = Math.max(1, contextWindow());
-        return 100.0 * estimatedTokens / window;
+        return 100.0 * estimatedTokens / usableWindow();
     }
 
     /**

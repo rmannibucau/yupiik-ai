@@ -25,5 +25,13 @@ public record CompactionConfiguration(
                 documentation = "Automatically compact the context when the threshold is reached.")
         boolean enabled,
 
-        @Property(defaultValue = "80", documentation = "Context window usage percentage triggering the compaction.")
-        int thresholdPercent) {}
+        @Property(
+                defaultValue = "80",
+                documentation = "Usable context window usage percentage triggering the compaction.")
+        int thresholdPercent,
+
+        @Property(
+                defaultValue = "0",
+                documentation =
+                        "Token budget of the verbatim recent tail kept by compaction (0 = auto: 25% of the usable window clamped to [2000, 15000]). The tail is extended or reduced at whole conversation turns and never splits an assistant tool call from its results.")
+        int tailBudgetTokens) {}

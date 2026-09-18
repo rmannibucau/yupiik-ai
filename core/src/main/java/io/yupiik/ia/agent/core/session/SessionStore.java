@@ -289,7 +289,11 @@ public class SessionStore {
 
     public String summary(final String id) {
         return load(id).stream()
-                .filter(m -> "user".equals(m.role()) && m.content() instanceof final String text && !text.isBlank())
+                .filter(m -> "user".equals(m.role())
+                        && m.content() instanceof final String text
+                        && !text.isBlank()
+                        && !text.startsWith("<compacted-context>")
+                        && !text.startsWith("<pruned-context>"))
                 .map(m -> (String) m.content())
                 .map(AgentSessionService::firstLine)
                 .findFirst()

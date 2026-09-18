@@ -19,7 +19,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.io.PrintStream;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class SpinnerTest {
@@ -34,29 +38,65 @@ class SpinnerTest {
 
     @Test
     void doubleStartDoesNotOrphanTheFirstAnimationThread() throws InterruptedException {
-        final var out = new ByteArrayOutputStream();
-        final var spinner = new Spinner(new Symbols(true), new PrintStream(out), true);
+        final var stream = new RecordingStream();
+        final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         spinner.start("thinking");
-        Thread.sleep(250);
+        assertTrue(stream.awaitFrame(), "spinner did not render a frame");
         spinner.stop();
-        final var sizeAfterStop = out.size();
+        final var sizeAfterStop = stream.size();
         assertTrue(sizeAfterStop > 0);
-        Thread.sleep(250);
-        assertEquals(sizeAfterStop, out.size(), "a leaked animation thread kept writing after stop()");
+        assertEquals(sizeAfterStop, stream.size(), "a leaked animation thread kept writing after stop()");
     }
 
     @Test
     void restartAfterStopAnimatesAgain() throws InterruptedException {
-        final var out = new ByteArrayOutputStream();
-        final var spinner = new Spinner(new Symbols(true), new PrintStream(out), true);
+        final var stream = new RecordingStream();
+        final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
-        Thread.sleep(250);
+        assertTrue(stream.awaitFrame(), "spinner did not render a frame");
         spinner.stop();
-        final var sizeAfterFirstStop = out.size();
+        final var sizeAfterFirstStop = stream.size();
+        stream.nextFrame();
         spinner.start("thinking");
-        Thread.sleep(250);
+        assertTrue(stream.awaitFrame(), "no frames after restart");
         spinner.stop();
-        assertTrue(out.size() > sizeAfterFirstStop, "no frames after restart");
+        assertTrue(stream.size() > sizeAfterFirstStop, "no frames after restart");
+    }
+
+    /**
+     * Records rendered bytes and signals each write through a latch so tests await real frames instead of sleeping.
+     */
+    private static final class RecordingStream extends OutputStream {
+        private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        private final AtomicReference<CountDownLatch> frame = new AtomicReference<>(new CountDownLatch(1));
+
+        PrintStream printStream() {
+            return new PrintStream(this, true);
+        }
+
+        void nextFrame() {
+            frame.set(new CountDownLatch(1));
+        }
+
+        boolean awaitFrame() throws InterruptedException {
+            return frame.get().await(5, TimeUnit.SECONDS);
+        }
+
+        int size() {
+            return bytes.size();
+        }
+
+        @Override
+        public void write(final int b) {
+            bytes.write(b);
+            frame.get().countDown();
+        }
+
+        @Override
+        public void write(final byte[] b, final int off, final int len) {
+            bytes.write(b, off, len);
+            frame.get().countDown();
+        }
     }
 }

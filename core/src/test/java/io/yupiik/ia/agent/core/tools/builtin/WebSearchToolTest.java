@@ -24,12 +24,17 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class WebSearchToolTest {
+
+    @TempDir
+    Path storageHome;
 
     @Test
     void formatsExaResults() throws Exception {
@@ -45,10 +50,12 @@ class WebSearchToolTest {
         server.start();
         try {
             final var config = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
-                    "yca.storageHome", "/tmp/yca-websearch",
-                    "yca.tools.websearch.provider", "exa",
+                    "yca.storageHome",
+                    storageHome.toString(),
+                    "yca.tools.websearch.provider",
+                    "exa",
                     "yca.tools.websearch.exaUrl",
-                            "http://localhost:" + server.getAddress().getPort() + "/mcp"));
+                    "http://localhost:" + server.getAddress().getPort() + "/mcp"));
             final var client = new ExtendedHttpClient(
                     new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
             final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
@@ -77,10 +84,12 @@ class WebSearchToolTest {
         server.start();
         try {
             final var config = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
-                    "yca.storageHome", "/tmp/yca-websearch",
-                    "yca.tools.websearch.provider", "parallel",
+                    "yca.storageHome",
+                    storageHome.toString(),
+                    "yca.tools.websearch.provider",
+                    "parallel",
                     "yca.tools.websearch.parallelUrl",
-                            "http://localhost:" + server.getAddress().getPort() + "/mcp"));
+                    "http://localhost:" + server.getAddress().getPort() + "/mcp"));
             final var client = new ExtendedHttpClient(
                     new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
             final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());

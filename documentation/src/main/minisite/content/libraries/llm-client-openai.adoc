@@ -88,3 +88,21 @@ selector falls back to the first registered client otherwise:
 final var request = LlmRequest.of("gpt-5",
         List.of(LlmMessage.user("Hello"))).with(Map.of("api", "openai-responses"));
 ----
+
+== Output budget
+
+`LlmRequest.maxTokens()` is forwarded to the wire format when set: as
+`max_tokens` for `/chat/completions` and as `max_output_tokens` for
+`/responses`.
+
+When the request carries no explicit budget, both dialects respect an
+explicitly configured value only: the per-model `outputTokens` behavior
+override or the per-provider `outputTokens` setting. Detected limits and
+library fallbacks are deliberately not applied to the OpenAI flavors, an
+unset budget means the server-side default governs the output size. The
+resolved budget and its source are logged once per provider/model at `INFO`
+level.
+
+Reasoning models can reject `max_tokens` on `/chat/completions` and expect
+`max_completion_tokens` instead; pass it through the provider specific
+options when needed.

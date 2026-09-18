@@ -24,4 +24,7 @@ public record ToolsConfiguration(
         BuiltinToolsConfiguration builtin,
 
         @Property(documentation = "Web search tool settings.")
-        WebSearchConfiguration websearch) {}
+        WebSearchConfiguration websearch,
+
+        @Property(documentation = "manage_context tool settings (model-driven context management).")
+        ManageContextToolConfiguration manageContext) {}

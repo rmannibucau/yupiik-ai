@@ -55,6 +55,9 @@ public class TuiTranscriptModel {
         if (event instanceof AgentEvent.TextDelta(String delta)) {
             pending.append(delta);
             scrollBack = 0;
+        } else if (event instanceof AgentEvent.TextReset) {
+            pending.setLength(0);
+            thinking.setLength(0);
         } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
             thinking.append(delta);
         } else if (event instanceof AgentEvent.ToolStarted(String name, String args)) {

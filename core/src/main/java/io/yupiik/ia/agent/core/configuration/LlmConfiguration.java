@@ -60,5 +60,17 @@ public record LlmConfiguration(
         @Property(
                 defaultValue = "true",
                 documentation =
-                        "When a reply ends truncated by the output token limit (finish_reason=length) without tool calls, automatically ask the model to continue instead of ending the turn (up to 3 continuations, then the turn is ended with an error notice).")
-        boolean continueOnTruncation) {}
+                        "When a reply ends truncated by the output token limit (finish_reason=length) without tool calls, automatically ask the model to continue instead of ending the turn (up to truncationContinuesMax continuations, then the turn is ended with an error notice).")
+        boolean continueOnTruncation,
+
+        @Property(
+                defaultValue = "3",
+                documentation =
+                        "Maximum automatic continuations when a reply is truncated by the output token limit (finish_reason=length); from the second continuation the model is asked to change strategy (smaller steps, tools to chunk output) instead of continuing verbatim.")
+        int truncationContinuesMax,
+
+        @Property(
+                defaultValue = "2",
+                documentation =
+                        "Maximum retries of a streamed LLM request that broke mid-stream (transport failure after partial content was received, eg. a dropped chunked HTTP connection). Each retry restarts the full request after an exponential backoff; 0 ends the turn on the first mid-stream failure.")
+        int streamRetriesMaxAttempts) {}

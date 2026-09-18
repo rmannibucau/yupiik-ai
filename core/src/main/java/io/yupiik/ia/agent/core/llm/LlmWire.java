@@ -166,6 +166,10 @@ final class LlmWire {
         final var byId = new HashMap<String, PartialToolCall>();
         final var byIndex = new HashMap<Integer, PartialToolCall>();
         final var mergeLock = new Object();
+        // a transport failure after fragments were delivered (connection cut mid-chunk) is a
+        // MidStreamFailureException so the caller can retry the whole request, while a failure
+        // before any fragment is left untouched for the resilience layer
+        final var delivered = new boolean[] {false};
         publisher.subscribe(new Flow.Subscriber<>() {
             private Flow.Subscription subscription;
 
@@ -184,11 +188,14 @@ final class LlmWire {
                         return;
                     }
                     if (event instanceof TextDelta(String t)) {
+                        delivered[0] = true;
                         text.append(t);
                         onDelta.accept(event);
                     } else if (event instanceof ReasoningDelta) {
+                        delivered[0] = true;
                         onDelta.accept(event);
                     } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
+                        delivered[0] = true;
                         final var partial = resolvePartial(byId, byIndex, index, id);
                         if (id != null) {
                             byId.put(id, partial);
@@ -212,7 +219,23 @@ final class LlmWire {
 
             @Override
             public void onError(final Throwable throwable) {
-                done.completeExceptionally(throwable);
+                synchronized (mergeLock) {
+                    if (delivered[0]) {
+                        final var partials = new LinkedHashSet<>(byId.values());
+                        partials.addAll(byIndex.values());
+                        done.completeExceptionally(new MidStreamFailureException(
+                                "stream interrupted after " + text.length() + " chars of partial content: " + throwable,
+                                throwable,
+                                text.toString(),
+                                partials.isEmpty()
+                                        ? null
+                                        : partials.stream()
+                                                .map(PartialToolCall::toToolCall)
+                                                .toList()));
+                    } else {
+                        done.completeExceptionally(throwable);
+                    }
+                }
             }
 
             @Override

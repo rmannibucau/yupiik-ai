@@ -1,10 +1,97 @@
 = Context management
 :minisite-breadcrumb: Home[index.html] > Features > Context management
 
-As a conversation grows, context usage is tracked with live gauges. When usage
-crosses configured thresholds, yca prunes or compacts the conversation to stay
-within the active model's window.
+As a conversation grows, context usage is tracked with live gauges.
+When usage crosses configured thresholds, yca prunes or compacts the
+conversation to stay within the active model's window.
 
-Compaction/pruning can optionally run on a dedicated, smaller and cheaper model
-(`model.compact`, `model.prune`). See xref:../configuration.adoc[Configuration]
-for the `yca.pruning.*` and `yca.compaction.*` options.
+== Usage tracking: real tokens first
+
+Threshold decisions are anchored on real usage whenever the provider reports
+it: the last observed `prompt_tokens` value is used as an anchor and the
+messages appended since that call are estimated on top.
+The appended estimate is calibrated by the ratio between the anchor and the
+estimate of the anchored request, clamped to `[0.5, 2.0]`, so a conservative
+heuristic never turns into an over-aggressive trigger once real data exists.
+Before the first response of a session (no anchor yet), the raw heuristic
+estimate is used.
+
+All percentages are computed against the _usable_ window: the configured or
+auto-detected context window minus an output headroom of
+`min(20000, window / 4)` tokens, so prompts leave room for completions.
+
+== Pruning: cheap local clearing
+
+Pruning (default trigger: 65% of the usable window) never calls the LLM.
+It walks old tool results backwards and replaces them with
+`[old tool result cleared]`, keeping the assistant tool call itself so the
+message pairing stays valid.
+
+The recent side of the conversation is protected: at least
+`yca.pruning.keepRecent` messages (a floor), the `yca.pruning.protectTurns`
+most recent turns, and `yca.pruning.protectRecentTokens` estimated tokens of
+the newest tool outputs.
+Pruning only rewrites anything when the prunable volume exceeds
+`yca.pruning.minPruneTokens`, which avoids churn on small gains.
+When nothing qualifies, pruning is a no-op.
+
+Because pruning is local, `model.prune` is no longer used (the key is
+accepted but ignored).
+
+== Compaction: structured summary plus verbatim tail
+
+Compaction (default trigger: 80% of the usable window, or a provider context
+overflow with retry) summarizes the old part of the conversation with the LLM
+(`model.compact`, falling back to the provider model) and keeps a verbatim
+tail.
+
+The summary follows a fixed structure - `## Objective`, `## Important Details`,
+`## Work State` (Completed / Active / Blocked), `## Next Move` and
+`## Relevant Files` - and preserves exact file paths, commands and errors.
+When the context was already compacted before, the previous summary is fed
+back as `<prior-summary>` and updated in place instead of being re-summarized
+from scratch.
+
+The kept tail is token-budgeted (`yca.compaction.tailBudgetTokens`, 0 = auto:
+25% of the usable window clamped to `[2000, 15000]`) and aligned on
+conversation turns: the boundary never splits an assistant tool call from its
+tool results, and `yca.pruning.keepRecent` acts as a floor on the tail size.
+The most recent user message is guaranteed to survive: it is either inside the
+tail or replayed verbatim after the summary.
+
+If the summarizer fails, compaction degrades to a deterministic local
+truncation (`yca.pruning.toolOutputMaxChars` caps old message content) and
+reports the fallback honestly instead of a fake success.
+
+== Persistence
+
+Every in-loop pruning or compaction is written back to the session store
+immediately (same as `/compact`), so the next turn never re-summarizes an
+already-compacted context.
+
+== The manage_context tool
+
+When `yca.tools.manageContext.enabled` is set (the default), the model gets a
+`manage_context` tool so it can manage its own context:
+
+[cols="1,2",opts=headers]
+|===
+|Action
+|Behavior
+
+|`status`
+|Reports the current usage (effective tokens, window, percent, thresholds).
+
+|`compact`
+|Requests a compaction, applied after the current tool round.
+
+|`prune`
+|Requests a tool-output pruning, applied after the current tool round.
+|===
+
+`compact` and `prune` accept an optional `focus` hint folded into the summary
+prompt and a `keep_last` floor override.
+Guardrails: a request is refused below 30% usage, and at most one
+model-initiated operation runs per turn.
+See xref:../configuration.adoc[Configuration] for the `yca.pruning.*` and
+`yca.compaction.*` options.

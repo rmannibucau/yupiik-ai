@@ -63,6 +63,15 @@ class TuiTranscriptModelTest {
     }
 
     @Test
+    void textResetDiscardsPendingAndThinkingBuffers() {
+        model.onEvent(new AgentEvent.TextDelta("partial"));
+        model.onEvent(new AgentEvent.ThinkingDelta("pondering"));
+        model.onEvent(new AgentEvent.TextReset());
+        assertEquals("", model.pending().toString());
+        assertFalse(model.markdown("|", "welcome").contains("partial"));
+    }
+
+    @Test
     void flushThinkingWrapsThoughtBetweenMarkersOnce() {
         model.onEvent(new AgentEvent.ThinkingDelta("let me "));
         model.onEvent(new AgentEvent.ThinkingDelta("think"));

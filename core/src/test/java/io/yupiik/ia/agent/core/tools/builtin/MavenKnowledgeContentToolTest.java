@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -54,11 +53,7 @@ class MavenKnowledgeContentToolTest {
         try {
             service.refresh(null, null, null);
             final var run = service.currentIndex();
-            final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
-            while (run.inFlight() && System.nanoTime() < deadline) {
-                Thread.sleep(50);
-            }
-            assertFalse(run.inFlight(), "indexing should have completed");
+            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
 
             final var index = tool.execute(Map.of("gav", "g.com:artifact-a:1.0"));
             assertTrue(index.success(), () -> "index read should succeed: " + index.output());

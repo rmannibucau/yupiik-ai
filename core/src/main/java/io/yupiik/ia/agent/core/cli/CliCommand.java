@@ -587,6 +587,8 @@ public class CliCommand implements Runnable {
         if (event instanceof AgentEvent.TextDelta(String delta)) {
             stopSpinner();
             print(textBuffer.append(delta));
+        } else if (event instanceof AgentEvent.TextReset) {
+            textBuffer.reset();
         } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
             if (showThinking) {
                 if (verbosity == CliVerbosity.RAW) {

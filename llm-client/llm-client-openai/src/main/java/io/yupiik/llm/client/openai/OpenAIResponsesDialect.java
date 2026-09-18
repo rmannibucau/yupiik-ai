@@ -178,7 +178,7 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                 request.model(),
                 input,
                 instructions.isEmpty() ? null : String.join("\n\n", instructions),
-                null,
+                request.maxTokens(),
                 request.temperature(),
                 request.topP(),
                 stream ? Boolean.TRUE : null,

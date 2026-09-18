@@ -29,15 +29,21 @@ public final class Spinner {
     private final Symbols symbols;
     private final PrintStream out;
     private final boolean active;
+    private final long frameIntervalMillis;
     private final long startNanos = System.nanoTime();
     private final AtomicBoolean running = new AtomicBoolean();
     private volatile Thread thread;
     private volatile String label;
 
     public Spinner(final Symbols symbols, final PrintStream out, final boolean tty) {
+        this(symbols, out, tty, 80L);
+    }
+
+    Spinner(final Symbols symbols, final PrintStream out, final boolean tty, final long frameIntervalMillis) {
         this.symbols = symbols;
         this.out = out;
         this.active = tty && symbols.spinner().length > 0;
+        this.frameIntervalMillis = frameIntervalMillis;
     }
 
     public void start(final String label) {
@@ -57,7 +63,7 @@ public final class Spinner {
                         + (seconds >= 1 ? String.format(" %.1fs", seconds) : ""));
                 out.flush();
                 try {
-                    Thread.sleep(80L);
+                    Thread.sleep(frameIntervalMillis);
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;

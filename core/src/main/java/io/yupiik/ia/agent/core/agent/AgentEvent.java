@@ -20,6 +20,12 @@ import io.yupiik.ia.agent.core.llm.Usage;
 public sealed interface AgentEvent {
     record TextDelta(String delta) implements AgentEvent {}
 
+    /**
+     * The streaming buffers must be discarded: the interrupted stream is retried from scratch and
+     * the fragments received before the failure would otherwise duplicate the retried reply prefix.
+     */
+    record TextReset() implements AgentEvent {}
+
     record ThinkingDelta(String delta) implements AgentEvent {}
 
     record ToolStarted(String name, String args) implements AgentEvent {}

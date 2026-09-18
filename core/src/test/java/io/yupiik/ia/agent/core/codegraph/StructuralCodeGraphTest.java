@@ -140,10 +140,14 @@ class StructuralCodeGraphTest {
                 Files.readString(docsFoo).contains("- sub · method"),
                 "expected the refreshed doc to contain the added method");
 
-        // deleting a source file removes its doc
+        // deleting a source file removes its doc and its symbols
         Files.delete(project.resolve("Foo.java"));
         graph.refreshFile(project.resolve("Foo.java"));
         assertTrue(!Files.exists(docsFoo), "expected doc removed when source file deleted");
+        final var afterDelete = graph.graph();
+        assertTrue(
+                afterDelete.symbols().stream().noneMatch(s -> s.fqn().startsWith("demo.Foo")),
+                "deleted file symbols must be dropped by the refresh");
 
         // reload from disk must match in-memory state
         final var reloaded = new StructuralCodeGraph(
@@ -155,7 +159,7 @@ class StructuralCodeGraphTest {
                 providerManager(config, mapper),
                 Clock.systemUTC());
         reloaded.ensureReady();
-        assertEquals(after.symbols().size(), reloaded.graph().symbols().size());
+        assertEquals(afterDelete.symbols().size(), reloaded.graph().symbols().size());
     }
 
     @Test
@@ -550,6 +554,159 @@ class StructuralCodeGraphTest {
         }
     }
 
+    @Test
+    void patchReconcilesOfflineDeletedFiles() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("proj-del"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+        Files.createDirectory(project.resolve("other"));
+        Files.writeString(
+                project.resolve("other/Bar.java"), "package demo.sub;\npublic class Bar { public void go() {} }\n");
+
+        final var config = config(project, Map.of());
+        final JsonMapper mapper = newMapper();
+        final var graph = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        graph.ensureReady();
+        assertTrue(
+                graph.graph().symbols().stream().anyMatch(s -> s.fqn().equals("demo.sub.Bar")),
+                "expected Bar symbols before the deletion");
+
+        // delete a file offline (no refreshFile event): a resync must fully reconcile the store
+        Files.delete(project.resolve("other/Bar.java"));
+        graph.resync();
+
+        final var after = graph.graph();
+        assertTrue(
+                after.symbols().stream().noneMatch(s -> s.fqn().startsWith("demo.sub")),
+                "deleted file symbols must be dropped by patch");
+        assertTrue(
+                !after.fingerprints().containsKey("other/Bar.java"),
+                "deleted file fingerprint must be dropped by patch");
+        assertTrue(
+                !Files.exists(project.resolve(".yca/generated/graph/other/Bar.md")),
+                "deleted file doc must be removed by patch");
+        final var meta = Files.readString(project.resolve(".yca/generated/graph/index.meta"));
+        assertEquals(
+                "#count=" + after.fingerprints().size(),
+                meta.substring(0, meta.indexOf('\n')),
+                "sidecar must record the indexed file count");
+        assertTrue(!meta.contains("other/Bar.java"), "sidecar must forget the deleted file, got:\n" + meta);
+
+        // a fresh session must reload the reconciled index: no ghost symbols survive
+        final var reloaded = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        reloaded.ensureReady();
+        assertEquals(
+                after.symbols().size(),
+                reloaded.graph().symbols().size(),
+                "reloaded index must not carry ghost symbols for the deleted file");
+    }
+
+    @Test
+    void gateDetectsOfflineAddedFilesOnSessionStart() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("proj-add"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+
+        final var config = config(project, Map.of());
+        final JsonMapper mapper = newMapper();
+        final var built = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        built.ensureReady();
+
+        // add a file offline: every known mtime still matches, only the #count gate can notice the addition
+        Files.writeString(project.resolve("Baz.java"), "package demo;\npublic class Baz { public void stop() {} }\n");
+        final var reloaded = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        reloaded.ensureReady();
+
+        final var symbols = reloaded.graph().symbols();
+        assertTrue(
+                symbols.stream().anyMatch(s -> s.fqn().equals("demo.Baz")),
+                "a file added offline must be indexed on session start");
+        assertTrue(
+                symbols.stream().anyMatch(s -> s.fqn().equals("demo.Foo")),
+                "existing symbols must be preserved by the incremental patch");
+        assertTrue(
+                Files.isRegularFile(project.resolve(".yca/generated/graph/Baz.md")),
+                "expected a doc card for the offline-added file");
+    }
+
+    @Test
+    void patchRefreshesSidecarAfterMtimeDriftWithoutContentChange() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("proj-drift"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+
+        final var config = config(project, Map.of());
+        final JsonMapper mapper = newMapper();
+        final var built = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        built.ensureReady();
+
+        // touch without a content change: the gate must fail once, the hash-identical patch must refresh
+        // the sidecar mtimes (snapshot taken while hashing, never after the whole build) ...
+        final var newMtime =
+                Files.getLastModifiedTime(project.resolve("Foo.java")).toMillis() + 60_000;
+        Files.setLastModifiedTime(project.resolve("Foo.java"), java.nio.file.attribute.FileTime.fromMillis(newMtime));
+        final var reloaded = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        reloaded.ensureReady();
+        final var meta = Files.readString(project.resolve(".yca/generated/graph/index.meta"));
+        assertTrue(
+                meta.contains("Foo.java\t" + newMtime),
+                "sidecar must carry the new mtime after a hash-identical patch, got:\n" + meta);
+
+        // ... so the next session hits the fresh fast path and serves the same symbols
+        final var third = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        third.ensureReady();
+        assertEquals(reloaded.graph().symbols().size(), third.graph().symbols().size());
+    }
+
     private static String safeRead(final Path p) {
         try {
             return Files.isRegularFile(p) ? Files.readString(p) : "";
@@ -561,7 +718,7 @@ class StructuralCodeGraphTest {
     private static void await(final java.util.function.BooleanSupplier cond) throws InterruptedException {
         final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         while (System.currentTimeMillis() < deadline && !cond.getAsBoolean()) {
-            Thread.sleep(25);
+            java.util.concurrent.locks.LockSupport.parkNanos(25_000_000L);
         }
         assertTrue(cond.getAsBoolean(), "timed out waiting for async enrichment");
     }

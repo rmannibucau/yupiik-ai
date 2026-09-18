@@ -33,7 +33,7 @@ class ToolPresenterTest {
 
     @Test
     void summarizesBashWithWorkdir() {
-        assertEquals("Bash(ls · /tmp)", presenter.summarize("bash", "{\"command\":\"ls\",\"workdir\":\"/tmp\"}"));
+        assertEquals("Bash(ls · build)", presenter.summarize("bash", "{\"command\":\"ls\",\"workdir\":\"build\"}"));
     }
 
     @Test

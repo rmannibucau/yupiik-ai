@@ -222,6 +222,7 @@ class OpenAIDialectTest {
         assertEquals(4, response.usage().totalTokens());
         final var body = reqBody.get();
         assertTrue(body.contains("\"model\":\"m\""));
+        assertTrue(body.contains("\"max_tokens\":64"), body);
     }
 
     @Test
@@ -315,6 +316,7 @@ class OpenAIDialectTest {
         final LlmResponse response =
                 dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
         assertEquals("hello", response.text());
+        assertTrue(reqBody.get().contains("\"max_output_tokens\":64"), reqBody.get());
     }
 
     @Test

@@ -279,6 +279,8 @@ public class RunCommand implements Runnable {
                 }
             } else if (event instanceof final AgentEvent.TextDelta t) {
                 answer.append(t.delta());
+            } else if (event instanceof AgentEvent.TextReset) {
+                answer.setLength(0);
             } else if (event instanceof final AgentEvent.ThinkingDelta t) {
                 perCallReasoning += t.delta().length();
             } else if (event instanceof final AgentEvent.TurnDone t) {

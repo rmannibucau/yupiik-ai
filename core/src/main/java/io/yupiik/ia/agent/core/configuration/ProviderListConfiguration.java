@@ -81,6 +81,12 @@ public record ProviderListConfiguration(
         int outputTokens,
 
         @Property(
+                defaultValue = "-1",
+                documentation =
+                        "Convenience shorthand for the default provider maximum concurrent in-flight LLM requests (used only when no providers are listed). Zero or negative falls back to the global yca.llm.maxConcurrent; when that is also unset the concurrency is unlimited and adapted from the provider 429 concurrency_limit_exceeded responses.")
+        int maxConcurrent,
+
+        @Property(
                 defaultValue = "300",
                 documentation =
                         "Convenience shorthand for the default provider timeout (used only when no providers are listed).")
@@ -119,7 +125,7 @@ public record ProviderListConfiguration(
                 contextWindow,
                 outputTokens,
                 List.of(),
-                -1,
+                maxConcurrent,
                 timeoutSeconds,
                 "",
                 Map.of(),

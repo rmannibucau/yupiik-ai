@@ -190,11 +190,11 @@ class LlmWireTest {
     void keepsTwoInterleavedToolCallsSepared() throws Exception {
         final var events = List.<LlmStreamEvent>of(
                 new LlmStreamEvent.ToolCallDelta(0, "fc_list", "list_dir", null),
-                new LlmStreamEvent.ToolCallDelta(0, "fc_list", null, "{\"path\":\"/"),
+                new LlmStreamEvent.ToolCallDelta(0, "fc_list", null, "{\"path\":\"s"),
                 new LlmStreamEvent.ToolCallDelta(1, "fc_bash", "bash", null),
                 new LlmStreamEvent.ToolCallDelta(1, "fc_bash", null, "{\"command\":\"ls"),
                 new LlmStreamEvent.ToolCallDelta(1, "fc_bash", null, "\"}"),
-                new LlmStreamEvent.ToolCallDelta(0, "fc_list", null, "tmp\"}"));
+                new LlmStreamEvent.ToolCallDelta(0, "fc_list", null, "rc\"}"));
 
         final var message = LlmWire.pump(
                 new Flow.Publisher<>() {
@@ -232,7 +232,7 @@ class LlmWireTest {
         final var listCall = calls.get(0);
         assertEquals("fc_list", listCall.id());
         assertEquals("list_dir", listCall.function().name());
-        assertEquals("{\"path\":\"/tmp\"}", listCall.function().arguments());
+        assertEquals("{\"path\":\"src\"}", listCall.function().arguments());
 
         final var bashCall = calls.get(1);
         assertEquals("fc_bash", bashCall.id());

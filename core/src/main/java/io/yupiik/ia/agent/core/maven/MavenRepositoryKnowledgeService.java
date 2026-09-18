@@ -42,6 +42,8 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -192,15 +194,11 @@ public class MavenRepositoryKnowledgeService {
     }
 
     private void awaitIdle(final IndexRun run) {
-        final var timeoutMs = 15L * 60L * 1000L; // generous upper bound for a large project
-        final var deadline = System.nanoTime() + timeoutMs * 1_000_000L;
-        while (run.inFlight() && System.nanoTime() < deadline) {
-            try {
-                Thread.sleep(200L);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
+        try {
+            // generous upper bound for a large project
+            run.awaitCompletion(15L * 60L, TimeUnit.SECONDS);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -762,6 +760,7 @@ public class MavenRepositoryKnowledgeService {
         private final int total;
         private final AtomicInteger done = new AtomicInteger();
         private final AtomicBoolean finished = new AtomicBoolean();
+        private final CountDownLatch completed = new CountDownLatch(1);
         private volatile String summary;
 
         IndexRun(final int total) {
@@ -778,6 +777,19 @@ public class MavenRepositoryKnowledgeService {
 
         void complete() {
             finished.set(true);
+            completed.countDown();
+        }
+
+        /**
+         * Blocks until the run completed or the wait timed out, without any polling.
+         *
+         * @return {@code true} when the run is no longer in flight (completed, or nothing to index).
+         */
+        public boolean awaitCompletion(final long timeout, final TimeUnit unit) throws InterruptedException {
+            if (!inFlight()) {
+                return true;
+            }
+            return completed.await(timeout, unit);
         }
 
         /** {@code true} while the indexing run is still in progress (nothing to index is never in-flight). */

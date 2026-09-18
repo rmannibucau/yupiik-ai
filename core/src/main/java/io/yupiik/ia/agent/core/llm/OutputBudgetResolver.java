@@ -46,21 +46,50 @@ public final class OutputBudgetResolver {
             final int configuredPerProvider,
             final Integer detected,
             final Integer contextWindow) {
+        return resolveTracked(requested, configuredPerModel, configuredPerProvider, detected, contextWindow)
+                .budget();
+    }
+
+    /**
+     * Same resolution as {@link #resolve} but also reports where the value comes from, for
+     * observability.
+     *
+     * @param requested explicit {@code max_tokens} on the request (nullable)
+     * @param configuredPerModel positive per-model override, or 0/negative when unset
+     * @param configuredPerProvider positive per-provider default, or 0/negative when unset
+     * @param detected value detected from /v1/models, or null/positive when known
+     * @param contextWindow total context window in tokens, or null/positive when known
+     */
+    public static Decision resolveTracked(
+            final Integer requested,
+            final int configuredPerModel,
+            final int configuredPerProvider,
+            final Integer detected,
+            final Integer contextWindow) {
         int budget;
+        String source;
         if (requested != null && requested > 0) {
             budget = requested;
+            source = "request";
         } else if (configuredPerModel > 0) {
             budget = configuredPerModel;
+            source = "configured-per-model";
         } else if (configuredPerProvider > 0) {
             budget = configuredPerProvider;
+            source = "configured-per-provider";
         } else if (detected != null && detected > 0) {
             budget = detected;
+            source = "detected";
         } else {
             budget = DEFAULT_MAX_TOKEN;
+            source = "fallback-" + DEFAULT_MAX_TOKEN;
         }
         if (contextWindow != null && contextWindow > 0 && budget > contextWindow - 1) {
-            return Math.max(1, contextWindow - 1);
+            return new Decision(Math.max(1, contextWindow - 1), source + " clamped to context window");
         }
-        return Math.max(1, budget);
+        return new Decision(Math.max(1, budget), source);
     }
+
+    /** Resolved output budget and the origin the value was taken from. */
+    public record Decision(int budget, String source) {}
 }

@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
@@ -38,10 +39,16 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ChatClientFlavorTest {
     private HttpServer server;
     private ChatClient client;
+
+    @TempDir
+    Path storageHome;
+
+    private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<>();
 
     @BeforeEach
     void start() throws IOException {
@@ -49,6 +56,7 @@ class ChatClientFlavorTest {
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
         server.createContext("/v1/chat/completions", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            bodies.add(body);
             if (body.contains("\"stream\":true")) {
                 final var sse = String.join(
                         "\n",
@@ -88,24 +96,30 @@ class ChatClientFlavorTest {
     }
 
     private CodingAgentConfiguration configuration() {
-        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
-                Map.entry("yca.storageHome", "/tmp/yca-test"),
-                Map.entry("yca.provider.providers.length", "1"),
-                Map.entry("yca.provider.providers.0.id", "default"),
-                Map.entry(
-                        "yca.provider.providers.0.baseUrl",
-                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
-                Map.entry("yca.provider.providers.0.apiKey", "test-key"),
-                Map.entry("yca.provider.providers.0.model", "test-model"),
-                Map.entry("yca.provider.providers.0.api", "auto"),
-                Map.entry("yca.provider.providers.0.contextWindow", "128000"),
-                Map.entry("yca.provider.providers.0.timeoutSeconds", "5"),
-                Map.entry("yca.llm.retriesMaxAttempts", "1"),
-                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
-                Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
-                Map.entry("yca.llm.maxConcurrent", "1"),
-                Map.entry("yca.llm.retryOnContextOverflow", "true"),
-                Map.entry("yca.llm.maxIterations", "250")));
+        return configuration(Map.of());
+    }
+
+    private CodingAgentConfiguration configuration(final Map<String, String> extra) {
+        final var entries = new java.util.HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "default");
+        entries.put(
+                "yca.provider.providers.0.baseUrl",
+                "http://localhost:" + server.getAddress().getPort() + "/v1");
+        entries.put("yca.provider.providers.0.apiKey", "test-key");
+        entries.put("yca.provider.providers.0.model", "test-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.contextWindow", "128000");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "5");
+        entries.put("yca.llm.retriesMaxAttempts", "1");
+        entries.put("yca.llm.retriesBaseDelayMs", "1");
+        entries.put("yca.llm.rateLimitRequestsPerMinute", "0");
+        entries.put("yca.llm.maxConcurrent", "1");
+        entries.put("yca.llm.retryOnContextOverflow", "true");
+        entries.put("yca.llm.maxIterations", "250");
+        entries.putAll(extra);
+        return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
     }
 
     private ProviderManager providerManager() {
@@ -220,7 +234,7 @@ class ChatClientFlavorTest {
                 {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""", "application/json"));
         server.start();
         final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
-                Map.entry("yca.storageHome", "/tmp/yca-test"),
+                Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
                 Map.entry("yca.provider.providers.0.id", "default"),
                 Map.entry(
@@ -241,5 +255,41 @@ class ChatClientFlavorTest {
 
         assertEquals("ok", client.chat(request()).message().content());
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
+    }
+
+    @Test
+    void configuredOutputTokensIsSentAsMaxTokens() throws Exception {
+        final var cfg = configuration(Map.of("yca.provider.providers.0.outputTokens", "1234"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertTrue(bodies.getLast().contains("\"max_tokens\":1234"), bodies.getLast());
+    }
+
+    @Test
+    void unconfiguredBudgetIsNotSentForCompletions() throws Exception {
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertTrue(bodies.getLast().contains("\"model\":\"test-model\""), bodies.getLast());
+        assertTrue(!bodies.getLast().contains("\"max_tokens\""), bodies.getLast());
+    }
+
+    @Test
+    void configuredOutputTokensIsSentAsMaxOutputTokensForResponses() throws Exception {
+        stop();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello there"}]}],"usage":{}}""", "application/json");
+        });
+        server.start();
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.api", "responses",
+                "yca.provider.providers.0.outputTokens", "1234"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(ApiFlavor.RESPONSES, client.flavor());
+        assertTrue(bodies.getLast().contains("\"max_output_tokens\":1234"), bodies.getLast());
     }
 }

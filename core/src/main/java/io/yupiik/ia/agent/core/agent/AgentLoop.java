@@ -21,11 +21,13 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
+import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -62,13 +64,20 @@ public class AgentLoop {
     /** Anti-thrash: stop auto-compacting when the context refills right after compaction this many turns in a row. */
     private static final int MAX_CONSECUTIVE_COMPACTIONS = 5;
 
-    /** Max times a truncated reply (finish_reason=length) is auto-continued before giving up. */
-    private static final int MAX_TRUNCATION_CONTINUES = 3;
-
     /** Nudge sent to the model after a truncated reply so it resumes instead of restarting. */
     private static final String TRUNCATION_CONTINUE_PROMPT =
             "Your previous reply was cut off by the output token limit before you could finish."
                     + " Continue exactly where you stopped; do not repeat content you already produced.";
+
+    /**
+     * Nudge used from the second continuation on: repeating the same verbatim continuation hits the
+     * same output budget again, so the model is asked to switch strategy instead.
+     */
+    private static final String TRUNCATION_SPLIT_PROMPT =
+            "Your previous reply was cut off by the output token limit again. Do not continue the same output verbatim,"
+                    + " it will hit the limit a second time. Change strategy: break the remaining work into smaller"
+                    + " steps, use tools to write files or produce results in chunks, keep prose minimal and summarize"
+                    + " instead of dumping full content.";
 
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
@@ -77,6 +86,7 @@ public class AgentLoop {
     private final PermissionService permissionService;
     private final UsageTracker usageTracker;
     private final ContextManager contextManager;
+    private final ContextView contextView;
     private final SessionStore sessionStore;
     private final SystemPromptBuilder systemPromptBuilder;
     private final MemoryExtractor memoryExtractor;
@@ -98,6 +108,7 @@ public class AgentLoop {
             final PermissionService permissionService,
             final UsageTracker usageTracker,
             final ContextManager contextManager,
+            final ContextView contextView,
             final SessionStore sessionStore,
             final SystemPromptBuilder systemPromptBuilder,
             final MemoryExtractor memoryExtractor,
@@ -117,6 +128,7 @@ public class AgentLoop {
         this.permissionService = permissionService;
         this.usageTracker = usageTracker;
         this.contextManager = contextManager;
+        this.contextView = contextView;
         this.sessionStore = sessionStore;
         this.systemPromptBuilder = systemPromptBuilder;
         this.memoryExtractor = memoryExtractor;
@@ -139,6 +151,7 @@ public class AgentLoop {
         this.permissionService = null;
         this.usageTracker = null;
         this.contextManager = null;
+        this.contextView = null;
         this.sessionStore = null;
         this.systemPromptBuilder = null;
         this.memoryExtractor = null;
@@ -219,7 +232,11 @@ public class AgentLoop {
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
         var toolsRanThisTurn = false;
+        var toolDirectiveApplied = false;
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
+            if (contextView != null) {
+                contextView.publish(snapshot(messages, toolsTokens));
+            }
             var compactedThisTurn = false;
             if (contextManager.pruneNeeded(messages, toolsTokens)) {
                 final var pruned = contextManager.prune(messages);
@@ -227,6 +244,7 @@ public class AgentLoop {
                     messages.clear();
                     messages.addAll(pruned.messages());
                     emit(new AgentEvent.Compacted("prune", pruned.mode().name()));
+                    persistContext(sessionId, messages);
                     compactedThisTurn = true;
                 }
             }
@@ -236,13 +254,14 @@ public class AgentLoop {
                     messages.clear();
                     messages.addAll(compacted.messages());
                     emit(new AgentEvent.Compacted("compact", compacted.mode().name()));
+                    persistContext(sessionId, messages);
                     compactedThisTurn = true;
                 }
             }
             if (compactedThisTurn) {
                 consecutiveCompactions++;
                 if (consecutiveCompactions >= maxConsecutiveCompactions
-                        && usageTracker.contextPercent(usageTracker.estimateContext(messages, toolsTokens))
+                        && usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens))
                                 >= configuration.compaction().thresholdPercent()) {
                     emit(new AgentEvent.Notice(
                             AgentEvent.Notice.Level.ERROR,
@@ -259,7 +278,7 @@ public class AgentLoop {
             final var finishReason = new String[] {null};
             final Message assistant;
             try {
-                assistant = chatClient.stream(request, delta -> dispatch(delta, usage, finishReason), cancelled);
+                assistant = streamWithRetry(request, usage, finishReason, cancelled);
             } catch (final ContextWindowExceededException e) {
                 if (!retryOnOverflow || overflowRetried) {
                     throw e;
@@ -282,6 +301,7 @@ public class AgentLoop {
                     messages.addAll(compacted.messages());
                     emit(new AgentEvent.Compacted(
                             "compact-retry", compacted.mode().name()));
+                    persistContext(sessionId, messages);
                     overflowRetried = true;
                     continue;
                 }
@@ -291,6 +311,9 @@ public class AgentLoop {
                 throw e;
             }
             usageTracker.record(usage[0]);
+            // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
+            // estimate at the same moment calibrates later deltas until the next observation
+            usageTracker.anchor(usage[0].promptTokens(), usageTracker.estimateContext(messages, toolsTokens));
             messages.add(assistant);
             sessionStore.append(
                     sessionId,
@@ -302,12 +325,14 @@ public class AgentLoop {
                 final var content = str(assistant.content());
                 final var reason = finishReason[0];
                 if (isTruncation(reason)) {
-                    if (configuration.llm().continueOnTruncation() && truncationContinues < MAX_TRUNCATION_CONTINUES) {
+                    final var maxTruncationContinues = configuration.llm().truncationContinuesMax();
+                    if (configuration.llm().continueOnTruncation() && truncationContinues < maxTruncationContinues) {
                         truncationContinues++;
                         emit(AgentEvent.Notice.warn("Response truncated by the output token limit (finish_reason="
                                 + reason + "); asking the model to continue (" + truncationContinues + '/'
-                                + MAX_TRUNCATION_CONTINUES + ")."));
-                        messages.add(Message.user(TRUNCATION_CONTINUE_PROMPT));
+                                + maxTruncationContinues + ")."));
+                        messages.add(Message.user(
+                                truncationContinues >= 2 ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
                         continue;
                     }
                     emit(AgentEvent.Notice.error("Response truncated by the output token limit (finish_reason="
@@ -330,6 +355,13 @@ public class AgentLoop {
                 executeTool(sessionId, messages, call);
                 toolsRanThisTurn = true;
             }
+            if (!toolDirectiveApplied && contextView != null) {
+                final var directive = contextView.poll();
+                if (directive != null) {
+                    toolDirectiveApplied = true;
+                    applyToolDirective(sessionId, messages, directive, toolsTokens);
+                }
+            }
         }
         if (cancelled.getAsBoolean()) {
             emit(new AgentEvent.Error("Cancelled"));
@@ -345,6 +377,127 @@ public class AgentLoop {
      */
     private static boolean isTruncation(final String finishReason) {
         return "length".equalsIgnoreCase(finishReason) || "max_tokens".equalsIgnoreCase(finishReason);
+    }
+
+    /** Live usage snapshot published to {@link ContextView} consumers (eg. the manage_context tool). */
+    private ContextView.Snapshot snapshot(final List<Message> messages, final int toolsTokens) {
+        final var effective = usageTracker.effectiveContext(messages, toolsTokens);
+        return new ContextView.Snapshot(
+                messages.size(),
+                effective,
+                usageTracker.contextWindow(),
+                usageTracker.usableWindow(),
+                usageTracker.contextPercent(effective),
+                configuration.pruning().enabled() ? configuration.pruning().thresholdPercent() : Integer.MAX_VALUE,
+                configuration.compaction().enabled()
+                        ? configuration.compaction().thresholdPercent()
+                        : Integer.MAX_VALUE);
+    }
+
+    /**
+     * Applies a model-requested context operation (manage_context tool) to the live messages:
+     * at most one per turn (enforced by the caller), results persisted and surfaced as a
+     * {@link AgentEvent.Compacted} event with the {@code tool} kind.
+     */
+    private void applyToolDirective(
+            final String sessionId,
+            final List<Message> messages,
+            final ContextView.Directive directive,
+            final int toolsTokens) {
+        final var result = "prune".equals(directive.action())
+                ? contextManager.prune(messages)
+                : contextManager.compact(messages, directive.focus(), directive.keepLast());
+        if (!result.changed()) {
+            emit(AgentEvent.Notice.warn(
+                    "manage_context " + directive.action() + " had nothing to reclaim; context left untouched."));
+            return;
+        }
+        messages.clear();
+        messages.addAll(result.messages());
+        emit(new AgentEvent.Compacted("tool", result.mode().name()));
+        persistContext(sessionId, messages);
+        emit(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.INFO,
+                "Context " + directive.action()
+                        + " requested by the model applied ("
+                        + result.mode().name().toLowerCase(java.util.Locale.ROOT)
+                        + ")."));
+        usageTracker.clearAnchor(); // the anchor predates the reduction: fall back to estimates until the next call
+    }
+
+    /**
+     * Persists an in-loop context reduction to the session store (without the leading system
+     * prompt, which is regenerated every turn) so the next turn reloads the compacted history
+     * instead of re-compacting the same full transcript. Failures never break the turn.
+     */
+    private void persistContext(final String sessionId, final List<Message> messages) {
+        if (sessionStore == null || sessionId == null || messages.isEmpty()) {
+            return;
+        }
+        try {
+            sessionStore.replace(
+                    sessionId,
+                    messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages);
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.WARNING, e, () -> "Could not persist the compacted session " + sessionId);
+            emit(AgentEvent.Notice.warn("Compacted context could not be persisted: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Streams the request, retrying whole requests whose transport broke mid-stream after partial
+     * content (eg. a chunked connection cut): the history is untouched until the stream returns so a
+     * plain retry is safe. Each retry discards the partial rendering ({@link AgentEvent.TextReset})
+     * and backs off exponentially before resending. Failures before any fragment and exhausted
+     * retries propagate to the caller.
+     */
+    private Message streamWithRetry(
+            final ChatCompletionRequest request,
+            final io.yupiik.ia.agent.core.llm.Usage[] usage,
+            final String[] finishReason,
+            final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
+        final var maxAttempts = 1 + Math.max(0, configuration.llm().streamRetriesMaxAttempts());
+        IOException last = null;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (cancelled.getAsBoolean()) {
+                throw new IOException("Cancelled");
+            }
+            try {
+                return chatClient.stream(request, delta -> dispatch(delta, usage, finishReason), cancelled);
+            } catch (final MidStreamFailureException e) {
+                last = e;
+                if (attempt >= maxAttempts) {
+                    break;
+                }
+                emit(new AgentEvent.TextReset());
+                emit(AgentEvent.Notice.warn("Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/'
+                        + maxAttempts + ")."));
+                Thread.sleep(streamRetryBackoffMs(attempt));
+            }
+        }
+        throw last;
+    }
+
+    /** Exponential backoff between mid-stream retries: base * 2^(attempt-1), capped by retryAfterMaxWaitMs. */
+    private long streamRetryBackoffMs(final int attempt) {
+        final var base = Math.max(0, configuration.llm().retriesBaseDelayMs());
+        final var cap = Math.max(base, configuration.llm().retryAfterMaxWaitMs());
+        var delay = base;
+        for (var i = 1; i < attempt && delay < cap; i++) {
+            delay *= 2;
+        }
+        return Math.min(delay, cap);
+    }
+
+    private static String causeSummary(final MidStreamFailureException e) {
+        final var cause = e.getCause();
+        final var message = cause == null
+                        || cause.getMessage() == null
+                        || cause.getMessage().isBlank()
+                ? e.getMessage()
+                : cause.getMessage();
+        return message == null ? "unknown transport failure" : message;
     }
 
     /**
@@ -441,15 +594,15 @@ public class AgentLoop {
     }
 
     private void emitUsage(final List<Message> messages, final int toolsTokens) {
-        final var estimated = usageTracker.estimateContext(messages, toolsTokens);
+        final var effective = usageTracker.effectiveContext(messages, toolsTokens);
         emit(new AgentEvent.UsageUpdated(
                 usageTracker.promptTokens() > 0
                         ? new io.yupiik.ia.agent.core.llm.Usage(
                                 (int) usageTracker.promptTokens(), (int) usageTracker.completionTokens(), (int)
                                         (usageTracker.promptTokens() + usageTracker.completionTokens()))
                         : io.yupiik.ia.agent.core.llm.Usage.EMPTY,
-                estimated,
-                usageTracker.contextPercent(estimated)));
+                effective,
+                usageTracker.contextPercent(effective)));
     }
 
     /**

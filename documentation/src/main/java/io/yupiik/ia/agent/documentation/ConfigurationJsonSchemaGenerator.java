@@ -38,7 +38,9 @@ import java.util.logging.Logger;
  * All {@code @RootConfiguration} of the documentation classloader are merged in a single schema,
  * command configurations (nested in their command class) being skipped, each root being nested
  * under its flattened key prefix ({@code yca} for {@code CodingAgentConfiguration},
- * {@code yca.tui} for {@code TuiConfiguration}).
+ * {@code yca.tui} for {@code TuiConfiguration}), the schema modeling the whole file, i.e. the
+ * {@code yca} root prefix being an object level of the schema, an optional string {@code $schema}
+ * property being tolerated.
  * The typed schemas come from the fusion {@code META-INF/fusion/json/schemas.json} entries of the
  * {@code @JsonModel} configuration records, nested objects being discovered by following the
  * {@code $ref}s, and the documentation/defaults are merged from
@@ -122,7 +124,19 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
                             "Configuration file loaded from ~/.yupiik/coding-agent/configuration.json "
                                     + "(override the location with the yca.configuration.json key)."));
             schema.put("type", "object");
-            schema.put("properties", properties);
+            final var rootProperties = new LinkedHashMap<String, Object>();
+            if (primary.prefix().isEmpty()) {
+                rootProperties.putAll(properties);
+            } else {
+                // the configuration file nests each root under its flattened prefix ("yca") so re-wrap it
+                final var wrapper = new LinkedHashMap<String, Object>();
+                wrapper.put("type", "object");
+                wrapper.put("properties", properties);
+                wrapper.put("additionalProperties", false);
+                insert(rootProperties, List.of(primary.prefix().split("\\.")), wrapper);
+            }
+            rootProperties.put("$schema", Map.of("type", "string")); // editor hint key, tolerate it
+            schema.put("properties", rootProperties);
             schema.put("additionalProperties", false);
             schema.put("$defs", defs);
 

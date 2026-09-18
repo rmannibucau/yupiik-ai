@@ -57,7 +57,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
 
@@ -320,15 +322,44 @@ public class StructuralCodeGraph {
         ensureReady();
         var current = index;
         if (current == null) {
-            // No persisted binary index is loaded (fresh build, or a test double exposing only graph()): serve
-            // queries off a transient index built from the current GraphStore so tools keep a single query API.
-            final var scratch = graph();
-            if (scratch != null) {
-                current = CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(scratch)));
+            // A background patch/rebuild is still running after the bounded wait: serve the last persisted
+            // index - slightly stale but complete - instead of an empty graph. assignIndexFrom() swaps in
+            // the fresh one when the build finishes.
+            current = loadPersistedIndex();
+            if (current != null) {
                 index = current;
             }
         }
+        if (current == null) {
+            // No persisted binary index is available at all (fresh project, or a test double exposing only
+            // graph()): serve queries off a transient index built from the current GraphStore so tools keep
+            // a single query API. Cache it only when it is non-empty - caching an empty index would make
+            // ensureReady() believe an index exists and serve empty results until the next reload.
+            final var scratch = graph();
+            if (scratch != null) {
+                current = CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(scratch)));
+                if (!scratch.fingerprints().isEmpty()) {
+                    index = current;
+                }
+            }
+        }
         return current;
+    }
+
+    /** Raw load of the on-disk index, bypassing the freshness gate: used by {@link #queryIndex()} while a
+     * background patch/rebuild is still running so tools serve a complete (slightly stale) graph instead of
+     * an empty one. */
+    private CodeGraphIndex loadPersistedIndex() {
+        final var conf = configuration == null ? null : configuration.structuralCodeGraph();
+        if (conf == null || !conf.indexEnabled() || indexFile == null || !Files.isRegularFile(indexFile)) {
+            return null;
+        }
+        try {
+            return conf.indexMemoryMap() ? CodeGraphIndex.mmap(indexFile) : CodeGraphIndex.load(indexFile);
+        } catch (final IOException | RuntimeException e) {
+            LOGGER.fine(() -> "Cannot serve the persisted code graph index while rebuilding: " + e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -480,9 +511,14 @@ public class StructuralCodeGraph {
             return;
         }
         final var fp = fingerprint(absolute);
+        // snapshot the mtime together with the content hash so the sidecar can never record an mtime
+        // newer than the indexed content (see patch())
+        final var mtimes = Map.of(rel, lastModified(absolute));
         final GraphModel model;
         try {
-            model = fp == null ? GraphModel.empty(parser.extensions().iterator().next()) : parser.parse(absolute);
+            model = fp == null
+                    ? GraphModel.empty(parser.extensions().iterator().next())
+                    : relativizeModel(parser.parse(absolute), rel);
         } catch (final RuntimeException e) {
             LOGGER.warning("Cannot re-index " + rel + ": " + e.getMessage());
             return;
@@ -501,7 +537,7 @@ public class StructuralCodeGraph {
         final var updated =
                 new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
         graph = updated;
-        persist(updated);
+        persist(updated, mtimes);
         reloadIndex();
         if (fp == null) {
             docWriter.delete(rel);
@@ -516,13 +552,29 @@ public class StructuralCodeGraph {
     private void dropFile(final String rel, final List<GraphModel.Symbol> symbols, final List<GraphModel.Edge> edges) {
         final var owned = new HashSet<String>();
         symbols.removeIf(s -> {
-            if (s.file().equals(rel)) {
+            // suffix fallback: stores built before symbol files were relativized hold absolute paths
+            if (s.file().equals(rel) || s.file().endsWith("/" + rel)) {
                 owned.add(s.fqn());
                 return true;
             }
             return false;
         });
         edges.removeIf(e -> owned.contains(e.from()));
+    }
+
+    /**
+     * Parsers report symbol files as absolute paths ({@code SourceFile.getName()}), but the store keys them by
+     * project-relative path (fingerprints, docs, dropFile): rewrite each parsed symbol onto the walked file so
+     * incremental drops match and tools expose relative paths.
+     */
+    private static GraphModel relativizeModel(final GraphModel model, final String rel) {
+        return new GraphModel(
+                model.language(),
+                model.symbols().stream()
+                        .map(s -> new GraphModel.Symbol(
+                                s.fqn(), s.kind(), rel, s.startLine(), s.endLine(), s.signature()))
+                        .toList(),
+                model.edges());
     }
 
     private GraphStore load() {
@@ -553,12 +605,22 @@ public class StructuralCodeGraph {
         final var fingerprints = new HashMap<>(current.fingerprints());
         final var symbols = new ArrayList<>(current.symbols());
         final var edges = new ArrayList<>(current.edges());
+        // mtimes snapshotted when each file is hashed/parsed, never after the whole build: a stat taken at
+        // persist time could store an mtime newer than the indexed content and mask the change forever
+        final var mtimes = new HashMap<String, Long>();
         var changed = false;
+        final var visited = new HashSet<String>();
         for (final Path file : candidateFiles()) {
             final var rel = rel(file);
+            visited.add(rel);
+            mtimes.put(rel, lastModified(file));
             final var fp = fingerprint(file);
             if (fp == null) {
+                // vanished between the tree walk and the hash: drop it fully, like an offline deletion
                 changed |= fingerprints.remove(rel) != null;
+                dropFile(rel, symbols, edges);
+                docWriter.delete(rel);
+                docEnricher.drop(rel);
                 continue;
             }
             if (fp.equals(fingerprints.get(rel))) {
@@ -574,7 +636,7 @@ public class StructuralCodeGraph {
                 continue;
             }
             try {
-                final var model = parser.parse(file);
+                final var model = relativizeModel(parser.parse(file), rel);
                 symbols.addAll(model.symbols());
                 edges.addAll(model.edges());
                 docWriter.write(rel, model);
@@ -583,12 +645,29 @@ public class StructuralCodeGraph {
                 LOGGER.warning("Cannot re-index " + rel + ": " + e.getMessage());
             }
         }
+        // Offline deletions: files present in the previous store but gone from disk are never visited by the
+        // walk above, so reconcile explicitly - otherwise their symbols/edges would ghost in the index forever.
+        for (final var rel : current.fingerprints().keySet()) {
+            if (!visited.contains(rel) && fingerprints.remove(rel) != null) {
+                changed = true;
+                dropFile(rel, symbols, edges);
+                docWriter.delete(rel);
+                docEnricher.drop(rel);
+            }
+        }
         if (!changed) {
+            // gate-stale but hash-identical (e.g. a touch without a content change): refresh the sidecar so
+            // the next session does not redo the whole walk over the same drifted timestamps
+            try {
+                writeIndexMeta(current, mtimes);
+            } catch (final IOException e) {
+                throw new UncheckedIOException(e);
+            }
             return current;
         }
         final var updated =
                 new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
-        persist(updated);
+        persist(updated, mtimes);
         statusReporter.report(
                 "structural code graph refreshed (" + updated.symbols().size() + " symbols)");
         enrichConceptsIfEnabled();
@@ -599,6 +678,8 @@ public class StructuralCodeGraph {
         final var symbols = new ArrayList<GraphModel.Symbol>();
         final var edges = new ArrayList<GraphModel.Edge>();
         final var fingerprints = new HashMap<String, String>();
+        // mtimes snapshotted when each file is hashed, never after the whole build (see patch())
+        final var mtimes = new HashMap<String, Long>();
         var count = 0;
         for (final Path file : candidateFiles()) {
             final var rel = rel(file);
@@ -606,6 +687,7 @@ public class StructuralCodeGraph {
             if (fp == null) {
                 continue;
             }
+            mtimes.put(rel, lastModified(file));
             fingerprints.put(rel, fp);
             final var parser = parserFor(file);
             if (parser == null) {
@@ -614,7 +696,7 @@ public class StructuralCodeGraph {
                 continue;
             }
             try {
-                final var model = parser.parse(file);
+                final var model = relativizeModel(parser.parse(file), rel);
                 symbols.addAll(model.symbols());
                 edges.addAll(model.edges());
                 docWriter.write(rel, model);
@@ -626,7 +708,7 @@ public class StructuralCodeGraph {
         }
         final var built =
                 new GraphStore(List.copyOf(symbols), List.copyOf(edges), Map.copyOf(fingerprints), clock.millis());
-        persist(built);
+        persist(built, mtimes);
         statusReporter.report(
                 "structural code graph built (" + built.symbols().size() + " symbols, " + count + " files)");
         enrichConceptsIfEnabled();
@@ -648,16 +730,35 @@ public class StructuralCodeGraph {
     }
 
     private List<Path> candidateFiles() {
+        final var result = new ArrayList<Path>();
+        if (!walkCandidates(result::add)) {
+            return List.of();
+        }
+        result.sort(Comparator.comparing(Path::toString));
+        return result;
+    }
+
+    /** Number of indexable candidate files on disk: a stat-only walk (no hashing, no parsing) used by the
+     * freshness gate to detect files added offline. A partial walk under-counts, which only makes the gate
+     * conservative (report stale), so completeness is not required here. */
+    private long countCandidateFiles() {
+        final var count = new AtomicInteger();
+        walkCandidates(file -> count.incrementAndGet());
+        return count.get();
+    }
+
+    /** Shared tree walk behind {@link #candidateFiles()} and {@link #countCandidateFiles()}: honours ignore
+     * rules (subtree pruning) and the size filter. Returns {@code false} if the walk failed midway. */
+    private boolean walkCandidates(final Consumer<Path> sink) {
         final Path root;
         try {
             root = configuration.resolveProjectDir();
         } catch (final RuntimeException e) {
-            return List.of();
+            return false;
         }
         if (!Files.isDirectory(root)) {
-            return List.of();
+            return false;
         }
-        final var result = new ArrayList<Path>();
         try {
             Files.walkFileTree(root, new SimpleFileVisitor<>() {
                 @Override
@@ -668,7 +769,7 @@ public class StructuralCodeGraph {
                 @Override
                 public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
                     if (attrs.isRegularFile() && sizeOk(file)) {
-                        result.add(file);
+                        sink.accept(file);
                     }
                     return FileVisitResult.CONTINUE;
                 }
@@ -680,10 +781,9 @@ public class StructuralCodeGraph {
                 }
             });
         } catch (final IOException | UncheckedIOException e) {
-            return List.of();
+            return false;
         }
-        result.sort(Comparator.comparing(Path::toString));
-        return result;
+        return true;
     }
 
     private boolean hasIndexableContent() {
@@ -874,11 +974,19 @@ public class StructuralCodeGraph {
     }
 
     private void persist(final GraphStore store) {
+        persist(store, Map.of());
+    }
+
+    /**
+     * @param mtimeSnapshot per-file {@code lastModified} captured when each file was hashed/parsed; entries
+     *        missing from it (unchanged files carried over from a previous build) fall back to a stat at write time.
+     */
+    private void persist(final GraphStore store, final Map<String, Long> mtimeSnapshot) {
         try {
             Files.createDirectories(storeRoot);
             if (configuration.structuralCodeGraph().indexEnabled()) {
                 CodeGraphIndexWriter.write(toIndexGraph(store), indexFile);
-                writeIndexMeta(store);
+                writeIndexMeta(store, mtimeSnapshot);
             }
             WiringGraphWriter.write(mapper, storeRoot, store, docEnricher.cache());
         } catch (final IOException e) {
@@ -900,11 +1008,19 @@ public class StructuralCodeGraph {
                 store.builtAt());
     }
 
-    /** Persist a small {@code rel \t lastModifiedMillis} sidecar used by the timestamp-first freshness gate. */
-    private void writeIndexMeta(final GraphStore store) throws IOException {
-        final var buf = new StringBuilder(store.fingerprints().size() * 48);
+    /**
+     * Persist a small {@code rel \t lastModifiedMillis} sidecar used by the timestamp-first freshness gate,
+     * prefixed with a {@code #count=N} header recording the indexed file count so the gate can also detect
+     * files added offline. Mtimes come from the caller's snapshot taken when each file was hashed - never
+     * from a stat after the whole build, which could store an mtime newer than the indexed content and mask
+     * that change forever.
+     */
+    private void writeIndexMeta(final GraphStore store, final Map<String, Long> mtimeSnapshot) throws IOException {
+        final var buf = new StringBuilder(store.fingerprints().size() * 48 + 32);
+        buf.append("#count=").append(store.fingerprints().size()).append('\n');
         for (final var entry : store.fingerprints().entrySet()) {
-            final var mtime = lastModified(projectDir.resolve(entry.getKey()));
+            final var snapshotted = mtimeSnapshot.get(entry.getKey());
+            final var mtime = snapshotted != null ? snapshotted : lastModified(projectDir.resolve(entry.getKey()));
             if (mtime >= 0) {
                 buf.append(entry.getKey()).append('\t').append(mtime).append('\n');
             }
@@ -921,40 +1037,55 @@ public class StructuralCodeGraph {
     }
 
     /**
-     * Timestamp-first freshness gate for the cached {@code index.bin}. Compares each indexed file's
-     * {@code lastModified} against the stored sidecar value - a cheap stat per file. Only when a timestamp
-     * actually differs (or the sidecar is missing) is the index considered stale and a SHA-verified incremental
-     * re-index triggered. This avoids the previous full-tree SHA walk on every session start.
+     * Timestamp-first freshness gate for the cached {@code index.bin}. Compares the number of indexable files
+     * on disk against the sidecar {@code #count} header - catching files added offline - then each indexed
+     * file's {@code lastModified} against the stored sidecar value. Only when one of these cheap checks
+     * actually differs (or the sidecar is missing) is the index considered stale and a SHA-verified
+     * incremental re-index triggered. This avoids the full-tree SHA walk on every session start.
      */
     private boolean indexIsFresh() {
         if (indexMetaFile == null || !Files.isRegularFile(indexMetaFile)) {
             return false;
         }
+        Long storedCount = null;
+        final var storedMtimes = new HashMap<String, Long>();
         try {
             for (var line : Files.readAllLines(indexMetaFile, StandardCharsets.UTF_8)) {
                 if (line.isBlank()) {
+                    continue;
+                }
+                if (line.startsWith("#count=")) {
+                    try {
+                        storedCount = Long.parseLong(line.substring("#count=".length()));
+                    } catch (final NumberFormatException e) {
+                        return false;
+                    }
                     continue;
                 }
                 final var tab = line.indexOf('\t');
                 if (tab < 0) {
                     return false;
                 }
-                final var rel = line.substring(0, tab);
-                final long stored;
                 try {
-                    stored = Long.parseLong(line.substring(tab + 1));
+                    storedMtimes.put(line.substring(0, tab), Long.parseLong(line.substring(tab + 1)));
                 } catch (final NumberFormatException e) {
                     return false;
                 }
-                final var mtime = lastModified(projectDir.resolve(rel));
-                if (mtime != stored) {
-                    return false;
-                }
             }
-            return true;
         } catch (final IOException e) {
             return false;
         }
+        // sidecars written before the #count header existed cannot prove no file was added offline:
+        // treat them as stale once, the next persist rewrites the sidecar with the header
+        if (storedCount == null || countCandidateFiles() != storedCount) {
+            return false;
+        }
+        for (final var entry : storedMtimes.entrySet()) {
+            if (lastModified(projectDir.resolve(entry.getKey())) != entry.getValue()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**

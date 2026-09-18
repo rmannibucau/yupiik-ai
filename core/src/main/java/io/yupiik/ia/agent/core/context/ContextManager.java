@@ -53,7 +53,7 @@ public class ContextManager {
     public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
         final var p = configuration.pruning();
         return p.enabled()
-                && usageTracker.contextPercent(usageTracker.estimateContext(messages, extraToolTokens))
+                && usageTracker.contextPercent(usageTracker.effectiveContext(messages, extraToolTokens))
                         >= p.thresholdPercent();
     }
 
@@ -64,7 +64,7 @@ public class ContextManager {
     public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
         final var c = configuration.compaction();
         return c.enabled()
-                && usageTracker.contextPercent(usageTracker.estimateContext(messages, extraToolTokens))
+                && usageTracker.contextPercent(usageTracker.effectiveContext(messages, extraToolTokens))
                         >= c.thresholdPercent();
     }
 
@@ -73,10 +73,18 @@ public class ContextManager {
     }
 
     public CompactionResult compact(final List<Message> messages) {
-        return coordinator.compact(messages, false);
+        return coordinator.compact(messages, false, null, 0);
+    }
+
+    /**
+     * Model-requested compaction: an optional focus hint is folded into the summarizer prompt and an
+     * optional {@code keepLastOverride} raises the verbatim tail floor.
+     */
+    public CompactionResult compact(final List<Message> messages, final String focus, final int keepLastOverride) {
+        return coordinator.compact(messages, false, focus, keepLastOverride);
     }
 
     public CompactionResult compactForOverflow(final List<Message> messages) {
-        return coordinator.compact(messages, true);
+        return coordinator.compact(messages, true, null, 0);
     }
 }

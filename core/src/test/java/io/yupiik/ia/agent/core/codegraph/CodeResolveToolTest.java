@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class CodeResolveToolTest {
 
@@ -61,7 +62,7 @@ class CodeResolveToolTest {
 
             @Override
             public Path storeRoot() {
-                return Path.of("/tmp/fake-code-resolve-graph");
+                return fakeRoot.resolve("fake-code-resolve-graph");
             }
         };
     }
@@ -81,10 +82,13 @@ class CodeResolveToolTest {
 
             @Override
             public Path storeRoot() {
-                return Path.of("/tmp/fake-code-resolve-graph");
+                return fakeRoot.resolve("fake-code-resolve-graph");
             }
         };
     }
+
+    @TempDir
+    static Path fakeRoot;
 
     private static MavenRepositoryKnowledgeService knowledge(
             final boolean enabled, final List<String> gavs, final Map<String, String> contentByGav) {

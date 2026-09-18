@@ -21,6 +21,8 @@ import dev.tamboui.layout.Position;
 import dev.tamboui.layout.Rect;
 import dev.tamboui.layout.Size;
 import dev.tamboui.terminal.Backend;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
 /**
  * In-memory terminal backend capturing drawn buffers so tests can assert on the
@@ -33,6 +35,7 @@ final class HeadlessBackend implements Backend {
 
     private final Object lock = new Object();
     private final Buffer buffer = Buffer.empty(new Rect(0, 0, WIDTH, HEIGHT));
+    private final Semaphore drawn = new Semaphore(0);
 
     @Override
     public Size size() {
@@ -46,6 +49,16 @@ final class HeadlessBackend implements Backend {
                 buffer.set(diff.getX(i), diff.getY(i), diff.getCell(i));
             }
         }
+        drawn.release();
+    }
+
+    /**
+     * Awaits a rendered frame so tests synchronize on real UI updates instead of sleeping.
+     *
+     * @return {@code true} when a frame was rendered before the timeout.
+     */
+    boolean awaitFrame(final long timeoutMillis) throws InterruptedException {
+        return drawn.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
     }
 
     @Override

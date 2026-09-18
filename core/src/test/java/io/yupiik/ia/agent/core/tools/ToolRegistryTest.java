@@ -28,8 +28,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ToolRegistryTest {
+
+    @TempDir
+    static Path fakeRoot;
 
     private static EmbeddedTool stub(final String name) {
         return new EmbeddedTool() {
@@ -75,7 +79,7 @@ class ToolRegistryTest {
 
             @Override
             public Path storeRoot() {
-                return Path.of("/tmp/fake-tool-registry-graph");
+                return fakeRoot.resolve("fake-tool-registry-graph");
             }
         };
     }

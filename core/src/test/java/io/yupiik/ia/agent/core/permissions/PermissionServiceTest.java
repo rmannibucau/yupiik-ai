@@ -23,13 +23,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class PermissionServiceTest {
+
+    @TempDir
+    Path storageHome;
+
     private PermissionService service(final PermissionMode mode, final List<String> allow, final List<String> deny) {
         return service(mode, allow, deny, List.of());
     }
@@ -37,7 +43,7 @@ class PermissionServiceTest {
     private PermissionService service(
             final PermissionMode mode, final List<String> allow, final List<String> deny, final List<String> planBash) {
         final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", "/tmp/yca-test",
+                "yca.storageHome", storageHome.toString(),
                 "yca.permissions.mode", mode.name().toLowerCase(Locale.ROOT),
                 "yca.permissions.allow", String.join(",", allow),
                 "yca.permissions.deny", String.join(",", deny),
@@ -59,7 +65,7 @@ class PermissionServiceTest {
     @Test
     void defaultModeIsPlanWhenConfigUnset() {
         final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
-                Map.of("yca.storageHome", "/tmp/yca-test"));
+                Map.of("yca.storageHome", storageHome.toString()));
         final var service = new PermissionService(configuration);
         assertEquals(AgentMode.PLAN, service.mode());
     }

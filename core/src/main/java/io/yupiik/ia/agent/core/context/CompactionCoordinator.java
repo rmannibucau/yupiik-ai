@@ -31,12 +31,18 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.logging.Logger;
 
 /**
- * Makes context compaction/pruning reliable: it never fails silently. The LLM
- * summarization is attempted with bounded retries and backoff; when it
- * repeatedly fails, the coordinator falls back to a deterministic local
- * truncation so the agent always keeps working, and it always reports what
- * actually happened (summarized, truncated, or failed) so frontends can show
- * the truth instead of a misleading success.
+ * Context reduction strategies, never failing silently.
+ *
+ * <p>{@link #compact(List, boolean, String, int)} summarizes the older conversation with an LLM
+ * using a structured template, keeping a turn-aligned, token-budgeted verbatim tail that never
+ * splits an assistant tool call from its results, re-anchoring on the previous summary when one
+ * exists and replaying the last user message when the tail does not cover it. When the summarizer
+ * fails it degrades to a deterministic local truncation.
+ *
+ * <p>{@link #prune(List)} is a local, LLM-free clearing of old tool outputs (the way to reclaim
+ * bulk space cheaply): recent turns and a token budget of recent tool outputs are protected, and
+ * older tool results are replaced by a short marker only when the prunable volume clears a
+ * minimum, so the operation never churns the history for a tiny gain.
  */
 @ApplicationScoped
 public class CompactionCoordinator {
@@ -58,10 +64,30 @@ public class CompactionCoordinator {
 
     /**
      * Cap applied to kept-tail messages when the assembled context still exceeds the window after
-     * compaction. Kept deliberately roomier than {@code toolOutputMaxChars} (80) so the tail's tool
+     * compaction. Kept deliberately roomier than the local-truncation fallback cap so the tail's tool
      * results stay meaningful; the digest (generated summary) is never spliced regardless.
      */
     private static final int TAIL_SPLICE_CAP = 500;
+
+    /** Per-message cap of tool outputs serialized into the summarizer input. */
+    private static final int TOOL_OUTPUT_CAP_CHARS = 2_000;
+
+    /** Replacement content of tool outputs cleared by {@link #prune(List)}. */
+    public static final String PRUNE_CLEARED_MARKER = "[old tool result cleared]";
+
+    private static final String COMPACTED_MARKER = "<compacted-context>";
+
+    /** Required output structure of the summarizer, kept stable so repeated compactions can merge cleanly. */
+    private static final String SUMMARY_TEMPLATE = """
+            Output this markdown structure exactly, keeping every section even when empty:
+            ## Objective
+            ## Important Details
+            ## Work State
+            ### Completed
+            ### Active
+            ### Blocked
+            ## Next Move
+            ## Relevant Files""";
 
     private final CodingAgentConfiguration configuration;
     private final ChatClient chatClient;
@@ -91,75 +117,114 @@ public class CompactionCoordinator {
     }
 
     /**
-     * Prunes older messages. Prefers an LLM digest but falls back to a local
-     * truncation when the summarizer fails; the result marks which path ran.
+     * Clears old tool outputs locally (no LLM call): the most recent turns and a budget of the
+     * most recent tool outputs are protected, older tool results are replaced by a marker but only
+     * when their total clears {@code yca.pruning.minPruneTokens}, otherwise nothing happens.
      */
     public CompactionResult prune(final List<Message> messages) {
         final var p = configuration.pruning();
-        final var keep = Math.max(2, p.keepRecent());
-        if (messages.size() <= keep + 2) {
-            return new CompactionResult(messages, Mode.NONE, "");
-        }
         final var system = messages.get(0).role().equals("system") ? messages.get(0) : null;
         final var from = system == null ? 0 : 1;
-        final var to = Math.max(from, messages.size() - keep);
-        if (to <= from) {
+        var boundary = splitBoundary(messages, from, Math.max(2, p.keepRecent()), false);
+        if (boundary <= from) {
             return new CompactionResult(messages, Mode.NONE, "");
         }
-        final var old = messages.subList(from, to);
-        final var chunks = chunkPrune(old, p.toolOutputMaxChars());
-        final var outcome = summarizeRolling(
-                "prune",
-                configSystemPrompt("prune"),
-                chunks,
-                configuration.model().resolvedPrune());
-        if (!outcome.summary().isBlank()) {
-            final var out = new ArrayList<Message>();
-            if (system != null) {
-                out.add(system);
+        // protect the most recent whole turns: the boundary can only move back (protect more)
+        final var protectTurns = Math.max(1, p.protectTurns());
+        var seenTurns = 0;
+        for (var i = messages.size() - 1; i >= from && seenTurns < protectTurns; i--) {
+            if ("user".equals(messages.get(i).role()) && ++seenTurns == protectTurns) {
+                boundary = Math.min(boundary, i);
             }
-            out.add(Message.user("<pruned-context>\n" + outcome.summary() + "\n</pruned-context>"));
-            out.addAll(messages.subList(to, messages.size()));
-            return new CompactionResult(out, Mode.SUMMARY, "");
         }
-        final var truncated = localTruncate(messages, from, to);
-        LOGGER.warning(outcome.error());
-        emit(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, outcome.error()));
-        return new CompactionResult(truncated, Mode.TRUNCATE, outcome.error());
+
+        final var toClear = new ArrayList<Integer>();
+        var protectedTokens = 0;
+        var prunableTokens = 0;
+        for (var i = boundary - 1; i >= from; i--) {
+            final var m = messages.get(i);
+            if (!"tool".equals(m.role())) {
+                continue;
+            }
+            final var content = str(m.content());
+            if (PRUNE_CLEARED_MARKER.equals(content)) {
+                continue;
+            }
+            final var tokens = TokenEstimator.estimate(content);
+            if (protectedTokens < p.protectRecentTokens()) {
+                protectedTokens += tokens;
+                continue;
+            }
+            toClear.add(i);
+            prunableTokens += tokens;
+        }
+        if (prunableTokens < p.minPruneTokens()) {
+            return new CompactionResult(messages, Mode.NONE, "");
+        }
+        final var out = new ArrayList<Message>(messages);
+        for (final var i : toClear) {
+            out.set(
+                    i,
+                    new Message(
+                            "tool",
+                            PRUNE_CLEARED_MARKER,
+                            null,
+                            null,
+                            messages.get(i).toolCallId(),
+                            null));
+        }
+        final var clearedCount = toClear.size();
+        final var clearedTokens = prunableTokens;
+        LOGGER.fine(() -> "prune cleared " + clearedCount + " tool output(s) (~" + clearedTokens + " tokens)");
+        return new CompactionResult(List.copyOf(out), Mode.CLEARED, "");
     }
 
     /**
-     * Compacts older messages into a summary, retrying then degrading to a
-     * local truncation. Never returns the input unchanged as a silent no-op.
+     * Compacts older messages into a structured summary, retrying then degrading to a local
+     * truncation. Never returns the input unchanged as a silent no-op.
+     *
+     * @param overflow whether this compaction recovers a provider context overflow (tighter floors)
+     * @param focus optional hint folded into the summarizer prompt (model-managed compaction)
+     * @param keepLastOverride optional minimum number of recent messages to keep verbatim (0 = default)
      */
-    public CompactionResult compact(final List<Message> messages, final boolean overflow) {
+    public CompactionResult compact(
+            final List<Message> messages, final boolean overflow, final String focus, final int keepLastOverride) {
         final var p = configuration.pruning();
-        final var keep = Math.max(2, overflow ? p.keepRecent() / 2 : p.keepRecent());
-        if (messages.size() <= keep + 2) {
-            return new CompactionResult(messages, Mode.NONE, "");
-        }
+        final var keepFloor =
+                Math.max(2, keepLastOverride > 0 ? keepLastOverride : overflow ? p.keepRecent() / 2 : p.keepRecent());
         final var system = messages.get(0).role().equals("system") ? messages.get(0) : null;
         final var from = system == null ? 0 : 1;
-        final var to = Math.max(from, messages.size() - keep);
-        final var chunks = chunkCompact(messages.subList(from, to));
+        final var boundary = splitBoundary(messages, from, keepFloor, overflow);
+        if (boundary <= from) {
+            return new CompactionResult(messages, Mode.NONE, "");
+        }
+        final var prior = previousSummary(messages);
+        final var chunks = chunkCompact(messages.subList(from, boundary));
         final var outcome = summarizeRolling(
                 "compaction",
-                configSystemPrompt("compact"),
+                configSystemPrompt(),
                 chunks,
+                prior,
+                focus,
                 configuration.model().compact());
         if (!outcome.summary().isBlank()) {
             List<Message> out = new ArrayList<>();
             if (system != null) {
                 out.add(system);
             }
-            out.add(Message.user("<compacted-context>\n" + outcome.summary()
-                    + "\n</compacted-context>\n\nContinue from this summary."));
-            out.addAll(messages.subList(to, messages.size()));
+            out.add(Message.user(COMPACTED_MARKER + "\n" + outcome.summary() + "\n</compacted-context>\n\n"
+                    + "Continue from this summary."));
+            out.addAll(messages.subList(boundary, messages.size()));
+            final var lastUser = lastUserMessageIndex(messages);
+            if (lastUser >= 0 && lastUser < boundary) {
+                // the current task must survive compaction even when the tail budget did not cover it
+                out.add(Message.user(str(messages.get(lastUser).content())));
+            }
             final var digestIndex = system == null ? 0 : 1;
             out = ensureUnderWindow(out, overflow, digestIndex);
             return new CompactionResult(out, Mode.SUMMARY, "");
         }
-        final var truncated = localTruncate(messages, from, to);
+        final var truncated = localTruncate(messages, from, boundary);
         final var keptTruncated = ensureUnderWindow(truncated, overflow, -1);
         LOGGER.warning(
                 outcome.error() == null || outcome.error().isBlank()
@@ -174,13 +239,102 @@ public class CompactionCoordinator {
     }
 
     /**
+     * First index of the verbatim tail: at least {@code keepFloor} recent messages, adjusted so the
+     * tail never starts on tool results orphaned from their assistant tool call, then extended
+     * backwards at whole user-turn boundaries while they fit the tail token budget (halved when
+     * {@code halveBudget} is set, ie. overflow recovery).
+     */
+    private int splitBoundary(
+            final List<Message> messages, final int from, final int keepFloor, final boolean halveBudget) {
+        final var size = messages.size();
+        if (size <= from + keepFloor + 2) {
+            return from;
+        }
+        var b = size - keepFloor;
+        while (b < size && "tool".equals(messages.get(b).role())) {
+            b++;
+        }
+        if (usageTracker == null) {
+            return b;
+        }
+        final var budget = halveBudget ? tailBudgetTokens() / 2 : tailBudgetTokens();
+        var acc = 0;
+        while (b > from) {
+            var t = b - 1;
+            while (t > from && !"user".equals(messages.get(t).role())) {
+                t--;
+            }
+            final var turnTokens = usageTracker.estimateContext(messages.subList(t, b));
+            if (acc + turnTokens > budget) {
+                break;
+            }
+            acc += turnTokens;
+            b = t;
+            if (acc >= budget) {
+                break;
+            }
+        }
+        return Math.max(from, b);
+    }
+
+    private int tailBudgetTokens() {
+        final var configured = configuration.compaction().tailBudgetTokens();
+        if (configured > 0) {
+            return configured;
+        }
+        final var usable = usageTracker == null ? 32_000 : usageTracker.usableWindow();
+        return Math.clamp(usable / 4, 2_000, 15_000);
+    }
+
+    /**
+     * Summary text of the latest {@code <compacted-context>} message in the list, to re-anchor a
+     * repeated compaction on instead of blindly re-summarizing from scratch; {@code null} when none.
+     */
+    private static String previousSummary(final List<Message> messages) {
+        for (var i = messages.size() - 1; i >= 1; i--) {
+            final var content = messages.get(i).content() instanceof String s ? s : null;
+            if (content == null) {
+                continue;
+            }
+            final var start = content.indexOf(COMPACTED_MARKER);
+            if (start < 0) {
+                continue;
+            }
+            final var bodyStart = content.indexOf('\n', start);
+            final var end = content.indexOf("</compacted-context>", start);
+            if (bodyStart < 0 || end < 0 || end <= bodyStart) {
+                continue;
+            }
+            return content.substring(bodyStart + 1, end).strip();
+        }
+        return null;
+    }
+
+    /** Index of the last real user message (skipping compaction digests and truncation nudges), or -1. */
+    private static int lastUserMessageIndex(final List<Message> messages) {
+        for (var i = messages.size() - 1; i >= 0; i--) {
+            final var m = messages.get(i);
+            if (!"user".equals(m.role()) || !(m.content() instanceof String s)) {
+                continue;
+            }
+            if (s.startsWith(COMPACTED_MARKER)
+                    || s.startsWith("<pruned-context>")
+                    || s.startsWith("Your previous reply")) {
+                continue;
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    /**
      * Guarantees the compacted message list fits under the provider context window (with a small
-     * completion headroom). The last {@code keepRecent} raw messages are normally preserved
-     * verbatim; when the kept tail alone is heavy or the window is small, it is progressively
-     * spilled: tool outputs are capped, retried until the list is within budget but at least once
-     * shrunk. The {@code digestIndex} message (the generated summary) is never spoken to, so the
-     * compacted context survives the size-fitting unchanged. This closes the gap where compaction
-     * "succeeded" but the output still overflowed.
+     * completion headroom). The kept raw messages are normally preserved verbatim; when the kept tail
+     * alone is heavy or the window is small, it is progressively spilled: tool outputs are capped,
+     * retried until the list is within budget but at least once shrunk. The {@code digestIndex}
+     * message (the generated summary) is never spoken to, so the compacted context survives the
+     * size-fitting unchanged. This closes the gap where compaction "succeeded" but the output still
+     * overflowed.
      */
     private List<Message> ensureUnderWindow(final List<Message> out, final boolean overflow, final int digestIndex) {
         if (usageTracker == null) {
@@ -240,14 +394,39 @@ public class CompactionCoordinator {
                 + content.substring(content.length() - half);
     }
 
+    /** Renders a message for the summarizer input, capping tool outputs at {@link #TOOL_OUTPUT_CAP_CHARS}. */
+    private static String renderForSummary(final Message m) {
+        final var content = str(m.content());
+        final var truncated = content.length() > TOOL_OUTPUT_CAP_CHARS
+                ? content.substring(0, TOOL_OUTPUT_CAP_CHARS) + " [truncated]"
+                : content;
+        if ("tool".equals(m.role())) {
+            return "[Tool result]: " + truncated;
+        }
+        if ("assistant".equals(m.role())
+                && m.toolCalls() != null
+                && !m.toolCalls().isEmpty()) {
+            final var sb = new StringBuilder("[Assistant]: ").append(truncated);
+            for (final var tc : m.toolCalls()) {
+                if (tc.function() != null) {
+                    sb.append("\n[Assistant tool call]: ")
+                            .append(tc.function().name())
+                            .append('(')
+                            .append(tc.function().arguments())
+                            .append(')');
+                }
+            }
+            return sb.toString();
+        }
+        return '[' + m.role() + "] " + truncated;
+    }
+
     /** Flattens old compact messages into chunks, each bounded by {@link #MAX_SUMMARY_INPUT_CHARS}. */
     private List<String> chunkCompact(final List<Message> old) {
         final var chunks = new ArrayList<String>();
         final var current = new StringBuilder();
         for (final var m : old) {
-            final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
-            final var line = '[' + m.role() + "] "
-                    + (content.length() > 2000 ? content.substring(0, 2000) + " [...]" : content) + '\n';
+            final var line = renderForSummary(m) + '\n';
             if (line.length() > MAX_SUMMARY_INPUT_CHARS) {
                 if (!current.isEmpty()) {
                     chunks.add(current.toString());
@@ -268,35 +447,21 @@ public class CompactionCoordinator {
         return chunks;
     }
 
-    private List<String> chunkPrune(final List<Message> old, final int cap) {
-        final var chunks = new ArrayList<String>();
-        final var current = new StringBuilder();
-        for (final var m : old) {
-            final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
-            final var truncated = content.length() > cap ? splice(content, cap) : content;
-            final var line = '[' + m.role() + "] " + truncated + '\n';
-            if (current.length() + line.length() > MAX_SUMMARY_INPUT_CHARS) {
-                chunks.add(current.toString());
-                current.setLength(0);
-            }
-            current.append(line);
-        }
-        if (!current.isEmpty()) {
-            chunks.add(current.toString());
-        }
-        return chunks;
-    }
-
     /**
      * Summarizes chunked history with a rolling digest, retrying each call with backoff.
      * When multiple chunks must be summarized, each chunk (including the running digest) is passed
      * separately so no single call ever exceeds the compact model's input window.
      */
     private Outcome summarizeRolling(
-            final String label, final String systemPrompt, final List<String> chunks, final String modelOverride) {
+            final String label,
+            final String systemPrompt,
+            final List<String> chunks,
+            final String priorSummary,
+            final String focus,
+            final String modelOverride) {
         final var summary = new StringBuilder();
         for (var c = 0; c < chunks.size(); c++) {
-            final var prompt = chunkPrompt(chunks, c, summary);
+            final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus);
             String part = null;
             String error = null;
             for (var attempt = 0; attempt < retries(); attempt++) {
@@ -369,10 +534,22 @@ public class CompactionCoordinator {
         }
     }
 
-    private static String chunkPrompt(final List<String> chunks, final int index, final StringBuilder rollingSummary) {
+    private static String chunkPrompt(
+            final List<String> chunks,
+            final int index,
+            final StringBuilder rollingSummary,
+            final String priorSummary,
+            final String focus) {
         final var sb = new StringBuilder();
-        if (rollingSummary.isEmpty()) {
-            sb.append("Summarize the conversation below.");
+        if (rollingSummary.isEmpty() && priorSummary != null && !priorSummary.isBlank()) {
+            sb.append("Below is the previous summary of this conversation, followed by more conversation.")
+                    .append(" Update the previous summary with the new information: the conversation wins on")
+                    .append(" conflicts, move finished Active items to Completed, and keep the same structure.\n\n")
+                    .append("<prior-summary>\n")
+                    .append(priorSummary)
+                    .append("\n</prior-summary>\n\nConversation:\n");
+        } else if (rollingSummary.isEmpty()) {
+            sb.append("Create a new summary of the conversation below.");
         } else {
             final var summaryText = rollingSummary.length() > MAX_ROLLING_SUMMARY_CHARS
                     ? rollingSummary.substring(rollingSummary.length() - MAX_ROLLING_SUMMARY_CHARS)
@@ -391,14 +568,18 @@ public class CompactionCoordinator {
                     .append(chunks.size())
                     .append("; continue merging)");
         }
+        if (focus != null && !focus.isBlank()) {
+            sb.append("\n\nExtra focus requested for this summary: ").append(focus.strip());
+        }
+        sb.append("\n\n").append(SUMMARY_TEMPLATE);
         return sb.toString();
     }
 
-    private static String configSystemPrompt(final String kind) {
-        if ("prune".equals(kind)) {
-            return "Summarize this conversation excerpt into a compact digest. Keep key decisions, file paths, commands and results. Max 40 lines.";
-        }
-        return "Summarize this coding agent conversation: goal, decisions, files touched, commands run, current state and next steps. Max 60 lines.";
+    private static String configSystemPrompt() {
+        return "You are a context summarization agent. Summarize the conversation for another coding agent so it"
+                + " can continue the work seamlessly. Do not continue the conversation and never reply to it:"
+                + " only output the structured summary. Preserve exact file paths, symbols, commands, error strings"
+                + " and URLs. Do not mention the summary process or that context was compacted.";
     }
 
     private record Outcome(String summary, String error) {}

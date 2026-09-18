@@ -219,7 +219,8 @@ class SystemPromptBuilderTest {
                 null,
                 null,
                 null);
-        final var prompt = builder.build("generate in /tmp/foo a frontend landing page for the yupiik fusion project");
+        final var prompt =
+                builder.build("generate in ~/projects/foo a frontend landing page for the yupiik fusion project");
         assertTrue(
                 prompt.contains("Target directory: if the user names an explicit directory"),
                 "the opencode-style target guidance rule should be present so the model follows the named target");

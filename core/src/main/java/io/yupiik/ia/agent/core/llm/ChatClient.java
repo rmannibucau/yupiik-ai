@@ -44,8 +44,11 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 
 /**
  * Blocking facade over the shared {@code llm-client} library. Requests are dispatched through a
@@ -62,6 +65,8 @@ import java.util.function.Consumer;
 @ApplicationScoped
 public class ChatClient implements AutoCloseable {
 
+    private static final java.util.logging.Logger LOGGER = Logger.getLogger(ChatClient.class.getName());
+
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final ProviderManager providerManager;
@@ -71,6 +76,7 @@ public class ChatClient implements AutoCloseable {
     private final boolean ownsHttpClient;
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
+    private final Set<String> budgetLogged = ConcurrentHashMap.newKeySet();
     private final RoutingLlmClient routing;
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
@@ -462,32 +468,39 @@ public class ChatClient implements AutoCloseable {
 
     /**
      * Resolve the effective output budget and, when it differs from the request, return a copy carrying
-     * it. Providers that require {@code max_tokens} (Anthropic) are guaranteed a value; OpenAI flavors
-     * are left untouched to preserve their existing behaviour.
+     * it. Anthropic always requires a {@code max_tokens}, resolved from the request, the configuration,
+     * the provider metadata or the 32000 fallback. OpenAI flavors are only given a value when one is
+     * explicitly set (request, per-model override or provider default): a detected or fallback value is
+     * deliberately not force-sent there so proxies governing their own server-side default keep working.
      */
     private ChatCompletionRequest applyOutputBudget(final ChatCompletionRequest request, final ApiFlavor flavor) {
-        if (flavor != ApiFlavor.ANTHROPIC) {
+        if (flavor == null || flavor == ApiFlavor.AUTO) {
             return request;
         }
         final var provider = target();
         final var model = request.model();
-        final var detectedMaxTokens = contextWindowCache
-                .getMaxTokens(providerManager.currentProviderId(), model)
-                .orElse(null);
+        final var perModel = providerManager.outputTokensOverride(provider, model);
+        final var perProvider = provider.outputTokens();
+        final var hasRequestBudget = request.maxTokens() != null && request.maxTokens() > 0;
+        if (flavor != ApiFlavor.ANTHROPIC && perModel <= 0 && perProvider <= 0 && !hasRequestBudget) {
+            return request;
+        }
         Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         if (contextWindow == null) {
             contextWindow = contextWindowCache
                     .get(providerManager.currentProviderId(), model)
                     .orElse(null);
         }
-        final var budget = OutputBudgetResolver.resolve(
-                request.maxTokens(),
-                providerManager.outputTokensOverride(provider, model),
-                provider.outputTokens(),
-                detectedMaxTokens,
-                contextWindow);
+        final var detectedMaxTokens = flavor == ApiFlavor.ANTHROPIC
+                ? contextWindowCache
+                        .getMaxTokens(providerManager.currentProviderId(), model)
+                        .orElse(null)
+                : null;
+        final var decision = OutputBudgetResolver.resolveTracked(
+                request.maxTokens(), perModel, perProvider, detectedMaxTokens, contextWindow);
+        logBudgetOnce(flavor, model, decision);
         final var maxTokens = request.maxTokens();
-        if (maxTokens != null && budget == maxTokens) {
+        if (maxTokens != null && decision.budget() == maxTokens) {
             return request;
         }
         return new ChatCompletionRequest(
@@ -497,9 +510,23 @@ public class ChatClient implements AutoCloseable {
                 request.stream(),
                 request.tools(),
                 request.toolChoice(),
-                budget,
+                decision.budget(),
                 request.reasoningEffort(),
                 request.others());
+    }
+
+    /**
+     * One-shot INFO line per (flavor, provider, model) exposing the resolved output budget and where
+     * it comes from, so a misconfigured budget can be diagnosed without tracing requests.
+     */
+    private void logBudgetOnce(
+            final ApiFlavor flavor, final String model, final OutputBudgetResolver.Decision decision) {
+        final var providerId = providerManager.currentProviderId();
+        if (budgetLogged.add(flavor.name() + '|' + providerId + '|' + model)) {
+            LOGGER.info(() -> "Output budget for " + providerId + '/' + model + " ["
+                    + flavor.name().toLowerCase(java.util.Locale.ROOT) + "]: " + decision.budget()
+                    + " tokens (source: " + decision.source() + ")");
+        }
     }
 
     public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
@@ -662,8 +689,7 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
-        final var effective =
-                effectiveFlavor() == ApiFlavor.ANTHROPIC ? applyOutputBudget(request, ApiFlavor.ANTHROPIC) : request;
+        final var effective = applyOutputBudget(request, effectiveFlavor());
         try {
             if (stream) {
                 final var publisher = LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled));

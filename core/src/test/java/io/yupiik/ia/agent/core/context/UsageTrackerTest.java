@@ -23,6 +23,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
@@ -128,6 +129,69 @@ class UsageTrackerTest {
     void modelsFailureFallsBackToAutoBaseline() {
         modelsStatus = 500;
         assertEquals(ModelsResponse.AUTO_DETECTED_BASELINE, tracker().contextWindow());
+    }
+
+    @Test
+    void effectiveContextFallsBackToRawEstimateWithoutAnchor() {
+        final var tracker = calibratedTracker();
+        final var messages = List.of(Message.user("hello world"));
+        assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
+    }
+
+    @Test
+    void anchorCalibratesTheAppendedEstimateWithRealUsage() {
+        final var tracker = calibratedTracker();
+        tracker.anchor(500, 100);
+        final var messages = List.of(Message.user("a".repeat(400)));
+        final var raw = tracker.estimateContext(messages, 0);
+        // ratio 500/100 = 5 clamped to 2.0
+        assertEquals((int) Math.round(500 + 2.0 * (raw - 100)), tracker.effectiveContext(messages, 0));
+    }
+
+    @Test
+    void anchorRatioIsClampedFromBelowToo() {
+        final var tracker = calibratedTracker();
+        tracker.anchor(25, 100);
+        final var messages = List.of(Message.user("a".repeat(400)));
+        final var raw = tracker.estimateContext(messages, 0);
+        // ratio 25/100 = 0.25 clamped to 0.5
+        assertEquals((int) Math.round(25 + 0.5 * (raw - 100)), tracker.effectiveContext(messages, 0));
+    }
+
+    @Test
+    void shrunkContextFallsBackToTheRawEstimate() {
+        final var tracker = calibratedTracker();
+        tracker.anchor(500, 100);
+        final var messages = List.of(Message.user("hi"));
+        assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
+    }
+
+    @Test
+    void nonPositiveAnchorIsIgnoredAndResetClearsIt() {
+        final var tracker = calibratedTracker();
+        final var messages = List.of(Message.user("a".repeat(400)));
+        tracker.anchor(0, 100);
+        assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
+        tracker.anchor(500, 100);
+        tracker.reset();
+        assertEquals(tracker.estimateContext(messages, 0), tracker.effectiveContext(messages, 0));
+    }
+
+    @Test
+    void usableWindowReservesCompletionHeadroom() {
+        assertEquals(80_000, calibratedTracker().usableWindow());
+        final var small =
+                new UsageTracker(new ProviderManager(configuration(4_096), mapper), null, null, Clock.systemUTC());
+        assertEquals(3_072, small.usableWindow());
+    }
+
+    @Test
+    void contextPercentIsComputedAgainstTheUsableWindow() {
+        assertEquals(10.0, calibratedTracker().contextPercent(8_000), 0.001);
+    }
+
+    private UsageTracker calibratedTracker() {
+        return new UsageTracker(new ProviderManager(configuration(100_000), mapper), null, null, Clock.systemUTC());
     }
 
     private UsageTracker tracker() {

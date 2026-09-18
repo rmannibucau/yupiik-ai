@@ -25,13 +25,35 @@ public record PruningConfiguration(
                 documentation = "Automatically prune the context (cheaper than compaction, applied first).")
         boolean enabled,
 
-        @Property(defaultValue = "65", documentation = "Context window usage percentage triggering the pruning.")
+        @Property(defaultValue = "65", documentation = "Usable context window usage percentage triggering the pruning.")
         int thresholdPercent,
 
-        @Property(defaultValue = "6", documentation = "Number of most recent messages never touched by the pruning.")
+        @Property(
+                defaultValue = "6",
+                documentation =
+                        "Minimum number of most recent messages never touched by the pruning (floor: the protected zone extends to whole conversation turns).")
         int keepRecent,
 
         @Property(
+                defaultValue = "2",
+                documentation =
+                        "Most recent conversation turns (from a user prompt to the next one) never touched by the pruning.")
+        int protectTurns,
+
+        @Property(
+                defaultValue = "40000",
+                documentation =
+                        "Estimated tokens of the most recent tool outputs protected from pruning, measured backwards from the protected turn boundary.")
+        int protectRecentTokens,
+
+        @Property(
+                defaultValue = "20000",
+                documentation =
+                        "Minimum estimated tokens of old tool outputs required before pruning rewrites anything (avoids churn on small gains).")
+        int minPruneTokens,
+
+        @Property(
                 defaultValue = "80",
-                documentation = "Maximum characters kept for a pruned tool output (head and tail).")
+                documentation =
+                        "Character cap (head and tail) used by the local truncation fallback applied to old messages when the compaction summarizer fails.")
         int toolOutputMaxChars) {}

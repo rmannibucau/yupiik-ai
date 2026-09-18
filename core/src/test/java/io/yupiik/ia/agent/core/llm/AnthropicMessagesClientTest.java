@@ -28,6 +28,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Exercises the Anthropic wire format through the routed {@link ChatClient} (provider configured
@@ -45,6 +47,10 @@ import org.junit.jupiter.api.Test;
 class AnthropicMessagesClientTest {
     private HttpServer server;
     private ChatClient client;
+
+    @TempDir
+    Path storageHome;
+
     private final AtomicReference<String> reqHeaders = new AtomicReference<>();
     private final AtomicReference<String> reqBody = new AtomicReference<>();
     private final CopyOnWriteArrayList<String> streamTexts = new CopyOnWriteArrayList<>();
@@ -75,7 +81,7 @@ class AnthropicMessagesClientTest {
 
     private CodingAgentConfiguration configuration() {
         return TestConfigs.codingAgent(Map.ofEntries(
-                Map.entry("yca.storageHome", "/tmp/yca-test"),
+                Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
                 Map.entry("yca.provider.providers.0.id", "default"),
                 Map.entry("yca.provider.providers.0.baseUrl", base()),

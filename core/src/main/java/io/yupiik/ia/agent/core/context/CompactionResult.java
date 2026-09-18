@@ -36,7 +36,9 @@ public record CompactionResult(List<Message> messages, Mode mode, String error) 
         /** The LLM summarizer produced the reduced context. */
         SUMMARY,
         /** The summarizer failed and a deterministic local truncation ran. */
-        TRUNCATE
+        TRUNCATE,
+        /** Old tool outputs were cleared locally (no LLM call). */
+        CLEARED
     }
 
     public boolean changed() {

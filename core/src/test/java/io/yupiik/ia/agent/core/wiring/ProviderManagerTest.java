@@ -21,12 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class ProviderManagerTest {
+
+    @TempDir
+    static Path storageHome;
 
     private static ProviderManager manager(final Map<String, String> overrides) {
         final CodingAgentConfiguration cfg = TestConfigs.codingAgent(overrides);
@@ -35,7 +40,7 @@ class ProviderManagerTest {
 
     private static ProviderManager twoProviders() {
         return manager(Map.ofEntries(
-                Map.entry("yca.storageHome", "/tmp/yca-test"),
+                Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "2"),
                 Map.entry("yca.provider.providers.0.id", "p0"),
                 Map.entry("yca.provider.providers.0.model", "fallback-0"),

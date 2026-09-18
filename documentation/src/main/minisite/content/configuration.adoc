@@ -18,7 +18,7 @@ Configuration is resolved from, highest priority first:
 
 The `provider` group (`yca.provider.*`) supports multiple providers. Each entry
 has an `id` referenced as `$<id>/<model>` anywhere a model is expected (main
-model, `model.compact`, `model.prune`, code graph enrichment).
+model, `model.compact`, code graph enrichment).
 `yca.provider.defaultProvider` selects the active entry (blank falls back to the
 first, then to the implicit `default` provider). A provider's optional
 `providerSpecificOptions` JSON object is merged into every API call payload for
@@ -34,7 +34,9 @@ token count; when zero or negative (the default) it is auto-detected from the
 provider `/v1/models` vendor extensions, cached one day per provider and model,
 falling back to 128000 when nothing is found. Detected values are totals (prompt
 + completion combined); the pruning and compaction thresholds (`yca.pruning.*`,
-`yca.compaction.*`) keep headroom for completions.
+`yca.compaction.*`) are computed against that window minus an output headroom of
+`min(20000, window / 4)` tokens. Context management behavior is detailed in
+xref:features/context.adoc[Context management].
 
 == Global configuration
 

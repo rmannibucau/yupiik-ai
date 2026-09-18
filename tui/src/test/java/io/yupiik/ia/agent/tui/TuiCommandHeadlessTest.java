@@ -142,7 +142,7 @@ class TuiCommandHeadlessTest {
                 if (sessionCount >= 1) {
                     break;
                 }
-                Thread.sleep(25);
+                java.util.concurrent.locks.LockSupport.parkNanos(25_000_000L);
             }
             assertTrue(sessionCount >= 1, "expected a session file under " + sessions);
             assertTrue(
@@ -205,20 +205,17 @@ class TuiCommandHeadlessTest {
         final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         while (tuiRef.get() == null) {
             assertTrue(System.currentTimeMillis() < deadline, "tui runner was not created in time");
-            Thread.sleep(20);
+            backend.awaitFrame(100);
         }
     }
 
     private void awaitText(final String expected) throws InterruptedException {
         final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
-        String screen = "";
-        while (System.currentTimeMillis() < deadline) {
+        var screen = backend.text();
+        while (!screen.contains(expected) && System.currentTimeMillis() < deadline) {
+            backend.awaitFrame(250);
             screen = backend.text();
-            if (screen.contains(expected)) {
-                return;
-            }
-            Thread.sleep(25);
         }
-        assertTrue(false, "expected screen to contain '" + expected + "' but was:\n" + screen);
+        assertTrue(screen.contains(expected), "expected screen to contain '" + expected + "' but was:\n" + screen);
     }
 }
