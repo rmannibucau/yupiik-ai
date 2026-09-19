@@ -1,0 +1,334 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.shell;
+
+import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.cli.CliVerbosity;
+import io.yupiik.ia.agent.core.cli.MarkdownColorizer;
+import io.yupiik.ia.agent.core.cli.Spinner;
+import io.yupiik.ia.agent.core.cli.StreamTextBuffer;
+import io.yupiik.ia.agent.core.cli.Symbols;
+import io.yupiik.ia.agent.core.cli.ToolPresenter;
+import io.yupiik.ia.agent.core.todo.TodoItem;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/**
+ * ANSI terminal frontend shared by the {@code cli} command: streams the answer
+ * on stdout through a line colorizer, renders tool activity and notices on
+ * stderr, and drives a spinner while the agent is busy. Conversation text is
+ * printed incrementally; tool output presentation follows the configured
+ * {@link CliVerbosity}.
+ */
+public class AnsiShellFrontend implements ShellFrontend {
+    private static final int DIFF_MAX_LINES = 5;
+
+    private final MarkdownColorizer colorizer;
+    private final Symbols symbols;
+    private final ToolPresenter presenter;
+    private final CliVerbosity verbosity;
+    private final boolean tty;
+    private final StreamTextBuffer textBuffer;
+    private final TurnStats stats = new TurnStats();
+
+    private volatile boolean showThinking;
+    private volatile boolean showToolOutput;
+    private volatile boolean toolStreamed;
+    private Spinner spinner;
+
+    public AnsiShellFrontend(
+            final MarkdownColorizer colorizer,
+            final Symbols symbols,
+            final ToolPresenter presenter,
+            final CliVerbosity verbosity,
+            final boolean tty,
+            final boolean showThinking,
+            final boolean showToolOutput) {
+        this.colorizer = colorizer;
+        this.symbols = symbols;
+        this.presenter = presenter;
+        this.verbosity = verbosity;
+        this.tty = tty;
+        this.showThinking = showThinking;
+        this.showToolOutput = showToolOutput;
+        this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
+    }
+
+    public TurnStats stats() {
+        return stats;
+    }
+
+    public MarkdownColorizer colorizer() {
+        return colorizer;
+    }
+
+    public Symbols symbols() {
+        return symbols;
+    }
+
+    public boolean showThinking() {
+        return showThinking;
+    }
+
+    public boolean showToolOutput() {
+        return showToolOutput;
+    }
+
+    @Override
+    public void showThinking(final boolean value) {
+        this.showThinking = value;
+    }
+
+    @Override
+    public void showToolOutput(final boolean value) {
+        this.showToolOutput = value;
+    }
+
+    @Override
+    public void status(final String message) {
+        stopSpinner();
+        System.err.println(MarkdownColorizer.status(symbols.infoMarker() + " " + message));
+    }
+
+    @Override
+    public void notice(final AgentEvent.Notice.Level level, final String message) {
+        stopSpinner();
+        final var marker =
+                switch (level) {
+                    case ERROR -> symbols.errorMarker();
+                    case WARN -> symbols.warningMarker();
+                    case INFO -> symbols.infoMarker();
+                };
+        System.err.println(MarkdownColorizer.status(marker + " " + message));
+    }
+
+    @Override
+    public void transcript(final String markdown) {
+        print(colorize(markdown));
+    }
+
+    @Override
+    public void error(final String message) {
+        stopSpinner();
+        System.err.println(MarkdownColorizer.error("[error] " + message));
+    }
+
+    @Override
+    public void activity(final String label) {
+        beginSpinner(label);
+    }
+
+    @Override
+    public void idle() {
+        stopSpinner();
+    }
+
+    /** Renders a markdown block on stdout, colorizing each line when enabled. */
+    private String colorize(final String markdown) {
+        final var lines = markdown.split("\n", -1);
+        final var sb = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) {
+                sb.append('\n');
+            }
+            sb.append(colorizer.colorizeLine(lines[i]));
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Prepares a new turn: resets per-turn stats and the streaming buffer,
+     * stops any leftover spinner and starts the "thinking" one.
+     */
+    @Override
+    public void beginTurn() {
+        stats.beginTurn();
+        textBuffer.reset();
+        stopSpinner();
+        beginSpinner("thinking");
+    }
+
+    /**
+     * Finalizes a turn: stops the spinner, flushes the streamed answer buffer
+     * to stdout and flushes both streams.
+     */
+    @Override
+    public void endTurn() {
+        stopSpinner();
+        print(textBuffer.flush());
+        System.out.flush();
+        System.err.flush();
+    }
+
+    @Override
+    public void onEvent(final AgentEvent event) {
+        if (event instanceof AgentEvent.TextDelta(String delta)) {
+            stopSpinner();
+            print(textBuffer.append(delta));
+        } else if (event instanceof AgentEvent.TextReset) {
+            textBuffer.reset();
+        } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
+            if (showThinking) {
+                // the reasoning stream is part of the answer flow: print it dimmed on stderr so
+                // /thinking show visibly works in every verbosity, not only in raw mode
+                stopSpinner();
+                System.err.print(MarkdownColorizer.thinking(delta));
+                System.err.flush();
+            } else {
+                beginSpinner("thinking");
+            }
+        } else if (event instanceof final AgentEvent.ToolStarted t) {
+            stopSpinner();
+            toolStreamed = false;
+            onToolStarted(t);
+        } else if (event instanceof final AgentEvent.ToolStream t) {
+            toolStreamed = true;
+            if (verbosity == CliVerbosity.RAW) {
+                System.err.print(t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n");
+            } else if (verbosity == CliVerbosity.VERBOSE) {
+                System.err.print(MarkdownColorizer.dim(t.fragment()));
+            }
+        } else if (event instanceof final AgentEvent.ToolFinished t) {
+            stats.incToolsRun();
+            stopSpinner();
+            if (showToolOutput) {
+                onToolFinished(t);
+            }
+            beginSpinner("thinking");
+        } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
+            stopSpinner();
+            System.err.println(MarkdownColorizer.status(
+                    symbols.infoMarker() + "context " + kind + " applied (" + mode.toLowerCase(Locale.ROOT) + ")"));
+        } else if (event instanceof AgentEvent.Notice(var level, String message, var finishReason)) {
+            notice(level, message);
+        } else if (event instanceof AgentEvent.Status(String message)) {
+            status(message);
+        } else if (event instanceof AgentEvent.Error(String message)) {
+            error(message);
+        } else if (event instanceof final AgentEvent.UsageUpdated u) {
+            stats.recordUsage(u);
+        } else if (event instanceof final AgentEvent.TurnMetrics tm) {
+            stats.recordTurnMetrics(tm);
+        }
+    }
+
+    private void onToolStarted(final AgentEvent.ToolStarted t) {
+        if (!showToolOutput) {
+            return;
+        }
+        if (verbosity == CliVerbosity.RAW) {
+            System.err.println(MarkdownColorizer.status("[tool] " + t.name() + " " + t.args()));
+            return;
+        }
+        System.err.println(MarkdownColorizer.bold(symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+        if (verbosity == CliVerbosity.COMPACT && t.name().equals("bash")) {
+            beginSpinner("running " + presenter.summarize(t.name(), t.args()));
+        }
+    }
+
+    private void onToolFinished(final AgentEvent.ToolFinished t) {
+        stopSpinner();
+        if (verbosity == CliVerbosity.RAW) {
+            if (!t.success() && t.output() != null && !t.output().isBlank()) {
+                System.err.println(MarkdownColorizer.error(t.output()));
+            }
+            return;
+        }
+        final var indent = "  ";
+        final var result = presenter.result(t.name(), t.output(), t.success());
+        System.err.println(MarkdownColorizer.dim(indent + symbols.resultPrefix())
+                + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
+        if (verbosity == CliVerbosity.VERBOSE) {
+            // show the full result for tools that did not stream their output live (e.g. bash streams,
+            // most other tools only surface their output through ToolFinished)
+            if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
+                for (final var line : t.output().stripTrailing().split("\n")) {
+                    System.err.println(MarkdownColorizer.dim("  " + line));
+                }
+            }
+        }
+        if (verbosity == CliVerbosity.COMPACT) {
+            for (final var line : presenter.diff(t.name(), null, DIFF_MAX_LINES)) {
+                System.err.println(indent + colorizeDiff(line));
+            }
+        }
+    }
+
+    private String colorizeDiff(final String line) {
+        final var marker = line.startsWith(symbols.diffDel())
+                ? symbols.diffDel()
+                : line.startsWith(symbols.diffAdd()) ? symbols.diffAdd() : null;
+        if (marker == null) {
+            return MarkdownColorizer.dim(line);
+        }
+        final var rest = line.substring(marker.length());
+        return (marker.equals(symbols.diffDel())
+                ? MarkdownColorizer.diffDel(marker + rest)
+                : MarkdownColorizer.diffAdd(marker + rest));
+    }
+
+    /**
+     * Colored, current-state rendering of the todo list: green check for
+     * completed, yellow arrow for in-progress, dim dot for pending, plus a
+     * done/total progress line.
+     */
+    public List<String> renderTodos(final List<TodoItem> todos) {
+        final var out = new ArrayList<String>();
+        if (todos.isEmpty()) {
+            out.add(MarkdownColorizer.status("(no todos)"));
+            return out;
+        }
+        var done = 0;
+        for (final var item : todos) {
+            switch (item.status() == null ? "" : item.status()) {
+                case "in_progress" -> out.add(MarkdownColorizer.warning(symbols.todoInProgress() + item.content()));
+                case "completed" -> {
+                    out.add(MarkdownColorizer.diffAdd(symbols.todoCompleted() + item.content()));
+                    done++;
+                }
+                default -> out.add(MarkdownColorizer.dim(symbols.todoPending() + item.content()));
+            }
+        }
+        out.add(MarkdownColorizer.status(done + "/" + todos.size() + " done"));
+        return out;
+    }
+
+    /**
+     * Starts the spinner when none is running; a thinking stream can call this
+     * once per token, so reusing the active spinner avoids leaking one thread
+     * (and one elapsed timer) per delta.
+     */
+    private void beginSpinner(final String label) {
+        if (!tty || spinner != null) {
+            return;
+        }
+        spinner = new Spinner(symbols, System.err, tty);
+        spinner.start(label);
+    }
+
+    private void stopSpinner() {
+        if (spinner != null) {
+            spinner.stop();
+            spinner = null;
+        }
+    }
+
+    private void print(final String text) {
+        System.out.print(text);
+        System.out.flush();
+    }
+}
