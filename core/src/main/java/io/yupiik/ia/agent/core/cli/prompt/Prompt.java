@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.cli.prompt;
 
 import java.io.IOException;
+import java.util.Optional;
 
 /**
  * Reads a line from the user terminal. The base implementation is a plain
@@ -30,11 +31,11 @@ public interface Prompt {
     /**
      * @param prompt text to display before reading, may be blank.
      * @return the line entered by the user (without its line terminator) or
-     *         {@code null} when the input reaches its end (Ctrl-D).
+     *         empty when the input reaches its end (Ctrl-D).
      * @throws PromptInterruptException when the read is interrupted (Ctrl-C).
      * @throws IOException              when the underlying stream fails.
      */
-    String readLine(String prompt) throws IOException;
+    Optional<String> readLine(String prompt) throws IOException;
 
     /**
      * @return {@code true} when the prompt supports rich line edition

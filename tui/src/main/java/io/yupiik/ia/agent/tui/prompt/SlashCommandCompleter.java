@@ -17,13 +17,12 @@ package io.yupiik.ia.agent.tui.prompt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
-import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
-import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.tui.CompletionEngine;
@@ -36,8 +35,8 @@ import org.jline.reader.ParsedLine;
 
 /**
  * JLine {@link Completer} for the plain {@code cli} REPL: completes the slash
- * command names (from {@link ReplSlashCommands}) and their arguments (models,
- * providers, agents, sessions, tools, options, paths) by reusing the TUI
+ * command names (from the shared {@link SlashRegistry}) and their arguments
+ * (models, providers, agents, sessions, tools, options, paths) by reusing the
  * {@link CompletionEngine}. Registered on the {@link LineReader} produced by
  * {@link JLineProducer}.
  */
@@ -46,17 +45,21 @@ public class SlashCommandCompleter implements Completer {
     private final List<String> slashNames;
     private final CompletionEngine engine;
 
+    protected SlashCommandCompleter() {
+        this.slashNames = null;
+        this.engine = null;
+    }
+
     public SlashCommandCompleter(
-            final ReplSlashCommands slashCommands,
+            final SlashRegistry registry,
             final ChatClient chatClient,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
             final SessionStore sessionStore,
             final McpManager mcpManager) {
-        this.slashNames = slashCommands == null
-                ? List.of()
-                : slashCommands.commands().stream().map(SlashCommandSpec::name).toList();
+        this.slashNames = registry.names();
         this.engine = new CompletionEngine(
+                registry,
                 () -> modelsOf(chatClient),
                 () -> providersOf(providerManager),
                 () -> agentsOf(agentProvider),

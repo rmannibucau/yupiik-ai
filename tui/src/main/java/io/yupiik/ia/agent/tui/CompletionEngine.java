@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,38 +27,12 @@ import java.util.function.Supplier;
 
 /**
  * Completion engine for the prompt line: slash commands, per-command
- * parameter completers, @agent prefixes and filesystem paths. Pure and
- * terminal-free so it can be unit tested; all dynamic value sources
- * (models, providers, agents, sessions, tools) are supplied by the TUI.
+ * parameter completers, @agent prefixes and filesystem paths. Command names
+ * and argument kinds come from the shared {@link SlashRegistry}; all dynamic
+ * value sources (models, providers, agents, sessions, tools) are supplied by
+ * the shell. Pure and terminal-free so it can be unit tested.
  */
 public final class CompletionEngine {
-    private static final List<String> SLASH_NAMES = List.of(
-            "/help",
-            "/shortcuts",
-            "/new",
-            "/resume",
-            "/compact",
-            "/model",
-            "/provider",
-            "/mode",
-            "/editplan",
-            "/memory",
-            "/context",
-            "/permissions",
-            "/thinking",
-            "/tool-output",
-            "/tools",
-            "/agent",
-            "/theme",
-            "/structural-code-graph",
-            "/mcp",
-            "/clear",
-            "/quit",
-            "/exit",
-            "/session-id",
-            "/session-flush",
-            "/session-housekeeping");
-
     /** A completion candidate: the range of text to replace and the matches. */
     public record Suggestion(List<String> items, int replaceStart, int replaceEnd, String label) {
         public boolean empty() {
@@ -69,6 +44,7 @@ public final class CompletionEngine {
         }
     }
 
+    private final SlashRegistry registry;
     private final Supplier<List<String>> models;
     private final Supplier<List<String>> providers;
     private final Supplier<List<String>> agents;
@@ -77,12 +53,14 @@ public final class CompletionEngine {
     private final Supplier<List<String>> agentNames;
 
     public CompletionEngine(
+            final SlashRegistry registry,
             final Supplier<List<String>> models,
             final Supplier<List<String>> providers,
             final Supplier<List<String>> agents,
             final Supplier<List<String>> sessions,
             final Supplier<List<String>> tools,
             final Supplier<List<String>> agentNames) {
+        this.registry = registry;
         this.models = orEmpty(models);
         this.providers = orEmpty(providers);
         this.agents = orEmpty(agents);
@@ -125,7 +103,7 @@ public final class CompletionEngine {
         // no text before the current token means we are still typing the command itself
         if (beforeRaw.isBlank()) {
             if (text.startsWith("/")) {
-                return complete(text.substring(0, cursor), 0, SLASH_NAMES, "commands");
+                return complete(text.substring(0, cursor), 0, registry.names(), "commands");
             }
             return Suggestion.none();
         }
@@ -134,20 +112,20 @@ public final class CompletionEngine {
             return Suggestion.none();
         }
         final var command = firstToken.substring(1);
-        return switch (command) {
-            case "model" -> complete(prefixInner, tokenStart, models.get(), "model");
-            case "provider" -> complete(prefixInner, tokenStart, providers.get(), "provider");
-            case "agent" -> complete(prefixInner, tokenStart, agents.get(), "agent");
-            case "resume" -> complete(prefixInner, tokenStart, sessions.get(), "session");
-            case "tools" -> complete(prefixInner, tokenStart, tools.get(), "tool");
-            case "mode" -> suggestionsWithHint("build", "plan", prefixInner, tokenStart);
-            case "permissions" -> suggestionsWithHint("all", "none", "show", prefixInner, tokenStart);
-            case "thinking", "tool-output" -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
-            case "context", "editplan" -> {
+        return switch (registry.completionFor(command)) {
+            case NONE -> Suggestion.none();
+            case MODELS -> complete(prefixInner, tokenStart, models.get(), "model");
+            case PROVIDERS -> complete(prefixInner, tokenStart, providers.get(), "provider");
+            case AGENTS -> complete(prefixInner, tokenStart, agents.get(), "agent");
+            case SESSIONS -> complete(prefixInner, tokenStart, sessions.get(), "session");
+            case TOOLS -> complete(prefixInner, tokenStart, tools.get(), "tool");
+            case MODE -> suggestionsWithHint("build", "plan", prefixInner, tokenStart);
+            case PERMISSIONS -> suggestionsWithHint("all", "none", "show", prefixInner, tokenStart);
+            case SHOW_HIDE -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
+            case PATH -> {
                 final var items = pathCandidates(prefixInner);
                 yield items.isEmpty() ? Suggestion.none() : new Suggestion(items, tokenStart, cursor, "path");
             }
-            default -> Suggestion.none();
         };
     }
 

@@ -17,24 +17,82 @@ package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.order.Order;
-import io.yupiik.ia.agent.core.cli.slash.BaseSlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import io.yupiik.ia.agent.core.shell.slash.SlashAction;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import java.util.List;
-import java.util.stream.Stream;
 
+/**
+ * TUI-contributed slash commands: the TUI-only theme switch and the TUI key
+ * cheatsheet. Registered into the shared {@link SlashRegistry} like any other
+ * {@link SlashCommandSet} bean.
+ */
 @ApplicationScoped
 @Order(2000)
-public class TuiSlashCommands extends BaseSlashCommands {
+public class TuiSlashCommands implements SlashCommandSet {
+    private static final String SHORTCUTS = """
+            | key | action |
+            |---|---|
+            | Enter | send the prompt |
+            | Shift/Alt+Enter | newline |
+            | Esc | clear the selection, or interrupt the running agent |
+            | Mouse drag | select text and copy it to the clipboard |
+            | Double/triple-click | select a word / a whole row |
+            | Ctrl+Shift+C | copy the current selection again |
+            | Ctrl+C | quit (or interrupt the running agent, then quit) |
+            | Ctrl+T | toggle all thinking blocks |
+            | Ctrl+Y | toggle all executed tool blocks |
+            | Ctrl+P | toggle todo list |
+            | Ctrl+S | compact the context now |
+            | Ctrl+L | clear the transcript |
+            | PageUp/PageDown | scroll the transcript |
+            | Ctrl+Home / Ctrl+End | jump to the top / bottom of the transcript |
+            | Mouse wheel | scroll the transcript |
+            | Alt+B / Alt+F | move backward/forward one word |
+            | Tab | complete model name or slash command |
+            """;
+
+    private volatile ThemeSwitcher themeSwitcher;
+
+    /** Implemented by the TUI command once the widget stack is up. */
+    public interface ThemeSwitcher {
+        ShellOutcome switchTheme(String arg);
+    }
+
+    public void bind(final ThemeSwitcher switcher) {
+        this.themeSwitcher = switcher;
+    }
+
     @Override
-    public List<SlashCommandSpec> commands() {
-        return Stream.concat(
-                        super.commands().stream(),
-                        Stream.of(new SlashCommandSpec(
+    public String title() {
+        return "TUI commands";
+    }
+
+    @Override
+    public List<SlashCommand> commands() {
+        return List.of(
+                SlashCommand.of(
+                        new SlashCommandSpec(
                                 "/theme",
                                 "(light|dark)",
                                 "switch between light and dark themes (persisted)",
-                                SlashGroup.CONFIG)))
-                .toList();
+                                SlashGroup.CONFIG),
+                        themeAction()),
+                SlashCommand.of(
+                        new SlashCommandSpec("/shortcuts", null, "show the keyboard shortcuts", SlashGroup.OTHER),
+                        SlashAction.sync((arg, env) -> ShellOutcome.transcript("\n\n" + SHORTCUTS))));
+    }
+
+    private SlashAction themeAction() {
+        return (arg, env) -> {
+            final var switcher = themeSwitcher;
+            return switcher == null
+                    ? java.util.concurrent.CompletableFuture.completedStage(
+                            ShellOutcome.status("theme is not available yet"))
+                    : java.util.concurrent.CompletableFuture.completedStage(switcher.switchTheme(arg));
+        };
     }
 }

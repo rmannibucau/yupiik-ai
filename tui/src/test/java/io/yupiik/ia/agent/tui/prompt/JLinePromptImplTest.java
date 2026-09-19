@@ -16,12 +16,12 @@
 package io.yupiik.ia.agent.tui.prompt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import java.lang.reflect.Proxy;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
@@ -47,8 +47,8 @@ class JLinePromptImplTest {
         final var prompt = new JLinePromptImpl(null, reader);
 
         assertTrue(prompt.editing());
-        assertEquals("hello", prompt.readLine("> "));
+        assertEquals(Optional.of("hello"), prompt.readLine("> "));
         assertThrows(PromptInterruptException.class, () -> prompt.readLine("> "));
-        assertNull(prompt.readLine("> "));
+        assertEquals(Optional.empty(), prompt.readLine("> "));
     }
 }

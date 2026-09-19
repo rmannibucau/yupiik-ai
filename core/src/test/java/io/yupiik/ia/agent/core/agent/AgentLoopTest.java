@@ -1045,7 +1045,7 @@ class AgentLoopTest {
         entries.put("yca.storageHome", storageHome.toString());
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
-        entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1");
+        entries.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
         entries.put("yca.provider.providers.0.apiKey", "test-key");
         entries.put("yca.provider.providers.0.model", "test-model");
         entries.put("yca.provider.providers.0.api", "auto");

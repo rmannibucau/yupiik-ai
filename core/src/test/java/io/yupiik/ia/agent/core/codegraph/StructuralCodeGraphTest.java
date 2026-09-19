@@ -788,7 +788,7 @@ class StructuralCodeGraphTest {
         map.put("yca.projectDir", project.toString());
         map.put("yca.provider.providers.length", "1");
         map.put("yca.provider.providers.0.id", "default");
-        map.put("yca.provider.providers.0.baseUrl", "https://api.openai.com/v1");
+        map.put("yca.provider.providers.0.baseUrl", "https://api.openai.com/v1/chat/completions");
         map.put("yca.provider.providers.0.apiKey", "");
         map.put("yca.provider.providers.0.model", "test-model");
         map.put("yca.provider.providers.0.api", "auto");

@@ -20,7 +20,6 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -28,6 +27,10 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.RunShellFrontend;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
+import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.ShellSession;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
@@ -42,30 +45,32 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Logger;
 
 @DefaultScoped
 @Command(name = "run", description = "Run a single headless prompt and print the answer on stdout.")
 public class RunCommand implements Runnable {
+    private static final Logger LOGGER = Logger.getLogger(RunCommand.class.getName());
+
     private final RunConf conf;
     private final AgentLoop agentLoop;
-    private final AgentEventBridge bridge;
+    private final ShellRegistry shellRegistry;
     private final PermissionService permissionService;
     private final UserFeedbackService userFeedbackService;
     private final SessionStore sessionStore;
     private final AgentProvider agentProvider;
-    private volatile boolean toolStreamed;
 
     public RunCommand(
             final RunConf conf,
             final AgentLoop agentLoop,
-            final AgentEventBridge bridge,
+            final ShellRegistry shellRegistry,
             final PermissionService permissionService,
             final UserFeedbackService userFeedbackService,
             final SessionStore sessionStore,
             final AgentProvider agentProvider) {
         this.conf = conf;
         this.agentLoop = agentLoop;
-        this.bridge = bridge;
+        this.shellRegistry = shellRegistry;
         this.permissionService = permissionService;
         this.userFeedbackService = userFeedbackService;
         this.sessionStore = sessionStore;
@@ -140,28 +145,33 @@ public class RunCommand implements Runnable {
         final var started = System.nanoTime();
         final var detailLog = Detail.of(conf.metricsDetailFile());
         final var userCancelled = new AtomicBoolean();
-        bridge.sink(event -> {
-            print(event, conf.showThinking(), conf.showToolOutput());
-            metrics.accept(event, started, detailLog);
-            if (event instanceof final AgentEvent.Error e) {
-                if ("Cancelled".equals(e.message()) && userCancelled.get()) {
-                    return; // explicit user interruption, not a failure
+        final var frontend = new RunShellFrontend(conf.showThinking(), conf.showToolOutput()) {
+            @Override
+            public void onEvent(final AgentEvent event) {
+                super.onEvent(event);
+                metrics.accept(event, started, detailLog);
+                if (event instanceof final AgentEvent.Error e) {
+                    if ("Cancelled".equals(e.message()) && userCancelled.get()) {
+                        return; // explicit user interruption, not a failure
+                    }
+                    failed.set(true);
+                    lastError.set(e.message());
                 }
-                failed.set(true);
-                lastError.set(e.message());
             }
-        });
+        };
+        final var shellEnv = new ShellEnv(frontend, null, new ShellSession(), null);
+        shellRegistry.register(shellEnv);
         if (conf.mode() != null && !conf.mode().isBlank()) {
             permissionService.setMode(AgentMode.fromConfigurationString(conf.mode()));
         }
         permissionService.setGate((title, detail, tool, args) -> {
-            System.err.println("[denied] " + title + " requires an approval in headless mode (" + detail
+            LOGGER.severe(() -> "denied: " + title + " requires an approval in headless mode (" + detail
                     + "); set yca.permissions.mode=yolo to auto allow.");
             return ApprovalGate.Result.DENY;
         });
         userFeedbackService.setGate(questions -> {
-            System.err.println(
-                    "[ask_user] not available in headless mode; provide the required input in your prompt and retry.");
+            LOGGER.warning(
+                    "ask_user is not available in headless mode; provide the required input in your prompt and retry.");
             return null;
         });
         permissionService.setPermitAll(conf.permitAll());
@@ -173,7 +183,7 @@ public class RunCommand implements Runnable {
             agentLoop.run(conf.prompt(), agentName, sessionId, null, installCancelHandler(userCancelled));
         } finally {
             System.out.flush();
-            bridge.sink(null);
+            shellRegistry.unregister(shellEnv);
             permissionService.setGate(null);
             permissionService.setPermitAll(false);
             userFeedbackService.setGate(null);
@@ -205,12 +215,12 @@ public class RunCommand implements Runnable {
                             final var previous = lastInterruptAt[0];
                             lastInterruptAt[0] = now;
                             if (previous > 0 && now - previous <= 2_000L) {
-                                System.err.println("[run] forced exit");
+                                LOGGER.severe("forced exit");
                                 System.exit(130);
                             }
                             cancelled.set(true);
                             userCancelled.set(true);
-                            System.err.println("[run] cancelling the current turn (ctrl-c again to force exit)...");
+                            LOGGER.warning("cancelling the current turn (ctrl-c again to force exit)...");
                         }
                         return null;
                     });
@@ -248,8 +258,7 @@ public class RunCommand implements Runnable {
             Files.writeString(
                     Paths.get(conf.metricsOutputFile()), line + System.lineSeparator(), StandardCharsets.UTF_8);
         } catch (final IOException e) {
-            System.err.println(
-                    "[error] failed to write metrics to " + conf.metricsOutputFile() + ": " + e.getMessage());
+            LOGGER.severe(() -> "failed to write metrics to " + conf.metricsOutputFile() + ": " + e.getMessage());
         }
     }
 
@@ -440,48 +449,6 @@ public class RunCommand implements Runnable {
             } catch (final IOException e) {
                 // ignore
             }
-        }
-    }
-
-    private void print(final AgentEvent event, final boolean showThinking, final boolean showToolOutput) {
-        if (event instanceof final AgentEvent.TextDelta t) {
-            System.out.print(t.delta());
-        } else if (event instanceof final AgentEvent.ThinkingDelta t) {
-            if (showThinking) {
-                System.err.print(t.delta());
-            }
-        } else if (event instanceof final AgentEvent.ToolStarted t) {
-            toolStreamed = false;
-            System.err.println("[tool] " + t.name());
-        } else if (event instanceof final AgentEvent.ToolStream t) {
-            toolStreamed = true;
-            System.err.println("[" + t.name() + "] " + t.fragment());
-        } else if (event instanceof final AgentEvent.ToolFinished t) {
-            if (!t.success()) {
-                System.err.println("[tool failed] " + t.name());
-            } else if (showToolOutput
-                    && !toolStreamed
-                    && t.output() != null
-                    && !t.output().isBlank()) {
-                for (final var line : t.output().stripTrailing().split("\n")) {
-                    System.err.println("[" + t.name() + "] " + line);
-                }
-            }
-        } else if (event instanceof final AgentEvent.Compacted c) {
-            System.err.println(
-                    "[context] " + c.kind() + " applied (" + c.mode().toLowerCase(java.util.Locale.ROOT) + ")");
-        } else if (event instanceof final AgentEvent.Notice n) {
-            final var prefix =
-                    switch (n.level()) {
-                        case ERROR -> "[error]";
-                        case WARN -> "[warning]";
-                        case INFO -> "[yca]";
-                    };
-            System.err.println(prefix + " " + n.message());
-        } else if (event instanceof final AgentEvent.Status s) {
-            System.err.println("[yca] " + s.message());
-        } else if (event instanceof final AgentEvent.Error e) {
-            System.err.println("[error] " + e.message());
         }
     }
 }

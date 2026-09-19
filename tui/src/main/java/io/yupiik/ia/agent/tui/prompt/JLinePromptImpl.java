@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import java.io.IOException;
+import java.util.Optional;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
@@ -50,13 +51,13 @@ public class JLinePromptImpl implements Prompt {
     }
 
     @Override
-    public String readLine(final String prompt) throws IOException {
+    public Optional<String> readLine(final String prompt) throws IOException {
         try {
-            return reader.readLine(prompt);
+            return Optional.ofNullable(reader.readLine(prompt));
         } catch (final UserInterruptException e) {
             throw new PromptInterruptException();
         } catch (final EndOfFileException e) {
-            return null;
+            return Optional.empty();
         }
     }
 

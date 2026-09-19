@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.cli.StreamTextBuffer;
 import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.todo.TodoItem;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -49,6 +50,8 @@ public class AnsiShellFrontend implements ShellFrontend {
     private volatile boolean showToolOutput;
     private volatile boolean toolStreamed;
     private Spinner spinner;
+    private final ArrayDeque<AgentEvent> pendingEvents = new ArrayDeque<>();
+    private boolean suspended;
 
     public AnsiShellFrontend(
             final MarkdownColorizer colorizer,
@@ -137,6 +140,29 @@ public class AnsiShellFrontend implements ShellFrontend {
         stopSpinner();
     }
 
+    /**
+     * Stops rendering events until {@link #resumeOutput()}: keeps interaction
+     * boxes (questions, approvals) visible instead of having spinner frames
+     * and thinking output bury them.
+     */
+    public void suspendOutput() {
+        synchronized (pendingEvents) {
+            suspended = true;
+        }
+        stopSpinner();
+    }
+
+    /** Resumes rendering and replays the events buffered while suspended. */
+    public void resumeOutput() {
+        final List<AgentEvent> queued;
+        synchronized (pendingEvents) {
+            queued = List.copyOf(pendingEvents);
+            pendingEvents.clear();
+            suspended = false;
+        }
+        queued.forEach(this::onEvent);
+    }
+
     /** Renders a markdown block on stdout, colorizing each line when enabled. */
     private String colorize(final String markdown) {
         final var lines = markdown.split("\n", -1);
@@ -159,7 +185,9 @@ public class AnsiShellFrontend implements ShellFrontend {
         stats.beginTurn();
         textBuffer.reset();
         stopSpinner();
-        beginSpinner("thinking");
+        if (!showThinking) {
+            beginSpinner("thinking");
+        }
     }
 
     /**
@@ -176,6 +204,12 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     @Override
     public void onEvent(final AgentEvent event) {
+        synchronized (pendingEvents) {
+            if (suspended) {
+                pendingEvents.add(event);
+                return;
+            }
+        }
         if (event instanceof AgentEvent.TextDelta(String delta)) {
             stopSpinner();
             print(textBuffer.append(delta));
@@ -208,7 +242,9 @@ public class AnsiShellFrontend implements ShellFrontend {
             if (showToolOutput) {
                 onToolFinished(t);
             }
-            beginSpinner("thinking");
+            if (!showThinking) {
+                beginSpinner("thinking");
+            }
         } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
             stopSpinner();
             System.err.println(MarkdownColorizer.status(
@@ -305,6 +341,15 @@ public class AnsiShellFrontend implements ShellFrontend {
         }
         out.add(MarkdownColorizer.status(done + "/" + todos.size() + " done"));
         return out;
+    }
+
+    /**
+     * Starts the spinner when none is running; a thinking stream can call this
+     * once per token, so reusing the active spinner avoids leaking one thread
+     * (and one elapsed timer) per delta.
+     */
+    boolean spinnerRunning() {
+        return spinner != null;
     }
 
     /**

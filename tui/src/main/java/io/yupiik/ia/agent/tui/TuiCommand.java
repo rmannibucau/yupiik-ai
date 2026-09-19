@@ -49,7 +49,6 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
@@ -68,6 +67,15 @@ import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
+import io.yupiik.ia.agent.core.shell.ShellFrontend;
+import io.yupiik.ia.agent.core.shell.ShellIO;
+import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -79,11 +87,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import java.util.regex.Pattern;
 
 @DefaultScoped
@@ -95,38 +109,9 @@ public class TuiCommand implements Runnable {
             "Enter | Esc interrupt | drag copy | Ctrl+T | Ctrl+Y | Ctrl+P | Ctrl+S | Ctrl+L | Ctrl+C";
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
-    private static final String SHORTCUTS = """
-            | key | action |
-            |---|---|
-            | Enter | send the prompt |
-            | Shift/Alt+Enter | newline |
-            | Esc | clear the selection, or interrupt the running agent |
-            | Mouse drag | select text and copy it to the clipboard |
-            | Double/triple-click | select a word / a whole row |
-            | Ctrl+Shift+C | copy the current selection again |
-            | Ctrl+C | quit (or interrupt the running agent, then quit) |
-            | Ctrl+T | toggle all thinking blocks |
-            | Ctrl+Y | toggle all executed tool blocks |
-            | Ctrl+P | toggle todo list |
-            | Ctrl+S | compact the context now |
-            | Ctrl+L | clear the transcript |
-            | PageUp/PageDown | scroll the transcript |
-            | Ctrl+Home / Ctrl+End | jump to the top / bottom of the transcript |
-            | Mouse wheel | scroll the transcript |
-            | Alt+B / Alt+F | move backward/forward one word |
-            | Tab | complete model name or slash command |
-            """;
 
     private String help() {
-        final var sb = new StringBuilder("\n\n| command | description |\n|---|---|");
-        for (final var spec : slashCommands.commands()) {
-            sb.append("\n| `")
-                    .append(spec.display())
-                    .append("` | ")
-                    .append(spec.description())
-                    .append(" |");
-        }
-        return sb.toString();
+        return "\n\n" + slashRegistry.helpMarkdown();
     }
 
     private final TuiConf conf;
@@ -134,7 +119,7 @@ public class TuiCommand implements Runnable {
     private final CodingAgentConfiguration configuration;
     private MetricsConfiguration metricsConfig;
     private final AgentLoop agentLoop;
-    private final AgentEventBridge bridge;
+    private final ShellRegistry shellRegistry;
     private final PermissionService permissionService;
     private final UserFeedbackService userFeedbackService;
     private final SessionStore sessionStore;
@@ -147,6 +132,8 @@ public class TuiCommand implements Runnable {
     private final AgentProvider agentProvider;
     private final AgentSessionService agentSessionService;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
+    private final TurnRunner turnRunner;
+    private final InterruptCoordinator interruptor;
     private final TuiTranscriptModel model;
     private final TuiRunnerFactory tuiRunnerFactory;
     private volatile Style thoughtStyle;
@@ -157,6 +144,11 @@ public class TuiCommand implements Runnable {
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
     private final TuiSlashCommands slashCommands;
+    private final SlashRegistry slashRegistry;
+    private final ShellSession session = new ShellSession();
+    private volatile UiState uiState;
+    private volatile TuiRunner uiRunner;
+    private volatile CompletableFuture<Optional<String>> pendingLine;
     private final Clock clock;
     private final SyntaxHighlighter syntaxHighlighter;
 
@@ -169,7 +161,7 @@ public class TuiCommand implements Runnable {
             final TuiConfiguration tuiConfiguration,
             final CodingAgentConfiguration configuration,
             final AgentLoop agentLoop,
-            final AgentEventBridge bridge,
+            final ShellRegistry shellRegistry,
             final PermissionService permissionService,
             final UserFeedbackService userFeedbackService,
             final SessionStore sessionStore,
@@ -182,16 +174,18 @@ public class TuiCommand implements Runnable {
             final AgentProvider agentProvider,
             final AgentSessionService agentSessionService,
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
+            final TurnRunner turnRunner,
             final TuiTranscriptModel model,
             final TuiRunnerFactory tuiRunnerFactory,
             final TuiSlashCommands slashCommands,
+            final SlashRegistry slashRegistry,
             final Clock clock) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
         this.metricsConfig = configuration.metrics();
         this.agentLoop = agentLoop;
-        this.bridge = bridge;
+        this.shellRegistry = shellRegistry;
         this.permissionService = permissionService;
         this.userFeedbackService = userFeedbackService;
         this.sessionStore = sessionStore;
@@ -204,13 +198,17 @@ public class TuiCommand implements Runnable {
         this.agentProvider = agentProvider;
         this.agentSessionService = agentSessionService;
         this.mavenKnowledgeService = mavenKnowledgeService;
+        this.turnRunner = turnRunner;
         this.model = model;
         this.tuiRunnerFactory = tuiRunnerFactory;
         this.slashCommands = slashCommands;
+        this.slashRegistry = slashRegistry;
         this.clock = clock;
+        this.interruptor = new InterruptCoordinator(clock, true);
         this.syntaxHighlighter = new SyntaxHighlighter().maxLineLength(configuration.maxLineLength());
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
         this.completionEngine = new CompletionEngine(
+                slashRegistry,
                 this::completionModels,
                 () -> providerManager == null || providerManager.providers() == null
                         ? List.of()
@@ -351,6 +349,11 @@ public class TuiCommand implements Runnable {
         final var state = new UiState(model, clock);
         state.sessionId = sessionStore.create();
         state.showThinking = conf.showThinking();
+        session.sessionId(state.sessionId).activeAgent(state.activeAgent).showThinking(conf.showThinking());
+        slashCommands.bind(arg -> {
+            final var current = uiState;
+            return current == null ? ShellOutcome.none() : themeOutcome(arg, current);
+        });
         final var transcriptConf = tuiConfiguration.transcript();
         state.model.reset();
         state.model.maxHistoryCharacters(
@@ -359,7 +362,41 @@ public class TuiCommand implements Runnable {
                         : transcriptConf.maxHistoryCharacters());
         try (final var tui = tuiRunnerFactory.create(conf)) {
             state.runner = tui;
-            bridge.sink(event -> tui.runLater(() -> onEvent(event, state)));
+            shellRegistry.register(env(tui, state));
+            final var logger = Logger.getLogger("io.yupiik");
+            final var previousUseParentHandlers = logger.getUseParentHandlers();
+            Handler julFeedback = null;
+            if (logger.getHandlers().length == 0 && previousUseParentHandlers) {
+                logger.setUseParentHandlers(false);
+                julFeedback = new Handler() {
+                    {
+                        setLevel(Level.WARNING);
+                    }
+
+                    @Override
+                    public void publish(final LogRecord record) {
+                        if (record.getLevel().intValue() < Level.WARNING.intValue()) {
+                            return;
+                        }
+                        final var level = record.getLevel();
+                        final var message = record.getMessage();
+                        tui.runLater(() -> {
+                            if (level == Level.SEVERE) {
+                                modelError(state, message);
+                            } else {
+                                state.model.status(message);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void flush() {}
+
+                    @Override
+                    public void close() {}
+                };
+                logger.addHandler(julFeedback);
+            }
             permissionService.setGate(gate(tui, state));
             userFeedbackService.setGate(feedbackGate(tui, state));
             permissionService.setPermitAll(conf.permitAll());
@@ -368,7 +405,11 @@ public class TuiCommand implements Runnable {
                 tui.run((event, runner) -> onKey(event, runner, state), frame -> render(frame, state));
             } finally {
                 awaitInFlight(state);
-                bridge.sink(null);
+                if (julFeedback != null) {
+                    logger.removeHandler(julFeedback);
+                    logger.setUseParentHandlers(previousUseParentHandlers);
+                }
+                shellRegistry.unregister(env(tui, state));
                 permissionService.setGate(null);
                 userFeedbackService.setGate(null);
                 permissionService.setPermitAll(false);
@@ -761,18 +802,15 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isCtrlC()) {
-            if (state.model.busy()) {
-                // while busy: interrupt, and only arm the second press to actually quit
+            if (interruptor.interrupt(state.model.busy()) == InterruptCoordinator.Decision.INTERRUPT) {
                 state.quitArmed = true;
                 state.interrupted = true;
                 waiting(state, "interrupting... press Ctrl+C again to quit", SpinnerStyle.CLOCK);
-                return true;
-            }
-            if (state.quitArmed) {
+            } else {
                 state.quitArmed = false;
+                awaitInFlight(state);
+                runner.quit();
             }
-            awaitInFlight(state);
-            runner.quit();
             return true;
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('t')) {
@@ -969,6 +1007,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void submit(final String text, final TuiRunner runner, final UiState state) {
+        this.uiRunner = runner;
         promptHistory.add(text);
         dismissCompletion(state);
         clearError(state);
@@ -981,9 +1020,6 @@ public class TuiCommand implements Runnable {
             final var n = state.pendingPrompts.size();
             state.model.status("queued prompt (" + n + " pending) - it will run when the agent finishes");
             state.input.clear();
-            return;
-        }
-        if (mavenIndexingBlocks(state)) {
             return;
         }
         if (agentSessionService.isResumeAlias(text)) {
@@ -1014,18 +1050,19 @@ public class TuiCommand implements Runnable {
     }
 
     private void startTurn(final UiState state, final String agentName, final String prompt) {
-        final var history = sessionStore.load(state.sessionId);
-        final var inFlight = new CompletableFuture<Void>();
-        state.inFlight = inFlight;
-        executor.execute(() -> {
-            try {
-                if (prompt == null) {
-                    agentLoop.resume(agentName, state.sessionId, history, () -> state.interrupted);
-                } else {
-                    agentLoop.run(prompt, agentName, state.sessionId, history, () -> state.interrupted);
-                }
-            } finally {
-                inFlight.complete(null);
+        state.inFlight = turnRunner
+                .submit(new TurnRunner.TurnRequest(
+                        env(uiRunner, state),
+                        state.sessionId,
+                        agentName,
+                        prompt,
+                        () -> sessionStore.load(state.sessionId),
+                        () -> state.interrupted))
+                .toCompletableFuture();
+        state.inFlight.thenAccept(ran -> {
+            if (ran == null || !ran) {
+                state.wait = null;
+                state.model.status("maven knowledge index still running - prompt not sent");
             }
         });
     }
@@ -1048,406 +1085,166 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    @FunctionalInterface
-    interface SlashAction {
-        void run(String arg, TuiRunner runner, UiState state);
-    }
-
     private void slash(final String text, final TuiRunner runner, final UiState state) {
+        uiState = state;
         state.model.transcript().append("\n\n---\n\n**You**\n\n`").append(text).append("`\n");
-        final var value = text.substring(1);
-        final var parts = SPLIT_COMMAND.split(value, 2);
-        final var name = parts[0].toLowerCase(Locale.ROOT);
-        final var arg = parts.length > 1 ? parts[1].strip() : "";
-        final var action = tuiSlashHandlers().get(name);
-        if (action == null) {
-            state.model.status("unknown command: " + text + " (/help)");
+        // the TUI keeps its modal-driven plan editor (Enter/Esc handling needs the widget stack)
+        final var parts = SPLIT_COMMAND.split(text.substring(1), 2);
+        if ("editplan".equals(parts[0].toLowerCase(Locale.ROOT))) {
+            editPlan(parts.length > 1 ? parts[1].strip() : "", runner, state);
             return;
         }
-        action.run(arg, runner, state);
-    }
-
-    // dispatch table: keys are the bare command names of TuiSlashCommands (SlashCommandSpec.command());
-    // adding a command means adding its spec to the catalog AND its action here (enforced by tests).
-    private Map<String, SlashAction> tuiSlashHandlers() {
-        if (tuiSlashHandlers == null) {
-            tuiSlashHandlers = createTuiSlashHandlers();
-        }
-        return tuiSlashHandlers;
-    }
-
-    private Map<String, SlashAction> tuiSlashHandlers;
-
-    private Map<String, SlashAction> createTuiSlashHandlers() {
-        return Map.ofEntries(
-                Map.entry(
-                        "help", (arg, runner, state) -> state.model.transcript().append(help())),
-                Map.entry(
-                        "shortcuts",
-                        (arg, runner, state) -> state.model.transcript().append(SHORTCUTS)),
-                Map.entry("new", (arg, runner, state) -> {
-                    state.sessionId = sessionStore.create();
-                    state.model.clearConversation();
-                    state.activeAgent = "";
-                    state.model.status("new session " + state.sessionId);
-                }),
-                Map.entry("resume", (arg, runner, state) -> resume(state)),
-                Map.entry("editplan", (arg, runner, state) -> editPlan(arg, runner, state)),
-                Map.entry("compact", (arg, runner, state) -> compact(runner, state)),
-                Map.entry("metrics", (arg, runner, state) -> metricsCommand(arg, state)),
-                Map.entry("snapshot", (arg, runner, state) -> snapshot(arg, state)),
-                Map.entry("session-id", (arg, runner, state) -> sessionIdInfo(state)),
-                Map.entry("session-flush", (arg, runner, state) -> sessionFlush(state)),
-                Map.entry("session-housekeeping", (arg, runner, state) -> sessionHousekeeping(runner, state)),
-                Map.entry("model", (arg, runner, state) -> modelCommand(arg, runner, state)),
-                Map.entry("provider", (arg, runner, state) -> providerCommand(arg, runner, state)),
-                Map.entry("agent", (arg, runner, state) -> agentCommand(arg, runner, state)),
-                Map.entry("memory", (arg, runner, state) -> memoryCommand(state)),
-                Map.entry("context", (arg, runner, state) -> context(arg, state)),
-                Map.entry("tools", (arg, runner, state) -> toolsCommand(arg, runner, state)),
-                Map.entry("structural-code-graph", (arg, runner, state) -> resyncGraph(runner, state)),
-                Map.entry(
-                        "maven-repository-knowledge",
-                        (arg, runner, state) -> mavenRepositoryKnowledge(arg, runner, state)),
-                Map.entry("mcp", (arg, runner, state) -> mcpCommand(arg, runner, state)),
-                Map.entry("theme", (arg, runner, state) -> themeCommand(arg, state)),
-                Map.entry("thinking", (arg, runner, state) -> thinkingCommand(arg, state)),
-                Map.entry("tool-output", (arg, runner, state) -> toolOutputCommand(arg, state)),
-                Map.entry("clear", (arg, runner, state) -> state.model.clearConversation()),
-                Map.entry("quit", (arg, runner, state) -> {
-                    awaitInFlight(state);
-                    runner.quit();
-                }),
-                Map.entry("exit", (arg, runner, state) -> {
-                    awaitInFlight(state);
-                    runner.quit();
-                }),
-                Map.entry("mode", (arg, runner, state) -> mode(arg, runner, state)),
-                Map.entry("permissions", (arg, runner, state) -> permissions(arg, state)));
-    }
-
-    private void memoryCommand(final UiState state) {
-        final var memory = agentSessionService.memory();
-        final var sb = new StringBuilder("\n```text\n");
-        if (memory.global().isBlank() && memory.project().isBlank()) {
-            sb.append("(empty memory)");
-        } else {
-            if (!memory.global().isBlank()) {
-                sb.append("-- global memory --\n").append(memory.global()).append('\n');
-            }
-            if (!memory.project().isBlank()) {
-                sb.append("-- project memory --\n").append(memory.project()).append('\n');
-            }
-        }
-        sb.append("\n```\n");
-        state.model.transcript().append(sb).append('\n');
-    }
-
-    private void themeCommand(final String arg, final UiState state) {
-        final var current = isPaletteLight() ? "light" : "dark";
-        if (arg.isBlank()) {
-            state.model.status("theme: " + current + " (/theme light|dark to switch)");
-            return;
-        }
-        final var next = arg.strip().toLowerCase(java.util.Locale.ROOT);
-        if (!"light".equals(next) && !"dark".equals(next)) {
-            state.model.status("usage: /theme light|dark (current: " + current + ")");
-            return;
-        }
-        applyTheme(next);
-        persistTheme(next);
-        state.model.status("theme: " + next);
-    }
-
-    private void thinkingCommand(final String arg, final UiState state) {
-        if (arg.isBlank()) {
-            state.model.status("thinking blocks " + (state.showThinking ? "shown" : "hidden")
-                    + " (/thinking show|hide to switch)");
-            return;
-        }
-        if (!"show".equalsIgnoreCase(arg) && !"hide".equalsIgnoreCase(arg)) {
-            state.model.status("usage: /thinking show|hide");
-            return;
-        }
-        state.showThinking = arg.equalsIgnoreCase("show");
-        state.model.status("thinking blocks " + (state.showThinking ? "shown" : "hidden"));
-    }
-
-    private void toolOutputCommand(final String arg, final UiState state) {
-        if (arg.isBlank()) {
-            state.model.status("tool blocks " + (state.showToolActions ? "shown" : "hidden")
-                    + " (/tool-output show|hide to switch)");
-            return;
-        }
-        if (!"show".equalsIgnoreCase(arg) && !"hide".equalsIgnoreCase(arg)) {
-            state.model.status("usage: /tool-output show|hide");
-            return;
-        }
-        state.showToolActions = arg.equalsIgnoreCase("show");
-        state.model.status("tool blocks " + (state.showToolActions ? "shown" : "hidden"));
-    }
-
-    private void metricsCommand(final String arg, final UiState state) {
-        final var value = arg == null ? "" : arg.strip().toLowerCase(java.util.Locale.ROOT);
-        if (value.isBlank() || "status".equals(value)) {
-            state.model.status("metrics: showPerTurn=" + metricsConfig.showPerTurn()
-                    + " showSessionTotals=" + metricsConfig.showSessionTotals()
-                    + " displayMode=" + metricsConfig.displayMode());
-            return;
-        }
-        final var parts = value.split("\\s+", 2);
-        final var cmd = parts[0];
-        switch (cmd) {
-            case "show" ->
-                metricsConfig =
-                        new MetricsConfiguration(true, metricsConfig.showSessionTotals(), metricsConfig.displayMode());
-            case "hide" ->
-                metricsConfig =
-                        new MetricsConfiguration(false, metricsConfig.showSessionTotals(), metricsConfig.displayMode());
-            case "compact" ->
-                metricsConfig = new MetricsConfiguration(
-                        metricsConfig.showPerTurn(), metricsConfig.showSessionTotals(), MetricsDisplayMode.COMPACT);
-            case "full" ->
-                metricsConfig = new MetricsConfiguration(
-                        metricsConfig.showPerTurn(), metricsConfig.showSessionTotals(), MetricsDisplayMode.FULL);
-            case "session" -> {
-                if (parts.length > 1) {
-                    metricsConfig = new MetricsConfiguration(
-                            metricsConfig.showPerTurn(),
-                            "on".equalsIgnoreCase(parts[1].strip()),
-                            metricsConfig.displayMode());
-                } else {
-                    state.model.status("usage: /metrics session on|off");
-                }
-            }
-            default -> state.model.status("usage: /metrics [show|hide|compact|full|session on|off|status]");
-        }
-    }
-
-    private boolean isPaletteLight() {
-        return "#1a1a1a".equalsIgnoreCase(palette.text());
-    }
-
-    private void resume(final UiState state) {
-        final var sessions = sessionStore.list().stream().limit(MAX_RESUME_LIST).toList();
-        if (sessions.isEmpty()) {
-            state.model.status("no session to resume");
-            return;
-        }
-        final var labels = sessions.stream()
-                .map(s -> s.id() + "  (" + formatBytes(s.sizeBytes()) + ")"
-                        + (sessionStore.summary(s.id()).isBlank()
-                                ? ""
-                                : " -- " + cap(sessionStore.summary(s.id()), RESUME_SUMMARY_WIDTH)))
-                .collect(java.util.stream.Collectors.toList());
-        openPicker(
-                state,
-                "resume session",
-                labels,
-                selected -> {
-                    final var id = selected.split("\\s+")[0];
-                    resumeSession(state, id);
-                },
-                () -> state.model.status("resume cancelled"));
-    }
-
-    private void resumeSession(final UiState state, final String id) {
-        state.sessionId = id;
-        state.model.clearConversation();
-        for (final var message : sessionStore.load(id)) {
-            switch (message.role()) {
-                case "user" ->
-                    state.model
-                            .transcript()
-                            .append("\n\n---\n\n**You**\n\n")
-                            .append(message.content())
-                            .append('\n');
-                case "assistant" ->
-                    state.model
-                            .transcript()
-                            .append("\n\n---\n\n**Assistant**\n\n")
-                            .append(message.content())
-                            .append('\n');
-                case "tool" ->
-                    state.model
-                            .transcript()
-                            .append("\n\n*tool `")
-                            .append(message.name())
-                            .append("` -> ")
-                            .append(TuiInputSupport.firstLine(String.valueOf(message.content())))
-                            .append("*\n");
-                default -> {}
-            }
-        }
-        state.model.status("resumed session " + id);
-    }
-
-    private void context(final String arg, final UiState state) {
-        try {
-            final var dump = agentSessionService.context(state.sessionId);
-            final var sb = new StringBuilder();
-            sb.append("**System prompt**\n\n```text\n")
-                    .append(dump.systemPrompt())
-                    .append("\n```\n");
-            sb.append("\n**Session ")
-                    .append(dump.sessionId())
-                    .append(" (")
-                    .append(dump.messages().size())
-                    .append(" messages)**\n\n");
-            for (final var message : dump.messages()) {
-                sb.append("- **")
-                        .append(message.role())
-                        .append("**: ")
-                        .append(TuiInputSupport.firstLine(message.content()))
-                        .append('\n');
-            }
-            final var context = sb.toString();
-            state.model.transcript().append("\n").append(context).append('\n');
-            if (arg != null && !arg.isBlank()) {
-                final var target = Path.of(arg).toAbsolutePath();
-                Files.createDirectories(target.getParent() == null ? Path.of(".") : target.getParent());
-                Files.writeString(target, context);
-                state.model.status("context written to " + target);
-            } else {
-                state.model.status("context shown (" + dump.messages().size() + " messages)");
-            }
-            state.model.scrollBack(0);
-        } catch (final IOException e) {
-            state.model.status("context failed: " + e.getMessage());
-        }
-    }
-
-    private void permissions(final String value, final UiState state) {
-        final var v = value == null ? "" : value.strip();
-        if (v.equals("show") || v.equals("list")) {
-            final var info = agentSessionService.permissionsInfo();
-            final var text = new StringBuilder("permissions status (session-scoped)\n")
-                    .append("permit all: ")
-                    .append(info.permitAll() ? "on" : "off")
-                    .append('\n')
-                    .append("agent mode: ")
-                    .append(info.agentMode().name().toLowerCase(Locale.ROOT))
-                    .append(", permission mode: ")
-                    .append(
-                            info.permissionMode() == null
-                                    ? "?"
-                                    : info.permissionMode().toString().toLowerCase(Locale.ROOT))
-                    .append('\n');
-            if (info.sessionGrants().isEmpty()) {
-                text.append("session grants: none (use 'a' in the approval prompt to add one)");
-            } else {
-                text.append("session grants (in-memory, lost on restart):");
-                for (final var grant : info.sessionGrants()) {
-                    text.append("\n  - ").append(grant);
-                }
-            }
-            state.model.status(text.toString());
-            return;
-        }
-        final var permitAll = agentSessionService.setPermissions(v);
-        if (permitAll == null) {
-            state.model.status("usage: /permissions all|none|show");
-        } else if (permitAll) {
-            state.model.status("permissions: all tools allowed");
-        } else {
-            state.model.status("permissions: asking for approval");
-        }
-    }
-
-    private void modelCommand(final String arg, final TuiRunner runner, final UiState state) {
-        if (arg.isEmpty()) {
-            models(runner, state);
-            return;
-        }
-        final var model = agentSessionService.setModel(arg);
-        state.model.status("model: " + model);
-    }
-
-    private void providerCommand(final String arg, final TuiRunner runner, final UiState state) {
-        final var providers = providerManager.providers();
-        if (!arg.isEmpty()) {
-            final var id = agentSessionService.setProvider(arg);
-            state.model.status("provider: " + id);
-            return;
-        }
-        final var ids = providers.stream().map(p -> p.id()).collect(java.util.stream.Collectors.toList());
-        openPicker(
-                state,
-                "provider",
-                ids,
-                selected -> {
-                    chatClient.setProvider(selected);
-                    state.model.status("provider: " + selected);
-                },
-                () -> state.model.status("provider cancelled"));
-    }
-
-    private void agentCommand(final String arg, final TuiRunner runner, final UiState state) {
-        if (arg.isEmpty()) {
-            final var names = agentProvider.agents().stream()
-                    .map(AgentConfiguration::name)
-                    .sorted()
-                    .collect(java.util.stream.Collectors.toList());
-            openPicker(
-                    state,
-                    "agent",
-                    names,
-                    selected -> {
-                        state.activeAgent = selected;
-                        state.model.status("agent: " + selected);
-                    },
-                    () -> state.model.status("agent picker cancelled"));
-            return;
-        }
-        final var name = agentSessionService.setAgent(arg);
-        if (name == null) {
-            state.model.status("unknown agent: " + arg + " (/agent)");
-            return;
-        }
-        state.activeAgent = name;
-        state.model.status("agent: " + name);
-    }
-
-    private void toolsCommand(final String arg, final TuiRunner runner, final UiState state) {
         executor.execute(() -> {
             try {
-                final var listing = agentSessionService.tools(arg);
-                final var sb = new StringBuilder("\n\n**Tools**\n\n");
-                if (!listing.anyTool()) {
-                    sb.append("(no tools available)\n");
-                } else {
-                    if (listing.matches() == 0) {
-                        sb.append("(no tool matches)\n");
-                    } else {
-                        for (final var server : listing.servers()) {
-                            sb.append("### ")
-                                    .append(server.server())
-                                    .append("\n\n")
-                                    .append("| tool | description |\n|---|---|");
-                            final var tools = server.tools();
-                            for (final var tool : tools) {
-                                sb.append("\n| **")
-                                        .append(sanitizeCell(tool.name()))
-                                        .append("** | ")
-                                        .append(sanitizeCell(tool.description() == null ? "" : tool.description()))
-                                        .append(" |");
-                            }
-                            sb.append('\n');
-                        }
-                    }
-                }
-                runner.runLater(() -> {
-                    state.model.transcript().append(sb).append('\n');
-                    state.model.scrollBack(0);
-                });
+                final var outcome = slashRegistry
+                        .dispatch(text, env(runner, state))
+                        .toCompletableFuture()
+                        .join();
+                runner.runLater(() -> apply(outcome, runner, state));
             } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "tools listing failed: " + e.getMessage()));
+                final var cause = e.getCause() == null ? e : e.getCause();
+                runner.runLater(() -> modelError(state, "command failed: " + cause.getMessage()));
             }
         });
     }
 
-    private static String sanitizeCell(final String value) {
-        return value == null ? "" : value.replace("|", "\\|").replace("\n", " ");
+    private void apply(final ShellOutcome outcome, final TuiRunner runner, final UiState state) {
+        switch (outcome) {
+            case ShellOutcome.None none -> {}
+            case ShellOutcome.Status(String message) -> state.model.status(message);
+            case ShellOutcome.Transcript(String markdown) ->
+                state.model.transcript().append(markdown);
+            case ShellOutcome.Error(String message) -> modelError(state, message);
+            case ShellOutcome.Quit quit -> {
+                awaitInFlight(state);
+                runner.quit();
+            }
+        }
+        syncSession(state);
+    }
+
+    private void syncSession(final UiState state) {
+        if (session.sessionId() != null && !session.sessionId().isBlank()) {
+            state.sessionId = session.sessionId();
+        }
+        if (session.activeAgent() != null) {
+            state.activeAgent = session.activeAgent();
+        }
+    }
+
+    private ShellEnv env(final TuiRunner runner, final UiState state) {
+        return new ShellEnv(frontend(runner, state), io(runner, state), session, state.model);
+    }
+
+    private ShellFrontend frontend(final TuiRunner runner, final UiState state) {
+        return new ShellFrontend() {
+            @Override
+            public void onEvent(final AgentEvent event) {
+                runner.runLater(() -> TuiCommand.this.onEvent(event, state));
+            }
+
+            @Override
+            public void status(final String message) {
+                state.model.status(message);
+            }
+
+            @Override
+            public void notice(final AgentEvent.Notice.Level level, final String message) {
+                state.model.status(message);
+            }
+
+            @Override
+            public void transcript(final String markdown) {
+                state.model.transcript().append(markdown);
+            }
+
+            @Override
+            public void error(final String message) {
+                modelError(state, message);
+            }
+
+            @Override
+            public void showThinking(final boolean value) {
+                state.showThinking = value;
+            }
+
+            @Override
+            public void showToolOutput(final boolean value) {
+                state.showToolActions = value;
+            }
+
+            @Override
+            public void clear() {
+                // conversation state lives in the transcript (already reset by the action)
+            }
+
+            @Override
+            public void onReplay(final String markdown) {
+                // replay already went through the shared transcript, which is the TUI model
+            }
+        };
+    }
+
+    private ShellIO io(final TuiRunner runner, final UiState state) {
+        return new ShellIO() {
+            @Override
+            public CompletionStage<Optional<String>> readLine(final String prompt) {
+                final var future = new CompletableFuture<Optional<String>>();
+                pendingLine = future;
+                return future;
+            }
+
+            @Override
+            public CompletionStage<Boolean> confirm(final String question) {
+                final var answers = userFeedbackService.ask(
+                        List.of(new Question("confirm", question, List.of("Yes", "No"), false)));
+                return CompletableFuture.completedStage(
+                        answers != null && "Yes".equalsIgnoreCase(String.valueOf(answers.get("confirm"))));
+            }
+
+            @Override
+            public CompletionStage<Optional<String>> pick(final String title, final List<String> options) {
+                final var future = new CompletableFuture<Optional<String>>();
+                runner.runLater(() -> openPicker(
+                        state,
+                        title,
+                        options,
+                        value -> future.complete(Optional.of(value)),
+                        () -> future.complete(Optional.empty())));
+                return future;
+            }
+
+            @Override
+            public ApprovalGate approvalGate() {
+                return gate(runner, state);
+            }
+
+            @Override
+            public FeedbackGate feedbackGate() {
+                return TuiCommand.this.feedbackGate(runner, state);
+            }
+        };
+    }
+
+    private ShellOutcome themeOutcome(final String arg, final UiState state) {
+        final var current = isPaletteLight() ? "light" : "dark";
+        if (arg == null || arg.isBlank()) {
+            state.model.status("theme: " + current + " (/theme light|dark to switch)");
+            return ShellOutcome.none();
+        }
+        final var next = arg.strip().toLowerCase(Locale.ROOT);
+        if (!"light".equals(next) && !"dark".equals(next)) {
+            state.model.status("usage: /theme light|dark (current: " + current + ")");
+            return ShellOutcome.none();
+        }
+        applyTheme(next);
+        persistTheme(next);
+        state.model.status("theme: " + next);
+        return ShellOutcome.none();
+    }
+
+    private boolean isPaletteLight() {
+        return "#1a1a1a".equalsIgnoreCase(palette.text());
     }
 
     private void complete(final TuiRunner runner, final UiState state) {
@@ -1764,30 +1561,6 @@ public class TuiCommand implements Runnable {
                 () -> state.model.status("model picker cancelled"));
     }
 
-    private void mode(final String value, final TuiRunner runner, final UiState state) {
-        if (state.model.busy()) {
-            state.model.status("cannot switch mode while busy");
-            return;
-        }
-        state.model.status("mode: switching...");
-        executor.execute(() -> {
-            try {
-                final var result = agentSessionService.setMode(value, state.sessionId);
-                runner.runLater(() -> {
-                    state.model.status(result.message());
-                    if (result.seedMessage() != null) {
-                        state.model.status(result.seedMessage());
-                    }
-                    if (result.seedError() != null) {
-                        modelError(state, result.seedError());
-                    }
-                });
-            } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "mode failed: " + e.getMessage()));
-            }
-        });
-    }
-
     private void editPlan(final String arg, final TuiRunner runner, final UiState state) {
         if (state.model.busy()) {
             state.model.status("editplan is not available while busy");
@@ -1947,133 +1720,6 @@ public class TuiCommand implements Runnable {
         });
     }
 
-    /**
-     * Asks the user whether to proceed with a prompt while a background maven-knowledge index is still
-     * running. Returns {@code true} (block) only when the index is genuinely in flight AND the user chose "No".
-     */
-    private boolean mavenIndexingBlocks(final UiState state) {
-        final var run = mavenKnowledgeService.currentIndex();
-        if (run == null || !run.inFlight()) {
-            return false;
-        }
-        final var answers = userFeedbackService.ask(List.of(new Question(
-                "confirm",
-                "maven knowledge index still running (" + run.doneCount() + "/" + run.total()
-                        + ") - send the prompt anyway?",
-                List.of("Yes", "No"),
-                false)));
-        if (answers == null) {
-            return false; // no interactive gate (headless) -> proceed
-        }
-        final var selected = String.valueOf(answers.get("confirm"));
-        return selected.equalsIgnoreCase("No");
-    }
-
-    private void mavenRepositoryKnowledge(final String arg, final TuiRunner runner, final UiState state) {
-        if (state.model.busy()) {
-            state.model.status("cannot run maven knowledge while busy");
-            return;
-        }
-        final var parts = (arg == null ? "" : arg.strip()).split("\\s+", 2);
-        final var sub = parts.length == 0 ? "" : parts[0].toLowerCase(Locale.ROOT);
-        if ("status".equals(sub)) {
-            try {
-                final var lines = mavenKnowledgeService.status();
-                final var sb = new StringBuilder("\n\n> maven-repository-knowledge:");
-                lines.forEach(line -> sb.append("\n").append(line));
-                state.model.transcript().append(sb).append('\n');
-                state.model.status(lines.stream().findFirst().orElse("maven knowledge status"));
-            } catch (final RuntimeException e) {
-                modelError(state, "maven knowledge status failed: " + e.getMessage());
-            }
-            return;
-        }
-        waiting(state, "refreshing local Maven artifact knowledge...", SpinnerStyle.BOUNCING_BALL);
-        executor.execute(() -> {
-            try {
-                final var gav = parts.length > 1 ? parts[1].strip() : "";
-                final var ack = mavenKnowledgeService.refresh(
-                        gav,
-                        progress -> runner.runLater(() -> state.model.status(progress + " artifacts")),
-                        summary -> runner.runLater(() -> {
-                            state.model.status("maven repository knowledge refreshed");
-                            final var sb = new StringBuilder("\n\n> maven-repository-knowledge:");
-                            summary.lines().forEach(line -> sb.append("\n").append(line));
-                            state.model.transcript().append(sb).append('\n');
-                        }));
-                runner.runLater(() -> {
-                    final var sb = new StringBuilder();
-                    ack.forEach(line -> sb.append("\n").append(line));
-                    final var first = ack.stream().findFirst().orElse("maven knowledge refresh started");
-                    state.model.status(first);
-                    state.model
-                            .transcript()
-                            .append("\n> maven-repository-knowledge:")
-                            .append(sb)
-                            .append('\n');
-                });
-            } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "maven knowledge refresh failed: " + e.getMessage()));
-            }
-        });
-    }
-
-    private void mcpCommand(final String arg, final TuiRunner runner, final UiState state) {
-        final var parts = (arg == null ? "" : arg.strip()).split("\\s+", 2);
-        final var sub = parts[0].isEmpty() ? "" : parts[0].toLowerCase(java.util.Locale.ROOT);
-        if (sub.isEmpty() || "status".equals(sub)) {
-            final var sb = new StringBuilder("\n\n**MCP servers**\n\n| server | state |\n|---|---|");
-            String first = "";
-            for (final var status : mcpManager.serverStatuses()) {
-                if (first.isEmpty()) {
-                    first = status.name() + ": " + status.state().name().toLowerCase(java.util.Locale.ROOT);
-                }
-                sb.append("\n| ")
-                        .append(sanitizeCell(status.name()))
-                        .append(" | ")
-                        .append(status.state().name().toLowerCase(java.util.Locale.ROOT))
-                        .append(" |");
-            }
-            state.model.transcript().append(sb).append('\n');
-            state.model.status(first.isEmpty() ? "no MCP servers" : first);
-            return;
-        }
-        if (!"reset".equals(sub)) {
-            state.model.status("usage: /mcp status|reset [server]");
-            return;
-        }
-        waiting(state, "resetting MCP servers...", SpinnerStyle.BOUNCING_BALL);
-        executor.execute(() -> {
-            try {
-                final var server = parts.length > 1 ? parts[1].strip() : "";
-                final String message;
-                if (server.isEmpty()) {
-                    mcpManager.reset();
-                    message = "MCP servers reset";
-                } else {
-                    mcpManager.reset(server);
-                    message = "MCP server " + server + " reset";
-                }
-                runner.runLater(() -> {
-                    state.model.status(message);
-                    state.model.transcript().append("\n\n> ").append(message).append('\n');
-                });
-            } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "mcp reset failed: " + e.getMessage()));
-            }
-        });
-    }
-
-    private void snapshot(final String arg, final UiState state) {
-        try {
-            final var message = agentSessionService.snapshot(arg, state.sessionId);
-            state.model.status(message);
-            state.model.transcript().append("\n\n> ").append(message).append('\n');
-        } catch (final RuntimeException e) {
-            modelError(state, "snapshot failed: " + e.getMessage());
-        }
-    }
-
     private void compact(final TuiRunner runner, final UiState state) {
         if (state.model.busy()) {
             state.model.status("cannot compact while busy");
@@ -2111,35 +1757,6 @@ public class TuiCommand implements Runnable {
                 });
             } catch (final RuntimeException e) {
                 runner.runLater(() -> modelError(state, "compaction failed: " + e.getMessage()));
-            }
-        });
-    }
-
-    private void sessionIdInfo(final UiState state) {
-        final var info = agentSessionService.sessionInfo(state.sessionId);
-        state.model.status("session " + info.id() + " -> " + info.path());
-        state.model.transcript().append("\n\n> session `" + info.id() + "` at `" + info.path() + "`\n");
-    }
-
-    private void sessionFlush(final UiState state) {
-        final var result = agentSessionService.flush(state.sessionId);
-        state.model.status(result);
-        state.model.transcript().append("\n\n> ").append(result).append('\n');
-    }
-
-    private void sessionHousekeeping(final TuiRunner runner, final UiState state) {
-        waiting(state, "housekeeping...", SpinnerStyle.BOUNCING_BALL);
-        executor.execute(() -> {
-            try {
-                final var report = agentSessionService.housekeeping();
-                runner.runLater(() -> {
-                    final var message = "housekeeping done - " + report.compressed() + " compressed, "
-                            + report.deleted() + " deleted, " + report.kept() + " kept";
-                    state.model.status(message);
-                    state.model.transcript().append("\n\n> ").append(message).append('\n');
-                });
-            } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "housekeeping failed: " + e.getMessage()));
             }
         });
     }
@@ -3267,21 +2884,6 @@ public class TuiCommand implements Runnable {
         return text.length() <= max ? text : text.substring(0, max) + "...";
     }
 
-    private static String formatBytes(final long value) {
-        if (value < 1_024) {
-            return value + " B";
-        }
-        final double[] units = {1_024.0, 1_048_576.0, 1_073_741_824.0};
-        final String[] names = {"KB", "MB", "GB"};
-        var i = 0;
-        while (i < units.length - 1 && value >= units[i + 1]) {
-            i++;
-        }
-        final var scaled = value / units[i];
-        return (scaled > 9 ? String.format("%.0f ", scaled) : String.format("%.1f ", scaled)).replace(",", ".")
-                + names[i];
-    }
-
     private String workingDirectory() {
         final var dir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
         final var home = Path.of(System.getProperty("user.home")).toAbsolutePath();
@@ -3706,7 +3308,7 @@ public class TuiCommand implements Runnable {
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;
         private volatile boolean quitArmed;
-        private volatile CompletableFuture<Void> inFlight;
+        private volatile CompletableFuture<Boolean> inFlight;
         private volatile boolean historyActive;
         private volatile String historyDraft = "";
         private volatile Approval approval;

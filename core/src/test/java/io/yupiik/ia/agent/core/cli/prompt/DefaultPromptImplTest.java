@@ -17,13 +17,13 @@ package io.yupiik.ia.agent.core.cli.prompt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class DefaultPromptImplTest {
@@ -34,9 +34,9 @@ class DefaultPromptImplTest {
         final var out = new ByteArrayOutputStream();
         final var prompt = new DefaultPromptImpl(in, new PrintStream(out, true, StandardCharsets.UTF_8));
 
-        assertEquals("hello", prompt.readLine("> "));
-        assertEquals("world", prompt.readLine("> "));
-        assertNull(prompt.readLine("> "));
+        assertEquals(Optional.of("hello"), prompt.readLine("> "));
+        assertEquals(Optional.of("world"), prompt.readLine("> "));
+        assertEquals(Optional.empty(), prompt.readLine("> "));
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("> "));
         assertFalse(prompt.editing());
     }

@@ -137,7 +137,7 @@ class ChatClientMidStreamTest {
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),
                 Map.entry("yca.provider.providers.0.id", "default"),
-                Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:" + port + "/v1"),
+                Map.entry("yca.provider.providers.0.baseUrl", "http://localhost:" + port + "/v1/chat/completions"),
                 Map.entry("yca.provider.providers.0.apiKey", "test-key"),
                 Map.entry("yca.provider.providers.0.model", "test-model"),
                 Map.entry("yca.provider.providers.0.api", "completions"),

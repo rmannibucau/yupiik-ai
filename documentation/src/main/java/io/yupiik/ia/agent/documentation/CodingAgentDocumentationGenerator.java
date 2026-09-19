@@ -27,7 +27,6 @@ import io.yupiik.fusion.framework.api.lifecycle.Stop;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
-import io.yupiik.ia.agent.core.cli.slash.SlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import java.io.IOException;
@@ -118,18 +117,23 @@ public class CodingAgentDocumentationGenerator implements Runnable {
 
     private void writeSlashCommands(final RuntimeContainer container) {
         try (final var providersInstance = container.lookups(
-                SlashCommands.class, it -> it.stream().map(Instance::instance).toList())) {
+                io.yupiik.ia.agent.core.shell.slash.SlashCommandSet.class,
+                it -> it.stream().map(Instance::instance).toList())) {
             final var providers = providersInstance.instance();
             if (providers.isEmpty()) {
                 return;
             }
             final var sb = new StringBuilder();
-            for (final var provider : providers) {
-                sb.append("== ").append(providerTitle(provider)).append("\n\n");
+            for (final var set : providers) {
+                final var commands = set.commands();
+                if (commands.isEmpty()) {
+                    continue;
+                }
+                sb.append("== ").append(set.title()).append("\n\n");
                 for (final var group : SlashGroup.values()) {
-                    final var inGroup = provider.commands().stream()
-                            .filter(c -> c.group() == group)
-                            .sorted(Comparator.comparing(c -> c.name()))
+                    final var inGroup = commands.stream()
+                            .filter(c -> c.spec().group() == group)
+                            .sorted(Comparator.comparing(c -> c.spec().name()))
                             .toList();
                     if (inGroup.isEmpty()) {
                         continue;
@@ -137,24 +141,14 @@ public class CodingAgentDocumentationGenerator implements Runnable {
                     sb.append("=== ")
                             .append(capitalize(group.name().toLowerCase(Locale.ROOT)))
                             .append("\n\n");
-                    for (final var spec : inGroup) {
-                        sb.append("`").append(spec.display()).append("`::\n");
-                        sb.append("  ").append(spec.description()).append("\n\n");
+                    for (final var command : inGroup) {
+                        sb.append("`").append(command.spec().display()).append("`::\n");
+                        sb.append("  ").append(command.spec().description()).append("\n\n");
                     }
                 }
             }
             writePartial("slash-commands.adoc", sb.toString());
         }
-    }
-
-    private String providerTitle(final SlashCommands provider) {
-        if (provider instanceof io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands) {
-            return "CLI commands";
-        }
-        if (provider instanceof io.yupiik.ia.agent.tui.TuiSlashCommands) {
-            return "TUI commands";
-        }
-        return provider.getClass().getSimpleName();
     }
 
     private String capitalize(final String value) {

@@ -17,18 +17,37 @@ package io.yupiik.ia.agent.tui.prompt;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
+import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
+import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.List;
 import org.jline.reader.Candidate;
 import org.jline.reader.ParsedLine;
 import org.junit.jupiter.api.Test;
 
 class SlashCommandCompleterTest {
 
+    private static SlashRegistry registry() {
+        final SlashCommandSet set = () -> List.of(
+                SlashCommand.of(
+                        new SlashCommandSpec("/model", null, "model cmd", SlashGroup.CONFIG),
+                        ArgCompletion.MODELS,
+                        (arg, env) -> null),
+                SlashCommand.of(
+                        new SlashCommandSpec("/mode", null, "mode cmd", SlashGroup.CONFIG),
+                        ArgCompletion.MODE,
+                        (arg, env) -> null));
+        return new SlashRegistry(List.of(set));
+    }
+
     @Test
     void completesSlashCommandNames() {
-        final var completer = new SlashCommandCompleter(new ReplSlashCommands(), null, null, null, null, null);
+        final var completer = new SlashCommandCompleter(registry(), null, null, null, null, null);
         final var candidates = new ArrayList<Candidate>();
         completer.complete(null, line("/mod", 4), candidates);
         assertTrue(candidates.stream().anyMatch(c -> "/model".equals(c.value())), candidates.toString());
@@ -36,7 +55,7 @@ class SlashCommandCompleterTest {
 
     @Test
     void completesArgumentsThroughTheEngine() {
-        final var completer = new SlashCommandCompleter(new ReplSlashCommands(), null, null, null, null, null);
+        final var completer = new SlashCommandCompleter(registry(), null, null, null, null, null);
         final var candidates = new ArrayList<Candidate>();
         // no dynamic source is wired (all null): must not throw and must not invent candidates
         completer.complete(null, line("/model ", 7), candidates);
@@ -48,7 +67,7 @@ class SlashCommandCompleterTest {
 
     @Test
     void ignoresFreeText() {
-        final var completer = new SlashCommandCompleter(new ReplSlashCommands(), null, null, null, null, null);
+        final var completer = new SlashCommandCompleter(registry(), null, null, null, null, null);
         final var candidates = new ArrayList<Candidate>();
         completer.complete(null, line("hello", 5), candidates);
         assertTrue(candidates.isEmpty(), candidates.toString());

@@ -20,16 +20,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.configuration.TestConfigs;
-import java.lang.reflect.Method;
+import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
+@ResourceLock(Resources.SYSTEM_OUT)
+@ResourceLock(Resources.SYSTEM_ERR)
 class CliCommandTest {
     private java.io.PrintStream originalOut;
     private java.io.PrintStream originalErr;
@@ -82,24 +84,15 @@ class CliCommandTest {
     }
 
     private static java.util.function.Consumer<AgentEvent> dispatcher(
-            final String presentation, final boolean showToolOutput) throws Exception {
-        final var conf =
-                new CliCommand.CliConf("", "", "", false, false, presentation, false, showToolOutput, false, false);
-        final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
-        final var config = TestConfigs.codingAgent(Map.of());
-        final var command = new CliCommand(
-                conf, null, null, null, null, null, null, null, null, null, null, null, null, mapper, null, null, null,
-                null, null, config);
-        final Method dispatch = CliCommand.class.getDeclaredMethod("dispatch", AgentEvent.class);
-        dispatch.setAccessible(true);
-        return event -> {
-            try {
-                dispatch.invoke(command, event);
-            } catch (final java.lang.reflect.InvocationTargetException e) {
-                throw new IllegalStateException(e.getCause());
-            } catch (final IllegalAccessException e) {
-                throw new IllegalStateException(e);
-            }
-        };
+            final String presentation, final boolean showToolOutput) {
+        final var frontend = new AnsiShellFrontend(
+                new MarkdownColorizer(false),
+                new Symbols(false),
+                new ToolPresenter(new JsonMapperImpl(List.of(), key -> Optional.empty())),
+                CliVerbosity.parse(presentation),
+                false,
+                false,
+                showToolOutput);
+        return frontend::onEvent;
     }
 }

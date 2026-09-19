@@ -230,7 +230,7 @@ class UsageTrackerTest {
                 Map.entry("yca.provider.providers.0.id", "default"),
                 Map.entry(
                         "yca.provider.providers.0.baseUrl",
-                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions"),
                 Map.entry("yca.provider.providers.0.apiKey", "test-key"),
                 Map.entry("yca.provider.providers.0.model", "test-model"),
                 Map.entry("yca.provider.providers.0.api", "auto"),

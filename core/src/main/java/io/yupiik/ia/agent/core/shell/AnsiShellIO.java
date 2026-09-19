@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Supplier;
 
 /**
  * Terminal {@link ShellIO} backed by a blocking {@link Prompt}: returned
@@ -44,17 +45,37 @@ public class AnsiShellIO implements ShellIO {
     private final Symbols symbols;
     private final Runnable onInterrupt;
     private final Runnable onInteractionStart;
+    private final Runnable onInteractionEnd;
 
     public AnsiShellIO(final Prompt prompt, final Symbols symbols, final Runnable onInterrupt) {
-        this(prompt, symbols, onInterrupt, () -> {});
+        this(prompt, symbols, onInterrupt, () -> {}, () -> {});
     }
 
     public AnsiShellIO(
             final Prompt prompt, final Symbols symbols, final Runnable onInterrupt, final Runnable onInteractionStart) {
+        this(prompt, symbols, onInterrupt, onInteractionStart, () -> {});
+    }
+
+    public AnsiShellIO(
+            final Prompt prompt,
+            final Symbols symbols,
+            final Runnable onInterrupt,
+            final Runnable onInteractionStart,
+            final Runnable onInteractionEnd) {
         this.prompt = prompt;
         this.symbols = symbols;
         this.onInterrupt = onInterrupt;
         this.onInteractionStart = onInteractionStart;
+        this.onInteractionEnd = onInteractionEnd;
+    }
+
+    private <T> CompletionStage<T> interact(final Supplier<CompletionStage<T>> interaction) {
+        onInteractionStart.run();
+        try {
+            return interaction.get();
+        } finally {
+            onInteractionEnd.run();
+        }
     }
 
     @Override
@@ -70,18 +91,20 @@ public class AnsiShellIO implements ShellIO {
 
     @Override
     public CompletionStage<Boolean> confirm(final String question) {
-        try {
-            final var yes = prompt.readLine(MarkdownColorizer.status(question + " [y/N] "))
-                    .map(line -> line.strip().toLowerCase(Locale.ROOT))
-                    .map(a -> a.equals("y") || a.equals("yes"))
-                    .orElse(false);
-            return CompletableFuture.completedStage(yes);
-        } catch (final PromptInterruptException e) {
-            onInterrupt.run();
-            return CompletableFuture.completedStage(false);
-        } catch (final IOException e) {
-            return CompletableFuture.completedStage(false);
-        }
+        return interact(() -> {
+            try {
+                final var yes = prompt.readLine(MarkdownColorizer.status(question + " [y/N] "))
+                        .map(line -> line.strip().toLowerCase(Locale.ROOT))
+                        .map(a -> a.equals("y") || a.equals("yes"))
+                        .orElse(false);
+                return CompletableFuture.completedStage(yes);
+            } catch (final PromptInterruptException e) {
+                onInterrupt.run();
+                return CompletableFuture.completedStage(false);
+            } catch (final IOException e) {
+                return CompletableFuture.completedStage(false);
+            }
+        });
     }
 
     @Override
@@ -89,61 +112,71 @@ public class AnsiShellIO implements ShellIO {
         if (options == null || options.isEmpty()) {
             return CompletableFuture.completedStage(Optional.empty());
         }
-        System.out.println(MarkdownColorizer.status(title + ":"));
-        for (int i = 0; i < options.size(); i++) {
-            System.out.println((i + 1) + ". " + options.get(i));
-        }
-        try {
-            final var choice = prompt.readLine(
-                            MarkdownColorizer.accent("select [1-" + options.size() + "] or Enter/c to cancel: "))
-                    .map(line -> line.strip().toLowerCase(Locale.ROOT))
-                    .orElse("");
-            if (choice.isBlank() || choice.equals("c") || choice.equals("cancel")) {
-                return CompletableFuture.completedStage(Optional.empty());
+        return interact(() -> {
+            System.out.println(MarkdownColorizer.status(title + ":"));
+            for (int i = 0; i < options.size(); i++) {
+                System.out.println((i + 1) + ". " + options.get(i));
             }
-            final int index;
             try {
-                index = Integer.parseInt(choice) - 1;
-            } catch (final NumberFormatException e) {
-                System.out.println(MarkdownColorizer.status("invalid selection"));
+                final var choice = prompt.readLine(
+                                MarkdownColorizer.accent("select [1-" + options.size() + "] or Enter/c to cancel: "))
+                        .map(line -> line.strip().toLowerCase(Locale.ROOT))
+                        .orElse("");
+                if (choice.isBlank() || choice.equals("c") || choice.equals("cancel")) {
+                    return CompletableFuture.completedStage(Optional.empty());
+                }
+                final int index;
+                try {
+                    index = Integer.parseInt(choice) - 1;
+                } catch (final NumberFormatException e) {
+                    System.out.println(MarkdownColorizer.status("invalid selection"));
+                    return CompletableFuture.completedStage(Optional.empty());
+                }
+                if (index < 0 || index >= options.size()) {
+                    System.out.println(MarkdownColorizer.status("invalid selection"));
+                    return CompletableFuture.completedStage(Optional.empty());
+                }
+                return CompletableFuture.completedStage(Optional.of(options.get(index)));
+            } catch (final PromptInterruptException e) {
+                onInterrupt.run();
+                return CompletableFuture.completedStage(Optional.empty());
+            } catch (final IOException e) {
                 return CompletableFuture.completedStage(Optional.empty());
             }
-            if (index < 0 || index >= options.size()) {
-                System.out.println(MarkdownColorizer.status("invalid selection"));
-                return CompletableFuture.completedStage(Optional.empty());
-            }
-            return CompletableFuture.completedStage(Optional.of(options.get(index)));
-        } catch (final PromptInterruptException e) {
-            onInterrupt.run();
-            return CompletableFuture.completedStage(Optional.empty());
-        } catch (final IOException e) {
-            return CompletableFuture.completedStage(Optional.empty());
-        }
+        });
     }
 
     @Override
     public ApprovalGate approvalGate() {
         return (title, detail, toolName, args) -> {
             onInteractionStart.run();
-            printApprovalBox(title, detail);
             try {
-                final var c = prompt.readLine(
-                                MarkdownColorizer.accent("allow? [y/n/a] (y=once, n=no, a=always this session) "))
-                        .map(line -> line.strip().toLowerCase(Locale.ROOT))
-                        .orElse("");
-                if (c.equals("y") || c.equals("yes") || c.equals("o") || c.equals("ok")) {
-                    return ApprovalGate.Result.ALLOW_ONCE;
-                }
-                if (c.equals("a") || c.equals("always")) {
-                    return ApprovalGate.Result.ALLOW_SESSION;
-                }
-            } catch (final PromptInterruptException e) {
-                onInterrupt.run();
-            } catch (final IOException ignored) {
-                // treat as deny
+                return approvalDecision(title, detail);
+            } finally {
+                onInteractionEnd.run();
             }
-            return ApprovalGate.Result.DENY;
         };
+    }
+
+    private ApprovalGate.Result approvalDecision(final String title, final String detail) {
+        printApprovalBox(title, detail);
+        try {
+            final var c = prompt.readLine(
+                            MarkdownColorizer.accent("allow? [y/n/a] (y=once, n=no, a=always this session) "))
+                    .map(line -> line.strip().toLowerCase(Locale.ROOT))
+                    .orElse("");
+            if (c.equals("y") || c.equals("yes") || c.equals("o") || c.equals("ok")) {
+                return ApprovalGate.Result.ALLOW_ONCE;
+            }
+            if (c.equals("a") || c.equals("always")) {
+                return ApprovalGate.Result.ALLOW_SESSION;
+            }
+        } catch (final PromptInterruptException e) {
+            onInterrupt.run();
+        } catch (final IOException ignored) {
+            // treat as deny
+        }
+        return ApprovalGate.Result.DENY;
     }
 
     @Override
@@ -152,34 +185,43 @@ public class AnsiShellIO implements ShellIO {
             if (questions == null || questions.isEmpty()) {
                 return Map.of();
             }
-            final Map<String, Object> answers = new HashMap<>();
-            boolean restart;
-            do {
-                restart = false;
-                answers.clear();
-                for (final var question : questions) {
-                    final var answer = askOne(question);
-                    if (answer == null) {
-                        return null;
-                    }
-                    answers.put(question.id(), answer);
-                }
-                // summary
-                System.out.println(MarkdownColorizer.status("your answers:"));
-                for (final var question : questions) {
-                    System.out.println("- " + question.prompt() + " -> " + answers.get(question.id()));
-                }
-                final var c = readAnswer(MarkdownColorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "))
-                        .map(line -> line.strip().toLowerCase(Locale.ROOT))
-                        .orElse("");
-                if (c.equals("e") || c.equals("edit") || c.equals("restart")) {
-                    restart = true;
-                } else if (c.equals("c") || c.equals("cancel")) {
+            onInteractionStart.run();
+            try {
+                return collectAnswers(questions);
+            } finally {
+                onInteractionEnd.run();
+            }
+        };
+    }
+
+    private Map<String, Object> collectAnswers(final List<Question> questions) {
+        final Map<String, Object> answers = new HashMap<>();
+        boolean restart;
+        do {
+            restart = false;
+            answers.clear();
+            for (final var question : questions) {
+                final var answer = askOne(question);
+                if (answer == null) {
                     return null;
                 }
-            } while (restart);
-            return answers;
-        };
+                answers.put(question.id(), answer);
+            }
+            // summary
+            System.out.println(MarkdownColorizer.status("your answers:"));
+            for (final var question : questions) {
+                System.out.println("- " + question.prompt() + " -> " + answers.get(question.id()));
+            }
+            final var c = readAnswer(MarkdownColorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "))
+                    .map(line -> line.strip().toLowerCase(Locale.ROOT))
+                    .orElse("");
+            if (c.equals("e") || c.equals("edit") || c.equals("restart")) {
+                restart = true;
+            } else if (c.equals("c") || c.equals("cancel")) {
+                return null;
+            }
+        } while (restart);
+        return answers;
     }
 
     private Object askOne(final Question question) {

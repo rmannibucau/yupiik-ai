@@ -108,7 +108,7 @@ class ManageContextToolTest {
         entries.put("yca.workingDir", ".");
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
-        entries.put("yca.provider.providers.0.baseUrl", "https://api.openai.com/v1");
+        entries.put("yca.provider.providers.0.baseUrl", "https://api.openai.com/v1/chat/completions");
         entries.put("yca.provider.providers.0.apiKey", "");
         entries.put("yca.provider.providers.0.model", "m");
         entries.put("yca.provider.providers.0.api", "auto");

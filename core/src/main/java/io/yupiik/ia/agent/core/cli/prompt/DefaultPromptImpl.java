@@ -22,6 +22,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 
 /**
  * Degraded {@link Prompt} used when the terminal widget stack is not present:
@@ -45,9 +46,9 @@ public class DefaultPromptImpl implements Prompt {
     }
 
     @Override
-    public String readLine(final String prompt) throws IOException {
+    public Optional<String> readLine(final String prompt) throws IOException {
         out.print(prompt);
         out.flush();
-        return reader.readLine();
+        return Optional.ofNullable(reader.readLine());
     }
 }

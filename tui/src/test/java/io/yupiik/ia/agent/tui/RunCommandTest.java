@@ -21,17 +21,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.RunShellFrontend;
+import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
@@ -43,11 +46,19 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
+import org.junit.jupiter.api.parallel.Resources;
 
+@ResourceLock(Resources.SYSTEM_OUT)
+@ResourceLock(Resources.SYSTEM_ERR)
+@ResourceLock("java.util.logging")
 class RunCommandTest {
     @TempDir
     Path temp;
@@ -56,6 +67,8 @@ class RunCommandTest {
     private PrintStream originalErr;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
+    private final List<String> logLines = new ArrayList<>();
+    private Handler logHandler;
 
     @BeforeEach
     void capture() {
@@ -63,17 +76,41 @@ class RunCommandTest {
         originalErr = System.err;
         System.setOut(new PrintStream(out, true, StandardCharsets.UTF_8));
         System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
+        logHandler = new Handler() {
+            @Override
+            public void publish(final LogRecord record) {
+                logLines.add(record.getMessage());
+            }
+
+            @Override
+            public void flush() {
+                // no-op
+            }
+
+            @Override
+            public void close() {
+                // no-op
+            }
+        };
+        Logger.getLogger(RunShellFrontend.class.getName()).addHandler(logHandler);
+        Logger.getLogger(RunCommand.class.getName()).addHandler(logHandler);
     }
 
     @AfterEach
     void restore() {
         System.setOut(originalOut);
         System.setErr(originalErr);
+        Logger.getLogger(RunShellFrontend.class.getName()).removeHandler(logHandler);
+        Logger.getLogger(RunCommand.class.getName()).removeHandler(logHandler);
+    }
+
+    private String logs() {
+        return String.join("\n", logLines);
     }
 
     @Test
     void happyPathPrintsDeltas() {
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var calls = new ArrayList<String[]>();
         final var agentLoop = new AgentLoop() {
             @Override
@@ -85,16 +122,16 @@ class RunCommandTest {
                     final BooleanSupplier cancelled) {
                 calls.add(new String[] {prompt, agentName, sessionId});
                 assertNull(history);
-                bridge.onEvent(new AgentEvent.TextDelta("hel"));
-                bridge.onEvent(new AgentEvent.TextDelta("lo"));
-                bridge.onEvent(new AgentEvent.TurnDone("hello"));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hel"));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("lo"));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello"));
                 return "ok";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, true, "", false, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 new PermissionService(null),
                 new UserFeedbackService(),
                 sessionStore(),
@@ -111,7 +148,7 @@ class RunCommandTest {
 
     @Test
     void errorEventFails() {
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -121,14 +158,14 @@ class RunCommandTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 lastSessionIdUsed.set(sessionId);
-                bridge.onEvent(new AgentEvent.Error("boom"));
+                shellRegistry.onEvent(new AgentEvent.Error("boom"));
                 return "ko";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "s-2", "", false, true, "", false, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 new PermissionService(null),
                 new UserFeedbackService(),
                 sessionStore(),
@@ -138,19 +175,20 @@ class RunCommandTest {
 
         assertEquals("s-2", lastSessionIdUsed.get());
         assertTrue(error.getMessage().contains("boom"));
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[error] boom"));
+        assertTrue(logs().contains("boom"));
     }
 
     @Test
     void deniedApprovalExplainsHeadlessBuildMode() {
-        final var configuration = MockLlmServer.configuration(
-                "http://localhost:1/v1",
-                temp.toString(),
-                new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
+        final var configuration = CodingAgentConfigurations.builder()
+                .baseUrl("http://localhost:1/v1/chat/completions")
+                .storageHome(temp.toString())
+                .permissions(new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()))
+                .build();
         final var permissions = new PermissionService(configuration);
         permissions.setMode(AgentMode.BUILD);
         final var allowed = new AtomicBoolean(true);
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -167,7 +205,7 @@ class RunCommandTest {
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "build", false, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 permissions,
                 new UserFeedbackService(),
                 sessionStore(),
@@ -176,20 +214,21 @@ class RunCommandTest {
         command.run();
 
         assertFalse(allowed.get(), "headless gate must deny the tool call");
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[denied]"));
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("headless mode"));
+        assertTrue(logs().contains("denied"));
+        assertTrue(logs().contains("headless mode"));
     }
 
     @Test
     void planModeHeadlessDeniesStateChangingToolInPermissionService() {
-        final var configuration = MockLlmServer.configuration(
-                "http://localhost:1/v1",
-                temp.toString(),
-                new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
+        final var configuration = CodingAgentConfigurations.builder()
+                .baseUrl("http://localhost:1/v1/chat/completions")
+                .storageHome(temp.toString())
+                .permissions(new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()))
+                .build();
         final var permissions = new PermissionService(configuration);
         // default mode, falls back to PLAN
         final var allowed = new AtomicBoolean(true);
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -206,7 +245,7 @@ class RunCommandTest {
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "", false, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 permissions,
                 new UserFeedbackService(),
                 sessionStore(),
@@ -219,10 +258,13 @@ class RunCommandTest {
 
     @Test
     void planModeFlagPutsRunInPlanMode() {
-        final var configuration = MockLlmServer.configuration("http://localhost:1/v1", temp.toString());
+        final var configuration = CodingAgentConfigurations.builder()
+                .baseUrl("http://localhost:1/v1/chat/completions")
+                .storageHome(temp.toString())
+                .build();
         final var permissions = new PermissionService(configuration);
         final var modeSeen = new AtomicReference<AgentMode>();
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -238,7 +280,7 @@ class RunCommandTest {
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "plan", false, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 permissions,
                 new UserFeedbackService(),
                 sessionStore(),
@@ -251,13 +293,14 @@ class RunCommandTest {
 
     @Test
     void planModeDenialSuggestsBuildMode() {
-        final var configuration = MockLlmServer.configuration(
-                "http://localhost:1/v1",
-                temp.toString(),
-                new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()));
+        final var configuration = CodingAgentConfigurations.builder()
+                .baseUrl("http://localhost:1/v1/chat/completions")
+                .storageHome(temp.toString())
+                .permissions(new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()))
+                .build();
         final var permissions = new PermissionService(configuration);
         final var reason = new AtomicReference<String>();
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -274,7 +317,7 @@ class RunCommandTest {
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "plan", false, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 permissions,
                 new UserFeedbackService(),
                 sessionStore(),
@@ -290,7 +333,7 @@ class RunCommandTest {
 
     @Test
     void showToolOutputPrintsNonStreamedSuccess() {
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -299,16 +342,16 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                bridge.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}"));
-                bridge.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
-                bridge.onEvent(new AgentEvent.TurnDone("done"));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}"));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done"));
                 return "ok";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "", true, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 new PermissionService(null),
                 new UserFeedbackService(),
                 sessionStore(),
@@ -316,13 +359,13 @@ class RunCommandTest {
 
         command.run();
 
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[read_file] line1"));
-        assertTrue(err.toString(StandardCharsets.UTF_8).contains("[read_file] line2"));
+        assertTrue(logs().contains("line1"));
+        assertTrue(logs().contains("line2"));
     }
 
     @Test
     void showToolOutputSkipsStreamedTools() {
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -331,17 +374,17 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                bridge.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}"));
-                bridge.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
-                bridge.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true));
-                bridge.onEvent(new AgentEvent.TurnDone("done"));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}"));
+                shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done"));
                 return "ok";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "", true, "", ""),
                 agentLoop,
-                bridge,
+                shellRegistry,
                 new PermissionService(null),
                 new UserFeedbackService(),
                 sessionStore(),
@@ -350,19 +393,22 @@ class RunCommandTest {
         command.run();
 
         // streamed tool output must not be re-printed from ToolFinished.output
-        final var stderr = err.toString(StandardCharsets.UTF_8);
-        assertTrue(stderr.contains("[bash] streamed line"));
-        assertEquals(1, stderr.split("\\[bash\\] streamed line", -1).length - 1);
+        final var logged = logs();
+        assertTrue(logged.contains("streamed line"));
+        assertEquals(1, logged.split("streamed line", -1).length - 1);
     }
 
     @Test
     void unknownAgentIsRejected() {
-        final var configuration = MockLlmServer.configuration("http://localhost:1/v1", temp.toString());
-        final var bridge = new AgentEventBridge();
+        final var configuration = CodingAgentConfigurations.builder()
+                .baseUrl("http://localhost:1/v1/chat/completions")
+                .storageHome(temp.toString())
+                .build();
+        final var shellRegistry = testRegistry();
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "nope", false, true, "", false, "", ""),
-                stubAgentLoop(bridge),
-                bridge,
+                stubAgentLoop(),
+                shellRegistry,
                 new PermissionService(null),
                 new UserFeedbackService(),
                 sessionStore(),
@@ -374,7 +420,7 @@ class RunCommandTest {
 
     private final AtomicReference<String> lastSessionIdUsed = new AtomicReference<>();
 
-    private AgentLoop stubAgentLoop(final AgentEventBridge bridge) {
+    private AgentLoop stubAgentLoop() {
         return new AgentLoop() {
             @Override
             public String run(
@@ -401,5 +447,14 @@ class RunCommandTest {
                 return List.of();
             }
         };
+    }
+
+    private static ShellRegistry testRegistry() {
+        return new ShellRegistry(new Emitter() {
+            @Override
+            public <T> void emit(final T event) {
+                // events are forwarded synchronously to the registered frontend
+            }
+        });
     }
 }

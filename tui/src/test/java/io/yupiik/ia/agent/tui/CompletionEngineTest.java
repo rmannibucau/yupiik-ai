@@ -18,12 +18,39 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
+import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
+import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class CompletionEngineTest {
+    private static SlashRegistry registry() {
+        final SlashCommandSet set = () -> List.of(
+                spec("/model", ArgCompletion.MODELS, SlashGroup.CONFIG),
+                spec("/provider", ArgCompletion.PROVIDERS, SlashGroup.CONFIG),
+                spec("/agent", ArgCompletion.AGENTS, SlashGroup.CONFIG),
+                spec("/resume", ArgCompletion.SESSIONS, SlashGroup.SESSION),
+                spec("/tools", ArgCompletion.TOOLS, SlashGroup.INSPECT),
+                spec("/mode", ArgCompletion.MODE, SlashGroup.CONFIG),
+                spec("/permissions", ArgCompletion.PERMISSIONS, SlashGroup.CONFIG),
+                spec("/thinking", ArgCompletion.SHOW_HIDE, SlashGroup.CONFIG),
+                spec("/tool-output", ArgCompletion.SHOW_HIDE, SlashGroup.CONFIG),
+                spec("/context", ArgCompletion.PATH, SlashGroup.INSPECT),
+                spec("/editplan", ArgCompletion.PATH, SlashGroup.MAINTAIN));
+        return new SlashRegistry(List.of(set));
+    }
+
+    private static SlashCommand spec(final String name, final ArgCompletion completion, final SlashGroup group) {
+        return SlashCommand.of(new SlashCommandSpec(name, null, name + " cmd", group), completion, (arg, env) -> null);
+    }
+
     private static CompletionEngine engine() {
         return new CompletionEngine(
+                registry(),
                 () -> List.of("gpt-5-mini", "gpt-5", "qwen3-coder"),
                 () -> List.of("openai", "ollama"),
                 () -> List.of("reviewer", "tester"),

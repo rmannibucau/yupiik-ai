@@ -25,8 +25,7 @@ public final class TestConfigs {
     }
 
     public static CodingAgentConfiguration codingAgent(final Map<String, String> overrides) {
-        final var map = new HashMap<String, String>();
-        map.putAll(overrides);
+        final var map = new HashMap<>(overrides);
         return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
     }
 }

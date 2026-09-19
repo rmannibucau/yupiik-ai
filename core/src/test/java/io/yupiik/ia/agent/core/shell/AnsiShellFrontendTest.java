@@ -59,14 +59,37 @@ class AnsiShellFrontendTest {
     }
 
     private AnsiShellFrontend frontend(final boolean showThinking, final boolean showToolOutput) {
+        return frontend(false, showThinking, showToolOutput);
+    }
+
+    private AnsiShellFrontend frontend(final boolean tty, final boolean showThinking, final boolean showToolOutput) {
         return new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
                 new ToolPresenter(new JsonMapperImpl(List.of(), key -> Optional.empty())),
                 CliVerbosity.COMPACT,
-                false,
+                tty,
                 showThinking,
                 showToolOutput);
+    }
+
+    @Test
+    void suspensionBuffersEventsAndResumeReplaysThem() {
+        final var frontend = frontend(false, true);
+        final var interrupt = new AgentEvent.Status("mid-gate status");
+
+        frontend.suspendOutput();
+        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden"));
+        frontend.onEvent(interrupt);
+        assertEquals("", out.toString());
+        assertEquals("", err.toString());
+
+        frontend.resumeOutput();
+        assertTrue(out.toString().isEmpty());
+        assertTrue(err.toString().contains("mid-gate status"));
+
+        frontend.onEvent(new AgentEvent.Status("after"));
+        assertTrue(err.toString().contains("after"));
     }
 
     @Test
@@ -133,5 +156,29 @@ class AnsiShellFrontendTest {
         assertEquals(4, lines.size());
         assertTrue(lines.get(3).contains("1/3 done"));
         assertTrue(lines.get(0).contains("write"));
+    }
+
+    @Test
+    void shownThinkingPrintsDimAndNeverSpins() {
+        final var frontend = frontend(true, true, true);
+        frontend.beginTurn();
+        assertFalse(frontend.spinnerRunning());
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
+        assertTrue(err.toString().contains("reasoning"));
+        assertFalse(frontend.spinnerRunning());
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls"));
+        assertTrue(frontend.spinnerRunning());
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true));
+        assertFalse(frontend.spinnerRunning());
+        frontend.endTurn();
+    }
+
+    @Test
+    void hiddenThinkingSpinsDuringTurn() {
+        final var frontend = frontend(true, false, true);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
     }
 }

@@ -35,6 +35,9 @@ import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
@@ -137,18 +140,22 @@ class TuiCommandHeadlessTest {
         assertNotNull(container.lookup(TuiCommand.class).instance());
         assertNotNull(container.lookup(RunCommand.class).instance());
         assertNotNull(container.lookup(TuiTranscriptModel.class).instance());
+        assertNotNull(container
+                .lookup(io.yupiik.ia.agent.tui.prompt.SlashCommandCompleter.class)
+                .instance());
         assertNotNull(container.lookup(TuiRunnerFactory.class).instance());
     }
 
     @Test
     void answersThroughRealAgentLoop() throws Exception {
         final var d = deps;
+        final var tuiSlashCommands = new TuiSlashCommands();
         final var command = new TuiCommand(
                 new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
                 d.tuiConfiguration(),
                 d.configuration(),
                 d.agentLoop(),
-                d.bridge(),
+                container.lookup(ShellRegistry.class).instance(),
                 d.permissionService(),
                 d.userFeedbackService(),
                 d.sessionStore(),
@@ -161,9 +168,11 @@ class TuiCommandHeadlessTest {
                 d.agentProvider(),
                 d.agentSessionService(),
                 new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
+                container.lookup(TurnRunner.class).instance(),
                 d.model(),
                 headlessFactory(),
-                new TuiSlashCommands(),
+                tuiSlashCommands,
+                new SlashRegistry(List.of(tuiSlashCommands)),
                 Clock.systemUTC());
 
         uiThread = new Thread(command::run, "tui-headless-test");

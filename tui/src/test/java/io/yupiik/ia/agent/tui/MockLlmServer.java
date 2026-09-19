@@ -18,10 +18,6 @@ package io.yupiik.ia.agent.tui;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
-import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
-import io.yupiik.ia.agent.core.configuration.StructuralCodeGraphConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
@@ -33,9 +29,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
@@ -96,7 +90,7 @@ public final class MockLlmServer implements AutoCloseable {
     }
 
     public String baseUrl() {
-        return "http://localhost:" + port() + "/v1";
+        return "http://localhost:" + port() + "/v1/chat/completions";
     }
 
     public String answer() {
@@ -132,64 +126,6 @@ public final class MockLlmServer implements AutoCloseable {
                         new ModelsResponse$FusionJsonCodec(),
                         new ModelsResponse$Model$FusionJsonCodec()),
                 key -> Optional.empty());
-    }
-
-    public static CodingAgentConfiguration configuration(final String baseUrl, final String storageHome) {
-        return configuration(baseUrl, storageHome, null, null);
-    }
-
-    public static CodingAgentConfiguration configuration(
-            final String baseUrl, final String storageHome, final PermissionsConfiguration permissions) {
-        return configuration(baseUrl, storageHome, permissions, null);
-    }
-
-    public static CodingAgentConfiguration configuration(
-            final String baseUrl,
-            final String storageHome,
-            final PermissionsConfiguration permissions,
-            final StructuralCodeGraphConfiguration codeGraph) {
-        final var map = new HashMap<String, String>();
-        map.put("yca.storageHome", storageHome);
-        map.put("yca.provider.providers.length", "1");
-        map.put("yca.provider.providers.0.id", "default");
-        map.put("yca.provider.providers.0.baseUrl", baseUrl);
-        map.put("yca.provider.providers.0.apiKey", "test-key");
-        map.put("yca.provider.providers.0.model", "test-model");
-        map.put("yca.provider.providers.0.api", "auto");
-        map.put("yca.provider.providers.0.contextWindow", "128000");
-        map.put("yca.provider.providers.0.timeoutSeconds", "5");
-        map.put("yca.llm.retriesMaxAttempts", "1");
-        map.put("yca.llm.retriesBaseDelayMs", "1");
-        map.put("yca.llm.rateLimitRequestsPerMinute", "0");
-        map.put("yca.llm.maxConcurrent", "1");
-        map.put("yca.llm.retryOnContextOverflow", "true");
-        map.put("yca.llm.maxIterations", "250");
-        if (permissions != null) {
-            map.put("yca.permissions.mode", permissions.mode().name().toLowerCase(Locale.ROOT));
-            map.put("yca.permissions.allow", String.join(",", permissions.allow()));
-            map.put("yca.permissions.deny", String.join(",", permissions.deny()));
-            map.put("yca.permissions.planBash", String.join(",", permissions.planBash()));
-        }
-        if (codeGraph != null) {
-            map.put("yca.structuralCodeGraph.enabled", String.valueOf(codeGraph.enabled()));
-            map.put("yca.structuralCodeGraph.enrich", String.valueOf(codeGraph.enrich()));
-            if (codeGraph.baseUrl() != null) {
-                map.put("yca.structuralCodeGraph.baseUrl", codeGraph.baseUrl());
-            }
-            if (codeGraph.apiKey() != null) {
-                map.put("yca.structuralCodeGraph.apiKey", codeGraph.apiKey());
-            }
-            if (codeGraph.model() != null) {
-                map.put("yca.structuralCodeGraph.model", codeGraph.model());
-            }
-            map.put("yca.structuralCodeGraph.maxFileBytes", String.valueOf(codeGraph.maxFileBytes()));
-            map.put("yca.structuralCodeGraph.languageExtensions", String.join(",", codeGraph.languageExtensions()));
-            map.put("yca.structuralCodeGraph.storeDir", codeGraph.storeDir());
-            map.put("yca.structuralCodeGraph.docs", String.valueOf(codeGraph.docs()));
-            map.put("yca.structuralCodeGraph.deep", String.valueOf(codeGraph.deep()));
-            map.put("yca.structuralCodeGraph.noRefresh", String.valueOf(codeGraph.noRefresh()));
-        }
-        return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
     }
 
     private static void respond(

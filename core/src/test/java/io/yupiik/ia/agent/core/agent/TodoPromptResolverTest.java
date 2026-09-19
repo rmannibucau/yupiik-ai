@@ -58,7 +58,8 @@ class TodoPromptResolverTest {
 
     @Test
     void verbatimValueIsReturnedAsIs() {
-        assertEquals("custom guidance", resolver.resolve("custom guidance", "https://api.openai.com/v1"));
+        assertEquals(
+                "custom guidance", resolver.resolve("custom guidance", "https://api.openai.com/v1/chat/completions"));
     }
 
     @Test

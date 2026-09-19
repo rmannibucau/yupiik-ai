@@ -288,7 +288,7 @@ class SystemPromptBuilderTest {
                 "yca.workingDir", project.toString(),
                 "yca.mode", "build",
                 "yca.provider.providers.length", "1",
-                "yca.provider.providers.0.baseUrl", "https://api.openai.com/v1",
+                "yca.provider.providers.0.baseUrl", "https://api.openai.com/v1/chat/completions",
                 "yca.provider.providers.0.model", "m",
                 "yca.provider.providers.0.prompt.todo", "custom guidance text"));
         final var builder = builder(cfg, todoResolver(), providerManager(cfg));
@@ -306,7 +306,7 @@ class SystemPromptBuilderTest {
                 "yca.workingDir", project.toString(),
                 "yca.mode", "build",
                 "yca.provider.providers.length", "1",
-                "yca.provider.providers.0.baseUrl", "https://api.openai.com/v1",
+                "yca.provider.providers.0.baseUrl", "https://api.openai.com/v1/chat/completions",
                 "yca.provider.providers.0.model", "m",
                 "yca.provider.providers.0.prompt.todo", "false"));
         final var builder = builder(cfg, todoResolver(), providerManager(cfg));

@@ -23,11 +23,12 @@ import dev.tamboui.tui.event.KeyCode;
 import dev.tamboui.tui.event.KeyEvent;
 import dev.tamboui.tui.event.KeyModifiers;
 import dev.tamboui.tui.event.PasteEvent;
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
@@ -37,6 +38,9 @@ import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -57,12 +61,6 @@ import org.junit.jupiter.api.io.TempDir;
  */
 class TuiCommandRenderTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
-
-    static {
-        java.net.http.HttpClient.newBuilder()
-                .version(java.net.http.HttpClient.Version.HTTP_1_1)
-                .build();
-    }
 
     @TempDir
     Path temp;
@@ -92,7 +90,7 @@ class TuiCommandRenderTest {
 
     @Test
     void rendersSidebarAndAnswer() throws Exception {
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -101,13 +99,13 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                bridge.onEvent(new AgentEvent.TextDelta("hello from stub"));
-                bridge.onEvent(new AgentEvent.TurnDone("hello from stub"));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub"));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub"));
                 return "ok";
             }
         };
-        final var command = command(bridge, agentLoop);
-        uiThread = new Thread(command::run, "tui-render-test");
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-render-test");
         uiThread.setDaemon(true);
         uiThread.start();
         awaitTui();
@@ -126,8 +124,8 @@ class TuiCommandRenderTest {
 
     @Test
     void slashHelpListsCommandsInTranscript() throws Exception {
-        final var command = command(new AgentEventBridge(), stubAgentLoop());
-        uiThread = new Thread(command::run, "tui-help-test");
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-help-test");
         uiThread.setDaemon(true);
         uiThread.start();
         awaitTui();
@@ -143,7 +141,7 @@ class TuiCommandRenderTest {
 
     @Test
     void clearRestoresWelcomeScreen() throws Exception {
-        final var bridge = new AgentEventBridge();
+        final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -152,12 +150,12 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                bridge.onEvent(new AgentEvent.TurnDone("some answer"));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("some answer"));
                 return "ok";
             }
         };
-        final var command = command(bridge, agentLoop);
-        uiThread = new Thread(command::run, "tui-clear-test");
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-clear-test");
         uiThread.setDaemon(true);
         uiThread.start();
         awaitTui();
@@ -188,7 +186,7 @@ class TuiCommandRenderTest {
         };
     }
 
-    private TuiCommand command(final AgentEventBridge bridge, final AgentLoop agentLoop) {
+    private TuiCommand command(final ShellRegistry shellRegistry, final AgentLoop agentLoop) {
         final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, false, "dark", true);
@@ -239,12 +237,13 @@ class TuiCommandRenderTest {
                 return runner;
             }
         };
+        final var tuiSlashCommands = new TuiSlashCommands();
         return new TuiCommand(
                 conf,
                 tuiConfiguration,
                 configuration,
                 agentLoop,
-                bridge,
+                shellRegistry,
                 new PermissionService(configuration),
                 new UserFeedbackService(),
                 sessionStore,
@@ -271,14 +270,22 @@ class TuiCommandRenderTest {
                         configuration,
                         null),
                 new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
+                new TurnRunner(
+                        agentLoop,
+                        new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
+                        new VirtualThreadExecutor()),
                 new TuiTranscriptModel(),
                 factory,
-                new TuiSlashCommands(),
+                tuiSlashCommands,
+                new SlashRegistry(List.of(tuiSlashCommands)),
                 Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {
-        return MockLlmServer.configuration(llm.baseUrl(), temp.resolve("home").toString());
+        return CodingAgentConfigurations.builder()
+                .baseUrl(llm.baseUrl())
+                .storageHome(temp.resolve("home").toString())
+                .build();
     }
 
     private void awaitTui() throws InterruptedException {
@@ -293,5 +300,14 @@ class TuiCommandRenderTest {
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
             screen = backend.text();
         }
+    }
+
+    private static ShellRegistry testRegistry() {
+        return new ShellRegistry(new Emitter() {
+            @Override
+            public <T> void emit(final T event) {
+                // no-op: events are dispatched through ShellRegistry.onEvent in tests
+            }
+        });
     }
 }

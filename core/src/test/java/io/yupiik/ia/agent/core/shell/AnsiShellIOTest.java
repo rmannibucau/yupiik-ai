@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.Question;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Map;
@@ -49,6 +50,28 @@ class AnsiShellIOTest {
         assertFalse(io.confirm("go?").toCompletableFuture().join());
         assertFalse(io.confirm("go?").toCompletableFuture().join());
         assertEquals(1, interrupts.get());
+    }
+
+    @Test
+    void interactionHooksFireAroundGates() {
+        final var calls = new ArrayList<String>();
+        final var io = new AnsiShellIO(
+                scripted("y", "y", new PromptInterruptException()),
+                new Symbols(true),
+                () -> {},
+                () -> calls.add("start"),
+                () -> calls.add("end"));
+
+        assertTrue(io.confirm("go?").toCompletableFuture().join());
+        assertEquals(List.of("start", "end"), calls);
+
+        assertEquals(ApprovalGate.Result.ALLOW_ONCE, io.approvalGate().approve("title", "detail", "bash", Map.of()));
+        assertEquals(List.of("start", "end", "start", "end"), calls);
+
+        assertThrows(
+                CompletionException.class,
+                () -> io.readLine("").toCompletableFuture().join());
+        assertEquals(List.of("start", "end", "start", "end"), calls);
     }
 
     @Test

@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.tui;
 
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
-import io.yupiik.ia.agent.core.agent.AgentEventBridge;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
@@ -46,7 +45,6 @@ public record TuiDeps(
         TuiConfiguration tuiConfiguration,
         CodingAgentConfiguration configuration,
         AgentLoop agentLoop,
-        AgentEventBridge bridge,
         PermissionService permissionService,
         UserFeedbackService userFeedbackService,
         ContextManager contextManager,
