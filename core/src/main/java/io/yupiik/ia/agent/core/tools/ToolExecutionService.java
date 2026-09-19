@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.tools;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
@@ -57,12 +58,14 @@ public class ToolExecutionService {
         if (optimizeThis) {
             emitter.emit(new BeforeToolExecutionEvent(tool.name(), args));
         }
+        final var startNanos = System.nanoTime();
         ToolResult result;
         try {
             result = tool.execute(args);
         } catch (final RuntimeException | Error e) {
             result = ToolResult.error("Tool " + tool.name() + " failed: " + e);
         }
+        final var durationMs = (System.nanoTime() - startNanos) / 1_000_000;
         var output = result.output();
         if (result.success() && optimizeThis) {
             output = optimizeOutput(tool, args, output);
@@ -70,6 +73,7 @@ public class ToolExecutionService {
         if (optimizeThis) {
             emitter.emit(new AfterToolExecutionEvent(tool.name(), result.success(), output));
         }
+        emitter.emit(new AgentEvent.ToolTimingEvent(tool.name(), durationMs, durationMs, false));
         return new ToolResult(result.success(), output);
     }
 

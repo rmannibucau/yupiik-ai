@@ -33,6 +33,10 @@ import org.junit.jupiter.api.io.TempDir;
 
 class WebSearchToolTest {
 
+    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
+            .version(java.net.http.HttpClient.Version.HTTP_1_1)
+            .build();
+
     @TempDir
     Path storageHome;
 
@@ -56,8 +60,8 @@ class WebSearchToolTest {
                     "exa",
                     "yca.tools.websearch.exaUrl",
                     "http://localhost:" + server.getAddress().getPort() + "/mcp"));
-            final var client = new ExtendedHttpClient(
-                    new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
+            final var client =
+                    new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
             final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
             final var tool = new WebSearchTool(client, mapper, config);
             final var result = tool.execute(Map.of("query", "hello"));
@@ -90,8 +94,8 @@ class WebSearchToolTest {
                     "parallel",
                     "yca.tools.websearch.parallelUrl",
                     "http://localhost:" + server.getAddress().getPort() + "/mcp"));
-            final var client = new ExtendedHttpClient(
-                    new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
+            final var client =
+                    new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
             final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
             final var tool = new WebSearchTool(client, mapper, config);
             final var result = tool.execute(Map.of("query", "hello"));

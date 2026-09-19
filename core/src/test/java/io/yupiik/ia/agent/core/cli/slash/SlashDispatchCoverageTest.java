@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.cli.CliCommand;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -54,9 +55,10 @@ class SlashDispatchCoverageTest {
     void cliSlashHandlersCoverAllReplSlashCommands() throws Exception {
         final var conf = new CliCommand.CliConf("", "", "", false, false, "compact", false, true, false, false);
         final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        final var config = TestConfigs.codingAgent(Map.of());
         final var command = new CliCommand(
                 conf, null, null, null, null, null, null, null, null, null, null, null, null, mapper, null, null, null,
-                null, null);
+                null, null, config);
         final Method slashHandlers = CliCommand.class.getDeclaredMethod("slashHandlers");
         slashHandlers.setAccessible(true);
         @SuppressWarnings("unchecked")
@@ -69,7 +71,7 @@ class SlashDispatchCoverageTest {
                         .map(SlashCommandSpec::command)
                         .collect(java.util.stream.Collectors.toUnmodifiableSet());
         // /quit has alias [/exit] in its usage - allow "exit" as extra handler
-        final Set<String> knownAliases = Set.of("exit");
+        final Set<String> knownAliases = Set.of("exit", "metrics");
 
         final var missing =
                 catalogKeys.stream().filter(k -> !handlerKeys.contains(k)).toList();

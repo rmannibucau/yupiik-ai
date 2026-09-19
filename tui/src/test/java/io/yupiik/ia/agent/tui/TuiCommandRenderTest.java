@@ -56,7 +56,13 @@ import org.junit.jupiter.api.io.TempDir;
  * screen while driving it with dispatched events.
  */
 class TuiCommandRenderTest {
-    private static final long TIMEOUT_MS = Duration.ofSeconds(30).toMillis();
+    private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
+
+    static {
+        java.net.http.HttpClient.newBuilder()
+                .version(java.net.http.HttpClient.Version.HTTP_1_1)
+                .build();
+    }
 
     @TempDir
     Path temp;
@@ -214,7 +220,9 @@ class TuiCommandRenderTest {
                 List.of(),
                 new io.yupiik.fusion.httpclient.core.ExtendedHttpClient(
                         new io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration()
-                                .setDelegate(java.net.http.HttpClient.newHttpClient())));
+                                .setDelegate(java.net.http.HttpClient.newBuilder()
+                                        .version(java.net.http.HttpClient.Version.HTTP_1_1)
+                                        .build())));
         final var factory = new TuiRunnerFactory() {
             @Override
             public TuiRunner create(final TuiCommand.TuiConf tuiConf) throws Exception {
@@ -274,20 +282,16 @@ class TuiCommandRenderTest {
     }
 
     private void awaitTui() throws InterruptedException {
-        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         while (tuiRef.get() == null) {
-            assertTrue(System.currentTimeMillis() < deadline, "tui runner was not created in time");
-            backend.awaitFrame(100);
+            assertTrue(backend.awaitFrame(1_000), "tui runner was not created in time");
         }
     }
 
     private void awaitText(final String expected) throws InterruptedException {
-        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         var screen = backend.text();
-        while (!screen.contains(expected) && System.currentTimeMillis() < deadline) {
-            backend.awaitFrame(250);
+        while (!screen.contains(expected)) {
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
             screen = backend.text();
         }
-        assertTrue(screen.contains(expected), "expected screen to contain '" + expected + "' but was:\n" + screen);
     }
 }

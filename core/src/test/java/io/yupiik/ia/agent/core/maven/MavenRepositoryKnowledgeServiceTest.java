@@ -66,7 +66,7 @@ public class MavenRepositoryKnowledgeServiceTest {
 
             final var run = service.currentIndex();
             assertTrue(run.inFlight(), "indexing should be in flight right after starting");
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
             assertEquals(run.total(), run.doneCount(), "all artifacts must have been processed");
             final var summary = run.summary();
             assertTrue(summary.contains("indexed"), () -> "summary should report indexed: " + summary);
@@ -121,7 +121,7 @@ public class MavenRepositoryKnowledgeServiceTest {
                     service.status().stream().anyMatch(l -> l.startsWith("index in progress:")),
                     () -> "while running the status should report progress: " + service.status());
 
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
             assertTrue(
                     service.status().stream().anyMatch(l -> l.contains("index idle") && l.contains("indexed")),
                     () -> "after the run the status should show the last summary: " + service.status());
@@ -151,7 +151,7 @@ public class MavenRepositoryKnowledgeServiceTest {
 
             final var run = service.currentIndex();
             assertEquals(2, run.total(), "cohort must match project deps");
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
             assertTrue(Files.exists(m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-knowledge-index.md")));
             assertTrue(Files.exists(m2.resolve("g/com/artifact-b/2.0/artifact-b-2.0-knowledge-index.md")));
             assertFalse(Files.exists(m2.resolve("g/com/artifact-other/3.0/artifact-other-3.0-knowledge-index.md")));
@@ -174,7 +174,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         try {
             service.refresh(null, null, null);
             final var run = service.currentIndex();
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
 
             service.onStart(new Start());
             assertTrue(
@@ -201,7 +201,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         try {
             service.refresh(null, null, null);
             final var run = service.currentIndex();
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
 
             final var index = service.knowledge("g.com:artifact-a:1.0", null);
             assertTrue(index.contains("## Knowledge"), () -> "index content expected: " + index);
@@ -233,7 +233,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         try {
             service.refresh(null, null, null);
             final var run = service.currentIndex();
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
 
             final var indexFile = m2.resolve("g/com/artifact-a/1.0/artifact-a-1.0-knowledge-index.md");
             final var first = service.knowledge("g.com:artifact-a:1.0", null);

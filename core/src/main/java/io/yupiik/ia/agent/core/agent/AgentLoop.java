@@ -107,6 +107,16 @@ public class AgentLoop {
     private final TodoStore todoStore;
     private final VirtualThreadExecutor executor;
 
+    // Per-turn metrics tracking (reset at start of each doRun)
+    private int turnLlmCalls;
+    private long turnThinkingMs;
+    private long turnToolSumMs;
+    private long turnToolWallMs;
+    private int turnToolsRun;
+    private boolean thinkingActive;
+    private long thinkingStartNanos;
+    private long turnStartNanos;
+
     public AgentLoop(
             final ChatClient chatClient,
             final ToolRegistry toolRegistry,
@@ -296,6 +306,16 @@ public class AgentLoop {
         var toolDirectiveApplied = false;
         final var repeats = new ToolRepeats();
         final var staleReads = new StaleReads(readsFromHistory(messages));
+
+        // Reset per-turn metrics
+        turnLlmCalls = 0;
+        turnThinkingMs = 0L;
+        turnToolSumMs = 0L;
+        turnToolWallMs = 0L;
+        turnToolsRun = 0;
+        thinkingActive = false;
+        thinkingStartNanos = 0;
+        turnStartNanos = System.nanoTime();
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
             if (contextView != null) {
                 contextView.publish(snapshot(messages, toolsTokens));
@@ -404,14 +424,14 @@ public class AgentLoop {
                                     ? " Gave up after " + truncationContinues + " continuation"
                                             + (truncationContinues == 1 ? "" : "s") + "."
                                     : " Enable yca.llm.continueOnTruncation to auto-continue.")));
-                    emit(new AgentEvent.TurnDone(content));
+                    emitTurnMetrics(content, turnStartNanos);
                     return content;
                 }
                 final var todos = unfinishedTodosNotice(toolsRanThisTurn, reason);
                 if (todos != null) {
                     emit(todos);
                 }
-                emit(new AgentEvent.TurnDone(content));
+                emitTurnMetrics(content, turnStartNanos);
                 return content;
             }
             executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads);
@@ -429,7 +449,20 @@ public class AgentLoop {
         } else {
             emit(new AgentEvent.Error("Maximum iterations reached (" + maxIterations + ")"));
         }
+        emitTurnMetrics(null, turnStartNanos);
         return null;
+    }
+
+    private void emitTurnMetrics(final String content, final long turnStartNanos) {
+        final var turnDurationMs = (System.nanoTime() - turnStartNanos) / 1_000_000;
+        if (thinkingActive) {
+            turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
+        }
+        emit(new AgentEvent.TurnMetrics(
+                turnLlmCalls, turnThinkingMs, turnToolSumMs, turnToolWallMs, turnToolsRun, turnDurationMs));
+        if (content != null) {
+            emit(new AgentEvent.TurnDone(content));
+        }
     }
 
     /**
@@ -593,9 +626,26 @@ public class AgentLoop {
      * Outcome of a single tool call, decoupled from message/session mutation so calls can run
      * concurrently while results still land in the conversation in the model's call order.
      * {@code paths} carries the file paths a read or write tool touched, for stale-read invalidation.
+     * {@code durationMs} is the individual tool execution time, used for per-turn metrics.
      */
     private record ToolOutcome(
-            String callId, String name, String output, boolean success, boolean persist, List<String> paths) {
+            String callId,
+            String name,
+            String output,
+            boolean success,
+            boolean persist,
+            List<String> paths,
+            long durationMs) {
+
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist,
+                final List<String> paths) {
+            this(callId, name, output, success, persist, paths, 0L);
+        }
 
         ToolOutcome(
                 final String callId,
@@ -603,7 +653,7 @@ public class AgentLoop {
                 final String output,
                 final boolean success,
                 final boolean persist) {
-            this(callId, name, output, success, persist, List.of());
+            this(callId, name, output, success, persist, List.of(), 0L);
         }
     }
 
@@ -630,6 +680,7 @@ public class AgentLoop {
                 if (end - i > 1 && executor != null && parallelReadonlyEnabled()) {
                     // tool events (started/finished) are emitted from the worker threads as they
                     // happen: bridges tolerate that, results order is still enforced below
+                    final var batchStartNanos = System.nanoTime();
                     final var futures = new ArrayList<Future<ToolOutcome>>(end - i);
                     for (var j = i; j < end; j++) {
                         final var call = calls.get(j);
@@ -645,6 +696,8 @@ public class AgentLoop {
                     for (final var future : futures) {
                         appendToolResult(sessionId, messages, awaitTool(future), staleReads);
                     }
+                    final var batchWallMs = (System.nanoTime() - batchStartNanos) / 1_000_000;
+                    turnToolWallMs += batchWallMs;
                 } else {
                     for (var j = i; j < end; j++) {
                         appendToolResult(sessionId, messages, runGuarded(calls.get(j), repeats), staleReads);
@@ -893,9 +946,12 @@ public class AgentLoop {
             emit(new AgentEvent.ToolFinished(name, denial, false));
             return new ToolOutcome(call.id(), name, denial, false, false);
         }
+        final var toolStartNanos = System.nanoTime();
         final ToolResult result = toolExecutionService.execute(tool, args);
+        final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
         emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
-        return new ToolOutcome(call.id(), name, result.output(), result.success(), true, touchedPaths(name, args));
+        return new ToolOutcome(
+                call.id(), name, result.output(), result.success(), true, touchedPaths(name, args), toolDurationMs);
     }
 
     /** Lands an executed outcome in the conversation and the session store, in call order. */
@@ -913,6 +969,8 @@ public class AgentLoop {
         if (invalidated > 0) {
             emit(new AgentEvent.Status("invalidated " + invalidated + " stale read(s) of modified files"));
         }
+        turnToolsRun++;
+        turnToolSumMs += outcome.durationMs();
     }
 
     private static String unknownToolDiagnostic(final String name) {
@@ -923,10 +981,22 @@ public class AgentLoop {
     private void dispatch(
             final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage, final String[] finishReason) {
         if (delta instanceof TextDelta(final String text)) {
+            if (thinkingActive) {
+                turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
+                thinkingActive = false;
+            }
             emit(new AgentEvent.TextDelta(text));
         } else if (delta instanceof ReasoningDelta(final String text)) {
+            if (!thinkingActive) {
+                thinkingActive = true;
+                thinkingStartNanos = System.nanoTime();
+            }
             emit(new AgentEvent.ThinkingDelta(text));
         } else if (delta instanceof End(final String reason, final Usage upper)) {
+            if (thinkingActive) {
+                turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
+                thinkingActive = false;
+            }
             if (reason != null) {
                 finishReason[0] = reason;
             }
@@ -939,6 +1009,7 @@ public class AgentLoop {
                             upper.cacheRead(),
                             upper.cacheWrite());
             usage[0] = converted;
+            turnLlmCalls++;
             // usage is recorded once per request after the stream completes (single record point,
             // otherwise requests and tokens are double counted)
         }

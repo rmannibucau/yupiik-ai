@@ -28,6 +28,8 @@ package io.yupiik.llm.client;
  *     10s default wait on concurrency-limit errors that carry no header); default on.
  * @param retryAfterMaxWaitMs upper bound honored for a provider {@code retry-after} or
  *     concurrency-limit cooldown (default 5 minutes).
+ * @param waitScale multiplier applied to the effective scheduling delay only; the reported reason
+ *     keeps the logical wait (default 1.0).
  */
 public record LlmResilienceConfig(
         int retriesMaxAttempts,
@@ -36,7 +38,8 @@ public record LlmResilienceConfig(
         int maxConcurrent,
         boolean retryOnContextOverflow,
         boolean retryAfterEnabled,
-        long retryAfterMaxWaitMs) {
+        long retryAfterMaxWaitMs,
+        double waitScale) {
 
     /**
      * The default configuration.
@@ -45,6 +48,6 @@ public record LlmResilienceConfig(
      *     retry-after honoring on capped at 5 minutes.
      */
     public static LlmResilienceConfig defaults() {
-        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L);
+        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d);
     }
 }

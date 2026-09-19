@@ -37,6 +37,11 @@ class HttpMcpClientTest {
     @AfterEach
     void stop() {
         serverState = null;
+        if (server != null) {
+            server.stop(0);
+            server = null;
+        }
+        client = null;
     }
 
     private com.sun.net.httpserver.HttpServer server;
@@ -182,9 +187,12 @@ class HttpMcpClientTest {
         return new JsonMapperImpl(List.of(), key -> Optional.empty());
     }
 
+    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
+            .version(java.net.http.HttpClient.Version.HTTP_1_1)
+            .build();
+
     private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(
-                new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
+        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     private static void respond(

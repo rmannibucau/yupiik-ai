@@ -38,6 +38,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
 
 /**
  * Minimal OpenAI flavored LLM double: serves /v1/chat/completions (SSE when the request
@@ -86,6 +87,7 @@ public final class MockLlmServer implements AutoCloseable {
                         200,
                         "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}",
                         "application/json"));
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
     }
 

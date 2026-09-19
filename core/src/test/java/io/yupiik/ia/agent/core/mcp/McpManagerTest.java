@@ -27,6 +27,8 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -212,6 +214,7 @@ class McpManagerTest {
                 base.mode(),
                 base.httpClient(),
                 base.tools(),
+                new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT),
                 base.maxLineLength(),
                 base.resumeAliases());
     }
@@ -220,9 +223,12 @@ class McpManagerTest {
         return new JsonMapperImpl(List.of(), key -> Optional.empty());
     }
 
+    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
+            .version(java.net.http.HttpClient.Version.HTTP_1_1)
+            .build();
+
     private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(
-                new ExtendedHttpClientConfiguration().setDelegate(java.net.http.HttpClient.newHttpClient()));
+        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     private static void respond(

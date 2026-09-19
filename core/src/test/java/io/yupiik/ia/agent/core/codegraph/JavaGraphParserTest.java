@@ -26,6 +26,33 @@ import org.junit.jupiter.api.io.TempDir;
 
 class JavaGraphParserTest {
 
+    static {
+        warmJavac();
+    }
+
+    private static void warmJavac() {
+        final var compiler = javax.tools.ToolProvider.getSystemJavaCompiler();
+        final var out = java.nio.file.Path.of("target", "javac-warmup");
+        try {
+            java.nio.file.Files.createDirectories(out);
+            final var unit =
+                    new javax.tools.SimpleJavaFileObject(
+                            java.net.URI.create("string:///Warmup.java"), javax.tools.JavaFileObject.Kind.SOURCE) {
+                        @Override
+                        public CharSequence getCharContent(final boolean ignoreEncodingErrors) {
+                            return "public class Warmup { }";
+                        }
+                    };
+            final var task = compiler.getTask(
+                    null, null, null, java.util.List.of("-d", out.toString()), null, java.util.List.of(unit));
+            if (!task.call()) {
+                throw new IllegalStateException("javac warmup compilation failed");
+            }
+        } catch (final java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
     @TempDir
     Path tempDir;
 

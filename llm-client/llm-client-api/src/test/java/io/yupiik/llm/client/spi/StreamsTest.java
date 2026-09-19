@@ -103,7 +103,7 @@ class StreamsTest {
                 });
         chunks.forEach(source::submit);
         source.close();
-        if (!done.await(10, TimeUnit.SECONDS)) {
+        if (!done.await(5, TimeUnit.SECONDS)) {
             throw new IllegalStateException("stream did not complete in time, got: " + events);
         }
         return events;

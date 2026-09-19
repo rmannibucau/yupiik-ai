@@ -79,4 +79,34 @@ public sealed interface AgentEvent {
     record TurnDone(String content) implements AgentEvent {}
 
     record Error(String message) implements AgentEvent {}
+
+    /**
+     * Per-turn aggregate metrics emitted at turn completion.
+     *
+     * @param llmCalls              number of LLM requests (UsageUpdated events) in this turn
+     * @param thinkingDurationMs    sum of wall-clock durations of all thinking sequences in this turn
+     * @param toolDurationSumMs     sum of individual tool durations (linear, e.g. 3 tools x 100ms = 300ms)
+     * @param toolDurationWallMs    wall-clock batch duration: first tool start to last tool finish in parallel batches
+     * @param toolsRun              total number of tool executions in this turn
+     * @param turnDurationMs        total turn wall time: turn start to TurnDone
+     */
+    record TurnMetrics(
+            int llmCalls,
+            long thinkingDurationMs,
+            long toolDurationSumMs,
+            long toolDurationWallMs,
+            int toolsRun,
+            long turnDurationMs)
+            implements AgentEvent {}
+
+    /**
+     * Individual tool timing event emitted from ToolExecutionService.
+     *
+     * @param toolName         name of the tool that executed
+     * @param durationMs       individual tool execution duration
+     * @param wallDurationMs   for parallel batches: batch elapsed time (first start to last finish); for sequential: equals durationMs
+     * @param parallelBatch    true if this tool was part of a parallel batch
+     */
+    record ToolTimingEvent(String toolName, long durationMs, long wallDurationMs, boolean parallelBatch)
+            implements AgentEvent {}
 }

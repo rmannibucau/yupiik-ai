@@ -68,6 +68,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -84,6 +85,7 @@ class OpenAIDialectTest {
     @BeforeEach
     void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
     @AfterEach
@@ -127,8 +129,11 @@ class OpenAIDialectTest {
                 key -> Optional.empty());
     }
 
+    private static final HttpClient WARM_HTTP_CLIENT =
+            HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+
     private static ExtendedHttpClient client() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient()));
+        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     private static LlmRequest request(final boolean stream) {
@@ -195,7 +200,7 @@ class OpenAIDialectTest {
                 done.countDown();
             }
         });
-        assertTrue(done.await(30, TimeUnit.SECONDS), "stream did not complete in time");
+        assertTrue(done.await(5, TimeUnit.SECONDS), "stream did not complete in time");
         if (error.get() != null) {
             throw new AssertionError("stream errored", error.get());
         }
@@ -220,7 +225,7 @@ class OpenAIDialectTest {
                 client(),
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
-        final var response = dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals("Bearer sk-test", reqHeaders.get());
         assertEquals("hello", response.text());
         assertEquals(4, response.usage().totalTokens());
@@ -249,7 +254,7 @@ class OpenAIDialectTest {
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var publisher =
-                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
         assertEquals(
                 List.of(
@@ -282,7 +287,7 @@ class OpenAIDialectTest {
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var publisher =
-                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
         assertTrue(reqBody.get().contains("\"stream_options\""), reqBody.get());
         assertTrue(reqBody.get().contains("\"include_usage\":true"), reqBody.get());
@@ -320,7 +325,7 @@ class OpenAIDialectTest {
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         dialect.stream(request(true, java.util.Map.of("includeUsage", false)), () -> false)
                 .toCompletableFuture()
-                .get(30, TimeUnit.SECONDS);
+                .get(5, TimeUnit.SECONDS);
         assertTrue(!reqBody.get().contains("stream_options"), "disabled by includeUsage=false: " + reqBody.get());
         assertTrue(!reqBody.get().contains("includeUsage"), "control key must not leak: " + reqBody.get());
 
@@ -328,12 +333,12 @@ class OpenAIDialectTest {
                         request(true, java.util.Map.of("stream_options", java.util.Map.of("include_usage", false))),
                         () -> false)
                 .toCompletableFuture()
-                .get(30, TimeUnit.SECONDS);
+                .get(5, TimeUnit.SECONDS);
         assertTrue(
                 reqBody.get().contains("\"include_usage\":false"),
                 "explicit stream_options must win: " + reqBody.get());
 
-        dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertTrue(!reqBody.get().contains("stream_options"), "non-stream must not ask for usage: " + reqBody.get());
     }
 
@@ -351,7 +356,7 @@ class OpenAIDialectTest {
                 client(),
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
-        final LlmModels models = dialect.models().toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals(List.of("a", "b"), models.ids());
     }
 
@@ -396,7 +401,7 @@ class OpenAIDialectTest {
                 client(),
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final LlmResponse response =
-                dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals("hello", response.text());
         assertTrue(reqBody.get().contains("\"max_output_tokens\":64"), reqBody.get());
     }
@@ -418,7 +423,7 @@ class OpenAIDialectTest {
                 client(),
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final LlmResponse response =
-                dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var calls = response.first().message().toolCalls();
         assertEquals(2, calls.size(), () -> "both parallel calls must survive, got " + calls);
         assertEquals("read", calls.get(0).function().name());
@@ -448,7 +453,7 @@ class OpenAIDialectTest {
                 client(),
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final var publisher =
-                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
         assertEquals(
                 List.of(

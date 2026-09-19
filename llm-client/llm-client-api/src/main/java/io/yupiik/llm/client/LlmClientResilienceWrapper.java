@@ -246,7 +246,7 @@ public final class LlmClientResilienceWrapper {
         if (pauseListener != null) {
             pauseListener.accept(new PauseEvent(attempt, reason, waitMs));
         }
-        CompletableFuture.delayedExecutor(waitMs, TimeUnit.MILLISECONDS)
+        CompletableFuture.delayedExecutor(Math.max(1L, (long) (waitMs * config.waitScale())), TimeUnit.MILLISECONDS)
                 .execute(() -> retry(dialect, request, cancelled, attempt + 1)
                         .whenComplete((r, e) -> completeInto(result, r, e)));
         return result;

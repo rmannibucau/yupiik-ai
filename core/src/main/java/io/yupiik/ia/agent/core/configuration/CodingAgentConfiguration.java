@@ -105,6 +105,9 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Agent tool settings (built-in tool server and web search).")
         ToolsConfiguration tools,
 
+        @Property(documentation = "Metrics display settings (LLM calls, thinking duration, tool duration).")
+        MetricsConfiguration metrics,
+
         @Property(
                 defaultValue = "10000",
                 documentation =

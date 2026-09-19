@@ -64,8 +64,9 @@ class ChatClientMidStreamTest {
                 "");
         final var sseBytes = sse.getBytes(StandardCharsets.UTF_8);
         final var firstChunkDelivered = new CountDownLatch(2);
+        final var serverDone = new CountDownLatch(1);
         try (final var server = new ServerSocket(0, 1, InetAddress.getByName("localhost"))) {
-            final var serverThread = new Thread(() -> serveOne(server, sseBytes, firstChunkDelivered));
+            final var serverThread = new Thread(() -> serveOne(server, sseBytes, firstChunkDelivered, serverDone));
             serverThread.start();
 
             final var port = server.getLocalPort();
@@ -87,7 +88,7 @@ class ChatClientMidStreamTest {
                         "the partial text seen before the cut must be preserved");
             } finally {
                 client.close();
-                serverThread.join(10_000);
+                assertTrue(serverDone.await(5, TimeUnit.SECONDS), "server thread must finish");
             }
             assertTrue(
                     deltas.stream().anyMatch(TextDelta.class::isInstance),
@@ -95,7 +96,11 @@ class ChatClientMidStreamTest {
         }
     }
 
-    private void serveOne(final ServerSocket server, final byte[] sseBytes, final CountDownLatch firstChunkDelivered) {
+    private void serveOne(
+            final ServerSocket server,
+            final byte[] sseBytes,
+            final CountDownLatch firstChunkDelivered,
+            final CountDownLatch serverDone) {
         try (final Socket socket = server.accept()) {
             final var in = socket.getInputStream();
             final var head = new StringBuilder();
@@ -117,11 +122,13 @@ class ChatClientMidStreamTest {
             out.flush();
             // only cut once the client actually consumed the first chunk, otherwise the failure
             // would happen before any fragment and would not be a mid-stream failure
-            firstChunkDelivered.await(30, TimeUnit.SECONDS);
+            firstChunkDelivered.await(5, TimeUnit.SECONDS);
             out.write("5\r\nhel".getBytes(StandardCharsets.UTF_8));
             out.flush();
         } catch (final IOException | InterruptedException e) {
             // the client may already be gone, nothing to do
+        } finally {
+            serverDone.countDown();
         }
     }
 

@@ -20,9 +20,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -84,9 +86,10 @@ class CliCommandTest {
         final var conf =
                 new CliCommand.CliConf("", "", "", false, false, presentation, false, showToolOutput, false, false);
         final var mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        final var config = TestConfigs.codingAgent(Map.of());
         final var command = new CliCommand(
                 conf, null, null, null, null, null, null, null, null, null, null, null, null, mapper, null, null, null,
-                null, null);
+                null, null, config);
         final Method dispatch = CliCommand.class.getDeclaredMethod("dispatch", AgentEvent.class);
         dispatch.setAccessible(true);
         return event -> {

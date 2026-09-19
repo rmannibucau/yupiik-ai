@@ -44,7 +44,9 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -53,109 +55,30 @@ import org.junit.jupiter.api.io.TempDir;
  * Boots the real fusion bean graph through autodiscovery (core + json + tui modules)
  * with a programmatically registered MapConfigSource pointing at {@link MockLlmServer}
  * and drives the TUI headlessly through the production {@link AgentLoop}.
+ *
+ * <p>The container and the mock server are shared across the tests of this class and
+ * created in {@code @BeforeAll} so the once-per-class wiring cost is never attributed
+ * to a single test.
  */
 class TuiCommandHeadlessTest {
-    private static final long TIMEOUT_MS = Duration.ofSeconds(30).toMillis();
+    private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
 
     @TempDir
-    Path temp;
+    static Path temp;
 
-    private MockLlmServer llm;
+    private static MockLlmServer llm;
+    private static RuntimeContainer container;
+    private static TuiDeps deps;
+
     private HeadlessBackend backend;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
 
-    @BeforeEach
-    void start() throws IOException {
+    @BeforeAll
+    static void boot() throws IOException {
         llm = new MockLlmServer();
         Files.createDirectories(temp.resolve("home").resolve("sessions"));
-        backend = new HeadlessBackend();
-    }
-
-    @AfterEach
-    void stop() throws InterruptedException {
-        final var tui = tuiRef.get();
-        if (tui != null && tui.isRunning()) {
-            tui.quit();
-        }
-        if (uiThread != null) {
-            uiThread.join(TIMEOUT_MS);
-        }
-        llm.close();
-    }
-
-    @Test
-    void wiresTheFullBeanGraph() {
-        try (final var container = container()) {
-            assertNotNull(container.lookup(TuiCommand.class).instance());
-            assertNotNull(container.lookup(RunCommand.class).instance());
-            assertNotNull(container.lookup(TuiTranscriptModel.class).instance());
-            assertNotNull(container.lookup(TuiRunnerFactory.class).instance());
-        }
-    }
-
-    @Test
-    void answersThroughRealAgentLoop() throws Exception {
-        try (final var container = container();
-                final var deps = container.lookup(TuiDeps.class)) {
-            final var d = deps.instance();
-            final var command = new TuiCommand(
-                    new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
-                    d.tuiConfiguration(),
-                    d.configuration(),
-                    d.agentLoop(),
-                    d.bridge(),
-                    d.permissionService(),
-                    d.userFeedbackService(),
-                    d.sessionStore(),
-                    d.todoStore(),
-                    d.chatClient(),
-                    d.modelStyleService(),
-                    d.mcpManager(),
-                    d.executor(),
-                    d.providerManager(),
-                    d.agentProvider(),
-                    d.agentSessionService(),
-                    new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
-                    d.model(),
-                    headlessFactory(),
-                    new TuiSlashCommands(),
-                    Clock.systemUTC());
-
-            uiThread = new Thread(command::run, "tui-headless-test");
-            uiThread.setDaemon(true);
-            uiThread.start();
-            awaitTui();
-            awaitText("yca coding agent");
-
-            tuiRef.get().dispatch(new PasteEvent("say hi to the mock"));
-            awaitText("say hi to the mock");
-            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-            awaitText("hello from mock");
-            awaitText("ready");
-
-            final var sessions = temp.resolve("home").resolve("sessions");
-            final long sessionDeadline = System.currentTimeMillis() + TIMEOUT_MS;
-            var sessionCount = -1L;
-            while (System.currentTimeMillis() < sessionDeadline) {
-                sessionCount = Files.exists(sessions) ? Files.list(sessions).count() : 0;
-                if (sessionCount >= 1) {
-                    break;
-                }
-                java.util.concurrent.locks.LockSupport.parkNanos(25_000_000L);
-            }
-            assertTrue(sessionCount >= 1, "expected a session file under " + sessions);
-            assertTrue(
-                    llm.requests().stream().anyMatch(r -> r.contains("say hi to the mock")),
-                    "expected the prompt to reach the mock LLM");
-
-            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-            uiThread.join(TIMEOUT_MS);
-        }
-    }
-
-    private RuntimeContainer container() {
-        return ConfiguringContainer.of()
+        container = ConfiguringContainer.of()
                 .register(new ProvidedInstanceBean<>(
                         DefaultScoped.class,
                         ArgsConfigSource.class,
@@ -180,6 +103,92 @@ class TuiCommandHeadlessTest {
                     }
                 })
                 .start();
+        deps = container.lookup(TuiDeps.class).instance();
+    }
+
+    @AfterAll
+    static void shutdown() throws Exception {
+        if (container != null) {
+            container.close();
+        }
+        if (llm != null) {
+            llm.close();
+        }
+    }
+
+    @BeforeEach
+    void start() {
+        backend = new HeadlessBackend();
+    }
+
+    @AfterEach
+    void stop() throws InterruptedException {
+        final var tui = tuiRef.get();
+        if (tui != null && tui.isRunning()) {
+            tui.quit();
+        }
+        if (uiThread != null) {
+            uiThread.join(TIMEOUT_MS);
+        }
+    }
+
+    @Test
+    void wiresTheFullBeanGraph() {
+        assertNotNull(container.lookup(TuiCommand.class).instance());
+        assertNotNull(container.lookup(RunCommand.class).instance());
+        assertNotNull(container.lookup(TuiTranscriptModel.class).instance());
+        assertNotNull(container.lookup(TuiRunnerFactory.class).instance());
+    }
+
+    @Test
+    void answersThroughRealAgentLoop() throws Exception {
+        final var d = deps;
+        final var command = new TuiCommand(
+                new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
+                d.tuiConfiguration(),
+                d.configuration(),
+                d.agentLoop(),
+                d.bridge(),
+                d.permissionService(),
+                d.userFeedbackService(),
+                d.sessionStore(),
+                d.todoStore(),
+                d.chatClient(),
+                d.modelStyleService(),
+                d.mcpManager(),
+                d.executor(),
+                d.providerManager(),
+                d.agentProvider(),
+                d.agentSessionService(),
+                new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
+                d.model(),
+                headlessFactory(),
+                new TuiSlashCommands(),
+                Clock.systemUTC());
+
+        uiThread = new Thread(command::run, "tui-headless-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi to the mock"));
+        awaitText("say hi to the mock");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("hello from mock");
+        awaitText("ready");
+
+        final var sessions = temp.resolve("home").resolve("sessions");
+        assertTrue(Files.isDirectory(sessions), "expected a sessions dir under " + sessions);
+        try (final var stream = Files.list(sessions)) {
+            assertTrue(stream.findAny().isPresent(), "expected a session file under " + sessions);
+        }
+        assertTrue(
+                llm.requests().stream().anyMatch(r -> r.contains("say hi to the mock")),
+                "expected the prompt to reach the mock LLM");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
     }
 
     private TuiRunnerFactory headlessFactory() {
@@ -202,20 +211,16 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitTui() throws InterruptedException {
-        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         while (tuiRef.get() == null) {
-            assertTrue(System.currentTimeMillis() < deadline, "tui runner was not created in time");
-            backend.awaitFrame(100);
+            assertTrue(backend.awaitFrame(1_000), "tui runner was not created in time");
         }
     }
 
     private void awaitText(final String expected) throws InterruptedException {
-        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
         var screen = backend.text();
-        while (!screen.contains(expected) && System.currentTimeMillis() < deadline) {
-            backend.awaitFrame(250);
+        while (!screen.contains(expected)) {
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
             screen = backend.text();
         }
-        assertTrue(screen.contains(expected), "expected screen to contain '" + expected + "' but was:\n" + screen);
     }
 }

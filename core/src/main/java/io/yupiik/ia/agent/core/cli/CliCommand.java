@@ -29,6 +29,9 @@ import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.cli.slash.ReplSlashCommands;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -87,6 +90,7 @@ public class CliCommand implements Runnable {
     private final Clock clock;
     private final Prompt prompt;
     private final McpManager mcpManager;
+    private final CodingAgentConfiguration configuration;
 
     private static final long QUIT_WINDOW_MILLIS = 2000;
     private static final long CLEANUP_AWAIT_NANOS = 1_000_000_000L;
@@ -118,6 +122,10 @@ public class CliCommand implements Runnable {
     private Path contextPath;
     private final AtomicBoolean cleaned = new AtomicBoolean();
 
+    private MetricsConfiguration metricsConfig;
+
+    private volatile AgentEvent.TurnMetrics lastTurnMetrics;
+
     public CliCommand(
             final CliConf conf,
             final AgentLoop agentLoop,
@@ -137,7 +145,8 @@ public class CliCommand implements Runnable {
             final ModelStyleService modelStyleService,
             final Prompt prompt,
             final Clock clock,
-            final McpManager mcpManager) {
+            final McpManager mcpManager,
+            final CodingAgentConfiguration configuration) {
         this.conf = conf;
         this.agentLoop = agentLoop;
         this.bridge = bridge;
@@ -156,6 +165,8 @@ public class CliCommand implements Runnable {
         this.prompt = prompt;
         this.clock = clock;
         this.mcpManager = mcpManager;
+        this.configuration = configuration;
+        this.metricsConfig = configuration.metrics();
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
         this.symbols = new Symbols(conf.ascii());
@@ -606,14 +617,50 @@ public class CliCommand implements Runnable {
                 sb.append(String.format(Locale.ROOT, " · %,d background tokens (compaction/memory)", backgroundTokens));
             }
         }
-        if (toolsRun > 0) {
+        if (metricsConfig.showPerTurn() && lastTurnMetrics != null) {
+            if (conf.showUsage()) {
+                sb.append(" · ");
+            }
+            sb.append(lastTurnMetrics.llmCalls()).append(" LLM");
+            if (lastTurnMetrics.thinkingDurationMs() > 0) {
+                sb.append(" (").append(lastTurnMetrics.thinkingDurationMs()).append("ms think)");
+            }
+            if (metricsConfig.displayMode() == MetricsDisplayMode.FULL) {
+                sb.append(" · ")
+                        .append(lastTurnMetrics.toolsRun())
+                        .append(" tools ")
+                        .append("(")
+                        .append(lastTurnMetrics.toolDurationSumMs())
+                        .append("ms sum")
+                        .append("/")
+                        .append(lastTurnMetrics.toolDurationWallMs())
+                        .append("ms wall)");
+            } else {
+                sb.append(" · ")
+                        .append(lastTurnMetrics.toolsRun())
+                        .append(" tools (")
+                        .append(lastTurnMetrics.toolDurationSumMs())
+                        .append("ms/")
+                        .append(lastTurnMetrics.toolDurationWallMs())
+                        .append("ms)");
+            }
+        } else if (toolsRun > 0) {
             if (conf.showUsage()) {
                 sb.append(" · ");
             }
             sb.append(toolsRun).append(toolsRun == 1 ? " tool" : " tools");
         }
+        if (metricsConfig.showSessionTotals() && usageTracker != null && usageTracker.requests() > 0) {
+            if (conf.showUsage() || toolsRun > 0 || (metricsConfig.showPerTurn() && lastTurnMetrics != null)) {
+                sb.append(" · ");
+            }
+            sb.append("session: ").append(usageTracker.requests()).append(" LLM calls");
+        }
         final var elapsedMillis = (System.nanoTime() - turnStartNanos) / 1_000_000L;
-        if (conf.showUsage() || toolsRun > 0) {
+        if (conf.showUsage()
+                || toolsRun > 0
+                || (metricsConfig.showPerTurn() && lastTurnMetrics != null)
+                || (metricsConfig.showSessionTotals() && usageTracker != null && usageTracker.requests() > 0)) {
             sb.append(" · ");
         }
         sb.append(String.format(Locale.ROOT, "%.1fs", elapsedMillis / 1000.0));
@@ -676,6 +723,8 @@ public class CliCommand implements Runnable {
             System.err.println(MarkdownColorizer.error("[error] " + message));
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
             lastUsageEvent = u;
+        } else if (event instanceof final AgentEvent.TurnMetrics tm) {
+            lastTurnMetrics = tm;
         }
     }
 
@@ -872,6 +921,10 @@ public class CliCommand implements Runnable {
                 }),
                 Map.entry("compact", arg -> {
                     compact();
+                    return false;
+                }),
+                Map.entry("metrics", arg -> {
+                    metrics(arg);
                     return false;
                 }),
                 Map.entry("snapshot", arg -> {
@@ -1170,6 +1223,44 @@ public class CliCommand implements Runnable {
             println(MarkdownColorizer.status(result));
         } catch (final RuntimeException e) {
             println(MarkdownColorizer.error("resync failed: " + e.getMessage()));
+        }
+    }
+
+    private void metrics(final String arg) {
+        final var value = arg == null ? "" : arg.strip().toLowerCase(Locale.ROOT);
+        if (value.isBlank() || "status".equals(value)) {
+            println(MarkdownColorizer.status("metrics: showPerTurn=" + metricsConfig.showPerTurn()
+                    + " showSessionTotals=" + metricsConfig.showSessionTotals()
+                    + " displayMode=" + metricsConfig.displayMode()));
+            return;
+        }
+        final var parts = value.split("\\s+", 2);
+        final var cmd = parts[0];
+        switch (cmd) {
+            case "show" ->
+                metricsConfig =
+                        new MetricsConfiguration(true, metricsConfig.showSessionTotals(), metricsConfig.displayMode());
+            case "hide" ->
+                metricsConfig =
+                        new MetricsConfiguration(false, metricsConfig.showSessionTotals(), metricsConfig.displayMode());
+            case "compact" ->
+                metricsConfig = new MetricsConfiguration(
+                        metricsConfig.showPerTurn(), metricsConfig.showSessionTotals(), MetricsDisplayMode.COMPACT);
+            case "full" ->
+                metricsConfig = new MetricsConfiguration(
+                        metricsConfig.showPerTurn(), metricsConfig.showSessionTotals(), MetricsDisplayMode.FULL);
+            case "session" -> {
+                if (parts.length > 1) {
+                    metricsConfig = new MetricsConfiguration(
+                            metricsConfig.showPerTurn(),
+                            "on".equalsIgnoreCase(parts[1].strip()),
+                            metricsConfig.displayMode());
+                } else {
+                    println(MarkdownColorizer.status("usage: /metrics session on|off"));
+                }
+            }
+            default ->
+                println(MarkdownColorizer.status("usage: /metrics [show|hide|compact|full|session on|off|status]"));
         }
     }
 

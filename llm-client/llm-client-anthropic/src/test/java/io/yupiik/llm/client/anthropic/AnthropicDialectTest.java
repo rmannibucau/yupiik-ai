@@ -53,6 +53,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -68,6 +69,7 @@ class AnthropicDialectTest {
     @BeforeEach
     void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
     }
 
     @AfterEach
@@ -95,8 +97,11 @@ class AnthropicDialectTest {
                 key -> Optional.empty());
     }
 
+    private static final HttpClient WARM_HTTP_CLIENT =
+            HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
+
     private static ExtendedHttpClient client() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient()));
+        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     private static LlmRequest request(final boolean stream) {
@@ -162,7 +167,7 @@ class AnthropicDialectTest {
                 done.countDown();
             }
         });
-        assertTrue(done.await(30, TimeUnit.SECONDS), "stream did not complete in time");
+        assertTrue(done.await(5, TimeUnit.SECONDS), "stream did not complete in time");
         if (error.get() != null) {
             throw new AssertionError("stream errored", error.get());
         }
@@ -187,7 +192,7 @@ class AnthropicDialectTest {
         final var dialect =
                 new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final LlmResponse response =
-                dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals("x-api-key:sk-test|anthropic-version:2023-06-01", reqHeaders.get());
         assertEquals("hello", response.text());
         assertEquals(6, response.usage().totalTokens());
@@ -227,7 +232,7 @@ class AnthropicDialectTest {
                 null,
                 false,
                 java.util.Map.of("promptCache", "false"));
-        dialect.chat(request).toCompletableFuture().get(30, TimeUnit.SECONDS);
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         assertTrue(body.contains("\"system\":\"be concise\""), "plain string system expected:\n" + body);
         assertFalse(body.contains("cache_control"), body);
@@ -258,7 +263,7 @@ class AnthropicDialectTest {
         final var dialect =
                 new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var publisher =
-                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
         assertEquals(
                 List.of(
@@ -291,7 +296,7 @@ class AnthropicDialectTest {
         final var dialect =
                 new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var publisher =
-                dialect.stream(request(true), () -> false).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
         assertEquals(
                 List.of(
@@ -313,7 +318,7 @@ class AnthropicDialectTest {
         server.start();
         final var dialect =
                 new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
-        final LlmModels models = dialect.models().toCompletableFuture().get(30, TimeUnit.SECONDS);
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals(List.of("a", "b"), models.ids());
     }
 
@@ -369,7 +374,7 @@ class AnthropicDialectTest {
         final var dialect =
                 new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final LlmResponse response =
-                dialect.chat(request(false)).toCompletableFuture().get(30, TimeUnit.SECONDS);
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var calls = response.first().message().toolCalls();
         assertEquals(1, calls.size());
         assertEquals("read", calls.get(0).function().name());

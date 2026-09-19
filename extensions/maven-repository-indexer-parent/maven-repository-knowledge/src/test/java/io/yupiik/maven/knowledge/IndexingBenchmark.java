@@ -48,7 +48,7 @@ import org.junit.jupiter.api.Test;
  * concurrency/virtual-thread change to {@link Indexer}.
  */
 @Disabled("benchmark, not a unit test - run explicitly")
-class IndexingBenchmarkTest {
+class IndexingBenchmark {
 
     private static final long ENTRY_POINT_MS = 400;
     private static final long SYNTHESIZE_MS = 250;

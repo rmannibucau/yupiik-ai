@@ -51,6 +51,13 @@ public class TuiTranscriptModel {
     private volatile int contextPercent;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
+    // Per-turn metrics
+    private volatile int turnLlmCalls;
+    private volatile long turnThinkingMs;
+    private volatile long turnToolSumMs;
+    private volatile long turnToolWallMs;
+    private volatile int turnToolsRun;
+
     public synchronized void onEvent(final AgentEvent event) {
         if (event instanceof AgentEvent.TextDelta(String delta)) {
             pending.append(delta);
@@ -147,6 +154,20 @@ public class TuiTranscriptModel {
             }
         } else if (event instanceof AgentEvent.Status(String message)) {
             status = message;
+        } else if (event
+                instanceof
+                AgentEvent.TurnMetrics(
+                        int llmCalls,
+                        long thinkingMs,
+                        long toolSumMs,
+                        long toolWallMs,
+                        int toolsRun,
+                        long turnDurationMs)) {
+            turnLlmCalls = llmCalls;
+            turnThinkingMs = thinkingMs;
+            turnToolSumMs = toolSumMs;
+            turnToolWallMs = toolWallMs;
+            turnToolsRun = toolsRun;
         } else if (event instanceof AgentEvent.TurnDone(String content)) {
             flushThinking();
             transcript.append("\n\n**Assistant**\n\n").append(content).append('\n');
@@ -425,6 +446,26 @@ public class TuiTranscriptModel {
 
     public int contextPercent() {
         return contextPercent;
+    }
+
+    public int turnLlmCalls() {
+        return turnLlmCalls;
+    }
+
+    public long turnThinkingMs() {
+        return turnThinkingMs;
+    }
+
+    public long turnToolSumMs() {
+        return turnToolSumMs;
+    }
+
+    public long turnToolWallMs() {
+        return turnToolWallMs;
+    }
+
+    public int turnToolsRun() {
+        return turnToolsRun;
     }
 
     public long maxHistoryCharacters() {

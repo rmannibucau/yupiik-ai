@@ -55,6 +55,8 @@ import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
@@ -130,6 +132,7 @@ public class TuiCommand implements Runnable {
     private final TuiConf conf;
     private final TuiConfiguration tuiConfiguration;
     private final CodingAgentConfiguration configuration;
+    private MetricsConfiguration metricsConfig;
     private final AgentLoop agentLoop;
     private final AgentEventBridge bridge;
     private final PermissionService permissionService;
@@ -186,6 +189,7 @@ public class TuiCommand implements Runnable {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
+        this.metricsConfig = configuration.metrics();
         this.agentLoop = agentLoop;
         this.bridge = bridge;
         this.permissionService = permissionService;
@@ -1090,6 +1094,7 @@ public class TuiCommand implements Runnable {
                 Map.entry("resume", (arg, runner, state) -> resume(state)),
                 Map.entry("editplan", (arg, runner, state) -> editPlan(arg, runner, state)),
                 Map.entry("compact", (arg, runner, state) -> compact(runner, state)),
+                Map.entry("metrics", (arg, runner, state) -> metricsCommand(arg, state)),
                 Map.entry("snapshot", (arg, runner, state) -> snapshot(arg, state)),
                 Map.entry("session-id", (arg, runner, state) -> sessionIdInfo(state)),
                 Map.entry("session-flush", (arg, runner, state) -> sessionFlush(state)),
@@ -1180,6 +1185,43 @@ public class TuiCommand implements Runnable {
         }
         state.showToolActions = arg.equalsIgnoreCase("show");
         state.model.status("tool blocks " + (state.showToolActions ? "shown" : "hidden"));
+    }
+
+    private void metricsCommand(final String arg, final UiState state) {
+        final var value = arg == null ? "" : arg.strip().toLowerCase(java.util.Locale.ROOT);
+        if (value.isBlank() || "status".equals(value)) {
+            state.model.status("metrics: showPerTurn=" + metricsConfig.showPerTurn()
+                    + " showSessionTotals=" + metricsConfig.showSessionTotals()
+                    + " displayMode=" + metricsConfig.displayMode());
+            return;
+        }
+        final var parts = value.split("\\s+", 2);
+        final var cmd = parts[0];
+        switch (cmd) {
+            case "show" ->
+                metricsConfig =
+                        new MetricsConfiguration(true, metricsConfig.showSessionTotals(), metricsConfig.displayMode());
+            case "hide" ->
+                metricsConfig =
+                        new MetricsConfiguration(false, metricsConfig.showSessionTotals(), metricsConfig.displayMode());
+            case "compact" ->
+                metricsConfig = new MetricsConfiguration(
+                        metricsConfig.showPerTurn(), metricsConfig.showSessionTotals(), MetricsDisplayMode.COMPACT);
+            case "full" ->
+                metricsConfig = new MetricsConfiguration(
+                        metricsConfig.showPerTurn(), metricsConfig.showSessionTotals(), MetricsDisplayMode.FULL);
+            case "session" -> {
+                if (parts.length > 1) {
+                    metricsConfig = new MetricsConfiguration(
+                            metricsConfig.showPerTurn(),
+                            "on".equalsIgnoreCase(parts[1].strip()),
+                            metricsConfig.displayMode());
+                } else {
+                    state.model.status("usage: /metrics session on|off");
+                }
+            }
+            default -> state.model.status("usage: /metrics [show|hide|compact|full|session on|off|status]");
+        }
     }
 
     private boolean isPaletteLight() {
@@ -2618,6 +2660,23 @@ public class TuiCommand implements Runnable {
         parts.add(Span.styled(modeName(), Style.EMPTY.fg(modeColor())));
         if (conf.bindings() == KeyBindingPreset.VIM) {
             parts.add(Span.styled("  [vim insert]  ", muted));
+        }
+        // Per-turn metrics
+        if (metricsConfig.showPerTurn() && state.model.turnLlmCalls() > 0) {
+            final var mode = metricsConfig.displayMode();
+            if (mode == MetricsDisplayMode.COMPACT) {
+                parts.add(Span.styled(
+                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms) · "
+                                + state.model.turnToolsRun() + " tools (" + state.model.turnToolSumMs() + "/"
+                                + state.model.turnToolWallMs() + "ms)  ",
+                        muted));
+            } else if (mode == MetricsDisplayMode.FULL) {
+                parts.add(Span.styled(
+                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms think) · "
+                                + state.model.turnToolsRun() + " tools (" + state.model.turnToolSumMs() + "ms sum/"
+                                + state.model.turnToolWallMs() + "ms wall)  ",
+                        muted));
+            }
         }
         final var line = Line.from(parts.toArray(Span[]::new));
         frame.renderWidget(

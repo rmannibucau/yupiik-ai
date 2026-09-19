@@ -41,6 +41,34 @@ import org.junit.jupiter.api.io.TempDir;
 
 class CodeGraphIndexCommandTest {
 
+    private static final javax.tools.JavaCompiler COMPILER = ToolProvider.getSystemJavaCompiler();
+
+    static {
+        warmJavac(COMPILER);
+    }
+
+    private static void warmJavac(final javax.tools.JavaCompiler compiler) {
+        final var out = java.nio.file.Path.of("target", "javac-warmup");
+        try {
+            java.nio.file.Files.createDirectories(out);
+            final var unit =
+                    new javax.tools.SimpleJavaFileObject(
+                            java.net.URI.create("string:///Warmup.java"), javax.tools.JavaFileObject.Kind.SOURCE) {
+                        @Override
+                        public CharSequence getCharContent(final boolean ignoreEncodingErrors) {
+                            return "public class Warmup { }";
+                        }
+                    };
+            final var task = compiler.getTask(
+                    null, null, null, java.util.List.of("-d", out.toString()), null, java.util.List.of(unit));
+            if (!task.call()) {
+                throw new IllegalStateException("javac warmup compilation failed");
+            }
+        } catch (final java.io.IOException e) {
+            throw new java.io.UncheckedIOException(e);
+        }
+    }
+
     @TempDir
     Path tmp;
 
@@ -65,7 +93,6 @@ class CodeGraphIndexCommandTest {
     private Path compileAndJar(final Map<String, String> sources) throws IOException {
         final var classes = tmp.resolve("classes");
         Files.createDirectories(classes);
-        final var compiler = ToolProvider.getSystemJavaCompiler();
         final var files = sources.entrySet().stream()
                 .map(e ->
                         new SimpleJavaFileObject(
@@ -77,7 +104,7 @@ class CodeGraphIndexCommandTest {
                             }
                         })
                 .toList();
-        final var result = compiler.getTask(null, null, null, List.of("-d", classes.toString()), null, files);
+        final var result = COMPILER.getTask(null, null, null, List.of("-d", classes.toString()), null, files);
         assertTrue(result.call(), "compilation must succeed");
         final var jar = tmp.resolve("lib.jar");
         try (final var zos = new ZipOutputStream(Files.newOutputStream(jar))) {

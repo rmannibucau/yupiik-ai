@@ -43,7 +43,12 @@ import org.junit.jupiter.api.Test;
 class LlmClientResilienceWrapperTest {
 
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
-        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L);
+        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d);
+    }
+
+    private static LlmResilienceConfig config(
+            final int attempts, final long baseDelayMs, final int maxConcurrent, final double waitScale) {
+        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale);
     }
 
     @Test
@@ -85,7 +90,7 @@ class LlmClientResilienceWrapperTest {
     void retryAfterIsHonoredAndSurfacedInThePauseReason() {
         final var dial = new ScriptedDialect(new IOException("LLM request failed (429): {\"error\":{}} retry-after=2"));
         final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
-        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4), pauses::add);
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4, 0.0001d), pauses::add);
 
         final var response =
                 wrapper.chat(dial, null, () -> false).toCompletableFuture().join();
@@ -99,26 +104,25 @@ class LlmClientResilienceWrapperTest {
     }
 
     @Test
-    void concurrencyLimitWithoutRetryAfterWaitsADefault() throws Exception {
+    void concurrencyLimitWithoutRetryAfterWaitsADefault() {
         final var dial = new ScriptedDialect(
                 new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
                         + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
         final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
-        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4), pauses::add);
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4, 0.0001d), pauses::add);
 
-        final var start = System.nanoTime();
         assertEquals(
                 "ok",
                 wrapper.chat(dial, null, () -> false)
                         .toCompletableFuture()
                         .join()
                         .text());
-        final var waited = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
 
-        assertTrue(waited >= LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS - 200);
         assertTrue(
-                pauses.stream().anyMatch(p -> p.reason().contains("concurrency-limit")),
-                "the retry notice must say why it waits, got: " + pauses);
+                pauses.stream()
+                        .anyMatch(p -> p.reason().contains("concurrency-limit")
+                                && p.waitMs() == LlmClientResilienceWrapper.CONCURRENCY_LIMIT_DEFAULT_WAIT_MS),
+                "the retry notice must surface the default wait and why it waits, got: " + pauses);
         assertTrue(
                 pauses.stream()
                         .anyMatch(p -> p.reason() != null && p.reason().startsWith("concurrency limit 2 detected")),

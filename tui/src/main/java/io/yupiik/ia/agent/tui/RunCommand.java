@@ -331,6 +331,15 @@ public class RunCommand implements Runnable {
                 detail.answer(
                         started,
                         t.content() == null ? answer.length() : t.content().length());
+            } else if (event instanceof final AgentEvent.TurnMetrics tm) {
+                detail.turnMetrics(
+                        started,
+                        tm.llmCalls(),
+                        tm.thinkingDurationMs(),
+                        tm.toolDurationSumMs(),
+                        tm.toolDurationWallMs(),
+                        tm.toolsRun(),
+                        tm.turnDurationMs());
             }
         }
     }
@@ -402,6 +411,23 @@ public class RunCommand implements Runnable {
 
         void compact(final long started, final String kind, final String mode) {
             write("compact t=" + (System.nanoTime() - started) / 1_000_000L + " kind=" + kind + " mode=" + mode);
+        }
+
+        void turnMetrics(
+                final long started,
+                final int llmCalls,
+                final long thinkingMs,
+                final long toolSumMs,
+                final long toolWallMs,
+                final int toolsRun,
+                final long turnDurationMs) {
+            write("turnMetrics t=" + (System.nanoTime() - started) / 1_000_000L
+                    + " llmCalls=" + llmCalls
+                    + " thinkingMs=" + thinkingMs
+                    + " toolSumMs=" + toolSumMs
+                    + " toolWallMs=" + toolWallMs
+                    + " toolsRun=" + toolsRun
+                    + " turnDurationMs=" + turnDurationMs);
         }
 
         @Override

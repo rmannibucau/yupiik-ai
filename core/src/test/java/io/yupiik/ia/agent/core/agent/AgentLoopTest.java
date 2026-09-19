@@ -935,7 +935,7 @@ class AgentLoopTest {
                     @Override
                     public ToolResult execute(final Map<String, Object> args) {
                         try {
-                            barrier.await(2, TimeUnit.SECONDS);
+                            barrier.await(250, TimeUnit.MILLISECONDS);
                         } catch (final Exception e) {
                             return ToolResult.error("not concurrent: " + e);
                         }

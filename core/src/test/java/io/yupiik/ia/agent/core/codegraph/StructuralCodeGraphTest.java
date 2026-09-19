@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.ConfiguringContainer;
@@ -37,11 +38,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class StructuralCodeGraphTest {
-    private static final long TIMEOUT_MS = java.time.Duration.ofSeconds(30).toMillis();
+    private static final long TIMEOUT_MS = java.time.Duration.ofSeconds(5).toMillis();
 
     @TempDir
     Path temp;
@@ -505,22 +507,23 @@ class StructuralCodeGraphTest {
 
             // per-symbol deep + file summary are scheduled asynchronously
             enricher.maybeEnrich("Foo.java", model);
-            await(() -> enricher.cache().file("Foo.java") != null);
+            enricher.awaitIdle().get(5, TimeUnit.SECONDS);
 
             final var fileEntry = enricher.cache().file("Foo.java");
+            assertNotNull(fileEntry);
             assertEquals(DocTreeWriter.structuralDigest(model), fileEntry.digest(), "cache keyed by content hash");
             assertTrue(fileEntry.summary().contains("One file"));
 
             // deep per-symbol entries present and keyed by fqn (await both writes flushed to disk)
             final var symKey = enricher.cache().symbolKey("Foo.java", "demo.Foo.add");
-            await(() -> enricher.cache().file("Foo.java") != null);
-            await(() -> enricher.cache().symbol(symKey) != null);
+            enricher.awaitIdle().get(5, TimeUnit.SECONDS);
             final var symEntry = enricher.cache().symbol(symKey);
+            assertNotNull(symEntry);
             assertEquals("does addition", symEntry.summary());
             assertEquals("careful with overflow", symEntry.crux());
 
             // the enriched card carries the file one-liner and the per-symbol one-liner inline, no sections
-            await(() -> safeRead(storeRoot.resolve("Foo.md")).contains("does addition"));
+            enricher.awaitIdle().get(5, TimeUnit.SECONDS);
             final var card = Files.readString(storeRoot.resolve("Foo.md"));
             assertTrue(card.startsWith("# Foo.java"), "expected source-path header");
             assertTrue(card.contains("One file summary text."), "expected the file one-liner inline");
@@ -528,7 +531,7 @@ class StructuralCodeGraphTest {
             assertTrue(!card.contains("## Summary"), "wiring cards must not carry a ## Summary section");
 
             // the wiring graph re-emits with summary, crux and a ready state once enriched
-            await(() -> safeRead(storeRoot.resolve(".graph/wiring.json")).contains("\"summary_state\":\"ready\""));
+            enricher.awaitIdle().get(5, TimeUnit.SECONDS);
             final var wiring = Files.readString(storeRoot.resolve(".graph/wiring.json"));
             assertTrue(wiring.contains("does addition"), "expected summary pushed into wiring.json");
             assertTrue(wiring.contains("careful with overflow"), "expected crux pushed into wiring.json");
@@ -539,7 +542,8 @@ class StructuralCodeGraphTest {
             try (final var enricher2 =
                     new DocEnricher(config, secondFake, writer, mapper, storeRoot, providerManager(config, mapper))) {
                 enricher2.maybeEnrich("Foo.java", model);
-                await(() -> enricher2.cache().file("Foo.java") != null);
+                enricher2.awaitIdle().get(5, TimeUnit.SECONDS);
+                assertNotNull(enricher2.cache().file("Foo.java"));
                 assertEquals(0, secondFake.calls.get(), "persistent cache must avoid redundant LLM calls");
             }
 
@@ -718,14 +722,6 @@ class StructuralCodeGraphTest {
         } catch (final Exception e) {
             return "";
         }
-    }
-
-    private static void await(final java.util.function.BooleanSupplier cond) throws InterruptedException {
-        final long deadline = System.currentTimeMillis() + TIMEOUT_MS;
-        while (System.currentTimeMillis() < deadline && !cond.getAsBoolean()) {
-            java.util.concurrent.locks.LockSupport.parkNanos(25_000_000L);
-        }
-        assertTrue(cond.getAsBoolean(), "timed out waiting for async enrichment");
     }
 
     /** Deterministic LLM double: no network, scripted per prompt marker. */

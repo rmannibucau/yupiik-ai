@@ -26,6 +26,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -126,6 +127,22 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     public boolean enabled() {
         final var cfg = configuration.structuralCodeGraph();
         return configuration != null && cfg != null && cfg.enabled() && cfg.enrich() && writer != null;
+    }
+
+    /**
+     * Returns a future that completes once every task previously queued on the enricher's single-thread
+     * executor has finished. When the enricher is disabled no task is ever queued and the returned future
+     * is already completed.
+     *
+     * @return a future completing when queued enrichment work is drained.
+     */
+    public CompletableFuture<Void> awaitIdle() {
+        if (executor == null) {
+            return CompletableFuture.completedFuture(null);
+        }
+        final var done = new CompletableFuture<Void>();
+        executor.execute(() -> done.complete(null));
+        return done;
     }
 
     /**

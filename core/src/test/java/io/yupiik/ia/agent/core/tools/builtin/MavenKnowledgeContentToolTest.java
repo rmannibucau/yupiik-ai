@@ -53,7 +53,7 @@ class MavenKnowledgeContentToolTest {
         try {
             service.refresh(null, null, null);
             final var run = service.currentIndex();
-            assertTrue(run.awaitCompletion(15, TimeUnit.SECONDS), "indexing should have completed");
+            assertTrue(run.awaitCompletion(5, TimeUnit.SECONDS), "indexing should have completed");
 
             final var index = tool.execute(Map.of("gav", "g.com:artifact-a:1.0"));
             assertTrue(index.success(), () -> "index read should succeed: " + index.output());

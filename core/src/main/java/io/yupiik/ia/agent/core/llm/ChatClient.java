@@ -127,7 +127,10 @@ public class ChatClient implements AutoCloseable {
     }
 
     private static ExtendedHttpClient defaultClient(final CodingAgentConfiguration configuration) {
-        final var clientConfig = new ExtendedHttpClientConfiguration().setDelegate(HttpClient.newHttpClient());
+        final var clientConfig = new ExtendedHttpClientConfiguration()
+                .setDelegate(HttpClient.newBuilder()
+                        .version(HttpClient.Version.HTTP_1_1)
+                        .build());
         if (configuration.httpClient().debug()) {
             clientConfig.setRequestListeners(List.of(new CurlLoggerListener(
                     new CurlLoggerListener.Configuration(java.util.logging.Logger.getLogger("yca.http"))
@@ -145,7 +148,8 @@ public class ChatClient implements AutoCloseable {
                         providerBounds,
                         false,
                         true,
-                        configuration.llm().retryAfterMaxWaitMs()),
+                        configuration.llm().retryAfterMaxWaitMs(),
+                        1.0d),
                 this::onLibraryPause);
     }
 
