@@ -67,6 +67,25 @@ class ToolCardTest {
     }
 
     @Test
+    void parsesRunningCard() {
+        final var card = ToolCard.parse("`| running tail -f log`\n\n```text\nstreamed line\n```");
+        assertTrue(card.running());
+        assertEquals("tail -f log", card.name());
+        assertEquals("", card.args());
+        assertFalse(card.failed());
+        assertEquals(0, card.elapsedMs());
+        assertEquals("streamed line", card.output());
+    }
+
+    @Test
+    void parsesRunningCardWithoutCommand() {
+        final var card = ToolCard.parse("`* running read_file`");
+        assertTrue(card.running());
+        assertEquals("read_file", card.name());
+        assertEquals("", card.output());
+    }
+
+    @Test
     void detectsDiff() {
         final var card = ToolCard.parse(
                 "*streaming `apply_patch`* (9 ms)\n\n```text\n--- a/File.java\n+++ b/File.java\n@@ -1,3 +1,4 @@\n-old\n+new\n context\n```");

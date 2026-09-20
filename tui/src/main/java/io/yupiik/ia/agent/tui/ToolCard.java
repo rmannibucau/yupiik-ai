@@ -22,15 +22,23 @@ package io.yupiik.ia.agent.tui;
  * the tool name, its command/arguments (or the error message when it failed),
  * the captured output and the wall-clock duration in milliseconds.
  */
-public record ToolCard(String name, String args, String output, boolean failed, long elapsedMs) {
+public record ToolCard(String name, String args, String output, boolean failed, long elapsedMs, boolean running) {
     public static ToolCard parse(final String regionText) {
         final var text = regionText.strip();
         final var newline = text.indexOf('\n');
         final var header = newline < 0 ? text : text.substring(0, newline);
         final var failed = header.contains(" failed: ");
+        // live running block from ConversationTranscript.markdown(): "`<spinner> running <command>`"
+        if (!failed && header.startsWith("`")) {
+            final var content = header.endsWith("`") ? header.substring(1, header.length() - 1) : header.substring(1);
+            final var idx = content.indexOf(" running ");
+            final var command =
+                    idx >= 0 ? content.substring(idx + " running ".length()).strip() : content.strip();
+            return new ToolCard(command, "", extractCode(text), false, 0, true);
+        }
         final var name = nameOf(header);
         final var argsAndDuration = failed ? failedArgs(header) : successArgs(header);
-        return new ToolCard(name, argsAndDuration.args(), extractCode(text), failed, argsAndDuration.elapsed());
+        return new ToolCard(name, argsAndDuration.args(), extractCode(text), failed, argsAndDuration.elapsed(), false);
     }
 
     private static String nameOf(final String header) {

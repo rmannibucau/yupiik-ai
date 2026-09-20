@@ -4,7 +4,7 @@
 yca streams model output token by token instead of waiting for the full response.
 Reasoning/thinking deltas are surfaced separately from the final answer.
 
-In the interactive interfaces the thinking stream is shown as it arrives, and
-its verbosity is controlled with the `--showThinking` flag (the TUI also exposes
-`/showthinking`). In headless `run` mode, reasoning deltas are printed on
-stderr.
+In the interactive interfaces the thinking stream is shown inline as it arrives
+(dimmed), and its default visibility is controlled with the `--showThinking`
+flag (the TUI also exposes `/thinking show|hide` or `Ctrl+T`). In headless
+`run` mode, reasoning deltas are printed on stderr.

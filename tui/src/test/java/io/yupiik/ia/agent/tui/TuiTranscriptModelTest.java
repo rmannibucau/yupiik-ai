@@ -109,7 +109,7 @@ class TuiTranscriptModelTest {
         model.onEvent(new AgentEvent.ToolStream("bash", "out.txt"));
         final var md = model.markdown("*", "welcome");
         assertTrue(md.contains("`* running ls`"));
-        assertTrue(md.contains("```text\nout.txt```"));
+        assertTrue(md.contains("```text\nout.txt\n```"));
     }
 
     @Test

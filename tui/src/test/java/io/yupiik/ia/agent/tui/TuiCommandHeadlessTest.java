@@ -173,7 +173,8 @@ class TuiCommandHeadlessTest {
                 headlessFactory(),
                 tuiSlashCommands,
                 new SlashRegistry(List.of(tuiSlashCommands)),
-                Clock.systemUTC());
+                Clock.systemUTC(),
+                new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()));
 
         uiThread = new Thread(command::run, "tui-headless-test");
         uiThread.setDaemon(true);

@@ -60,6 +60,7 @@ public class ConversationTranscript {
     private volatile long turnToolSumMs;
     private volatile long turnToolWallMs;
     private volatile int turnToolsRun;
+    private volatile long turnDurationMs;
 
     public synchronized void onEvent(final AgentEvent event) {
         if (event instanceof AgentEvent.TextDelta(String delta)) {
@@ -169,6 +170,7 @@ public class ConversationTranscript {
             turnToolSumMs = toolSumMs;
             turnToolWallMs = toolWallMs;
             turnToolsRun = toolsRun;
+            this.turnDurationMs = turnDurationMs;
         } else if (event instanceof AgentEvent.TurnDone(String content)) {
             flushThinking();
             transcript.append("\n\n**Assistant**\n\n").append(content).append('\n');
@@ -218,7 +220,9 @@ public class ConversationTranscript {
             sb.append("\n\n**Assistant**\n\n").append(pending);
         }
         if (runningTool != null) {
-            sb.append("\n\n`")
+            sb.append("\n\n")
+                    .append(TOOL_BEGIN)
+                    .append("\n`")
                     .append(spinner)
                     .append(" running ")
                     .append(
@@ -229,8 +233,9 @@ public class ConversationTranscript {
             if (!toolStream.isEmpty()) {
                 sb.append("\n\n```text\n")
                         .append(toolStream.toString().stripTrailing())
-                        .append("```\n");
+                        .append("\n```\n");
             }
+            sb.append(TOOL_END).append('\n');
         }
         final var md = sb.toString().strip();
         return md.isBlank() ? fallback : md;
@@ -424,6 +429,7 @@ public class ConversationTranscript {
         turnToolSumMs = 0;
         turnToolWallMs = 0;
         turnToolsRun = 0;
+        turnDurationMs = 0;
     }
 
     public StringBuilder transcript() {
@@ -456,6 +462,11 @@ public class ConversationTranscript {
 
     public int thinkingLength() {
         return thinking.length();
+    }
+
+    /** Thread-safe snapshot of the live (not yet flushed) thinking buffer, for renderers. */
+    public synchronized String thinkingText() {
+        return thinking.toString();
     }
 
     public String runningTool() {
@@ -500,6 +511,10 @@ public class ConversationTranscript {
 
     public int turnToolsRun() {
         return turnToolsRun;
+    }
+
+    public long turnDurationMs() {
+        return turnDurationMs;
     }
 
     public long maxHistoryCharacters() {

@@ -58,6 +58,38 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void runningToolBlockIsWrappedInToolMarkers() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}"));
+        t.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains(ConversationTranscript.TOOL_BEGIN));
+        assertTrue(md.contains(ConversationTranscript.TOOL_END));
+        assertTrue(md.contains("`| running tail -f log`"));
+        assertTrue(md.contains("```text\nstreamed line\n```"));
+
+        final var regions = ConversationTranscript.regions(md);
+        assertTrue(regions.stream().anyMatch(ConversationTranscript.Region::tool));
+    }
+
+    @Test
+    void turnMetricsKeepDurationAndResetClearsIt() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500));
+        assertEquals(3, t.turnLlmCalls());
+        assertEquals(1500, t.turnDurationMs());
+        t.onEvent(new AgentEvent.ThinkingDelta("thought"));
+        assertEquals("thought", t.thinkingText());
+        assertEquals(7, t.thinkingLength());
+
+        t.reset();
+        assertEquals(0, t.turnDurationMs());
+        assertEquals("", t.thinkingText());
+    }
+
+    @Test
     void statusNoticeAndUsageAreTracked() {
         final var t = new ConversationTranscript();
         t.onEvent(AgentEvent.Notice.warn("careful"));

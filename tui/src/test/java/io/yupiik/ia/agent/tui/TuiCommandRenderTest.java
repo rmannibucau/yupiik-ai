@@ -29,8 +29,10 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
+import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -40,6 +42,7 @@ import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -187,9 +190,17 @@ class TuiCommandRenderTest {
     }
 
     private TuiCommand command(final ShellRegistry shellRegistry, final AgentLoop agentLoop) {
+        return command(shellRegistry, agentLoop, false, new UsageTracker(null, null, null, Clock.systemUTC()));
+    }
+
+    private TuiCommand command(
+            final ShellRegistry shellRegistry,
+            final AgentLoop agentLoop,
+            final boolean showThinking,
+            final UsageTracker usageTracker) {
         final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
-        final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, false, "dark", true);
+        final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#56b6c2", "#eeeeee", "#808080", 0.85, 0.85,
                 "#484848", "#606060", "#141414", "#ff5555", 4000L, null);
@@ -238,13 +249,34 @@ class TuiCommandRenderTest {
             }
         };
         final var tuiSlashCommands = new TuiSlashCommands();
+        final var providerManager = new ProviderManager(configuration, mapper);
+        // one shared permission service like in production: the TUI and the slash
+        // commands must observe the same mode for the gutter to follow /mode
+        final var permissionService = new PermissionService(configuration);
+        final var agentSessionService = new AgentSessionService(
+                permissionService,
+                chatClient,
+                mcpManager,
+                new AgentProvider(configuration),
+                sessionStore,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                todoStore,
+                configuration,
+                null);
+        final var configCommands =
+                new ConfigCommands(agentSessionService, chatClient, providerManager, new AgentProvider(configuration));
         return new TuiCommand(
                 conf,
                 tuiConfiguration,
                 configuration,
                 agentLoop,
                 shellRegistry,
-                new PermissionService(configuration),
+                permissionService,
                 new UserFeedbackService(),
                 sessionStore,
                 todoStore,
@@ -252,23 +284,9 @@ class TuiCommandRenderTest {
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
                 mcpManager,
                 new VirtualThreadExecutor(),
-                new ProviderManager(configuration, mapper),
+                providerManager,
                 new AgentProvider(configuration),
-                new AgentSessionService(
-                        new PermissionService(configuration),
-                        chatClient,
-                        mcpManager,
-                        new AgentProvider(configuration),
-                        sessionStore,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        null,
-                        todoStore,
-                        configuration,
-                        null),
+                agentSessionService,
                 new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
                 new TurnRunner(
                         agentLoop,
@@ -277,8 +295,241 @@ class TuiCommandRenderTest {
                 new TuiTranscriptModel(),
                 factory,
                 tuiSlashCommands,
-                new SlashRegistry(List.of(tuiSlashCommands)),
-                Clock.systemUTC());
+                new SlashRegistry(List.of(tuiSlashCommands, configCommands)),
+                Clock.systemUTC(),
+                usageTracker);
+    }
+
+    @Test
+    void thinkingStreamsInlineAndCtrlTTogglesItBack() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-thinking-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // live thinking renders inline in the conversation panel (no dedicated panel)
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering"));
+        awaitText("pondering");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
+        awaitTextGone("pondering");
+        tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
+        awaitText("pondering");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void thinkingSlashCommandTogglesFlushedThoughts() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-thinking-slash-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a flushed thought region sits in the transcript
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("secret reasoning"));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer"));
+        awaitText("secret reasoning");
+
+        tuiRef.get().dispatch(new PasteEvent("/thinking hide"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitTextGone("secret reasoning");
+
+        tuiRef.get().dispatch(new PasteEvent("/thinking show"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("secret reasoning");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void toolOutputHideKeepsDimLineAndRestoresCards() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-output-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt"));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true));
+        awaitText("ls -la"); // full card with args + output
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitTextGone("ls -la"); // args and output hidden
+        awaitText("✓ bash"); // dim one-liner remains (tool finished in <1ms: no duration)
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitText("ls -la"); // full card restored
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void runningToolStreamIsHiddenWithToolBlocks() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-running-tool-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}"));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        awaitText("streamed line"); // live tool stream visible
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitTextGone("streamed line");
+        awaitText("tail -f log"); // dim one-liner with the command
+        awaitText("running...");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void turnAndSessionMetricsShowInStatusBar() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var usageTracker = newUsageTracker();
+        usageTracker.record(new Usage(10, 5, 15, 0, 0));
+        final var command = command(shellRegistry, stubAgentLoop(), true, usageTracker);
+        uiThread = new Thread(command, "tui-metrics-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500));
+        awaitText("3 LLM");
+        awaitText("1.5s");
+        awaitText("session: 1 LLM calls");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void multilinePasteStaysInPromptUntilSubmitted() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var received = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                received.set(prompt);
+                shellRegistry.onEvent(
+                        new AgentEvent.TurnDone("lines:" + prompt.lines().count()));
+                return "ok";
+            }
+        };
+        final var command = command(shellRegistry, agentLoop, true, newUsageTracker());
+        uiThread = new Thread(command, "tui-multiline-paste-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("line one\nline two"));
+        awaitText("line two"); // both lines visible in the grown prompt
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("lines:2"); // submitted as a single prompt
+        org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void guttersFollowAgentMode() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-mode-gutter-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        // PLAN is the default mode: the global gutter (screen column 0) is the thin bar
+        awaitNoRowStartingWith("┃");
+
+        tuiRef.get().dispatch(new PasteEvent("/mode build"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("build");
+        awaitRowStartingWith("┃"); // heavy bar on the prompt + global gutters
+
+        tuiRef.get().dispatch(new PasteEvent("/mode plan"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("plan");
+        awaitNoRowStartingWith("┃");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void shiftTabTogglesAgentMode() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-shift-tab-mode-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitNoRowStartingWith("┃"); // plan by default
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.SHIFT));
+        awaitRowStartingWith("┃"); // build
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.SHIFT));
+        awaitNoRowStartingWith("┃"); // back to plan
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    private boolean anyRowStartsWith(final String prefix) {
+        for (final var line : backend.text().split("\n")) {
+            if (line.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void awaitRowStartingWith(final String prefix) throws InterruptedException {
+        while (!anyRowStartsWith(prefix)) {
+            assertTrue(
+                    backend.awaitFrame(1_000),
+                    "no frame received while waiting for a row starting with '" + prefix + "'");
+        }
+    }
+
+    private void awaitNoRowStartingWith(final String prefix) throws InterruptedException {
+        while (anyRowStartsWith(prefix)) {
+            assertTrue(
+                    backend.awaitFrame(1_000),
+                    "no frame received while waiting for the '" + prefix + "' gutter to clear");
+        }
+    }
+
+    private static UsageTracker newUsageTracker() {
+        return new UsageTracker(null, null, null, Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {
@@ -298,6 +549,14 @@ class TuiCommandRenderTest {
         var screen = backend.text();
         while (!screen.contains(expected)) {
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
+            screen = backend.text();
+        }
+    }
+
+    private void awaitTextGone(final String expected) throws InterruptedException {
+        var screen = backend.text();
+        while (screen.contains(expected)) {
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "' to clear");
             screen = backend.text();
         }
     }
