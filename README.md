@@ -294,24 +294,34 @@ Project instructions and skills are loaded into the system prompt:
 
 - Right details panel: model, flavor, cwd, git branch, mode, session, MCP
   servers with status dots (green=enabled, grey=disabled, red=failing), token
-  counts and a context gauge
-- Transcript and prompt have an accent-colored left bar; transcript renders as
-  markdown with long lines wrapped at the panel width. Thinking is streamed
-  live in a `thinking` panel and always written into the transcript before each
-  tool call and the final answer, drawn dimmed (text blended over the panel
-  background at `yca.tui.thinkingOpacity`, default `0.85`) and wrapped in a
-  `**Thinking**` section so it stays clearly distinguishable from the real
-  output. Tool actions and their output are drawn the same subdued way
-  (`yca.tui.toolOutputOpacity`, default `0.85`) so assistant answers stand out.
-  When permissions are set to `all` the left bar, mode line and status turn red
-  (`tui.permitAll`, default `#ff5555`)
-- `Ctrl+T` toggles all thinking blocks (live panel + transcript history):
+  counts, session LLM call count and a context gauge
+- Transcript and prompt have a mode-colored left bar (thin orange in `plan`,
+  heavy bold purple in `build`, red when permissions are `all`
+  (`tui.permitAll`, default `#ff5555`)); transcript renders as
+  markdown with long lines wrapped at the panel width. Thinking streams inline
+  in the same conversation panel, dimmed (text blended over the panel
+  background at `yca.tui.thinkingOpacity`, default `0.85`) and marked with a
+  thin dim left bar, and is always written into the transcript before each
+  tool call and the final answer; regular output lines get a bold accent left
+  bar so the main thread of the conversation stands out. Tool actions and
+  their output are drawn the same subdued way (`yca.tui.toolOutputOpacity`,
+  default `0.85`) so assistant answers stand out
+- `Ctrl+T` toggles all thinking blocks (live stream + transcript history):
   hides every block when shown, shows them all back when hidden - nothing is
-  lost, blocks stay in memory
-- `Ctrl+Y` toggles all executed tool blocks: hidden mode keeps each block's
-  command line (`streaming \`<tool>\`: <command>`, tool failures included)
-  visible and only hides the streamed output; the live `calling <command>`
-  spinner and its streamed output stay visible either way
+  lost, blocks stay in memory (same as `/thinking show|hide`, kept in sync)
+- `Ctrl+Y` toggles all executed tool blocks: hidden mode keeps a single dim
+  line per tool (name + duration, failures marked) and hides args, output and
+  the live running stream; showing them back restores the full cards (same as
+  `/tool-output show|hide`, kept in sync)
+- Paste works through the terminal (ctrl+shift+v, middle-click, ...):
+  bracketed paste is enabled so multiline content lands as-is in the prompt
+  (newlines preserved, CRLF normalized) instead of being split into multiple
+  submits; the prompt grows with its content up to a few rows
+- The status bar shows per-turn metrics when the turn completes - LLM calls,
+  thinking time, tool count and durations, turn duration - honoring
+  `yca.metrics.displayMode` (compact/full/hidden, also runtime-tunable with
+  `/config metrics`), plus session totals (`session: N LLM calls`) when
+  `yca.metrics.showSessionTotals` is on
 - The transcript is capped in memory at
   `yca.tui.transcript.maxHistoryCharacters` (default `10000000`): once
   exceeded, the oldest content is truncated from the beginning
@@ -319,7 +329,9 @@ Project instructions and skills are loaded into the system prompt:
   opens automatically on the first todo update
 - Switching `/mode build` keeps the plan todos recorded in `plan` mode, or
   derives them from the last plan of the session when the list is empty
-- `Ctrl+S` compact, `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt
+- `Ctrl+S` compact, `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt; `Shift+Tab`
+  flips between `plan` and `build` modes (same as `/mode`), `Tab` completes
+  slash commands and their parameters
 - Mouse drag selects any visible text (transcript, sidebar, status bar...) and
   copies it to the system clipboard on release; double/triple-click select a
   word / a whole row, `Ctrl+Shift+C` re-copies the selection and `Esc` clears
