@@ -18,32 +18,70 @@ package io.yupiik.ia.agent.core.agent;
 import io.yupiik.ia.agent.core.llm.Usage;
 
 public sealed interface AgentEvent {
-    record TextDelta(String delta) implements AgentEvent {}
+    record TextDelta(String delta, String subagentId, String subagentName) implements AgentEvent {
+        public TextDelta(String delta) {
+            this(delta, null, null);
+        }
+    }
 
     /**
      * The streaming buffers must be discarded: the interrupted stream is retried from scratch and
      * the fragments received before the failure would otherwise duplicate the retried reply prefix.
      */
-    record TextReset() implements AgentEvent {}
-
-    record ThinkingDelta(String delta) implements AgentEvent {}
-
-    record ToolStarted(String name, String args) implements AgentEvent {}
-
-    record ToolFinished(String name, String output, boolean success) implements AgentEvent {}
-
-    record ToolStream(String name, String fragment) implements AgentEvent {}
-
-    record UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent) implements AgentEvent {}
-
-    record Compacted(String kind, String mode) implements AgentEvent {
-
-        public Compacted(String kind) {
-            this(kind, "SUMMARY");
+    record TextReset(String subagentId, String subagentName) implements AgentEvent {
+        public TextReset() {
+            this(null, null);
         }
     }
 
-    record Status(String message) implements AgentEvent {}
+    record ThinkingDelta(String delta, String subagentId, String subagentName) implements AgentEvent {
+        public ThinkingDelta(String delta) {
+            this(delta, null, null);
+        }
+    }
+
+    record ToolStarted(String name, String args, String subagentId, String subagentName) implements AgentEvent {
+        public ToolStarted(String name, String args) {
+            this(name, args, null, null);
+        }
+    }
+
+    record ToolFinished(String name, String output, boolean success, String subagentId, String subagentName)
+            implements AgentEvent {
+        public ToolFinished(String name, String output, boolean success) {
+            this(name, output, success, null, null);
+        }
+    }
+
+    record ToolStream(String name, String fragment, String subagentId, String subagentName) implements AgentEvent {
+        public ToolStream(String name, String fragment) {
+            this(name, fragment, null, null);
+        }
+    }
+
+    record UsageUpdated(
+            Usage usage, int estimatedContextTokens, double contextPercent, String subagentId, String subagentName)
+            implements AgentEvent {
+        public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent) {
+            this(usage, estimatedContextTokens, contextPercent, null, null);
+        }
+    }
+
+    record Compacted(String kind, String mode, String subagentId, String subagentName) implements AgentEvent {
+        public Compacted(String kind) {
+            this(kind, "SUMMARY", null, null);
+        }
+
+        public Compacted(String kind, String mode) {
+            this(kind, mode, null, null);
+        }
+    }
+
+    record Status(String message, String subagentId, String subagentName) implements AgentEvent {
+        public Status(String message) {
+            this(message, null, null);
+        }
+    }
 
     /**
      * A durable, user-visible non-conversation notice. Unlike {@link Status},
@@ -51,7 +89,8 @@ public sealed interface AgentEvent {
      * status bar) so feedback survives and is understandable in all cases,
      * including failures that would otherwise be silent.
      */
-    record Notice(Level level, String message, String finishReason) implements AgentEvent {
+    record Notice(Level level, String message, String finishReason, String subagentId, String subagentName)
+            implements AgentEvent {
 
         public enum Level {
             INFO,
@@ -60,7 +99,11 @@ public sealed interface AgentEvent {
         }
 
         public Notice(final Level level, final String message) {
-            this(level, message, null);
+            this(level, message, null, null, null);
+        }
+
+        public Notice(final Level level, final String message, final String finishReason) {
+            this(level, message, finishReason, null, null);
         }
 
         public static Notice info(final String message) {
@@ -76,9 +119,17 @@ public sealed interface AgentEvent {
         }
     }
 
-    record TurnDone(String content) implements AgentEvent {}
+    record TurnDone(String content, String subagentId, String subagentName) implements AgentEvent {
+        public TurnDone(String content) {
+            this(content, null, null);
+        }
+    }
 
-    record Error(String message) implements AgentEvent {}
+    record Error(String message, String subagentId, String subagentName) implements AgentEvent {
+        public Error(String message) {
+            this(message, null, null);
+        }
+    }
 
     /**
      * Per-turn aggregate metrics emitted at turn completion.
@@ -96,8 +147,29 @@ public sealed interface AgentEvent {
             long toolDurationSumMs,
             long toolDurationWallMs,
             int toolsRun,
-            long turnDurationMs)
-            implements AgentEvent {}
+            long turnDurationMs,
+            String subagentId,
+            String subagentName)
+            implements AgentEvent {
+
+        public TurnMetrics(
+                int llmCalls,
+                long thinkingDurationMs,
+                long toolDurationSumMs,
+                long toolDurationWallMs,
+                int toolsRun,
+                long turnDurationMs) {
+            this(
+                    llmCalls,
+                    thinkingDurationMs,
+                    toolDurationSumMs,
+                    toolDurationWallMs,
+                    toolsRun,
+                    turnDurationMs,
+                    null,
+                    null);
+        }
+    }
 
     /**
      * Individual tool timing event emitted from ToolExecutionService.
@@ -107,6 +179,17 @@ public sealed interface AgentEvent {
      * @param wallDurationMs   for parallel batches: batch elapsed time (first start to last finish); for sequential: equals durationMs
      * @param parallelBatch    true if this tool was part of a parallel batch
      */
-    record ToolTimingEvent(String toolName, long durationMs, long wallDurationMs, boolean parallelBatch)
-            implements AgentEvent {}
+    record ToolTimingEvent(
+            String toolName,
+            long durationMs,
+            long wallDurationMs,
+            boolean parallelBatch,
+            String subagentId,
+            String subagentName)
+            implements AgentEvent {
+
+        public ToolTimingEvent(String toolName, long durationMs, long wallDurationMs, boolean parallelBatch) {
+            this(toolName, durationMs, wallDurationMs, parallelBatch, null, null);
+        }
+    }
 }

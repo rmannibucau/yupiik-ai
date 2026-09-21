@@ -30,6 +30,8 @@ import java.util.function.Consumer;
 public class StatusReporter {
     private final Deque<Consumer<String>> sinks = new ArrayDeque<>();
 
+    public StatusReporter() {}
+
     public synchronized void setSink(final Consumer<String> sink) {
         if (sink == null) {
             if (!sinks.isEmpty()) {

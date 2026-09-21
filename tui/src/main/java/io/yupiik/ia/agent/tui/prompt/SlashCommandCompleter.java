@@ -65,7 +65,8 @@ public class SlashCommandCompleter implements Completer {
                 () -> agentsOf(agentProvider),
                 () -> sessionsOf(sessionStore),
                 () -> toolsOf(mcpManager),
-                () -> agentsOf(agentProvider));
+                () -> agentsOf(agentProvider),
+                model -> variantsOf(chatClient, model));
     }
 
     @Override
@@ -172,6 +173,32 @@ public class SlashCommandCompleter implements Completer {
                     .distinct()
                     .sorted()
                     .toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> variantsOf(final ChatClient chatClient, final String model) {
+        try {
+            if (chatClient == null) {
+                return List.of();
+            }
+            final var variants = chatClient.variants(model);
+            final var hasDefault = chatClient.implicitVariant(model) != null;
+            final var size = (variants == null ? 0 : variants.size()) + (hasDefault ? 1 : 0);
+            if (size == 0) {
+                return List.of();
+            }
+            final var names = new java.util.ArrayList<String>(size);
+            if (hasDefault) {
+                names.add("default");
+            }
+            if (variants != null) {
+                for (final var variant : variants) {
+                    names.add(variant.name());
+                }
+            }
+            return names;
         } catch (final RuntimeException e) {
             return List.of();
         }

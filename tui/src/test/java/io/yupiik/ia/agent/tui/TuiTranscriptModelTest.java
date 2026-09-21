@@ -21,10 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import org.junit.jupiter.api.Test;
 
 class TuiTranscriptModelTest {
-    private final TuiTranscriptModel model = new TuiTranscriptModel();
+    private final TuiTranscriptModel model = new TuiTranscriptModel(new ThinkTagSplitter());
 
     @Test
     void freshModelFallsBackToWelcomeMarkdown() {
@@ -60,6 +61,45 @@ class TuiTranscriptModelTest {
         assertEquals("", model.pending().toString());
         assertFalse(model.busy());
         assertEquals("ready", model.status());
+    }
+
+    @Test
+    void thinkingDeltaRePinsScrollToLiveTail() {
+        model.scrollBack(42);
+        model.onEvent(new AgentEvent.ThinkingDelta("pondering"));
+        assertEquals(0, model.scrollBack());
+    }
+
+    @Test
+    void splitTurnsSeparatesAssistantFromUserBlocks() {
+        final var md = "**Assistant**\n\nhello\n\n---\n\n**You**\n\nhi there\n\n---\n\n**Assistant**\n\nbye";
+        final var turns = TuiTranscriptModel.splitTurns(md);
+        assertEquals(3, turns.size());
+        assertFalse(turns.get(0).user());
+        assertTrue(turns.get(0).text().startsWith("**Assistant**"));
+        assertTrue(turns.get(1).user());
+        assertTrue(turns.get(1).text().contains("hi there"));
+        assertFalse(turns.get(2).user());
+        assertTrue(turns.get(2).text().contains("bye"));
+    }
+
+    @Test
+    void splitTurnsKeepsPlainThematicBreaksInline() {
+        final var md = "intro\n\n---\n\nstill assistant";
+        final var turns = TuiTranscriptModel.splitTurns(md);
+        assertEquals(1, turns.size());
+        assertFalse(turns.get(0).user());
+        assertTrue(turns.get(0).text().contains("---"));
+    }
+
+    @Test
+    void splitTurnsHandlesLeadingContentAndEmptyInput() {
+        final var first = TuiTranscriptModel.splitTurns("welcome");
+        assertEquals(1, first.size());
+        assertFalse(first.get(0).user());
+        final var userFirst = TuiTranscriptModel.splitTurns("---\n\n**You**\n\nquestion");
+        assertEquals(1, userFirst.size());
+        assertTrue(userFirst.get(0).user());
     }
 
     @Test

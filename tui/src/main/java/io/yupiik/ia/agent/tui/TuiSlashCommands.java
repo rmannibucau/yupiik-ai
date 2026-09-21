@@ -33,27 +33,7 @@ import java.util.List;
 @ApplicationScoped
 @Order(2000)
 public class TuiSlashCommands implements SlashCommandSet {
-    private static final String SHORTCUTS = """
-            | key | action |
-            |---|---|
-            | Enter | send the prompt |
-            | Shift/Alt+Enter | newline |
-            | Esc | clear the selection, or interrupt the running agent |
-            | Mouse drag | select text and copy it to the clipboard |
-            | Double/triple-click | select a word / a whole row |
-            | Ctrl+Shift+C | copy the current selection again |
-            | Ctrl+C | quit (or interrupt the running agent, then quit) |
-            | Ctrl+T | toggle all thinking blocks |
-            | Ctrl+Y | toggle all executed tool blocks |
-            | Ctrl+P | toggle todo list |
-            | Ctrl+S | compact the context now |
-            | Ctrl+L | clear the transcript |
-            | PageUp/PageDown | scroll the transcript |
-            | Ctrl+Home / Ctrl+End | jump to the top / bottom of the transcript |
-            | Mouse wheel | scroll the transcript |
-            | Alt+B / Alt+F | move backward/forward one word |
-            | Tab | complete model name or slash command |
-            """;
+    private static final String SHORTCUTS = KeymapCatalog.markdown();
 
     private volatile ThemeSwitcher themeSwitcher;
 

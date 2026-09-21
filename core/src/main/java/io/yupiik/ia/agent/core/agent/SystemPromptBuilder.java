@@ -34,7 +34,6 @@ import java.util.List;
 @ApplicationScoped
 public class SystemPromptBuilder {
     private static final List<String> SIBLING_CONTEXT_FILES = List.of("CLAUDE.md", "README.md");
-    private static final List<String> PROJECT_SKILL_DIRS = List.of(".opencode/skills", ".claude/skills", ".yca/skills");
 
     /**
      * Hard ceiling on the assembled system prompt (rules + environment + project AGENTS.md + skills
@@ -171,10 +170,6 @@ public class SystemPromptBuilder {
         if (!project.isBlank()) {
             sb.append('\n').append(project).append('\n');
         }
-        final var skills = skillsSection();
-        if (!skills.isBlank()) {
-            sb.append('\n').append(skills).append('\n');
-        }
         if (mavenRepositoryKnowledge != null) {
             final var sessionSkills = mavenRepositoryKnowledge.sessionSkillBlocks();
             if (!sessionSkills.isEmpty()) {
@@ -308,115 +303,4 @@ public class SystemPromptBuilder {
             list.add(path);
         }
     }
-
-    private String skillsSection() {
-        final var config = configuration.skills();
-        if (config == null || !config.enabled()) {
-            return "";
-        }
-        final var sb = new StringBuilder();
-        final var seen = new java.util.HashSet<String>();
-        var added = false;
-        final var base = configuration.resolveWorkingDir();
-        for (final var dir : skillDirectories(base)) {
-            final var dirPath = Path.of(dir);
-            if (!Files.isDirectory(dirPath)) {
-                continue;
-            }
-            try (final var dirs = Files.list(dirPath)) {
-                for (final var skillDir : dirs.sorted().toList()) {
-                    if (!Files.isDirectory(skillDir)) {
-                        continue;
-                    }
-                    final var skillFile = skillDir.resolve("SKILL.md");
-                    if (!Files.isRegularFile(skillFile)) {
-                        continue;
-                    }
-                    if (!seen.add(skillDir.getFileName().toString())) {
-                        continue;
-                    }
-                    try {
-                        final var raw = Files.readString(skillFile);
-                        final var parsed =
-                                parseSkill(raw, skillDir.getFileName().toString());
-                        sb.append("<skill name=\"")
-                                .append(parsed.name())
-                                .append("\">\n")
-                                .append(parsed.description())
-                                .append("\n</skill>\n");
-                        added = true;
-                    } catch (final IOException e) {
-                        // skip unreadable
-                    }
-                }
-            } catch (final IOException e) {
-                // skip unreadable dir
-            }
-        }
-        return added ? sb.toString() : "";
-    }
-
-    private List<String> skillDirectories(final Path base) {
-        final var list = new ArrayList<String>();
-        var dir = base;
-        final var walk = new ArrayList<Path>();
-        walk.add(dir);
-        while (dir.getParent() != null) {
-            dir = dir.getParent();
-            walk.add(dir);
-        }
-        for (var i = walk.size() - 1; i >= 0; i--) {
-            for (final var d : PROJECT_SKILL_DIRS) {
-                list.add(walk.get(i).resolve(d).toString());
-            }
-        }
-        list.add(Path.of(configuration.resolveStorageHome(), "skills").toString());
-        final var home = configuration.resolveHome();
-        list.add(Path.of(home, ".config", "opencode", "skills").toString());
-        list.add(Path.of(home, ".claude", "skills").toString());
-        list.add(Path.of(home, ".agents", "skills").toString());
-        return list;
-    }
-
-    private static final String FRONTMATTER_START = "---\n";
-    private static final String FRONTMATTER_END = "---";
-
-    private static Skill parseSkill(final String raw, final String dirName) {
-        var content = raw;
-        var name = dirName;
-        var description = "";
-        if (content.startsWith(FRONTMATTER_START)) {
-            final var end = content.indexOf('\n' + FRONTMATTER_END + "\n", FRONTMATTER_START.length());
-            if (end > 0) {
-                final var front = content.substring(FRONTMATTER_START.length(), end);
-                for (final var line : front.lines().toList()) {
-                    if (line.startsWith("name:") && line.length() > "name:".length()) {
-                        final var candidate = line.substring("name:".length()).strip();
-                        if (!candidate.isEmpty()) {
-                            name = candidate;
-                        }
-                    } else if (line.startsWith("description:") && line.length() > "description:".length()) {
-                        description = line.substring("description:".length()).strip();
-                    }
-                }
-                content = content.substring(end + FRONTMATTER_END.length() + 2);
-            }
-        }
-        if (description.isEmpty()) {
-            description = firstMeaningfulLine(content);
-        }
-        return new Skill(name, description);
-    }
-
-    private static String firstMeaningfulLine(final String content) {
-        for (final var line : content.lines().toList()) {
-            final var stripped = line.strip();
-            if (!stripped.isEmpty() && !stripped.startsWith("#")) {
-                return stripped;
-            }
-        }
-        return content.strip();
-    }
-
-    private record Skill(String name, String description) {}
 }

@@ -1,0 +1,221 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.llm;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+
+class DefaultModelTunerTest {
+
+    @Test
+    void temperatureFollowsTheModelFamily() {
+        assertEquals(1.0, DefaultModelTuner.temperature("north-mini-code", null));
+        assertEquals(1.0, DefaultModelTuner.temperature("gemini-2.5-pro", null));
+        assertEquals(1.0, DefaultModelTuner.temperature("gemini-3-flash", null));
+        assertEquals(1.0, DefaultModelTuner.temperature("glm-4.7", null));
+        assertEquals(1.0, DefaultModelTuner.temperature("minimax-m2", null));
+        assertEquals(1.0, DefaultModelTuner.temperature("kimi-k2-thinking", null));
+        assertEquals(0.6, DefaultModelTuner.temperature("kimi-k2-base", null));
+        assertNull(DefaultModelTuner.temperature("claude-sonnet-5", null));
+        assertNull(DefaultModelTuner.temperature("gpt-5", null));
+        assertNull(DefaultModelTuner.temperature("", null));
+        assertNull(DefaultModelTuner.temperature(null, null));
+    }
+
+    @Test
+    void topPPicksGeminiMinimaxKimiAndDeepseekFamilies() {
+        assertEquals(0.95, DefaultModelTuner.topP("gemini-2.5-pro", null));
+        assertEquals(0.95, DefaultModelTuner.topP("minimax-m2", null));
+        assertEquals(0.95, DefaultModelTuner.topP("kimi-k2.5", null));
+        assertEquals(0.95, DefaultModelTuner.topP("kimi-k2-5", null));
+        assertEquals(0.95, DefaultModelTuner.topP("deepseek-v4-flash-0731", null));
+        assertEquals(0.95, DefaultModelTuner.topP("deepseek-v4-flash-0731-preview", null));
+        assertEquals(0.95, DefaultModelTuner.topP("deepseek-v4-flash:0731", null));
+        assertEquals(0.95, DefaultModelTuner.topP("deepseek-v4-flash:0731-preview", null));
+        assertEquals(0.95, DefaultModelTuner.topP("deepseek-v4-flash", "deepseek"));
+        assertEquals(0.95, DefaultModelTuner.topP("deepseek-v4-flash", "OpenCode"));
+        assertNull(DefaultModelTuner.topP("deepseek-v4-flash", "other"));
+        assertNull(DefaultModelTuner.topP("claude-sonnet-5", null));
+    }
+
+    @Test
+    void topKDistinguishesMinimaxAndGemini() {
+        assertEquals(40.0, DefaultModelTuner.topK("minimax-m21", null));
+        assertEquals(20.0, DefaultModelTuner.topK("minimax-m2", null));
+        assertEquals(64.0, DefaultModelTuner.topK("gemini-2.5-flash", null));
+        assertNull(DefaultModelTuner.topK("gpt-5", null));
+    }
+
+    @Test
+    void implicitVariantNameIsOnlyExposedWhenADefaultApplies() {
+        assertEquals("default", DefaultModelTuner.implicitVariantName("gemini-2.5-pro", null));
+        assertNull(DefaultModelTuner.implicitVariantName("claude-sonnet-5", null));
+    }
+
+    @Test
+    void variantsExposeReasoningEffortPresetsForDeepseekV4() {
+        final var variants = DefaultModelTuner.variants("deepseek-v4-flash", null);
+        assertEquals(4, variants.size());
+        assertEquals("low", variants.get(0).name());
+        assertEquals("medium", variants.get(1).name());
+        assertEquals("high", variants.get(2).name());
+        assertEquals("max", variants.get(3).name());
+        assertEquals("low", variants.get(0).reasoningEffort());
+        assertEquals("max", variants.get(3).reasoningEffort());
+    }
+
+    @Test
+    void reasoningEffortDefaultsMaxForDeepseekAndMediumForGpt5() {
+        assertEquals("max", DefaultModelTuner.reasoningEffort("deepseek-v4-flash", null));
+        assertEquals("max", DefaultModelTuner.reasoningEffort("deepseek-v4-pro", null));
+        assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-5", null));
+        assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-5.1", null));
+        assertEquals("medium", DefaultModelTuner.reasoningEffort("gpt-5.2", null));
+        assertNull(DefaultModelTuner.reasoningEffort("gpt-5-chat", null));
+        assertNull(DefaultModelTuner.reasoningEffort("gpt-5-pro", null));
+        assertNull(DefaultModelTuner.reasoningEffort("claude-sonnet-5", null));
+        assertNull(DefaultModelTuner.reasoningEffort(null, null));
+    }
+
+    @Test
+    void variantsAreEmptyForExcludedAndNonReasoningFamilies() {
+        assertEquals(0, DefaultModelTuner.variants("deepseek-reasoner", null).size());
+        assertEquals(0, DefaultModelTuner.variants("deepseek-chat", null).size());
+        assertEquals(0, DefaultModelTuner.variants("deepseek-r1", null).size());
+        assertEquals(0, DefaultModelTuner.variants("deepseek-v3", null).size());
+        assertEquals(0, DefaultModelTuner.variants("qwen3-32b", null).size());
+        assertEquals(0, DefaultModelTuner.variants("big-pickle", null).size());
+        assertEquals(0, DefaultModelTuner.variants(null, null).size());
+    }
+
+    @Test
+    void gpt5TieringFollowsReleaseDateAndSubFamily() {
+        // No release date: no none/xhigh tiers, gpt-5 adds minimal.
+        List<String> names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("minimal", "low", "medium", "high"), names);
+
+        // gpt-5-pro exposes only high.
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5-pro", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("high"), names);
+
+        // gpt-5.1 exposes the none..high set (no xhigh).
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5.1", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high"), names);
+
+        // gpt-5.2 (no -pro) additionally exposes xhigh.
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5.2", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+
+        // gpt-5-chat exposes only medium.
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5.1-chat", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("medium"), names);
+
+        // gpt-5.3-codex exposes the none..xhigh set.
+        names = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5.3-codex", "openai", ApiFlavor.RESPONSES, null, null)));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), names);
+    }
+
+    @Test
+    void o1MiniHasNoVariantsOnAzure() {
+        assertEquals(
+                0,
+                DefaultModelTuner.variants(
+                                new DefaultModelTuner.ModelContext("o1-mini", "azure", ApiFlavor.RESPONSES, null, null))
+                        .size());
+    }
+
+    @Test
+    void genericOpenAiCompatibleFamiliesGetWidelySupportedEfforts() {
+        assertEquals(List.of("low", "medium", "high"), namesOf(DefaultModelTuner.variants("grok", "xai")));
+        assertEquals(List.of("none", "low", "medium", "high"), namesOf(DefaultModelTuner.variants("llama", "groq")));
+        assertEquals(List.of("none", "high"), namesOf(DefaultModelTuner.variants("north-mini-code", "deepseek")));
+    }
+
+    @Test
+    void grok3MiniExposesLowHigh() {
+        assertEquals(List.of("low", "high"), namesOf(DefaultModelTuner.variants("grok-3-mini", null)));
+    }
+
+    @Test
+    void mistralOnlyExposesHighForReasoningReleaseIds() {
+        assertEquals(
+                List.of("high"),
+                namesOf(DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                        "mistral-small-latest", "mistral", ApiFlavor.COMPLETIONS, null, null))));
+        assertEquals(
+                0,
+                DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                                "mistral-large-latest", "mistral", ApiFlavor.COMPLETIONS, null, null))
+                        .size());
+    }
+
+    @Test
+    void anthropicModernClaudeUsesAdaptiveThinkingEfforts() {
+        final var variants = DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("claude-sonnet-4.7", "anthropic", ApiFlavor.ANTHROPIC, 32000, null));
+        assertEquals(List.of("low", "medium", "high", "xhigh", "max"), namesOf(variants));
+        assertTrue(variants.get(0).extra().contains("\"type\":\"adaptive\""));
+        // Modern adaptive models force display summarized.
+        assertTrue(variants.get(0).extra().contains("\"display\":\"summarized\""));
+    }
+
+    @Test
+    void anthropicOlderClaudeDefaultsToTokenBudgets() {
+        final var variants = DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("claude-sonnet-4.5", "anthropic", ApiFlavor.ANTHROPIC, 32000, null));
+        assertEquals(List.of("high", "max"), namesOf(variants));
+        assertTrue(variants.get(0).extra().contains("\"budget_tokens\":"));
+    }
+
+    @Test
+    void glm52ExposesMaxOnOpenAiWire() {
+        assertEquals(
+                List.of("high", "max"),
+                namesOf(DefaultModelTuner.variants(
+                        new DefaultModelTuner.ModelContext("glm-5.2", "zhipuai", ApiFlavor.COMPLETIONS, null, null))));
+    }
+
+    @Test
+    void kimiOnAnthropicWireExposesAdaptiveEfforts() {
+        final var variants = DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("kimi-k2.5", "moonshot", ApiFlavor.ANTHROPIC, null, null));
+        assertEquals(List.of("low", "medium", "high", "xhigh", "max"), namesOf(variants));
+        assertTrue(variants.get(0).extra().contains("\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"}"));
+    }
+
+    @Test
+    void minimaxM3ExposesThinkingToggle() {
+        final var variants = DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("minimax-m3", "minimax", ApiFlavor.COMPLETIONS, null, null));
+        assertEquals(List.of("none", "thinking"), namesOf(variants));
+        assertTrue(variants.get(0).extra().contains("\"thinking\":{\"type\":\"disabled\"}"));
+    }
+
+    private static List<String> namesOf(final List<ModelVariantConfiguration> variants) {
+        return variants.stream().map(ModelVariantConfiguration::name).toList();
+    }
+}

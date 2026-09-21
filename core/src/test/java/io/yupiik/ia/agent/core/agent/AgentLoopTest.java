@@ -17,11 +17,13 @@ package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.CompactionResult;
@@ -78,6 +80,8 @@ class AgentLoopTest {
 
     private final List<AgentEvent> events = new ArrayList<>();
     private final AtomicReference<Consumer<PauseEvent>> pauseListenerReference = new AtomicReference<>();
+    private final AtomicReference<io.yupiik.ia.agent.core.llm.Usage> recordedUsage = new AtomicReference<>();
+    private PermissionService permissionServiceOverride;
 
     @Test
     void unknownToolDiagnosticNamesOffendingToolAndPointsToTools() throws Exception {
@@ -280,6 +284,10 @@ class AgentLoopTest {
 
     @Test
     void turnEndingWithPendingTodosIsWarnedAbout() {
+        // the default (unconfigured) permission mode is PLAN where pending todos are expected:
+        // opt into BUILD explicitly so the warning still applies
+        permissionServiceOverride = new PermissionService(configuration(true));
+        permissionServiceOverride.setMode(AgentMode.BUILD);
         final var todoStore = new TodoStore() {
             private List<TodoItem> todos = List.of(
                     new TodoItem("done step", "completed"),
@@ -311,19 +319,71 @@ class AgentLoopTest {
                     }
                 },
                 new ScriptedReply("made progress", "stop", false)));
-        final var result = loop(chatClient(replies, new ArrayList<>()), todoStore, configuration(true))
-                .run("do it", null, "s1", null, () -> false);
+        try {
+            final var result = loop(chatClient(replies, new ArrayList<>()), todoStore, configuration(true))
+                    .run("do it", null, "s1", null, () -> false);
 
-        assertEquals("made progress", result);
-        final var notices =
-                events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
-        assertEquals(1, notices.size());
-        final var notice = (AgentEvent.Notice) notices.getFirst();
-        assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
+            assertEquals("made progress", result);
+            final var notices =
+                    events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
+            assertEquals(1, notices.size());
+            final var notice = (AgentEvent.Notice) notices.getFirst();
+            assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
+            assertEquals(
+                    "model ended its turn (finish_reason=stop) with 2/3 todos still pending - send 'continue' to resume, or review why it stopped",
+                    notice.message());
+            assertEquals("stop", notice.finishReason());
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    @Test
+    void noTodosWarningInPlanMode() {
+        final var todoStore = new TodoStore() {
+            private List<TodoItem> todos = List.of(
+                    new TodoItem("done step", "completed"),
+                    new TodoItem("running step", "in_progress"),
+                    new TodoItem("later step", "pending"));
+
+            @Override
+            public List<TodoItem> all() {
+                return todos;
+            }
+
+            @Override
+            public synchronized List<TodoItem> replace(final List<TodoItem> items) {
+                todos = List.copyOf(items);
+                return all();
+            }
+        };
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply(null, "tool_calls", false) {
+                    @Override
+                    Message toMessage() {
+                        return new Message(
+                                "assistant",
+                                null,
+                                null,
+                                List.of(new ToolCall("t1", "function", new ToolCall.FunctionCall("bash", "{}"), 0)),
+                                null,
+                                null);
+                    }
+                },
+                new ScriptedReply("made progress", "stop", false)));
+        final var config = configuration(true);
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.PLAN);
+        try {
+            loop(chatClient(replies, new ArrayList<>()), todoStore, config).run("do it", null, "s1", null, () -> false);
+        } finally {
+            permissionServiceOverride = null;
+        }
+
         assertEquals(
-                "model ended its turn (finish_reason=stop) with 2/3 todos still pending - send 'continue' to resume, or review why it stopped",
-                notice.message());
-        assertEquals("stop", notice.finishReason());
+                0,
+                events.stream().filter(AgentEvent.Notice.class::isInstance).count(),
+                "plan mode must not warn about pending todos: that is the goal of the mode");
     }
 
     @Test
@@ -405,6 +465,24 @@ class AgentLoopTest {
         assertEquals(1, compacted.size());
         assertEquals("compact", compacted.get(0).kind());
         assertEquals("SUMMARY", compacted.get(0).mode());
+    }
+
+    @Test
+    void usageIsNotClobberedWhenUsageAndFinishShareTheFinalStreamLine() {
+        // a single SSE line carrying both usage and a finish reason is decoded by the dialect into a
+        // usage End followed by a finish-reason-only End; the trailing End must not reset the
+        // captured usage back to empty (regression: tokens reported 0 for every streamed turn)
+        recordedUsage.set(null);
+        final var usage = new io.yupiik.llm.client.model.Usage(12L, 7L, 19L, 3L, 1L);
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", false, usage)));
+        final var result = loop(chatClient(replies, new ArrayList<>()), null, configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("done", result);
+        final var recorded = recordedUsage.get();
+        assertNotNull(recorded, "usage must be recorded for the finished turn");
+        assertEquals(12, recorded.promptTokens(), "prompt tokens must survive the trailing finish End");
+        assertEquals(7, recorded.completionTokens(), "completion tokens must survive the trailing finish End");
     }
 
     @Test
@@ -1121,10 +1199,12 @@ class AgentLoopTest {
                 resolvedRegistry,
                 resolvedExecutions,
                 config,
-                new PermissionService(config),
+                permissionServiceOverride != null ? permissionServiceOverride : new PermissionService(config),
                 new UsageTracker() {
                     @Override
-                    public void record(final io.yupiik.ia.agent.core.llm.Usage usage) {}
+                    public void record(final io.yupiik.ia.agent.core.llm.Usage usage) {
+                        recordedUsage.set(usage);
+                    }
 
                     @Override
                     public int estimateContext(final List<Message> messages, final int extraToolTokens) {
@@ -1215,6 +1295,9 @@ class AgentLoopTest {
                 if (reply.ioError() != null) {
                     throw reply.ioError();
                 }
+                if (reply.usage() != null) {
+                    onDelta.accept(new End(null, reply.usage()));
+                }
                 if (reply.finishReason() != null) {
                     onDelta.accept(new End(reply.finishReason(), null));
                 }
@@ -1238,30 +1321,41 @@ class AgentLoopTest {
         private final boolean firePauses;
         private final RuntimeException error;
         private final IOException ioError;
+        private final io.yupiik.llm.client.model.Usage usage;
 
         private ScriptedReply(
                 final String content,
                 final String finishReason,
                 final boolean firePauses,
                 final RuntimeException error,
-                final IOException ioError) {
+                final IOException ioError,
+                final io.yupiik.llm.client.model.Usage usage) {
             this.content = content;
             this.finishReason = finishReason;
             this.firePauses = firePauses;
             this.error = error;
             this.ioError = ioError;
+            this.usage = usage;
         }
 
         ScriptedReply(final String content, final String finishReason, final boolean firePauses) {
-            this(content, finishReason, firePauses, null, null);
+            this(content, finishReason, firePauses, null, null, null);
+        }
+
+        ScriptedReply(
+                final String content,
+                final String finishReason,
+                final boolean firePauses,
+                final io.yupiik.llm.client.model.Usage usage) {
+            this(content, finishReason, firePauses, null, null, usage);
         }
 
         ScriptedReply(final String content, final String finishReason, final RuntimeException error) {
-            this(content, finishReason, false, error, null);
+            this(content, finishReason, false, error, null, null);
         }
 
         ScriptedReply(final IOException ioError) {
-            this(null, null, false, null, ioError);
+            this(null, null, false, null, ioError, null);
         }
 
         String content() {
@@ -1282,6 +1376,10 @@ class AgentLoopTest {
 
         IOException ioError() {
             return ioError;
+        }
+
+        io.yupiik.llm.client.model.Usage usage() {
+            return usage;
         }
 
         Message toMessage() {

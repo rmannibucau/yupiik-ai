@@ -53,6 +53,12 @@ public record PruningConfiguration(
         int minPruneTokens,
 
         @Property(
+                defaultValue = "2000",
+                documentation =
+                        "Character cap (head and tail) applied to old verbose tool outputs by the first pruning pass, before any full clear; 0 disables the shrink pass.")
+        int shrinkOutputChars,
+
+        @Property(
                 defaultValue = "80",
                 documentation =
                         "Character cap (head and tail) used by the local truncation fallback applied to old messages when the compaction summarizer fails.")

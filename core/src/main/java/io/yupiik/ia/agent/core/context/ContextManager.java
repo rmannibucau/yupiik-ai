@@ -77,6 +77,14 @@ public class ContextManager {
     }
 
     /**
+     * Explicit {@code /compact force}: runs compaction even when the context is still within
+     * budget, using the tighter (halved tail) floors so short histories compact too.
+     */
+    public CompactionResult compact(final List<Message> messages, final boolean force) {
+        return coordinator.compact(messages, force, null, 0);
+    }
+
+    /**
      * Model-requested compaction: an optional focus hint is folded into the summarizer prompt and an
      * optional {@code keepLastOverride} raises the verbatim tail floor.
      */

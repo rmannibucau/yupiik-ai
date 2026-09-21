@@ -36,5 +36,5 @@ public record ProviderModelConfiguration(
 
         @Property(
                 documentation =
-                        "Behavioral overrides (reasoning effort default and output token budget) for this model. Nullable facets keep the provider defaults.")
-        ModelBehaviorConfiguration behavior) {}
+                        "Tuning defaults (reasoning effort, output token budget, variants and provider specific options) for this model. Nullable facets keep the provider defaults.")
+        ModelTuningConfiguration behavior) {}

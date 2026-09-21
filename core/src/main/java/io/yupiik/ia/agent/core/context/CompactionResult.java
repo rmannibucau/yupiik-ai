@@ -38,7 +38,9 @@ public record CompactionResult(List<Message> messages, Mode mode, String error) 
         /** The summarizer failed and a deterministic local truncation ran. */
         TRUNCATE,
         /** Old tool outputs were cleared locally (no LLM call). */
-        CLEARED
+        CLEARED,
+        /** Old verbose tool outputs were spliced locally, keeping their head and tail (no LLM call). */
+        SHRUNK
     }
 
     public boolean changed() {

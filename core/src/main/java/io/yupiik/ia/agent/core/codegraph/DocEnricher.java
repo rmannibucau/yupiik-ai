@@ -458,7 +458,16 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     private String chat(final String prompt) {
         try {
             final var request = new ChatCompletionRequest(
-                    resolveModel(), List.of(Message.user(prompt)), (Double) null, false, null, null, 800, null, null);
+                    resolveModel(),
+                    List.of(Message.user(prompt)),
+                    (Double) null,
+                    null,
+                    false,
+                    null,
+                    null,
+                    800,
+                    null,
+                    null);
             final var result = chatClient.chat(request);
             return result.message() == null ? null : text(result.message().content());
         } catch (final Exception e) {

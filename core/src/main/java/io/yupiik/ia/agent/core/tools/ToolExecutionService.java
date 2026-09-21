@@ -33,16 +33,30 @@ public class ToolExecutionService {
     private final Emitter emitter;
     private final List<OutputProcessor> processors;
     private final StatusReporter statusReporter;
+    private final String subagentId;
+    private final String subagentName;
 
     public ToolExecutionService(
             final CodingAgentConfiguration configuration,
             final Emitter emitter,
             final List<OutputProcessor> processors,
             final StatusReporter statusReporter) {
+        this(configuration, emitter, processors, statusReporter, null, null);
+    }
+
+    protected ToolExecutionService(
+            final CodingAgentConfiguration configuration,
+            final Emitter emitter,
+            final List<OutputProcessor> processors,
+            final StatusReporter statusReporter,
+            final String subagentId,
+            final String subagentName) {
         this.configuration = configuration;
         this.emitter = emitter;
         this.processors = processors;
         this.statusReporter = statusReporter;
+        this.subagentId = subagentId;
+        this.subagentName = subagentName;
     }
 
     protected ToolExecutionService() {
@@ -50,6 +64,8 @@ public class ToolExecutionService {
         this.emitter = null;
         this.processors = null;
         this.statusReporter = null;
+        this.subagentId = null;
+        this.subagentName = null;
     }
 
     public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
@@ -73,7 +89,8 @@ public class ToolExecutionService {
         if (optimizeThis) {
             emitter.emit(new AfterToolExecutionEvent(tool.name(), result.success(), output));
         }
-        emitter.emit(new AgentEvent.ToolTimingEvent(tool.name(), durationMs, durationMs, false));
+        emitter.emit(
+                new AgentEvent.ToolTimingEvent(tool.name(), durationMs, durationMs, false, subagentId, subagentName));
         return new ToolResult(result.success(), output);
     }
 

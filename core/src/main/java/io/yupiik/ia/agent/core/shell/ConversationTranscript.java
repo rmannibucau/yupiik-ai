@@ -37,7 +37,7 @@ public class ConversationTranscript {
     public static final String TOOL_END = "<<<yca:/tool>>>";
 
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
-    private static final int MAX_EMBEDDED_TOOL_CHARS = 1600;
+    private static final int MAX_EMBEDDED_TOOL_CHARS = 4000;
 
     private final StringBuilder transcript = new StringBuilder();
     private final StringBuilder pending = new StringBuilder();
@@ -46,6 +46,7 @@ public class ConversationTranscript {
     private volatile String runningTool;
     private volatile String runningToolCommand;
     private long toolStartedNanos;
+    private long toolCallOrdinal;
     private volatile boolean busy;
     private volatile String status = "";
     private volatile int promptTokens;
@@ -53,6 +54,21 @@ public class ConversationTranscript {
     private volatile int estimatedContext;
     private volatile int contextPercent;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
+
+    /** Splits GLM-style inline {@code <think>} reasoning out of the text channel. */
+    protected final ThinkTagSplitter thinkTags;
+
+    private final ThinkTagSplitter.Parser inlineThink;
+
+    public ConversationTranscript() {
+        this(new ThinkTagSplitter());
+    }
+
+    protected ConversationTranscript(final ThinkTagSplitter thinkTags) {
+        // defensive: hand-built instances (tests, generated subclasses) may pass null
+        this.thinkTags = thinkTags != null ? thinkTags : new ThinkTagSplitter();
+        this.inlineThink = this.thinkTags.create();
+    }
 
     // Per-turn metrics
     private volatile int turnLlmCalls;
@@ -63,36 +79,62 @@ public class ConversationTranscript {
     private volatile long turnDurationMs;
 
     public synchronized void onEvent(final AgentEvent event) {
-        if (event instanceof AgentEvent.TextDelta(String delta)) {
-            pending.append(delta);
-        } else if (event instanceof AgentEvent.TextReset) {
+        if (event instanceof AgentEvent.TextDelta(String delta, String subagentId, String subagentName)) {
+            // the answer's first delta usually arrives with no reset: flush the reasoning
+            // so it stays in place, above the streaming answer
+            flushThinking();
+            // GLM-style gateways inline the reasoning in the text channel: classify the
+            // stream with the think-tag state machine instead of per-chunk regex
+            for (final var segment : inlineThink.feed(delta)) {
+                if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
+                    thinking.append(segment.text());
+                } else {
+                    pending.append(segment.text());
+                }
+            }
+        } else if (event instanceof AgentEvent.TextReset(String subagentId, String subagentName)) {
             pending.setLength(0);
-            thinking.setLength(0);
-        } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
+            inlineThink.reset();
+            // keep the reasoning visible: flush instead of dropping it, the model resets
+            // its output right before the final answer streams
+            flushThinking();
+        } else if (event instanceof AgentEvent.ThinkingDelta(String delta, String subagentId, String subagentName)) {
             thinking.append(delta);
-        } else if (event instanceof AgentEvent.ToolStarted(String name, String args)) {
+        } else if (event
+                instanceof AgentEvent.ToolStarted(String name, String args, String subagentId, String subagentName)) {
             flushThinking();
             runningTool = name;
             runningToolCommand = toolCommand(args);
             toolStream.setLength(0);
             toolStartedNanos = System.nanoTime();
-        } else if (event instanceof AgentEvent.ToolStream(String name, String fragment)) {
+        } else if (event
+                instanceof
+                AgentEvent.ToolStream(String name, String fragment, String subagentId, String subagentName)) {
             if (name.equals(runningTool)) {
                 toolStream.append(fragment).append('\n');
                 if (toolStream.length() > MAX_EMBEDDED_TOOL_CHARS) {
                     toolStream.delete(0, toolStream.length() - MAX_EMBEDDED_TOOL_CHARS);
                 }
             }
-        } else if (event instanceof AgentEvent.ToolFinished(String name, String output, boolean success)) {
+        } else if (event
+                instanceof
+                AgentEvent.ToolFinished(
+                        String name,
+                        String output,
+                        boolean success,
+                        String subagentId,
+                        String subagentName)) {
             final var running = runningTool;
             final var command = runningToolCommand;
             runningTool = null;
             runningToolCommand = null;
             final var elapsedMs = Math.max(0, (System.nanoTime() - toolStartedNanos) / 1_000_000);
+            final var ordinal = ++toolCallOrdinal;
             if (running != null && (!toolStream.isEmpty() || (success && output != null && !output.isBlank()))) {
                 final var header = command == null || command.isBlank()
-                        ? "*streaming `" + running + "`* (" + elapsedMs + " ms)"
-                        : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (" + elapsedMs + " ms)";
+                        ? "*streaming `" + running + "`* (#" + ordinal + ", " + elapsedMs + " ms)"
+                        : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (#" + ordinal + ", "
+                                + elapsedMs + " ms)";
                 final var captured = toolStream.isEmpty()
                         ? capToolOutput(output == null ? "" : output)
                         : toolStream.toString().stripTrailing();
@@ -116,7 +158,9 @@ public class ConversationTranscript {
                         .append(name)
                         .append("` failed: ")
                         .append(firstLine(output))
-                        .append(" (")
+                        .append(" (#")
+                        .append(ordinal)
+                        .append(", ")
                         .append(elapsedMs)
                         .append(" ms)\n")
                         .append(TOOL_END)
@@ -127,12 +171,15 @@ public class ConversationTranscript {
                 AgentEvent.UsageUpdated(
                         io.yupiik.ia.agent.core.llm.Usage usage,
                         int estimatedContextTokens,
-                        double percent)) {
+                        double percent,
+                        String subagentId,
+                        String subagentName)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
             estimatedContext = estimatedContextTokens;
             contextPercent = (int) Math.round(percent);
-        } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
+        } else if (event
+                instanceof AgentEvent.Compacted(String kind, String mode, String subagentId, String subagentName)) {
             status = "context " + kind + " done (" + mode.toLowerCase(java.util.Locale.ROOT) + ")";
             transcript
                     .append("\n\n> context ")
@@ -141,7 +188,13 @@ public class ConversationTranscript {
                     .append(mode.toLowerCase(java.util.Locale.ROOT))
                     .append(")\n");
         } else if (event
-                instanceof AgentEvent.Notice(AgentEvent.Notice.Level level, String message, String finishReason)) {
+                instanceof
+                AgentEvent.Notice(
+                        AgentEvent.Notice.Level level,
+                        String message,
+                        String finishReason,
+                        String subagentId,
+                        String subagentName)) {
             final var tag =
                     switch (level) {
                         case ERROR -> "⚠ error";
@@ -154,7 +207,7 @@ public class ConversationTranscript {
             } else {
                 status = message;
             }
-        } else if (event instanceof AgentEvent.Status(String message)) {
+        } else if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
             status = message;
         } else if (event
                 instanceof
@@ -164,21 +217,40 @@ public class ConversationTranscript {
                         long toolSumMs,
                         long toolWallMs,
                         int toolsRun,
-                        long turnDurationMs)) {
+                        long turnDurationMs,
+                        String subagentId,
+                        String subagentName)) {
             turnLlmCalls = llmCalls;
             turnThinkingMs = thinkingMs;
             turnToolSumMs = toolSumMs;
             turnToolWallMs = toolWallMs;
             turnToolsRun = toolsRun;
             this.turnDurationMs = turnDurationMs;
-        } else if (event instanceof AgentEvent.TurnDone(String content)) {
+        } else if (event instanceof AgentEvent.TurnDone(String content, String subagentId, String subagentName)) {
             flushThinking();
-            transcript.append("\n\n**Assistant**\n\n").append(content).append('\n');
+            // split any inline <think> reasoning out of the final content so it renders
+            // as a thought region instead of being dropped by markdown HTML handling
+            final var parts = thinkTags.split(content);
+            if (!parts.thinking().isBlank()) {
+                transcript
+                        .append("\n\n")
+                        .append(THOUGHT_BEGIN)
+                        .append("\n**Thinking**\n\n")
+                        .append(parts.thinking().strip())
+                        .append('\n')
+                        .append(THOUGHT_END)
+                        .append('\n');
+            }
+            transcript.append("\n\n**Assistant**\n\n").append(parts.visible()).append('\n');
             pending.setLength(0);
             thinking.setLength(0);
+            inlineThink.reset();
             busy = false;
             status = "ready";
-        } else if (event instanceof AgentEvent.Error(String message)) {
+        } else if (event instanceof AgentEvent.Error(String message, String subagentId, String subagentName)) {
+            // keep the reasoning readable even when the turn fails
+            flushThinking();
+            inlineThink.reset();
             transcript.append("\n\n> error: ").append(message).append("\n");
             pending.setLength(0);
             busy = false;
@@ -217,6 +289,8 @@ public class ConversationTranscript {
     public synchronized String markdown(final String spinner, final String fallback) {
         final var sb = new StringBuilder(transcript);
         if (busy && !pending.isEmpty()) {
+            // pending only carries visible text: inline <think> content is already
+            // classified into the thinking buffer by the stream splitter
             sb.append("\n\n**Assistant**\n\n").append(pending);
         }
         if (runningTool != null) {
@@ -380,11 +454,25 @@ public class ConversationTranscript {
                             .append("\n\n---\n\n**You**\n\n")
                             .append(String.valueOf(message.content()))
                             .append('\n');
-                case "assistant" ->
+                case "assistant" -> {
+                    // persisted sessions keep the raw <think> content: split it so the
+                    // replay renders past reasoning as thought regions too
+                    final var parts = thinkTags.split(String.valueOf(message.content()));
+                    if (!parts.thinking().isBlank()) {
+                        transcript
+                                .append("\n\n")
+                                .append(THOUGHT_BEGIN)
+                                .append("\n**Thinking**\n\n")
+                                .append(parts.thinking().strip())
+                                .append('\n')
+                                .append(THOUGHT_END)
+                                .append('\n');
+                    }
                     transcript
                             .append("\n\n---\n\n**Assistant**\n\n")
-                            .append(String.valueOf(message.content()))
+                            .append(parts.visible())
                             .append('\n');
+                }
                 case "tool" ->
                     transcript
                             .append("\n\n*tool `")
@@ -401,12 +489,14 @@ public class ConversationTranscript {
     public synchronized void clearConversation() {
         transcript.setLength(0);
         thinking.setLength(0);
+        inlineThink.reset();
     }
 
     public synchronized void startUserTurn(final String text) {
         transcript.append("\n\n---\n\n**You**\n\n").append(text).append('\n');
         pending.setLength(0);
         thinking.setLength(0);
+        inlineThink.reset();
         busy = true;
     }
 
@@ -415,6 +505,7 @@ public class ConversationTranscript {
         pending.setLength(0);
         thinking.setLength(0);
         toolStream.setLength(0);
+        inlineThink.reset();
         runningTool = null;
         runningToolCommand = null;
         busy = false;
@@ -511,6 +602,11 @@ public class ConversationTranscript {
 
     public int turnToolsRun() {
         return turnToolsRun;
+    }
+
+    /** @return the 1-based ordinal of the last finished tool call, used to key tool cards. */
+    public synchronized long toolCallCount() {
+        return toolCallOrdinal;
     }
 
     public long turnDurationMs() {

@@ -39,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -47,6 +48,19 @@ class StructuralCodeGraphTest {
 
     @TempDir
     Path temp;
+
+    private final List<ChatClient> chatClients = new java.util.ArrayList<>();
+
+    @AfterEach
+    void tearDown() {
+        chatClients.forEach(ChatClient::close);
+    }
+
+    private ChatClient chatClient(final CodingAgentConfiguration config, final JsonMapper mapper) {
+        final var client = new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC());
+        chatClients.add(client);
+        return client;
+    }
 
     @Test
     void buildsRefreshAndPersists() throws Exception {
@@ -74,7 +88,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
 
@@ -158,7 +172,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         reloaded.ensureReady();
@@ -180,7 +194,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -215,7 +229,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -234,7 +248,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -279,7 +293,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -325,7 +339,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -350,7 +364,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -424,7 +438,7 @@ class StructuralCodeGraphTest {
                     List.of(new JavaGraphParser()),
                     mapper,
                     new StatusReporter(),
-                    new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                    chatClient(config, mapper),
                     providerManager(config, mapper),
                     Clock.systemUTC());
 
@@ -452,7 +466,7 @@ class StructuralCodeGraphTest {
                     List.of(new JavaGraphParser()),
                     mapper,
                     new StatusReporter(),
-                    new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                    chatClient(config, mapper),
                     providerManager(config, mapper),
                     Clock.systemUTC());
             reloaded.ensureReady();
@@ -576,7 +590,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         graph.ensureReady();
@@ -613,7 +627,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         reloaded.ensureReady();
@@ -636,7 +650,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         built.ensureReady();
@@ -648,7 +662,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         reloaded.ensureReady();
@@ -678,7 +692,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         built.ensureReady();
@@ -694,7 +708,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         reloaded.ensureReady();
@@ -709,7 +723,7 @@ class StructuralCodeGraphTest {
                 List.of(new JavaGraphParser()),
                 mapper,
                 new StatusReporter(),
-                new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC()),
+                chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());
         third.ensureReady();

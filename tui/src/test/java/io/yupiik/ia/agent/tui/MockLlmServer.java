@@ -41,9 +41,11 @@ import java.util.concurrent.Executors;
 public final class MockLlmServer implements AutoCloseable {
     private final HttpServer server;
     private final List<String> requests = new CopyOnWriteArrayList<>();
+    private final java.util.concurrent.ExecutorService executor;
     private volatile String answer = "hello from mock";
 
     public MockLlmServer() throws IOException {
+        executor = Executors.newVirtualThreadPerTaskExecutor();
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
         server.createContext("/v1/chat/completions", exchange -> {
@@ -81,7 +83,7 @@ public final class MockLlmServer implements AutoCloseable {
                         200,
                         "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}",
                         "application/json"));
-        server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        server.setExecutor(executor);
         server.start();
     }
 
@@ -108,6 +110,7 @@ public final class MockLlmServer implements AutoCloseable {
     @Override
     public void close() {
         server.stop(0);
+        executor.shutdownNow();
     }
 
     private static String chunk(final String content) {

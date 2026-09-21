@@ -131,6 +131,7 @@ class AnthropicMessagesClientTest {
                         new Message("system", "be concise", null, null, null, null),
                         new Message("user", "hi", null, null, null, null)),
                 null,
+                null,
                 false,
                 null,
                 null,
@@ -208,6 +209,7 @@ class AnthropicMessagesClientTest {
         final var streamReq = new ChatCompletionRequest(
                 "deepseek-v4-flash",
                 List.of(new Message("user", "hi", null, null, null, null)),
+                null,
                 null,
                 true,
                 null,

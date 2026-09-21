@@ -50,13 +50,14 @@ final class LlmWire {
     }
 
     static LlmRequest toLlmRequest(final ChatCompletionRequest request) {
+        final Map<String, Object> extensions = request.others() == null ? Map.of() : request.others();
         return new LlmRequest(
                 request.model(),
                 request.messages() == null
                         ? null
                         : request.messages().stream().map(LlmWire::toLlmMessage).toList(),
                 request.temperature(),
-                null,
+                request.topP(),
                 request.maxTokens(),
                 null,
                 request.tools() == null
@@ -66,7 +67,7 @@ final class LlmWire {
                 null,
                 request.reasoningEffort(),
                 request.stream(),
-                request.others() == null ? Map.of() : request.others());
+                extensions);
     }
 
     static LlmMessage toLlmMessage(final Message message) {

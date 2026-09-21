@@ -31,6 +31,7 @@ import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -42,6 +43,13 @@ class ModelStyleServiceTest {
     private ChatClient chatClient;
     private ModelStyleService service;
     private ProviderManager providerManager;
+
+    @AfterEach
+    void tearDown() {
+        if (chatClient != null) {
+            chatClient.close();
+        }
+    }
 
     private void init() {
         final JsonMapper mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());

@@ -43,6 +43,7 @@ class AnsiShellFrontendTest {
     private PrintStream originalErr;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
+    private JsonMapperImpl jsonMapper;
 
     @BeforeEach
     void capture() {
@@ -54,6 +55,10 @@ class AnsiShellFrontendTest {
 
     @AfterEach
     void restore() {
+        if (jsonMapper != null) {
+            jsonMapper.close();
+            jsonMapper = null;
+        }
         System.setOut(originalOut);
         System.setErr(originalErr);
     }
@@ -63,10 +68,21 @@ class AnsiShellFrontendTest {
     }
 
     private AnsiShellFrontend frontend(final boolean tty, final boolean showThinking, final boolean showToolOutput) {
+        return frontend(new MarkdownColorizer(false), tty, showThinking, showToolOutput);
+    }
+
+    private AnsiShellFrontend frontend(
+            final MarkdownColorizer colorizer,
+            final boolean tty,
+            final boolean showThinking,
+            final boolean showToolOutput) {
+        if (jsonMapper == null) {
+            jsonMapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        }
         return new AnsiShellFrontend(
-                new MarkdownColorizer(false),
+                colorizer,
                 new Symbols(false),
-                new ToolPresenter(new JsonMapperImpl(List.of(), key -> Optional.empty())),
+                new ToolPresenter(jsonMapper),
                 CliVerbosity.COMPACT,
                 tty,
                 showThinking,
@@ -180,5 +196,19 @@ class AnsiShellFrontendTest {
         assertTrue(frontend.spinnerRunning());
         frontend.endTurn();
         assertFalse(frontend.spinnerRunning());
+    }
+
+    @Test
+    void replayedTranscriptDimsThoughtAndToolRegions() {
+        final var frontend = frontend(new MarkdownColorizer(true), false, true, true);
+        frontend.transcript(ConversationTranscript.THOUGHT_BEGIN + "\n**Thinking**\n\nsecret\n"
+                + ConversationTranscript.THOUGHT_END
+                + "\nplain answer\n\n"
+                + ConversationTranscript.TOOL_BEGIN + "\n```text\nout\n```\n"
+                + ConversationTranscript.TOOL_END);
+        final var stdout = out.toString(StandardCharsets.UTF_8);
+        assertTrue(stdout.startsWith("\u001b[38;5;240m"), "thought region must lead in thinking grey: " + stdout);
+        assertTrue(stdout.contains("plain answer"), stdout);
+        assertTrue(stdout.contains("\u001b[2m"), "tool region must be dimmed: " + stdout);
     }
 }

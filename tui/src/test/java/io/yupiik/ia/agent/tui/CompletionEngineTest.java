@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
@@ -56,7 +57,8 @@ class CompletionEngineTest {
                 () -> List.of("reviewer", "tester"),
                 () -> List.of("11111111-aaaa (2026-09-01 10:00)", "22222222-bbbb (2026-09-02 11:00)"),
                 () -> List.of("read_file", "write_file", "bash"),
-                () -> List.of("coder", "writer"));
+                () -> List.of("coder", "writer"),
+                model -> List.<String>of("default", "fast".equals(model) ? "deep" : "fast"));
     }
 
     @Test
@@ -80,6 +82,24 @@ class CompletionEngineTest {
         assertEquals(7, s.replaceStart());
         assertEquals(10, s.replaceEnd());
         assertEquals("model", s.label());
+    }
+
+    @Test
+    void completesVariantAsSecondModelToken() {
+        final var s = engine().suggest("/model gpt-5 f", 13);
+        assertTrue(s.items().contains("fast"));
+        assertTrue(s.items().contains("default"));
+        assertEquals("variant", s.label());
+    }
+
+    @Test
+    void variantCompletionIsDrivenByTheTypedModel() {
+        // "fast" typed model resolves a different variant set than "gpt-5"
+        final var forFast = engine().suggest("/model fast f", 12);
+        assertTrue(forFast.items().contains("deep"), "variant list must reflect the typed model");
+        final var forGpt5 = engine().suggest("/model gpt-5 f", 13);
+        assertTrue(forGpt5.items().contains("fast"), "gpt-5 typed model keeps its own variants");
+        assertFalse(forGpt5.items().contains("deep"));
     }
 
     @Test

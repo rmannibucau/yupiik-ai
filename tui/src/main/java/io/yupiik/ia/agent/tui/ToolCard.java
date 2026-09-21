@@ -15,14 +15,21 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import java.util.regex.Pattern;
+
 /**
  * Parses a tool region of the transcript (the markdown emitted by
  * {@link TuiTranscriptModel} between its {@code TOOL_BEGIN}/{@code TOOL_END}
  * markers) into structured fields used to render a bordered "tool card":
  * the tool name, its command/arguments (or the error message when it failed),
- * the captured output and the wall-clock duration in milliseconds.
+ * the captured output, the wall-clock duration in milliseconds and the
+ * {@code #N} ordinal embedded by {@code ConversationTranscript} (used to key
+ * full outputs, {@code -1} when absent).
  */
-public record ToolCard(String name, String args, String output, boolean failed, long elapsedMs, boolean running) {
+public record ToolCard(
+        String name, String args, String output, boolean failed, long elapsedMs, boolean running, long ordinal) {
+    private static final Pattern DURATION = Pattern.compile("\\(\\s*(?:#(\\d+)\\s*,\\s*)?(\\d+)\\s*ms\\s*\\)");
+
     public static ToolCard parse(final String regionText) {
         final var text = regionText.strip();
         final var newline = text.indexOf('\n');
@@ -34,11 +41,18 @@ public record ToolCard(String name, String args, String output, boolean failed, 
             final var idx = content.indexOf(" running ");
             final var command =
                     idx >= 0 ? content.substring(idx + " running ".length()).strip() : content.strip();
-            return new ToolCard(command, "", extractCode(text), false, 0, true);
+            return new ToolCard(command, "", extractCode(text), false, 0, true, -1);
         }
         final var name = nameOf(header);
         final var argsAndDuration = failed ? failedArgs(header) : successArgs(header);
-        return new ToolCard(name, argsAndDuration.args(), extractCode(text), failed, argsAndDuration.elapsed(), false);
+        return new ToolCard(
+                name,
+                argsAndDuration.args(),
+                extractCode(text),
+                failed,
+                argsAndDuration.elapsed(),
+                false,
+                argsAndDuration.ordinal());
     }
 
     private static String nameOf(final String header) {
@@ -51,7 +65,7 @@ public record ToolCard(String name, String args, String output, boolean failed, 
         final int bt = header.indexOf('`');
         final int et = bt >= 0 ? header.indexOf('`', bt + 1) : -1;
         if (et <= bt) {
-            return new Args("", 0);
+            return new Args("", 0, -1);
         }
         var rest = header.substring(et + 1).strip();
         if (rest.startsWith(":")) {
@@ -68,26 +82,36 @@ public record ToolCard(String name, String args, String output, boolean failed, 
         return stripDuration(header.substring(idx + " failed: ".length()).strip());
     }
 
-    /** Removes a trailing {@code (NNN ms)} then any trailing asterisk from an args/error string. */
+    /** Removes a trailing {@code (#NNN, NNN ms)} then any trailing asterisk from an args/error string. */
     private static Args stripDuration(final String raw) {
         final var initial = raw.strip();
         var rest = initial;
         long elapsed = 0;
+        long ordinal = -1;
         final var open = rest.lastIndexOf('(');
-        if (open >= 0 && rest.endsWith(")") && rest.substring(open).matches("\\(\\s*\\d+\\s*ms\\s*\\)")) {
-            final var inner = rest.substring(open + 1, rest.length() - 1).replaceAll("[^0-9]", "");
-            try {
-                elapsed = Long.parseLong(inner);
-            } catch (final NumberFormatException e) {
-                elapsed = 0;
+        if (open >= 0 && rest.endsWith(")")) {
+            final var matcher = DURATION.matcher(rest.substring(open));
+            if (matcher.matches()) {
+                if (matcher.group(1) != null) {
+                    try {
+                        ordinal = Long.parseLong(matcher.group(1));
+                    } catch (final NumberFormatException e) {
+                        ordinal = -1;
+                    }
+                }
+                try {
+                    elapsed = Long.parseLong(matcher.group(2));
+                } catch (final NumberFormatException e) {
+                    elapsed = 0;
+                }
+                rest = rest.substring(0, open).strip();
             }
-            rest = rest.substring(0, open).strip();
         }
         rest = rest.replaceAll("\\*$", "").strip();
         if (rest.startsWith(":")) {
             rest = rest.substring(1).strip();
         }
-        return new Args(rest, elapsed);
+        return new Args(rest, elapsed, ordinal);
     }
 
     private static String extractCode(final String text) {
@@ -106,18 +130,8 @@ public record ToolCard(String name, String args, String output, boolean failed, 
 
     /** True when the captured output looks like a git/udiff patch. */
     public boolean isDiff() {
-        var hunks = 0;
-        var changed = 0;
-        for (final var line : output.split("\n")) {
-            final var s = line.stripLeading();
-            if (s.startsWith("@@")) {
-                hunks++;
-            } else if (s.startsWith("+") || s.startsWith("-")) {
-                changed++;
-            }
-        }
-        return changed >= 2 || (hunks >= 1 && changed >= 1);
+        return DiffLines.looksLikeDiff(output);
     }
 
-    private record Args(String args, long elapsed) {}
+    private record Args(String args, long elapsed, long ordinal) {}
 }

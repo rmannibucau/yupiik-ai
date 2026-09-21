@@ -117,6 +117,8 @@ public record ProviderListConfiguration(
                 api,
                 contextWindow,
                 outputTokens,
+                "",
+                null,
                 List.of(),
                 maxConcurrent,
                 timeoutSeconds,

@@ -64,9 +64,20 @@ public record ProviderConfiguration(
         int outputTokens,
 
         @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Optional ISO-8601 release date (yyyy-MM-dd) of the latest model of this provider. Mirrors opencode's model release date and unlocks the newer reasoning effort tiers (OpenAI 'none' since 2025-11-13 and 'xhigh' since 2025-12-04) for the implicit per-family variant scheme.")
+        String releaseDate,
+
+        @Property(
+                documentation =
+                        "Provider-level tuning defaults (reasoning effort, variants and provider specific options) applied to every model of this provider below the per-model entries. Unset facets fall back to the implicit per-family scheme.")
+        ModelTuningConfiguration tuning,
+
+        @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
-                        "Per-model entries for this provider (display style and behavior). Each entry applies to a model id matched exactly or, when the configured id is a substring of the actual model name, by containment. The strongest override is an exact id match, then the first substring match, then the provider defaults (color, outputTokens and the implicit scheme). The list order also defines the implicit display scheme within this provider: the first two listed models are bold.")
+                        "Per-model entries for this provider (display style and behavior). Each entry applies to a model id matched exactly or, when the configured id is a substring of the actual model name, by containment. The strongest override is an exact id match, then the first substring match, then the provider defaults (tuning, color, outputTokens and the implicit scheme). The list order also defines the implicit display scheme within this provider: the first two listed models are bold.")
         List<ProviderModelConfiguration> models,
 
         @Property(

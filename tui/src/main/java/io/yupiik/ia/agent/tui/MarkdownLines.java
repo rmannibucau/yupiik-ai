@@ -91,22 +91,135 @@ public final class MarkdownLines {
      * @return the final lines, each not wider than {@code width}
      */
     public List<Line> render(final String markdown, final int width, final Style base, final MarkdownStyles styles) {
-        final var root = parser.parse(markdown);
-        final var lines = new ArrayList<Line>();
-        renderNode(root, Prefix.NONE, base, styles, width, false, lines);
-        return lines;
+        final var out = new ArrayList<Line>();
+        final var codeStyle =
+                styles.codeBlock() == null ? base : styles.codeBlock().patch(base);
+        for (final var segment : splitSegments(markdown)) {
+            if (segment.block()) {
+                emitLiteral(segment.text(), codeStyle, width, out);
+            } else {
+                final var root = parser.parse(segment.text());
+                renderNode(root, Prefix.NONE, base, styles, width, false, out);
+            }
+        }
+        return out;
     }
 
     /**
+     * Splits {@code markdown} into prose/markdown segments and bare XML-block segments. A bare XML
+     * block is a contiguous run of two or more lines each starting (after whitespace) with an XML tag,
+     * delimited by blank lines or the input boundaries. Because custom tags like {@code <plan>} or
+     * {@code <files>} are not block-level HTML in commonmark, they would otherwise parse as a paragraph
+     * and have their indentation collapsed; extracting them here and rendering through the
+     * character-exact code path keeps the structure intact while leaving ordinary prose untouched.
+     */
+    private static List<Segment> splitSegments(final String markdown) {
+        final var lines = markdown == null || markdown.isEmpty() ? new String[0] : markdown.split("\n", -1);
+        final var blocks = new ArrayList<int[]>();
+        var i = 0;
+        while (i < lines.length) {
+            if (isXmlLine(lines[i])) {
+                var j = i + 1;
+                while (j < lines.length && isXmlLine(lines[j])) {
+                    j++;
+                }
+                final var precededByBlank = i == 0 || lines[i - 1].isBlank();
+                final var followedByBlank = j == lines.length || lines[j].isBlank();
+                if (j - i >= 2 && precededByBlank && followedByBlank) {
+                    blocks.add(new int[] {i, j});
+                    i = j;
+                    continue;
+                }
+            }
+            i++;
+        }
+        final var out = new ArrayList<Segment>();
+        var cursor = 0;
+        for (final var block : blocks) {
+            if (block[0] > cursor) {
+                out.add(new Segment(join(lines, cursor, block[0] - 1), false));
+            }
+            final var literal = new StringBuilder();
+            if (block[0] > 0) {
+                // keep the delimiting blank row so sibling blocks keep their rhythm
+                literal.append('\n');
+            }
+            literal.append(join(lines, block[0], block[1]));
+            if (block[1] < lines.length) {
+                literal.append('\n');
+            }
+            out.add(new Segment(literal.toString(), true));
+            cursor = block[1] + 1;
+        }
+        if (cursor < lines.length) {
+            out.add(new Segment(join(lines, cursor, lines.length), false));
+        }
+        return out.isEmpty() && !markdown.isEmpty() ? List.of(new Segment(markdown, false)) : out;
+    }
+
+    private static String join(final String[] lines, final int from, final int to) {
+        final var sb = new StringBuilder();
+        for (var idx = from; idx < to; idx++) {
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(lines[idx]);
+        }
+        return sb.toString();
+    }
+
+    /** True when the line starts (after optional leading whitespace) with an XML tag. */
+    private static boolean isXmlLine(final String line) {
+        final var t = line.trim();
+        if (t.isEmpty() || t.charAt(0) != '<') {
+            return false;
+        }
+        final var idx = t.charAt(1) == '/' ? 2 : 1;
+        return idx < t.length() && (Character.isLetter(t.charAt(idx)) || t.charAt(idx) == '_');
+    }
+
+    private record Segment(String text, boolean block) {}
+
+    /**
      * Wraps already-styled code lines (from {@link SyntaxHighlighter#highlight}) to
-     * {@code width} so long code lines stay fully visible and copyable.
+     * {@code width} so long code lines stay fully visible and copyable. Unlike the
+     * prose wrapper, this is character-exact: leading indentation and internal
+     * whitespace runs are preserved, overlong tokens are hard-split with the
+     * remainder on the next row.
      */
     public static List<Line> wrapCode(final List<Line> lines, final int width) {
         final var out = new ArrayList<Line>();
         for (final var line : lines) {
-            appendWrapped(line.spans(), false, Math.max(1, width), Prefix.NONE, out);
+            appendCodeLine(line.spans(), Math.max(1, width), out);
         }
         return out;
+    }
+
+    /**
+     * Emits one logical code row, wrapping at {@code width} without ever dropping
+     * or collapsing a character. An empty span list still emits a (blank) row so
+     * blank lines inside code blocks survive.
+     */
+    private static void appendCodeLine(final List<Span> spans, final int width, final List<Line> out) {
+        var cur = new ArrayList<Span>();
+        var curWidth = 0;
+        for (final var span : spans) {
+            var text = span.content() == null ? "" : span.content();
+            while (!text.isEmpty()) {
+                final var room = width - curWidth;
+                if (room <= 0) {
+                    out.add(Line.from(cur));
+                    cur = new ArrayList<>();
+                    curWidth = 0;
+                    continue;
+                }
+                final var take = Math.min(text.length(), room);
+                cur.add(Span.styled(text.substring(0, take), span.style()));
+                curWidth += take;
+                text = text.substring(take);
+            }
+        }
+        out.add(Line.from(cur));
     }
 
     private static void renderNode(
@@ -120,23 +233,30 @@ public final class MarkdownLines {
         if (node instanceof Paragraph p) {
             emitInline(p, prefix, base, styles, width, breakWords, out);
         } else if (node instanceof Heading h) {
-            emitInline(h, prefix, base.patch(styles.heading(h.getLevel())), styles, width, breakWords, out);
+            // base wins where it carries an explicit style (e.g. a dimmed fg for thoughts),
+            // the heading decorations still apply on top
+            emitInline(h, prefix, styles.heading(h.getLevel()).patch(base), styles, width, breakWords, out);
         } else if (node instanceof FencedCodeBlock c) {
             emitLiteral(
                     c.getLiteral(),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
                     width,
-                    out,
-                    true);
+                    out);
         } else if (node instanceof IndentedCodeBlock c) {
             emitLiteral(
                     c.getLiteral(),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
                     width,
-                    out,
-                    true);
+                    out);
         } else if (node instanceof HtmlBlock h) {
-            emitLiteral(textOf(h), styles.html() == null ? base : styles.html().patch(base), width, out, true);
+            // HtmlBlock stores its content in getLiteral() (no Text children): rendering
+            // textOf(h) alone silently dropped whole blocks such as inline <think> notes
+            final var literal = h.getLiteral();
+            emitLiteral(
+                    literal == null || literal.isBlank() ? textOf(h) : literal,
+                    styles.html() == null ? base : styles.html().patch(base),
+                    width,
+                    out);
         } else if (node instanceof BlockQuote q) {
             final var markerStyle = styles.blockquote() == null ? Style.EMPTY : styles.blockquote();
             final var marker = Span.styled(styles.blockquotePrefix(), markerStyle.patch(base));
@@ -165,7 +285,7 @@ public final class MarkdownLines {
             final var avail = Math.max(1, width - widthOf(prefix.first()));
             out.add(Line.from(concat(prefix.first(), List.of(Span.styled("─".repeat(avail), style)))));
         } else if (node instanceof TableBlock table) {
-            renderTable(table, prefix, width, out);
+            renderTable(table, prefix, base, width, out);
         } else {
             renderChildren(node, prefix, base, styles, width, breakWords, out);
         }
@@ -207,9 +327,25 @@ public final class MarkdownLines {
             final int width,
             final boolean breakWords,
             final List<Line> out) {
+        var renderedAny = false;
         for (final var child : children(node)) {
+            // blank source lines between block siblings must survive: markdown
+            // only separates blocks with blank lines, so render one too
+            if (renderedAny && !out.isEmpty() && !isBlankLine(out.get(out.size() - 1))) {
+                out.add(Line.empty());
+            }
             renderNode(child, prefix, base, styles, width, breakWords, out);
+            renderedAny = true;
         }
+    }
+
+    private static boolean isBlankLine(final Line line) {
+        for (final var span : line.spans()) {
+            if (span.content() != null && !span.content().isBlank()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void renderListItem(
@@ -297,14 +433,12 @@ public final class MarkdownLines {
         }
     }
 
-    private static void emitLiteral(
-            final String literal, final Style style, final int width, final List<Line> out, final boolean breakWords) {
+    private static void emitLiteral(final String literal, final Style style, final int width, final List<Line> out) {
         if (literal == null || literal.isEmpty()) {
             return;
         }
         for (final var row : literal.split("\n", -1)) {
-            appendWrapped(
-                    row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), breakWords, width, Prefix.NONE, out);
+            appendCodeLine(row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), width, out);
         }
     }
 
@@ -321,7 +455,7 @@ public final class MarkdownLines {
     }
 
     private static void renderTable(
-            final TableBlock table, final Prefix prefix, final int width, final List<Line> out) {
+            final TableBlock table, final Prefix prefix, final Style base, final int width, final List<Line> out) {
         final var columns = new ArrayList<Integer>();
         TableHead head = null;
         final var bodyRows = new ArrayList<TableRow>();
@@ -352,12 +486,12 @@ public final class MarkdownLines {
         if (head != null) {
             for (final var row : children(head)) {
                 if (row instanceof TableRow r) {
-                    emitTableRow(cellSpans(r, true), widths, prefix, out);
+                    emitTableRow(cellSpans(r, true, base), widths, prefix, out);
                 }
             }
         }
         for (final var row : bodyRows) {
-            emitTableRow(cellSpans(row, false), widths, prefix, out);
+            emitTableRow(cellSpans(row, false, base), widths, prefix, out);
         }
     }
 
@@ -380,14 +514,14 @@ public final class MarkdownLines {
         return widthOf(spans);
     }
 
-    private static List<List<Span>> cellSpans(final TableRow row, final boolean header) {
+    private static List<List<Span>> cellSpans(final TableRow row, final boolean header, final Style base) {
         final var out = new ArrayList<List<Span>>();
         for (final var cell : children(row)) {
             if (cell instanceof TableCell tc) {
                 final var spans = new ArrayList<Span>();
                 for (final var child : children(tc)) {
                     if (child instanceof Text t) {
-                        spans.add(Span.styled(t.getLiteral(), Style.EMPTY));
+                        spans.add(Span.styled(t.getLiteral(), header ? base.bold() : base));
                     }
                 }
                 out.add(spans);

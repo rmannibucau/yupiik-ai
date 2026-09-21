@@ -44,7 +44,7 @@ class JLinePromptImplTest {
                         default -> throw new EndOfFileException();
                     };
                 });
-        final var prompt = new JLinePromptImpl(null, reader);
+        final var prompt = new JLinePromptImpl(reader);
 
         assertTrue(prompt.editing());
         assertEquals(Optional.of("hello"), prompt.readLine("> "));

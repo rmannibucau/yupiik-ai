@@ -51,6 +51,7 @@ public final class CompletionEngine {
     private final Supplier<List<String>> sessions;
     private final Supplier<List<String>> tools;
     private final Supplier<List<String>> agentNames;
+    private final java.util.function.Function<String, List<String>> variants;
 
     public CompletionEngine(
             final SlashRegistry registry,
@@ -59,7 +60,8 @@ public final class CompletionEngine {
             final Supplier<List<String>> agents,
             final Supplier<List<String>> sessions,
             final Supplier<List<String>> tools,
-            final Supplier<List<String>> agentNames) {
+            final Supplier<List<String>> agentNames,
+            final java.util.function.Function<String, List<String>> variants) {
         this.registry = registry;
         this.models = orEmpty(models);
         this.providers = orEmpty(providers);
@@ -67,6 +69,7 @@ public final class CompletionEngine {
         this.sessions = orEmpty(sessions);
         this.tools = orEmpty(tools);
         this.agentNames = orEmpty(agentNames);
+        this.variants = variants == null ? model -> List.of() : variants;
     }
 
     private static Supplier<List<String>> orEmpty(final Supplier<List<String>> supplier) {
@@ -112,6 +115,13 @@ public final class CompletionEngine {
             return Suggestion.none();
         }
         final var command = firstToken.substring(1);
+        // for /model the first argument completes model names and the second (separated by a
+        // space) completes variant names; detect the position from the already-typed tokens
+        if ("model".equals(command) && beforeRaw.strip().split("\\s+").length >= 2) {
+            final var tokens = beforeRaw.strip().split("\\s+");
+            final var typedModel = tokens.length > 1 ? tokens[1] : "";
+            return complete(prefixInner, tokenStart, variants.apply(typedModel), "variant");
+        }
         return switch (registry.completionFor(command)) {
             case NONE -> Suggestion.none();
             case MODELS -> complete(prefixInner, tokenStart, models.get(), "model");

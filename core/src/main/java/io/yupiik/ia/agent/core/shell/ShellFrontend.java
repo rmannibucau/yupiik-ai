@@ -83,11 +83,18 @@ public interface ShellFrontend {
      * state is updated by its own observers, this is only about displaying.
      */
     default void onEvent(final AgentEvent event) {
-        if (event instanceof AgentEvent.Status(String message)) {
+        if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
             status(message);
-        } else if (event instanceof AgentEvent.Notice(var level, String message, var finishReason)) {
+        } else if (event
+                instanceof
+                AgentEvent.Notice(
+                        var level,
+                        String message,
+                        var finishReason,
+                        String subagentId,
+                        String subagentName)) {
             notice(level, message);
-        } else if (event instanceof AgentEvent.Error(String message)) {
+        } else if (event instanceof AgentEvent.Error(String message, String subagentId, String subagentName)) {
             error(message);
         }
     }

@@ -176,8 +176,11 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                         "function", tool.name(), tool.description(), tool.parameters(), tool.strict()));
             }
         }
-        final var reasoning =
-                request.reasoningEffort() == null ? null : Map.<String, Object>of("effort", request.reasoningEffort());
+        // 'summary' is required by the official API to stream reasoning deltas at all
+        // (gateways often emit them unrequested); 'auto' keeps the payload small
+        final var reasoning = request.reasoningEffort() == null
+                ? null
+                : Map.<String, Object>of("effort", request.reasoningEffort(), "summary", "auto");
         return new ResponsesRequest(
                 request.model(),
                 input,
@@ -251,7 +254,9 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                         result.add(new LlmStreamEvent.TextDelta(text));
                     }
                 }
-                case "response.reasoning_text.delta" -> {
+                case "response.reasoning_text.delta", "response.reasoning_summary_text.delta" -> {
+                    // reasoning models stream either the full reasoning text or (more
+                    // commonly on gateways) only its summary: both are the model thinking
                     final var text = str(root.get("delta"));
                     if (text != null && !text.isEmpty()) {
                         result.add(new LlmStreamEvent.ReasoningDelta(text));

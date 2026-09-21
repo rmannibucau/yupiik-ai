@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -36,6 +38,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -49,9 +52,11 @@ class ChatClientFlavorTest {
     Path storageHome;
 
     private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<>();
+    private final AtomicInteger modelsHits = new AtomicInteger();
 
     @BeforeEach
     void start() throws IOException {
+        modelsHits.set(0);
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
         server.createContext("/v1/chat/completions", exchange -> {
@@ -74,13 +79,14 @@ class ChatClientFlavorTest {
                         {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"hello there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}""", "application/json");
             }
         });
-        server.createContext(
-                "/v1/models",
-                exchange -> respond(
-                        exchange,
-                        200,
-                        "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}",
-                        "application/json"));
+        server.createContext("/v1/models", exchange -> {
+            modelsHits.incrementAndGet();
+            respond(
+                    exchange,
+                    200,
+                    "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}",
+                    "application/json");
+        });
         server.start();
         client = new ChatClient(configuration(), mapper(), providerManager(), Clock.systemUTC());
     }
@@ -173,7 +179,7 @@ class ChatClientFlavorTest {
 
     private ChatCompletionRequest request() {
         return new ChatCompletionRequest(
-                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null);
+                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
     }
 
     @Test
@@ -183,6 +189,32 @@ class ChatClientFlavorTest {
         assertEquals("hello there", result.message().content());
         assertEquals(3, result.usage().promptTokens());
         assertEquals(5, result.usage().totalTokens());
+    }
+
+    @Test
+    void bareV1AutoPrefersCompletionsWithoutProbingResponses() throws Exception {
+        stop();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            throw new IllegalStateException("responses endpoint must not be probed for a bare /v1 base URL");
+        });
+        server.createContext("/v1/chat/completions", exchange -> respond(exchange, 200, """
+                {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}""", "application/json"));
+        server.start();
+        final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry(
+                        "yca.provider.providers.0.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.0.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.0.model", "test-model"),
+                Map.entry("yca.provider.providers.0.api", "auto")));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("ok", client.chat(request()).message().content());
+        assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
     }
 
     @Test
@@ -336,11 +368,158 @@ class ChatClientFlavorTest {
         assertEquals(1, occurrences(bodies.getLast(), "\"temperature\":0.2"), bodies.getLast());
     }
 
+    @Test
+    void providerModelLeadingSpaceIsTrimmedOffTheWire() throws Exception {
+        final var cfg = configuration(Map.of("yca.provider.providers.0.model", " deepseek-v4-flash"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertTrue(bodies.getLast().contains("\"model\":\"deepseek-v4-flash\""), bodies.getLast());
+        assertTrue(!bodies.getLast().contains("\"model\":\" deepseek-v4-flash\""), bodies.getLast());
+    }
+
     private static int occurrences(final String body, final String needle) {
         var count = 0;
         for (var idx = body.indexOf(needle); idx >= 0; idx = body.indexOf(needle, idx + needle.length())) {
             count++;
         }
         return count;
+    }
+
+    @Test
+    void selectedVariantAppliesTemperatureTopPAndTopK() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.top_p", "0.9"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.top_k", "40")));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        assertEquals(1, client.variants().size());
+        client.setVariant("balanced");
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals("balanced", client.variant());
+        final var body = bodies.getLast();
+        assertEquals(1, occurrences(body, "\"temperature\":0.7"), body);
+        assertEquals(1, occurrences(body, "\"top_p\":0.9"), body);
+        assertEquals(1, occurrences(body, "\"top_k\":40"), body);
+    }
+
+    @Test
+    void unknownVariantNameIsIgnoredAndImplicitDefaultsApply() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client.setVariant("missing");
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals("missing", client.variant());
+        final var body = bodies.getLast();
+        // no configured variant was applied and the model has no implicit default
+        assertTrue(!body.contains("\"temperature\""), body);
+    }
+
+    @Test
+    void setProviderResetsTheSelectedVariant() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.1.id", "other"),
+                Map.entry(
+                        "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.1.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.1.model", "test-model"),
+                Map.entry("yca.provider.providers.1.api", "auto"),
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced")));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client.setVariant("balanced");
+        assertEquals("balanced", client.variant());
+        client.setProvider("other");
+        assertNull(client.variant());
+    }
+
+    @Test
+    void inMemorySamplingOverrideSetsTemperatureTopPAndTopK() throws Exception {
+        client = new ChatClient(
+                configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
+        client.setSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
+                ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.3d),
+                ChatClient.SamplingField.TOP_P, java.util.Optional.of(0.85d),
+                ChatClient.SamplingField.TOP_K, java.util.Optional.of(32d))));
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        final var body = bodies.getLast();
+        assertEquals(1, occurrences(body, "\"temperature\":0.3"), body);
+        assertEquals(1, occurrences(body, "\"top_p\":0.85"), body);
+        assertEquals(1, occurrences(body, "\"top_k\":32"), body);
+    }
+
+    @Test
+    void noneSamplingOverrideForcesOmissionFromTheWireEvenWithAVariant() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client.setVariant("balanced");
+        client.setSampling(ChatClient.SamplingOverride.of(
+                java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.empty())));
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        final var body = bodies.getLast();
+        assertTrue(!body.contains("\"temperature\""), body);
+    }
+
+    @Test
+    void implicitVariantReflectsInlineSamplingOverrides() throws Exception {
+        client = new ChatClient(
+                configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
+        client.setSampling(ChatClient.SamplingOverride.of(
+                java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.25d))));
+
+        final var implicit = client.implicitVariant();
+        // test-model has no implicit default; the explicit override surfaces through it
+        if (implicit != null) {
+            assertEquals(0.25, implicit.temperature(), 0.0);
+        }
+        assertNotNull(client.sampling());
+        client.setProvider("default");
+        assertNull(client.sampling(), "provider change must clear in-memory sampling overrides");
+    }
+
+    @Test
+    void setModelClearsInMemorySamplingOverrides() throws Exception {
+        client = new ChatClient(
+                configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
+        client.setSampling(ChatClient.SamplingOverride.of(
+                java.util.Map.of(ChatClient.SamplingField.TOP_K, java.util.Optional.of(16d))));
+        assertNotNull(client.sampling());
+        client.setModel("other-model");
+        assertNull(client.sampling(), "model change must clear in-memory sampling overrides");
+    }
+
+    @Test
+    void gpt5EmitsDefaultReasoningEffortOnTheWire() throws Exception {
+        final var cfg = configuration(Map.of("yca.provider.providers.0.model", "gpt-5"));
+        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+
+        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(1, occurrences(bodies.getLast(), "\"reasoning_effort\":\"medium\""), bodies.getLast());
+    }
+
+    @Test
+    void modelsAreCachedAcrossCallsAndRefreshedOnProviderChange() throws Exception {
+        assertEquals(List.of("model-a", "model-b"), client.models().ids());
+        assertEquals(1, modelsHits.get(), "the /v1/models endpoint must be hit once");
+
+        assertEquals(client.models().ids(), client.models().ids());
+        assertEquals(1, modelsHits.get(), "repeated calls must reuse the cached model list");
+
+        client.setProvider("default");
+        assertEquals(List.of("model-a", "model-b"), client.models().ids());
+        assertEquals(2, modelsHits.get(), "changing the provider must refresh the cached model list");
     }
 }

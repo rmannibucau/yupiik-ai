@@ -153,7 +153,7 @@ class ChatClientMidStreamTest {
 
     private ChatCompletionRequest request() {
         return new ChatCompletionRequest(
-                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null);
+                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
     }
 
     private JsonMapper mapper() {

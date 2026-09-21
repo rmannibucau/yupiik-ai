@@ -24,9 +24,11 @@ import dev.tamboui.tui.event.KeyEvent;
 import dev.tamboui.tui.event.KeyModifiers;
 import dev.tamboui.tui.event.PasteEvent;
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -41,6 +43,7 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
@@ -73,10 +76,21 @@ class TuiCommandRenderTest {
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
 
+    private JsonMapperImpl formatMapper;
+
     @BeforeEach
     void start() throws IOException {
+        formatMapper = new JsonMapperImpl(List.of(), key -> java.util.Optional.empty());
         llm = new MockLlmServer();
         backend = new HeadlessBackend();
+    }
+
+    @AfterEach
+    void closeFormatMapper() {
+        if (formatMapper != null) {
+            formatMapper.close();
+            formatMapper = null;
+        }
     }
 
     @AfterEach
@@ -202,8 +216,8 @@ class TuiCommandRenderTest {
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
-                "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#56b6c2", "#eeeeee", "#808080", 0.85, 0.85,
-                "#484848", "#606060", "#141414", "#ff5555", 4000L, null);
+                "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", 0.85, 0.85,
+                "#484848", "#606060", "#141414", "#ff5555", 4000L, true, "unicode", "auto", "auto", List.of(), null);
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -292,12 +306,14 @@ class TuiCommandRenderTest {
                         agentLoop,
                         new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
                         new VirtualThreadExecutor()),
-                new TuiTranscriptModel(),
+                new TuiTranscriptModel(new ThinkTagSplitter()),
                 factory,
                 tuiSlashCommands,
                 new SlashRegistry(List.of(tuiSlashCommands, configCommands)),
                 Clock.systemUTC(),
-                usageTracker);
+                usageTracker,
+                new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
+                new ToolOutputFormat(formatMapper));
     }
 
     @Test

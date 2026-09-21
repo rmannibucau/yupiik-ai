@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.tui.prompt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
@@ -25,7 +24,6 @@ import java.util.Optional;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
-import org.jline.terminal.Terminal;
 
 /**
  * JLine backed {@link Prompt} giving the plain {@code cli} REPL full line
@@ -35,18 +33,16 @@ import org.jline.terminal.Terminal;
  * terminal widget stack (tui module) is present; the higher
  * {@link Order} makes it win over {@code DefaultPromptImpl}.
  * <p>
- * The terminal and reader are produced by {@link JLineProducer} and injected;
- * the terminal is released on container shutdown through {@link Destroy}.
+ * The terminal and reader are produced by {@link JLineProducer}; the terminal
+ * is an application-scoped bean whose lifecycle (including the close) is owned
+ * by the producer, so this class only consumes the {@link LineReader}.
  */
 @ApplicationScoped
 @Order(2000)
 public class JLinePromptImpl implements Prompt {
-    private final Terminal terminal;
     private final LineReader reader;
-    private boolean closed;
 
-    public JLinePromptImpl(final Terminal terminal, final LineReader reader) {
-        this.terminal = terminal;
+    public JLinePromptImpl(final LineReader reader) {
         this.reader = reader;
     }
 
@@ -64,20 +60,5 @@ public class JLinePromptImpl implements Prompt {
     @Override
     public boolean editing() {
         return true;
-    }
-
-    @Destroy
-    public synchronized void shutdown() {
-        if (closed) {
-            return;
-        }
-        closed = true;
-        if (terminal != null) {
-            try {
-                terminal.close();
-            } catch (final IOException ignored) {
-                // best-effort: the process is going down anyway
-            }
-        }
     }
 }

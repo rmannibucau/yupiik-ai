@@ -117,4 +117,76 @@ class ProviderManagerTest {
         assertSame(first, second, "parsed providerSpecificOptions must be cached, not re-parsed per request");
         assertEquals(0.2, ((Number) first.get("temperature")).doubleValue());
     }
+
+    private static ProviderManager tuningProvider() {
+        return manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.providerSpecificOptions", "{\"echo\":1}"),
+                Map.entry("yca.provider.providers.0.tuning.reasoningEffort", "medium"),
+                Map.entry("yca.provider.providers.0.tuning.outputTokens", "4096"),
+                Map.entry("yca.provider.providers.0.tuning.providerSpecificOptions", "{\"frequency_penalty\":0.5}"),
+                Map.entry("yca.provider.providers.0.tuning.variants.length", "2"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7"),
+                Map.entry("yca.provider.providers.0.tuning.variants.0.top_p", "0.9"),
+                Map.entry("yca.provider.providers.0.tuning.variants.1.name", "reasoning"),
+                Map.entry("yca.provider.providers.0.tuning.variants.1.reasoningEffort", "high"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "claude-sonnet-5"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.reasoningEffort", "low"),
+                Map.entry(
+                        "yca.provider.providers.0.models.0.behavior.providerSpecificOptions",
+                        "{\"temperature\":0.2}")));
+    }
+
+    @Test
+    void tuningFallsBackToProviderLevelWhenNoModelEntryMatches() {
+        final var manager = tuningProvider();
+        final var provider = manager.providers().get(0);
+        final var tuning = manager.tuning(provider, "gpt-5");
+        assertEquals("medium", tuning.reasoningEffort());
+        assertEquals(4096, tuning.outputTokens());
+        assertEquals("medium", manager.reasoningEffort(provider, "gpt-5"));
+        assertEquals(4096, manager.outputTokensOverride(provider, "gpt-5"));
+        assertEquals(2, manager.variants(provider, "gpt-5").size());
+    }
+
+    @Test
+    void perModelBehaviorWinsOverProviderLevelTuning() {
+        final var manager = tuningProvider();
+        final var provider = manager.providers().get(0);
+        final var tuning = manager.tuning(provider, "claude-sonnet-5");
+        assertEquals("low", tuning.reasoningEffort());
+        assertEquals("low", manager.reasoningEffort(provider, "claude-sonnet-5"));
+        // per-model providerSpecificOptions wins over the provider-level one
+        assertEquals("{\"temperature\":0.2}", manager.providerSpecificOptions(provider, "claude-sonnet-5"));
+        // provider-level (top-level) providerSpecificOptions applies for an unlisted model
+        assertEquals("{\"echo\":1}", manager.providerSpecificOptions(provider, "gpt-5"));
+    }
+
+    @Test
+    void tuningOptionsAreParsedAndCached() {
+        final var manager = tuningProvider();
+        final var provider = manager.providers().get(0);
+        final var tuning = manager.tuning(provider, "gpt-5");
+        // tuning-level providerSpecificOptions is what ChatClient merges per-request
+        assertEquals(0.5, ((Number) manager.tuningOptions(tuning).get("frequency_penalty")).doubleValue());
+        final var first = manager.tuningOptions(tuning);
+        final var second = manager.tuningOptions(tuning);
+        assertSame(first, second, "parsed tuning providerSpecificOptions must be cached");
+    }
+
+    @Test
+    void variantsExposeWireMappedFields() {
+        final var manager = tuningProvider();
+        final var provider = manager.providers().get(0);
+        final var variants = manager.variants(provider, "gpt-5");
+        assertEquals("balanced", variants.get(0).name());
+        assertEquals(0.7, variants.get(0).temperature());
+        assertEquals(0.9, variants.get(0).topP());
+        assertEquals("high", variants.get(1).reasoningEffort());
+    }
 }

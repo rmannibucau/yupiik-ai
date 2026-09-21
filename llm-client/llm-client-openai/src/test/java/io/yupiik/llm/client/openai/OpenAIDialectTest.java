@@ -374,6 +374,31 @@ class OpenAIDialectTest {
         assertTrue(
                 failure instanceof DialectNotSupportedException,
                 () -> "expected DialectNotSupportedException but got " + failure);
+        assertTrue(
+                failure.getMessage().contains("not found"),
+                () -> "expected the server body to surface but got: " + failure.getMessage());
+    }
+
+    @Test
+    void completionsDialectSurfacesProviderErrorBodyOnFlavorMissing() {
+        server.createContext(
+                "/v1/chat/completions",
+                exchange ->
+                        respond(exchange, 404, "{\"error\":{\"message\":\"Model ' deepseek-v4-flash' not found\"}}"));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var completion = dialect.chat(request(false)).toCompletableFuture();
+        final var failure = failureOf(completion).orElseThrow();
+        assertTrue(
+                failure instanceof DialectNotSupportedException,
+                () -> "expected DialectNotSupportedException but got " + failure);
+        assertTrue(
+                failure.getMessage().contains("Model ' deepseek-v4-flash' not found"),
+                () -> "expected the provider error body to surface but got: " + failure.getMessage());
     }
 
     private static Optional<Throwable> failureOf(final java.util.concurrent.CompletableFuture<LlmResponse> future) {
@@ -404,6 +429,37 @@ class OpenAIDialectTest {
                 dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals("hello", response.text());
         assertTrue(reqBody.get().contains("\"max_output_tokens\":64"), reqBody.get());
+    }
+
+    @Test
+    void responsesDialectRequestsReasoningSummary() throws Exception {
+        server.createContext("/v1/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        // reasoningEffort is the 10th component of LlmRequest (before stream/extensions)
+        final var request = new LlmRequest(
+                "m",
+                List.of(LlmMessage.system("be concise"), LlmMessage.user("hi")),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                "low",
+                false,
+                java.util.Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        // 'summary' is what makes official OpenAI stream reasoning deltas at all
+        assertTrue(reqBody.get().contains("\"summary\":\"auto\""), reqBody.get());
+        assertTrue(reqBody.get().contains("\"effort\":\"low\""), reqBody.get());
     }
 
     @Test
@@ -459,6 +515,42 @@ class OpenAIDialectTest {
                 List.of(
                         new LlmStreamEvent.TextDelta("hel"),
                         new LlmStreamEvent.TextDelta("lo"),
+                        new LlmStreamEvent.End("stop", Usage.EMPTY)),
+                events);
+    }
+
+    @Test
+    void responsesDialectStreamsReasoningSummaryDeltas() throws Exception {
+        // gateways commonly stream only the reasoning summary, not the full reasoning text
+        final var sse = String.join(
+                "\n",
+                "event: response.reasoning_summary_text.delta",
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"i\",\"delta\":\"let me \"}",
+                "",
+                "event: response.reasoning_summary_text.delta",
+                "data: {\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"i\",\"delta\":\"think\"}",
+                "",
+                "event: response.output_text.delta",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"i\",\"output_index\":0,\"delta\":\"hi\"}",
+                "",
+                "event: response.completed",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":\"m\",\"output\":[]}}",
+                "",
+                "");
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        assertEquals(
+                List.of(
+                        new LlmStreamEvent.ReasoningDelta("let me "),
+                        new LlmStreamEvent.ReasoningDelta("think"),
+                        new LlmStreamEvent.TextDelta("hi"),
                         new LlmStreamEvent.End("stop", Usage.EMPTY)),
                 events);
     }

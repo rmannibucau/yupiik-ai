@@ -210,12 +210,16 @@ public final class AnthropicDialect extends AbstractDialect {
         }
         final var maxTokens = request.maxTokens() == null ? 4096 : request.maxTokens();
         final Map<String, Object> extensions = request.extensions() == null ? Map.of() : request.extensions();
+        Integer topK = null;
+        if (extensions.get("top_k") instanceof Number n) {
+            topK = n.intValue();
+        }
         final var promptCache = !"false".equals(extensions.get("promptCache"));
         Map<String, Object> passthrough = extensions;
-        if (extensions.containsKey("promptCache")) {
+        if (extensions.containsKey("promptCache") || topK != null) {
             final var stripped = new java.util.HashMap<String, Object>();
             extensions.forEach((k, v) -> {
-                if (!"promptCache".equals(k)) {
+                if (!"promptCache".equals(k) && !"top_k".equals(k)) {
                     stripped.put(k, v);
                 }
             });
@@ -228,7 +232,7 @@ public final class AnthropicDialect extends AbstractDialect {
                 messages,
                 request.temperature(),
                 request.topP(),
-                null,
+                topK,
                 request.stop(),
                 stream,
                 tools.isEmpty() ? null : tools,

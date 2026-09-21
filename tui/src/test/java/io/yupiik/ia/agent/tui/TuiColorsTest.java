@@ -37,19 +37,19 @@ class TuiColorsTest {
     }
 
     @Test
-    void blendWithFullOpacityKeepsForeground() {
+    void blendWithFullOpacityCollapsesIntoBackground() {
         final var blended = TuiColors.blend("#e06c75", "#141414", 1.0);
-        assertEquals(0xe0, blended.toRgb().r());
-        assertEquals(0x6c, blended.toRgb().g());
-        assertEquals(0x75, blended.toRgb().b());
-    }
-
-    @Test
-    void blendWithZeroOpacityKeepsBackground() {
-        final var blended = TuiColors.blend("#e06c75", "#141414", 0.0);
         assertEquals(0x14, blended.toRgb().r());
         assertEquals(0x14, blended.toRgb().g());
         assertEquals(0x14, blended.toRgb().b());
+    }
+
+    @Test
+    void blendWithZeroOpacityKeepsForeground() {
+        final var blended = TuiColors.blend("#e06c75", "#141414", 0.0);
+        assertEquals(0xe0, blended.toRgb().r());
+        assertEquals(0x6c, blended.toRgb().g());
+        assertEquals(0x75, blended.toRgb().b());
     }
 
     @Test

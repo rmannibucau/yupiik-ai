@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
@@ -106,6 +107,8 @@ public class AgentLoop {
     private final SnapshotStore snapshotStore;
     private final TodoStore todoStore;
     private final VirtualThreadExecutor executor;
+    private final String subagentId;
+    private final String subagentName;
 
     // Per-turn metrics tracking (reset at start of each doRun)
     private int turnLlmCalls;
@@ -139,6 +142,56 @@ public class AgentLoop {
             final SnapshotStore snapshotStore,
             final TodoStore todoStore,
             final VirtualThreadExecutor executor) {
+        this(
+                chatClient,
+                toolRegistry,
+                toolExecutionService,
+                configuration,
+                permissionService,
+                usageTracker,
+                contextManager,
+                contextView,
+                sessionStore,
+                systemPromptBuilder,
+                memoryExtractor,
+                statusReporter,
+                emitter,
+                mapper,
+                structuralCodeGraph,
+                providerManager,
+                agentProvider,
+                clock,
+                snapshotStore,
+                todoStore,
+                executor,
+                null,
+                null);
+    }
+
+    AgentLoop(
+            final ChatClient chatClient,
+            final ToolRegistry toolRegistry,
+            final ToolExecutionService toolExecutionService,
+            final CodingAgentConfiguration configuration,
+            final PermissionService permissionService,
+            final UsageTracker usageTracker,
+            final ContextManager contextManager,
+            final ContextView contextView,
+            final SessionStore sessionStore,
+            final SystemPromptBuilder systemPromptBuilder,
+            final MemoryExtractor memoryExtractor,
+            final StatusReporter statusReporter,
+            final Emitter emitter,
+            final JsonMapper mapper,
+            final StructuralCodeGraph structuralCodeGraph,
+            final ProviderManager providerManager,
+            final AgentProvider agentProvider,
+            final Clock clock,
+            final SnapshotStore snapshotStore,
+            final TodoStore todoStore,
+            final VirtualThreadExecutor executor,
+            final String subagentId,
+            final String subagentName) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -160,6 +213,8 @@ public class AgentLoop {
         this.snapshotStore = snapshotStore;
         this.todoStore = todoStore;
         this.executor = executor;
+        this.subagentId = subagentId;
+        this.subagentName = subagentName;
     }
 
     protected AgentLoop() {
@@ -184,6 +239,8 @@ public class AgentLoop {
         this.snapshotStore = null;
         this.todoStore = null;
         this.executor = null;
+        this.subagentId = null;
+        this.subagentName = null;
     }
 
     public String run(
@@ -230,28 +287,28 @@ public class AgentLoop {
             messages.add(Message.user(userMessage));
             sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", userMessage, null, null));
         }
-        statusReporter.setSink(message -> emitter.emit(new AgentEvent.Status(message)));
+        statusReporter.setSink(message -> emitter.emit(status(message)));
         if (chatClient != null) {
             // surface provider throttles and retry backoffs: without this the UI only shows a
             // spinner while the resilience layer can silently wait up to minutes between attempts
             chatClient.setPauseListener(pause -> emit(
                     pause.kind() == PauseEvent.Pause.THROTTLE
-                            ? new AgentEvent.Status(pause.message())
-                            : AgentEvent.Notice.info(pause.message())));
+                            ? status(pause.message())
+                            : notice(AgentEvent.Notice.Level.INFO, pause.message())));
         }
 
         try {
             return loop(sessionId, messages, cancelled);
         } catch (final IOException e) {
-            emit(new AgentEvent.Error(e.getMessage()));
+            emit(error(e.getMessage()));
             return null;
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
-            emit(new AgentEvent.Error("Interrupted"));
+            emit(error("Interrupted"));
             return null;
         } catch (final RuntimeException e) {
             LOGGER.log(Level.SEVERE, "agent turn failed", e);
-            emit(new AgentEvent.Error("unexpected failure: " + e));
+            emit(error("unexpected failure: " + e));
             return null;
         } finally {
             if (chatClient != null) {
@@ -290,6 +347,91 @@ public class AgentLoop {
         emitter.emit(event);
     }
 
+    // Event helpers that include subagent info
+    private AgentEvent.TextDelta textDelta(final String delta) {
+        return new AgentEvent.TextDelta(delta, subagentId, subagentName);
+    }
+
+    private AgentEvent.TextReset textReset() {
+        return new AgentEvent.TextReset(subagentId, subagentName);
+    }
+
+    private AgentEvent.ThinkingDelta thinkingDelta(final String delta) {
+        return new AgentEvent.ThinkingDelta(delta, subagentId, subagentName);
+    }
+
+    private AgentEvent.ToolStarted toolStarted(final String name, final String args) {
+        return new AgentEvent.ToolStarted(name, args, subagentId, subagentName);
+    }
+
+    private AgentEvent.ToolFinished toolFinished(final String name, final String output, final boolean success) {
+        return new AgentEvent.ToolFinished(name, output, success, subagentId, subagentName);
+    }
+
+    private AgentEvent.ToolStream toolStream(final String name, final String fragment) {
+        return new AgentEvent.ToolStream(name, fragment, subagentId, subagentName);
+    }
+
+    private AgentEvent.UsageUpdated usageUpdated(
+            final io.yupiik.ia.agent.core.llm.Usage usage,
+            final int estimatedContextTokens,
+            final double contextPercent) {
+        return new AgentEvent.UsageUpdated(usage, estimatedContextTokens, contextPercent, subagentId, subagentName);
+    }
+
+    private AgentEvent.Compacted compacted(final String kind, final String mode) {
+        return new AgentEvent.Compacted(kind, mode, subagentId, subagentName);
+    }
+
+    private AgentEvent.Compacted compacted(final String kind) {
+        return new AgentEvent.Compacted(kind, "SUMMARY", subagentId, subagentName);
+    }
+
+    private AgentEvent.Status status(final String message) {
+        return new AgentEvent.Status(message, subagentId, subagentName);
+    }
+
+    private AgentEvent.Notice notice(final AgentEvent.Notice.Level level, final String message) {
+        return new AgentEvent.Notice(level, message, null, subagentId, subagentName);
+    }
+
+    private AgentEvent.Notice notice(
+            final AgentEvent.Notice.Level level, final String message, final String finishReason) {
+        return new AgentEvent.Notice(level, message, finishReason, subagentId, subagentName);
+    }
+
+    private AgentEvent.TurnDone turnDone(final String content) {
+        return new AgentEvent.TurnDone(content, subagentId, subagentName);
+    }
+
+    private AgentEvent.Error error(final String message) {
+        return new AgentEvent.Error(message, subagentId, subagentName);
+    }
+
+    private AgentEvent.TurnMetrics turnMetrics(
+            final int llmCalls,
+            final long thinkingDurationMs,
+            final long toolDurationSumMs,
+            final long toolDurationWallMs,
+            final int toolsRun,
+            final long turnDurationMs) {
+        return new AgentEvent.TurnMetrics(
+                llmCalls,
+                thinkingDurationMs,
+                toolDurationSumMs,
+                toolDurationWallMs,
+                toolsRun,
+                turnDurationMs,
+                subagentId,
+                subagentName);
+    }
+
+    private AgentEvent.ToolTimingEvent toolTimingEvent(
+            final String toolName, final long durationMs, final long wallDurationMs, final boolean parallelBatch) {
+        return new AgentEvent.ToolTimingEvent(
+                toolName, durationMs, wallDurationMs, parallelBatch, subagentId, subagentName);
+    }
+
     private String loop(final String sessionId, final List<Message> messages, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
@@ -326,7 +468,7 @@ public class AgentLoop {
                 if (pruned.changed()) {
                     messages.clear();
                     messages.addAll(pruned.messages());
-                    emit(new AgentEvent.Compacted("prune", pruned.mode().name()));
+                    emit(compacted("prune", pruned.mode().name()));
                     persistContext(sessionId, messages);
                     compactedThisTurn = true;
                 }
@@ -336,7 +478,7 @@ public class AgentLoop {
                 if (compacted.changed()) {
                     messages.clear();
                     messages.addAll(compacted.messages());
-                    emit(new AgentEvent.Compacted("compact", compacted.mode().name()));
+                    emit(compacted("compact", compacted.mode().name()));
                     persistContext(sessionId, messages);
                     compactedThisTurn = true;
                 }
@@ -346,7 +488,7 @@ public class AgentLoop {
                 if (consecutiveCompactions >= maxConsecutiveCompactions
                         && usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens))
                                 >= configuration.compaction().thresholdPercent()) {
-                    emit(new AgentEvent.Notice(
+                    emit(notice(
                             AgentEvent.Notice.Level.ERROR,
                             "Context keeps filling up right after compaction after " + consecutiveCompactions
                                     + " attempts. Consider /compact manually, a larger model, or splitting the task."));
@@ -356,7 +498,8 @@ public class AgentLoop {
                 consecutiveCompactions = 0;
             }
 
-            final var request = new ChatCompletionRequest(model, messages, null, null, tools, "auto", null, null, null);
+            final var request =
+                    new ChatCompletionRequest(model, messages, null, null, null, tools, "auto", null, null, null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final var finishReason = new String[] {null};
             final Message assistant;
@@ -368,13 +511,13 @@ public class AgentLoop {
                 }
                 if (usageTracker.lastResolutionWasAuto() && !autoNoticeEmitted) {
                     emit(
-                            new AgentEvent.Notice(
+                            notice(
                                     AgentEvent.Notice.Level.INFO,
                                     "Context window auto-detected: no exact figure was available, using a conservative default and learning on overflow."));
                     autoNoticeEmitted = true;
                 }
                 final var shrunken = usageTracker.rememberShrinkOnOverflow();
-                emit(new AgentEvent.Notice(
+                emit(notice(
                         AgentEvent.Notice.Level.INFO,
                         "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
                                 + " tokens)."));
@@ -382,13 +525,12 @@ public class AgentLoop {
                 if (compacted.changed() && !compacted.messages().isEmpty()) {
                     messages.clear();
                     messages.addAll(compacted.messages());
-                    emit(new AgentEvent.Compacted(
-                            "compact-retry", compacted.mode().name()));
+                    emit(compacted("compact-retry", compacted.mode().name()));
                     persistContext(sessionId, messages);
                     overflowRetried = true;
                     continue;
                 }
-                emit(new AgentEvent.Notice(
+                emit(notice(
                         AgentEvent.Notice.Level.ERROR,
                         "Context window exceeded and compacting did not free enough context: " + e.getMessage()));
                 throw e;
@@ -411,19 +553,23 @@ public class AgentLoop {
                     final var maxTruncationContinues = configuration.llm().truncationContinuesMax();
                     if (configuration.llm().continueOnTruncation() && truncationContinues < maxTruncationContinues) {
                         truncationContinues++;
-                        emit(AgentEvent.Notice.warn("Response truncated by the output token limit (finish_reason="
-                                + reason + "); asking the model to continue (" + truncationContinues + '/'
-                                + maxTruncationContinues + ")."));
+                        emit(notice(
+                                AgentEvent.Notice.Level.WARN,
+                                "Response truncated by the output token limit (finish_reason="
+                                        + reason + "); asking the model to continue (" + truncationContinues + '/'
+                                        + maxTruncationContinues + ")."));
                         messages.add(Message.user(
                                 truncationContinues >= 2 ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
                         continue;
                     }
-                    emit(AgentEvent.Notice.error("Response truncated by the output token limit (finish_reason="
-                            + reason + "); the reply may be incomplete."
-                            + (configuration.llm().continueOnTruncation()
-                                    ? " Gave up after " + truncationContinues + " continuation"
-                                            + (truncationContinues == 1 ? "" : "s") + "."
-                                    : " Enable yca.llm.continueOnTruncation to auto-continue.")));
+                    emit(notice(
+                            AgentEvent.Notice.Level.ERROR,
+                            "Response truncated by the output token limit (finish_reason="
+                                    + reason + "); the reply may be incomplete."
+                                    + (configuration.llm().continueOnTruncation()
+                                            ? " Gave up after " + truncationContinues + " continuation"
+                                                    + (truncationContinues == 1 ? "" : "s") + "."
+                                            : " Enable yca.llm.continueOnTruncation to auto-continue.")));
                     emitTurnMetrics(content, turnStartNanos);
                     return content;
                 }
@@ -445,9 +591,9 @@ public class AgentLoop {
             }
         }
         if (cancelled.getAsBoolean()) {
-            emit(new AgentEvent.Error("Cancelled"));
+            emit(error("Cancelled"));
         } else {
-            emit(new AgentEvent.Error("Maximum iterations reached (" + maxIterations + ")"));
+            emit(error("Maximum iterations reached (" + maxIterations + ")"));
         }
         emitTurnMetrics(null, turnStartNanos);
         return null;
@@ -458,10 +604,9 @@ public class AgentLoop {
         if (thinkingActive) {
             turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
         }
-        emit(new AgentEvent.TurnMetrics(
-                turnLlmCalls, turnThinkingMs, turnToolSumMs, turnToolWallMs, turnToolsRun, turnDurationMs));
+        emit(turnMetrics(turnLlmCalls, turnThinkingMs, turnToolSumMs, turnToolWallMs, turnToolsRun, turnDurationMs));
         if (content != null) {
-            emit(new AgentEvent.TurnDone(content));
+            emit(turnDone(content));
         }
     }
 
@@ -502,15 +647,16 @@ public class AgentLoop {
                 ? contextManager.prune(messages)
                 : contextManager.compact(messages, directive.focus(), directive.keepLast());
         if (!result.changed()) {
-            emit(AgentEvent.Notice.warn(
+            emit(notice(
+                    AgentEvent.Notice.Level.WARN,
                     "manage_context " + directive.action() + " had nothing to reclaim; context left untouched."));
             return;
         }
         messages.clear();
         messages.addAll(result.messages());
-        emit(new AgentEvent.Compacted("tool", result.mode().name()));
+        emit(compacted("tool", result.mode().name()));
         persistContext(sessionId, messages);
-        emit(new AgentEvent.Notice(
+        emit(notice(
                 AgentEvent.Notice.Level.INFO,
                 "Context " + directive.action()
                         + " requested by the model applied ("
@@ -534,7 +680,7 @@ public class AgentLoop {
                     messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages);
         } catch (final RuntimeException e) {
             LOGGER.log(Level.WARNING, e, () -> "Could not persist the compacted session " + sessionId);
-            emit(AgentEvent.Notice.warn("Compacted context could not be persisted: " + e.getMessage()));
+            emit(notice(AgentEvent.Notice.Level.WARN, "Compacted context could not be persisted: " + e.getMessage()));
         }
     }
 
@@ -564,9 +710,11 @@ public class AgentLoop {
                 if (attempt >= maxAttempts) {
                     break;
                 }
-                emit(new AgentEvent.TextReset());
-                emit(AgentEvent.Notice.warn("Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/'
-                        + maxAttempts + ")."));
+                emit(textReset());
+                emit(notice(
+                        AgentEvent.Notice.Level.WARN,
+                        "Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/' + maxAttempts
+                                + ")."));
                 Thread.sleep(streamRetryBackoffMs(attempt));
             }
         }
@@ -604,6 +752,11 @@ public class AgentLoop {
      */
     private AgentEvent.Notice unfinishedTodosNotice(final boolean toolsRanThisTurn, final String finishReason) {
         if (!toolsRanThisTurn || todoStore == null) {
+            return null;
+        }
+        // in plan mode pending todos are the expected end state: the whole point is to
+        // record the plan as todos, so no resume reminder is needed
+        if (permissionService != null && permissionService.mode() == AgentMode.PLAN) {
             return null;
         }
         final var todos = todoStore.all();
@@ -687,7 +840,7 @@ public class AgentLoop {
                         // doom-loop check happens in call order, before the worker starts
                         final var repeated = repeats.rejectIfRepeated(call);
                         if (repeated != null) {
-                            emit(new AgentEvent.ToolFinished(repeated.name(), repeated.output(), false));
+                            emit(toolFinished(repeated.name(), repeated.output(), false));
                             futures.add(executor.submit(() -> repeated));
                         } else {
                             futures.add(executor.submit(() -> runTool(call)));
@@ -714,7 +867,7 @@ public class AgentLoop {
     private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats) {
         final var repeated = repeats.rejectIfRepeated(call);
         if (repeated != null) {
-            emit(new AgentEvent.ToolFinished(repeated.name(), repeated.output(), false));
+            emit(toolFinished(repeated.name(), repeated.output(), false));
             return repeated;
         }
         return runTool(call);
@@ -925,7 +1078,7 @@ public class AgentLoop {
         final EmbeddedTool tool = toolRegistry.tool(name);
         if (tool == null) {
             final var diagnostic = "Unknown tool: " + name;
-            emit(new AgentEvent.ToolFinished(name, unknownToolDiagnostic(name), false));
+            emit(toolFinished(name, unknownToolDiagnostic(name), false));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         final Map<String, Object> args;
@@ -934,22 +1087,22 @@ public class AgentLoop {
             args = parsed instanceof Map<?, ?> m ? cast(m) : new LinkedHashMap<>();
         } catch (final RuntimeException e) {
             final var diagnostic = "Invalid tool arguments JSON: " + argsJson;
-            emit(new AgentEvent.ToolFinished(name, diagnostic, false));
+            emit(toolFinished(name, diagnostic, false));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
-        emit(new AgentEvent.ToolStarted(name, argsJson));
+        emit(toolStarted(name, argsJson));
         final PermissionService.Decision decision =
                 permissionService.check(name, tool.category(), args, tool.readonly());
         if (!decision.allowed()) {
             final var denial =
                     "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason());
-            emit(new AgentEvent.ToolFinished(name, denial, false));
+            emit(toolFinished(name, denial, false));
             return new ToolOutcome(call.id(), name, denial, false, false);
         }
         final var toolStartNanos = System.nanoTime();
         final ToolResult result = toolExecutionService.execute(tool, args);
         final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
-        emit(new AgentEvent.ToolFinished(name, result.output(), result.success()));
+        emit(toolFinished(name, result.output(), result.success()));
         return new ToolOutcome(
                 call.id(), name, result.output(), result.success(), true, touchedPaths(name, args), toolDurationMs);
     }
@@ -967,7 +1120,7 @@ public class AgentLoop {
         }
         final var invalidated = staleReads.onLanded(messages, outcome);
         if (invalidated > 0) {
-            emit(new AgentEvent.Status("invalidated " + invalidated + " stale read(s) of modified files"));
+            emit(status("invalidated " + invalidated + " stale read(s) of modified files"));
         }
         turnToolsRun++;
         turnToolSumMs += outcome.durationMs();
@@ -985,13 +1138,13 @@ public class AgentLoop {
                 turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
                 thinkingActive = false;
             }
-            emit(new AgentEvent.TextDelta(text));
+            emit(textDelta(text));
         } else if (delta instanceof ReasoningDelta(final String text)) {
             if (!thinkingActive) {
                 thinkingActive = true;
                 thinkingStartNanos = System.nanoTime();
             }
-            emit(new AgentEvent.ThinkingDelta(text));
+            emit(thinkingDelta(text));
         } else if (delta instanceof End(final String reason, final Usage upper)) {
             if (thinkingActive) {
                 turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
@@ -1000,15 +1153,18 @@ public class AgentLoop {
             if (reason != null) {
                 finishReason[0] = reason;
             }
-            final var converted = upper == null
-                    ? io.yupiik.ia.agent.core.llm.Usage.EMPTY
-                    : new io.yupiik.ia.agent.core.llm.Usage(
-                            Math.toIntExact(upper.promptTokens()),
-                            Math.toIntExact(upper.completionTokens()),
-                            Math.toIntExact(upper.totalTokens()),
-                            upper.cacheRead(),
-                            upper.cacheWrite());
-            usage[0] = converted;
+            // a chunk may carry usage and a choice finish reason on the same stream line, which
+            // the dialect splits into two End events; only overwrite usage when this End actually
+            // carries a usage payload, otherwise a trailing finish-reason-only End would reset the
+            // captured counters back to empty
+            if (upper != null) {
+                usage[0] = new io.yupiik.ia.agent.core.llm.Usage(
+                        Math.toIntExact(upper.promptTokens()),
+                        Math.toIntExact(upper.completionTokens()),
+                        Math.toIntExact(upper.totalTokens()),
+                        upper.cacheRead(),
+                        upper.cacheWrite());
+            }
             turnLlmCalls++;
             // usage is recorded once per request after the stream completes (single record point,
             // otherwise requests and tokens are double counted)
@@ -1017,7 +1173,7 @@ public class AgentLoop {
 
     private void emitUsage(final List<Message> messages, final int toolsTokens) {
         final var effective = usageTracker.effectiveContext(messages, toolsTokens);
-        emit(new AgentEvent.UsageUpdated(
+        emit(usageUpdated(
                 usageTracker.promptTokens() > 0
                         ? new io.yupiik.ia.agent.core.llm.Usage(
                                 (int) usageTracker.promptTokens(),

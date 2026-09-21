@@ -21,10 +21,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import java.util.List;
 import java.util.Optional;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 class ToolPresenterTest {
-    private final ToolPresenter presenter = new ToolPresenter(new JsonMapperImpl(List.of(), key -> Optional.empty()));
+    private JsonMapperImpl mapper;
+    private ToolPresenter presenter;
+
+    @BeforeEach
+    void setUp() {
+        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        presenter = new ToolPresenter(mapper);
+    }
+
+    @AfterEach
+    void tearDown() {
+        mapper.close();
+        mapper = null;
+    }
+
+    @Test
+    void askUserResultRendersKeyValueLines() {
+        assertEquals("q1: yes\nq2: a, b", presenter.result("ask_user", "{\"q1\":\"yes\",\"q2\":[\"a\",\"b\"]}", true));
+    }
+
+    @Test
+    void malformedAskUserResultFallsBackToTruncation() {
+        final var rendered = presenter.result("ask_user", "{oops", true);
+        assertTrue(rendered.contains("{oops"));
+    }
 
     @Test
     void summarizesBashCommand() {

@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.skills;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -96,5 +97,109 @@ public final class SkillLocator {
             }
         }
         return null;
+    }
+
+    /**
+     * The {@code name} and {@code description} of an available skill, read from the SKILL.md frontmatter
+     * (or derived from the directory name and first meaningful line when the frontmatter is absent).
+     */
+    public record SkillDescriptor(String name, String description) {}
+
+    /**
+     * Enumerate every discovered skill with its {@code name} and {@code description} (frontmatter only,
+     * never the full SKILL.md body). Mirrors opencode's {@code <available_skills>} discovery so the model
+     * can decide which skill to load on demand via the {@code skill} tool.
+     */
+    public static List<SkillDescriptor> availableSkills(final CodingAgentConfiguration configuration) {
+        final var out = new ArrayList<SkillDescriptor>();
+        final var seen = new java.util.HashSet<String>();
+        for (final var dir : skillDirectories(configuration)) {
+            if (!Files.isDirectory(dir)) {
+                continue;
+            }
+            try (final var dirs = Files.list(dir)) {
+                for (final var skillDir : dirs.sorted().toList()) {
+                    if (!Files.isDirectory(skillDir)) {
+                        continue;
+                    }
+                    final var skillFile = skillDir.resolve("SKILL.md");
+                    if (!Files.isRegularFile(skillFile)) {
+                        continue;
+                    }
+                    if (!seen.add(skillDir.getFileName().toString())) {
+                        continue;
+                    }
+                    try {
+                        final var raw = Files.readString(skillFile);
+                        out.add(descriptor(raw, skillDir.getFileName().toString()));
+                    } catch (final IOException e) {
+                        // skip unreadable
+                    }
+                }
+            } catch (final IOException e) {
+                // skip unreadable dir
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Render the discovered skills as an opencode-style {@code <available_skills>} catalog (name + description),
+     * used inside the {@code skill} tool description. Returns {@code ""} when no skills are found.
+     */
+    public static String availableSkillsCatalog(final CodingAgentConfiguration configuration) {
+        final var skills = availableSkills(configuration);
+        if (skills.isEmpty()) {
+            return "";
+        }
+        final var sb = new StringBuilder("<available_skills>\n");
+        for (final var skill : skills) {
+            sb.append("<skill><name>")
+                    .append(skill.name())
+                    .append("</name><description>")
+                    .append(skill.description() == null ? "" : skill.description())
+                    .append("</description></skill>\n");
+        }
+        return sb.append("</available_skills>").toString();
+    }
+
+    private static final String FRONTMATTER_START = "---\n";
+    private static final String FRONTMATTER_END = "---";
+
+    private static SkillDescriptor descriptor(final String raw, final String dirName) {
+        var content = raw;
+        var name = dirName;
+        var description = "";
+        if (content.startsWith(FRONTMATTER_START)) {
+            final var end = content.indexOf('\n' + FRONTMATTER_END + "\n", FRONTMATTER_START.length());
+            if (end > 0) {
+                final var front = content.substring(FRONTMATTER_START.length(), end);
+                for (final var line : front.lines().toList()) {
+                    if (line.startsWith("name:") && line.length() > "name:".length()) {
+                        final var candidate = line.substring("name:".length()).strip();
+                        if (!candidate.isEmpty()) {
+                            name = candidate;
+                        }
+                    } else if (line.startsWith("description:") && line.length() > "description:".length()) {
+                        description = line.substring("description:".length()).strip();
+                    }
+                }
+                content = content.substring(end + FRONTMATTER_END.length() + 2);
+            }
+        }
+        if (description.isEmpty()) {
+            description = firstMeaningfulLine(content);
+        }
+        return new SkillDescriptor(name, description);
+    }
+
+    private static String firstMeaningfulLine(final String content) {
+        for (final var line : content.lines().toList()) {
+            final var stripped = line.strip();
+            if (!stripped.isEmpty() && !stripped.startsWith("#")) {
+                return stripped;
+            }
+        }
+        return content.strip();
     }
 }

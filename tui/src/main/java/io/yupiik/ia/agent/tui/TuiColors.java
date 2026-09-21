@@ -20,13 +20,18 @@ import dev.tamboui.style.Color;
 public final class TuiColors {
     private TuiColors() {}
 
+    /**
+     * Solid color looking like a transparent {@code fg} over {@code bg}: terminals have no
+     * alpha so the color is pre-blended, {@code opacity} being the transparency level
+     * (0 keeps the foreground as-is, 1 collapses it into the background).
+     */
     public static Color blend(final String fgHex, final String bgHex, final double opacity) {
         final var fg = parseHex(fgHex);
         final var bg = parseHex(bgHex);
         return Color.rgb(
-                (int) Math.round(fg[0] * opacity + bg[0] * (1 - opacity)),
-                (int) Math.round(fg[1] * opacity + bg[1] * (1 - opacity)),
-                (int) Math.round(fg[2] * opacity + bg[2] * (1 - opacity)));
+                (int) Math.round(fg[0] * (1 - opacity) + bg[0] * opacity),
+                (int) Math.round(fg[1] * (1 - opacity) + bg[1] * opacity),
+                (int) Math.round(fg[2] * (1 - opacity) + bg[2] * opacity));
     }
 
     public static int[] parseHex(final String hex) {

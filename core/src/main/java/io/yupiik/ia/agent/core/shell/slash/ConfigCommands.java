@@ -22,14 +22,20 @@ import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
@@ -68,7 +74,11 @@ public class ConfigCommands implements SlashCommandSet {
                         ArgCompletion.MODE,
                         SlashAction.sync(this::mode)),
                 SlashCommand.of(
-                        new SlashCommandSpec("/model", "[name]", "show or switch the model", SlashGroup.CONFIG),
+                        new SlashCommandSpec(
+                                "/model",
+                                "[name] [variant] [temperature] [topK] [topP] | [temp=..] [top_k=..] [top_p=..]",
+                                "show or switch the model, optionally a named variant and in-memory sampling overrides",
+                                SlashGroup.CONFIG),
                         ArgCompletion.MODELS,
                         this::model),
                 SlashCommand.of(
@@ -130,22 +140,232 @@ public class ConfigCommands implements SlashCommandSet {
 
     private CompletionStage<ShellOutcome> model(final String arg, final ShellEnv env) {
         if (arg.isBlank()) {
-            final List<String> ids;
-            try {
-                ids = chatClient.models().ids();
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return CompletableFuture.completedStage(ShellOutcome.error("cannot list models: " + e.getMessage()));
-            } catch (final IOException | RuntimeException e) {
-                return CompletableFuture.completedStage(ShellOutcome.error("cannot list models: " + e.getMessage()));
-            }
-            return env.io()
-                    .pick("model", ids)
-                    .thenApply(selected -> selected.isEmpty()
-                            ? ShellOutcome.status("model picker cancelled")
-                            : ShellOutcome.status("model: " + agentSessionService.setModel(selected.get())));
+            return modelWizard(env);
         }
-        return CompletableFuture.completedStage(ShellOutcome.status("model: " + agentSessionService.setModel(arg)));
+        return CompletableFuture.completedStage(applyModelArg(arg));
+    }
+
+    private CompletionStage<ShellOutcome> modelWizard(final ShellEnv env) {
+        final List<String> ids;
+        try {
+            ids = chatClient.models().ids();
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return CompletableFuture.completedStage(ShellOutcome.error("cannot list models: " + e.getMessage()));
+        } catch (final IOException | RuntimeException e) {
+            return CompletableFuture.completedStage(ShellOutcome.error("cannot list models: " + e.getMessage()));
+        }
+        return env.io().pick("model", ids).thenCompose(selected -> {
+            if (selected.isEmpty()) {
+                return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(chatClient.model())));
+            }
+            return pickVariant(env, selected.get());
+        });
+    }
+
+    /**
+     * Ask for the variant (or the implicit {@code default}) once a model has been chosen. The
+     * "default" entry clears any forced variant and resets the in-memory sampling overrides so the
+     * implicit tuner defaults are proposed again. The variants are resolved for the chosen model so
+     * the list reflects it rather than the still-active model; when the model exposes no variant
+     * beyond the implicit default (one option or fewer) the step is skipped entirely.
+     */
+    private CompletionStage<ShellOutcome> pickVariant(final ShellEnv env, final String model) {
+        final var options = new ArrayList<String>();
+        options.add("default");
+        chatClient.variants(model).forEach(v -> options.add(v.name()));
+        agentSessionService.setModel(model);
+        if (options.size() <= 1) {
+            chatClient.setVariant(null);
+            chatClient.setSampling(null);
+            return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(model)));
+        }
+        return env.io().pick("variant", options).thenApply(selected -> {
+            if (selected.isEmpty()) {
+                return ShellOutcome.status("model wizard cancelled");
+            }
+            if ("default".equals(selected.get())) {
+                chatClient.setVariant(null);
+                chatClient.setSampling(null);
+            } else {
+                chatClient.setVariant(selected.get());
+                chatClient.setSampling(null);
+            }
+            return ShellOutcome.status(modelStatus(model));
+        });
+    }
+
+    /**
+     * Apply the non-interactive form: {@code /model [model] [variant] [temperature] [topK] [topP]} or a
+     * mix with {@code key=value} overrides ({@code temp} / {@code top_k} / {@code top_p}). Positional
+     * arguments follow a fixed order once the first sampling value is given; a token containing {@code =}
+     * is always treated as a key/value pair. The model and variant are optional (falling back to the
+     * current ones); a sampling value may be a decimal or {@code none}/{@code -}/{@code null} to force-omit
+     * the field from the payload and bypass the variant and implicit tuner defaults.
+     */
+    private ShellOutcome applyModelArg(final String arg) {
+        final var upserts = new LinkedHashMap<String, String>();
+        final var positional = new ArrayList<String>();
+        for (final var token : arg.strip().split("\\s+")) {
+            final var eq = token.indexOf('=');
+            if (eq > 0) {
+                upserts.put(token.substring(0, eq).toLowerCase(Locale.ROOT), token.substring(eq + 1));
+            } else {
+                positional.add(token);
+            }
+        }
+        final var model = positional.isEmpty() ? chatClient.model() : positional.get(0);
+        final String variant;
+        if (positional.size() > 1) {
+            variant = positional.get(1);
+        } else if (upserts.isEmpty()) {
+            variant = null;
+        } else {
+            variant = chatClient.variant();
+        }
+        // positional order is fixed: model, variant, temperature, topK, topP
+        if (positional.size() >= 3) {
+            upserts.putIfAbsent("temp", positional.get(2));
+        }
+        if (positional.size() >= 4) {
+            upserts.putIfAbsent("top_k", positional.get(3));
+        }
+        if (positional.size() >= 5) {
+            upserts.putIfAbsent("top_p", positional.get(4));
+        }
+        agentSessionService.setModel(model);
+        chatClient.setVariant(variant);
+        chatClient.setSampling(upserts.isEmpty() ? null : parseSampling(upserts));
+        return ShellOutcome.status(modelStatus(model));
+    }
+
+    private ChatClient.SamplingOverride parseSampling(final Map<String, String> upserts) {
+        if (upserts.isEmpty()) {
+            return null;
+        }
+        final var values = new HashMap<ChatClient.SamplingField, Optional<Double>>();
+        putSampling(values, ChatClient.SamplingField.TEMPERATURE, upserts.get("temp"), upserts.get("temperature"));
+        putSampling(values, ChatClient.SamplingField.TOP_K, upserts.get("top_k"));
+        putSampling(values, ChatClient.SamplingField.TOP_P, upserts.get("top_p"));
+        return ChatClient.SamplingOverride.of(values);
+    }
+
+    private void putSampling(
+            final Map<ChatClient.SamplingField, Optional<Double>> into,
+            final ChatClient.SamplingField field,
+            final String... raw) {
+        final var value = firstNonBlank(raw);
+        if (value == null) {
+            return;
+        }
+        if (isNone(value)) {
+            into.put(field, Optional.empty());
+            return;
+        }
+        try {
+            into.put(field, Optional.of(Double.valueOf(value)));
+        } catch (final NumberFormatException e) {
+            into.put(field, Optional.empty());
+        }
+    }
+
+    private String firstNonBlank(final String... values) {
+        for (final var value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private boolean isNone(final String value) {
+        return "none".equalsIgnoreCase(value) || "null".equalsIgnoreCase(value) || "-".equals(value);
+    }
+
+    /** Render the model status line: active model, sampling overrides, implicit default variant and explicit variants. */
+    private String modelStatus(final String model) {
+        final var sb = new StringBuilder("model: ").append(model);
+        final var sampling = chatClient.sampling();
+        if (sampling != null && !sampling.isEmpty()) {
+            sb.append(" [sampling ");
+            final var fields = new ArrayList<String>();
+            appendOverride(sampling, fields, ChatClient.SamplingField.TEMPERATURE, "temp");
+            appendOverride(sampling, fields, ChatClient.SamplingField.TOP_K, "top_k");
+            appendOverride(sampling, fields, ChatClient.SamplingField.TOP_P, "top_p");
+            sb.append(String.join(", ", fields));
+            sb.append(']');
+        }
+        final var variant = chatClient.variant();
+        final boolean namedVariant = variant != null && !variant.isBlank();
+        sb.append(" [variant ").append(namedVariant ? variant : "default").append(']');
+        final var implicit = chatClient.implicitVariant();
+        if (implicit != null) {
+            sb.append(" - default");
+            final var fields = new ArrayList<String>();
+            if (implicit.temperature() != null) {
+                fields.add("temp=" + implicit.temperature());
+            }
+            if (implicit.topK() != null) {
+                fields.add("top_k=" + implicit.topK());
+            }
+            if (implicit.topP() != null) {
+                fields.add("top_p=" + implicit.topP());
+            }
+            if (!fields.isEmpty()) {
+                sb.append("(").append(String.join(", ", fields)).append(')');
+            }
+        }
+        final var variants = chatClient.variants();
+        final var activeVariant = namedVariant ? variant : "default";
+        if (!variants.isEmpty()) {
+            sb.append(" - variants: ");
+            final var names = new ArrayList<String>();
+            names.add("default");
+            for (final var v : variants) {
+                names.add(appendVariantFields(v));
+            }
+            for (int i = 0; i < names.size(); i++) {
+                if (i > 0) {
+                    sb.append(", ");
+                }
+                final var name = names.get(i);
+                if (activeVariant.equals(name)) {
+                    sb.append("**").append(name).append("**");
+                } else {
+                    sb.append(name);
+                }
+            }
+        }
+        return sb.toString();
+    }
+
+    private String appendVariantFields(final ModelVariantConfiguration v) {
+        if (v.temperature() == null && v.topP() == null && v.topK() == null) {
+            return v.name();
+        }
+        final var fields = new ArrayList<String>();
+        if (v.temperature() != null) {
+            fields.add("temp=" + v.temperature());
+        }
+        if (v.topP() != null) {
+            fields.add("top_p=" + v.topP());
+        }
+        if (v.topK() != null) {
+            fields.add("top_k=" + v.topK());
+        }
+        return v.name() + "(" + String.join(", ", fields) + ")";
+    }
+
+    private void appendOverride(
+            final ChatClient.SamplingOverride sampling,
+            final List<String> fields,
+            final ChatClient.SamplingField field,
+            final String label) {
+        final var value = sampling.get(field);
+        if (value == null) {
+            return;
+        }
+        fields.add(value.isPresent() ? label + "=" + value.get() : label + "=none");
     }
 
     private CompletionStage<ShellOutcome> provider(final String arg, final ShellEnv env) {

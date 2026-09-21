@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionEntry$FusionJsonCodec;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -56,7 +57,7 @@ class SessionLifecycleTest {
                         new ToolCall$FunctionCall$FusionJsonCodec(),
                         new Usage$FusionJsonCodec()),
                 key -> Optional.empty());
-        return new SessionStore(
+        return new FileSessionStore(
                 TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString())), mapper, Clock.systemUTC());
     }
 

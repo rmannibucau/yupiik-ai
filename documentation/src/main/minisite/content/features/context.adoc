@@ -23,15 +23,19 @@ auto-detected context window minus an output headroom of
 == Pruning: cheap local clearing
 
 Pruning (default trigger: 65% of the usable window) never calls the LLM.
-It walks old tool results backwards and replaces them with
-`[old tool result cleared]`, keeping the assistant tool call itself so the
-message pairing stays valid.
+It walks old tool results backwards and reduces them in two rungs: verbose
+outputs are first spliced to their head and tail
+(`yca.pruning.shrinkOutputChars`, default 2000, 0 disables the shrink pass),
+keeping a self-describing `[... N chars elided ...]` marker in place of the
+dropped middle; only when the reclaimed volume alone is not enough are the
+remaining outputs replaced with `[old tool result cleared]`, still keeping the
+assistant tool call itself so the message pairing stays valid.
 
-The recent side of the conversation is protected: at least
+The recent side of the conversation is protected by both rungs: at least
 `yca.pruning.keepRecent` messages (a floor), the `yca.pruning.protectTurns`
 most recent turns, and `yca.pruning.protectRecentTokens` estimated tokens of
 the newest tool outputs.
-Pruning only rewrites anything when the prunable volume exceeds
+Pruning only rewrites anything when the volume it would reclaim exceeds
 `yca.pruning.minPruneTokens`, which avoids churn on small gains.
 When nothing qualifies, pruning is a no-op.
 

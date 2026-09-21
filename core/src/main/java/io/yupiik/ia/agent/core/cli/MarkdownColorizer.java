@@ -593,6 +593,22 @@ public class MarkdownColorizer {
         return THINK + text + RESET;
     }
 
+    /**
+     * Dims a whole rendered markdown chunk (e.g. a replayed tool region), re-applying the
+     * dim after every nested reset so inner colors cannot cancel the outer effect.
+     */
+    public static String dimChunk(final String text) {
+        return DIM + text.replace(RESET, RESET + DIM) + RESET;
+    }
+
+    /**
+     * Renders a whole rendered markdown chunk (e.g. a replayed thought region) in the
+     * lower-opacity thinking grey, re-applying it after every nested reset.
+     */
+    public static String thinkChunk(final String text) {
+        return THINK + text.replace(RESET, RESET + THINK) + RESET;
+    }
+
     public static String status(final String text) {
         return MUTED + text + RESET;
     }

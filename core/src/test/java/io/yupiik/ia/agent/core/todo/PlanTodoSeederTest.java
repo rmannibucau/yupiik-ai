@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.nio.file.Path;
@@ -135,7 +136,7 @@ class PlanTodoSeederTest {
     }
 
     private SessionStore newSessionStore() {
-        return new SessionStore(configuration(), mapper(), Clock.systemUTC());
+        return new FileSessionStore(configuration(), mapper(), Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {

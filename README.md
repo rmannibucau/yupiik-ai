@@ -300,12 +300,14 @@ Project instructions and skills are loaded into the system prompt:
   (`tui.permitAll`, default `#ff5555`)); transcript renders as
   markdown with long lines wrapped at the panel width. Thinking streams inline
   in the same conversation panel, dimmed (text blended over the panel
-  background at `yca.tui.thinkingOpacity`, default `0.85`) and marked with a
+  background at `yca.tui.thinkingOpacity`, default `0.6`) and marked with a
   thin dim left bar, and is always written into the transcript before each
   tool call and the final answer; regular output lines get a bold accent left
   bar so the main thread of the conversation stands out. Tool actions and
   their output are drawn the same subdued way (`yca.tui.toolOutputOpacity`,
-  default `0.85`) so assistant answers stand out
+  default `0.35`) so assistant answers stand out. Terminal colors have no
+  alpha channel, so both opacities express how much the color is faded toward
+  the panel background: 0 keeps the text color, 1 would hide it entirely
 - `Ctrl+T` toggles all thinking blocks (live stream + transcript history):
   hides every block when shown, shows them all back when hidden - nothing is
   lost, blocks stay in memory (same as `/thinking show|hide`, kept in sync)

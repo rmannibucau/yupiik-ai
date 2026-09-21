@@ -34,6 +34,7 @@ import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegis
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
@@ -119,9 +120,20 @@ class TuiCommandHeadlessTest {
         }
     }
 
+    private io.yupiik.fusion.json.internal.JsonMapperImpl formatMapper;
+
     @BeforeEach
     void start() {
         backend = new HeadlessBackend();
+        formatMapper = new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> java.util.Optional.empty());
+    }
+
+    @AfterEach
+    void closeFormatMapper() {
+        if (formatMapper != null) {
+            formatMapper.close();
+            formatMapper = null;
+        }
     }
 
     @AfterEach
@@ -174,7 +186,9 @@ class TuiCommandHeadlessTest {
                 tuiSlashCommands,
                 new SlashRegistry(List.of(tuiSlashCommands)),
                 Clock.systemUTC(),
-                new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()));
+                new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
+                new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
+                new ToolOutputFormat(formatMapper));
 
         uiThread = new Thread(command::run, "tui-headless-test");
         uiThread.setDaemon(true);
@@ -227,8 +241,13 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitText(final String expected) throws InterruptedException {
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(2_500);
         var screen = backend.text();
         while (!screen.contains(expected)) {
+            if (System.nanoTime() > deadline) {
+                final var message = "did not see '" + expected + "' within 2.5s; last screen:\n" + screen;
+                throw new AssertionError(message);
+            }
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
             screen = backend.text();
         }

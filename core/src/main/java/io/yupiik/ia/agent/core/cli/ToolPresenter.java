@@ -30,9 +30,11 @@ public final class ToolPresenter {
     private static final int RAW_TRUNCATE = 120;
 
     private final JsonMapper mapper;
+    private final AskUserAnswersFormatter askUserAnswersFormatter;
 
     public ToolPresenter(final JsonMapper mapper) {
         this.mapper = mapper;
+        this.askUserAnswersFormatter = new AskUserAnswersFormatter(mapper);
     }
 
     /**
@@ -83,6 +85,20 @@ public final class ToolPresenter {
     public String result(final String name, final String output, final boolean success) {
         if (output == null || output.isBlank()) {
             return success ? "done" : "failed";
+        }
+        // ask_user answers read better as key: value pairs than a truncated JSON line
+        if ("ask_user".equals(name)) {
+            final var answers = askUserAnswersFormatter.answers(output);
+            if (answers != null) {
+                final var rendered = new StringBuilder();
+                for (final var answer : answers) {
+                    if (rendered.length() > 0) {
+                        rendered.append('\n');
+                    }
+                    rendered.append(answer.key()).append(": ").append(answer.value());
+                }
+                return rendered.toString();
+            }
         }
         if (success) {
             return truncate(lastMeaningfulLine(output));

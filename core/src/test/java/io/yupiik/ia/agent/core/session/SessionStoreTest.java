@@ -54,7 +54,7 @@ class SessionStoreTest {
                         new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
                         new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec()),
                 key -> Optional.empty());
-        return new SessionStore(
+        return new FileSessionStore(
                 io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),
                         "yca.sessions.retentionDays", String.valueOf(sessions.retentionDays()),

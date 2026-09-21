@@ -56,7 +56,11 @@ public class MaintainCommands implements SlashCommandSet {
     public List<SlashCommand> commands() {
         return List.of(
                 SlashCommand.of(
-                        new SlashCommandSpec("/compact", null, "compact the context window", SlashGroup.MAINTAIN),
+                        new SlashCommandSpec(
+                                "/compact",
+                                "[force]",
+                                "compact the context window (/compact [force])",
+                                SlashGroup.MAINTAIN),
                         SlashAction.sync(this::compact)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -101,8 +105,13 @@ public class MaintainCommands implements SlashCommandSet {
         if (env.session().busy()) {
             return ShellOutcome.status("cannot compact while busy");
         }
+        final var trimmed = arg == null ? "" : arg.strip();
+        if (!trimmed.isEmpty() && !trimmed.equalsIgnoreCase("force")) {
+            return ShellOutcome.status("usage: /compact [force]");
+        }
         try {
-            final var result = agentSessionService.compact(env.session().sessionId());
+            final var result =
+                    agentSessionService.compact(env.session().sessionId(), trimmed.equalsIgnoreCase("force"));
             if (result.applied() && result.error() != null) {
                 return ShellOutcome.status(result.message() + "\n" + result.error());
             }

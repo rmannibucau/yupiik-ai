@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -236,6 +237,26 @@ public class McpManager {
                 Thread.currentThread().interrupt();
             }
             throw new UncheckedIOException(new IOException(e.getMessage(), e));
+        }
+    }
+
+    /**
+     * Close every running {@link McpClient} (stdio subprocesses and stream-backed clients included)
+     * and drop the cached tool metadata. Invoked as an application-scoped bean destroy so MCP
+     * subprocesses are torn down on application shutdown, not only on restart/reset.
+     */
+    @Destroy
+    public void close() {
+        clients.values().forEach(this::quietClose);
+        clients.clear();
+        toolsByServer.clear();
+    }
+
+    private void quietClose(final McpClient client) {
+        try {
+            client.close();
+        } catch (final RuntimeException e) {
+            LOGGER.warning("MCP client close failed: " + e.getMessage());
         }
     }
 }

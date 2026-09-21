@@ -58,6 +58,92 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void textResetFlushesThinkingInsteadOfDroppingIt() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply"));
+        t.onEvent(new AgentEvent.TextReset());
+        assertEquals("", t.thinking().toString());
+        assertTrue(t.transcript()
+                .toString()
+                .contains(ConversationTranscript.THOUGHT_BEGIN + "\n**Thinking**\n\nreasoning deeply\n"
+                        + ConversationTranscript.THOUGHT_END));
+    }
+
+    @Test
+    void thinkTagAtTurnDoneBecomesThoughtRegion() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.TurnDone("<think>\nstep one\nstep two\n</think>\n\nThe answer"));
+        final var transcript = t.transcript().toString();
+        assertTrue(transcript.contains(ConversationTranscript.THOUGHT_BEGIN));
+        assertTrue(transcript.contains("**Thinking**\n\nstep one\nstep two"));
+        assertTrue(transcript.contains(ConversationTranscript.THOUGHT_END));
+        // raw text keeps the newline that followed </think>
+        assertTrue(transcript.contains("The answer"));
+        assertTrue(
+                ConversationTranscript.regions(transcript).stream().anyMatch(r -> r.thought()),
+                "expected a thought region in: " + transcript);
+    }
+
+    @Test
+    void thinkTagStreamsLiveOnThoughtPanel() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("go");
+        t.onEvent(new AgentEvent.TextDelta("<think>\nreasoning line\n</think>\n\ndrafting"));
+        // live reasoning is classified into the thinking buffer, visible text into pending
+        assertTrue(
+                t.thinking().toString().contains("reasoning line"), t.thinking().toString());
+        // the raw newlines after </think> stay in the visible stream
+        assertEquals("\n\ndrafting", t.pending().toString());
+    }
+
+    @Test
+    void fencedThinkTagUntouched() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.TurnDone("```text\n<think>not a thought</think>\n```\n\nok"));
+        final var transcript = t.transcript().toString();
+        assertFalse(transcript.contains(ConversationTranscript.THOUGHT_BEGIN), transcript);
+        assertTrue(transcript.contains("<think>not a thought</think>"));
+    }
+
+    @Test
+    void unclosedThinkTailAndWhitespaceTagAreReasoning() {
+        final var parts = new ThinkTagSplitter().split("<think >\npartial reasoning");
+        assertEquals("", parts.visible());
+        assertEquals("partial reasoning", parts.thinking().strip());
+        final var plain = new ThinkTagSplitter().split("plain text");
+        assertEquals("plain text", plain.visible());
+        assertEquals("", plain.thinking());
+    }
+
+    @Test
+    void firstAnswerDeltaFlushesThinkingAboveAnswer() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply"));
+        t.onEvent(new AgentEvent.TextDelta("answer part"));
+        assertEquals("", t.thinking().toString());
+        assertEquals("answer part", t.pending().toString());
+        assertTrue(t.transcript()
+                .toString()
+                .contains(ConversationTranscript.THOUGHT_BEGIN + "\n**Thinking**\n\nreasoning deeply\n"
+                        + ConversationTranscript.THOUGHT_END));
+    }
+
+    @Test
+    void errorKeepsThinkingVisibleAboveTheErrorLine() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.ThinkingDelta("why it broke"));
+        t.onEvent(new AgentEvent.Error("kaput"));
+        assertEquals("", t.thinking().toString());
+        assertFalse(t.busy());
+        final var transcript = t.transcript().toString();
+        assertTrue(transcript.contains("why it broke"));
+        assertTrue(transcript.contains("> error: kaput"));
+        assertTrue(
+                transcript.indexOf("why it broke") < transcript.indexOf("> error: kaput"),
+                "expected reasoning to stay above the error line: " + transcript);
+    }
+
+    @Test
     void runningToolBlockIsWrappedInToolMarkers() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");

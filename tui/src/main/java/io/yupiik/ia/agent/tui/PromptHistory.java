@@ -74,6 +74,16 @@ public final class PromptHistory {
         }
     }
 
+    /** Replaces the entries with those of {@code loaded} (seeds an in-memory history from disk). */
+    public void replaceWith(final PromptHistory loaded) {
+        if (loaded == null) {
+            return;
+        }
+        entries.clear();
+        entries.addAll(loaded.entries);
+        index = -1;
+    }
+
     /**
      * Records a submitted prompt, deduplicating consecutive identical entries
      * and Drops the oldest entry beyond capacity. Resets the navigation index.
@@ -101,6 +111,10 @@ public final class PromptHistory {
 
     public int size() {
         return entries.size();
+    }
+
+    public int capacity() {
+        return capacity;
     }
 
     public boolean navigating() {

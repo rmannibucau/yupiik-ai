@@ -31,7 +31,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
-import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
@@ -71,7 +71,7 @@ public class CliCommand implements Runnable {
     private final CliConf conf;
     private final PermissionService permissionService;
     private final SessionLifecycle sessionLifecycle;
-    private final SessionStore sessionStore;
+    private final FileSessionStore sessionStore;
     private final TodoStore todoStore;
     private final AgentProvider agentProvider;
     private final ChatClient chatClient;
@@ -107,7 +107,7 @@ public class CliCommand implements Runnable {
             final CliConf conf,
             final PermissionService permissionService,
             final SessionLifecycle sessionLifecycle,
-            final SessionStore sessionStore,
+            final FileSessionStore sessionStore,
             final TodoStore todoStore,
             final AgentProvider agentProvider,
             final UsageTracker usageTracker,

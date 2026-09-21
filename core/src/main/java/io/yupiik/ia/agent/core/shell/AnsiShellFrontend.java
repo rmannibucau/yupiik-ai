@@ -49,6 +49,9 @@ public class AnsiShellFrontend implements ShellFrontend {
     private volatile boolean showThinking;
     private volatile boolean showToolOutput;
     private volatile boolean toolStreamed;
+    /** Whether the dim 'thinking...' header was printed for the current reasoning round. */
+    private boolean thinkingRoundOpen;
+
     private Spinner spinner;
     private final ArrayDeque<AgentEvent> pendingEvents = new ArrayDeque<>();
     private boolean suspended;
@@ -121,7 +124,22 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     @Override
     public void transcript(final String markdown) {
-        print(colorize(markdown));
+        // speaker-aware replay: thought and tool regions stay visibly subordinate
+        // to assistant/user output the same way the live stream is dimmed
+        final var sb = new StringBuilder();
+        for (final var region : ConversationTranscript.regions(markdown)) {
+            final var rendered = colorize(region.text());
+            if (!colorizer.isEnabled()) {
+                sb.append(rendered);
+            } else if (region.thought()) {
+                sb.append(MarkdownColorizer.thinkChunk(rendered));
+            } else if (region.tool()) {
+                sb.append(MarkdownColorizer.dimChunk(rendered));
+            } else {
+                sb.append(rendered);
+            }
+        }
+        print(sb.toString());
     }
 
     @Override
@@ -184,6 +202,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     public void beginTurn() {
         stats.beginTurn();
         textBuffer.reset();
+        thinkingRoundOpen = false;
         stopSpinner();
         if (!showThinking) {
             beginSpinner("thinking");
@@ -210,31 +229,37 @@ public class AnsiShellFrontend implements ShellFrontend {
                 return;
             }
         }
-        if (event instanceof AgentEvent.TextDelta(String delta)) {
+        final var prefix = subagentPrefix(event);
+        if (event instanceof AgentEvent.TextDelta(String delta, String subagentId, String subagentName)) {
             stopSpinner();
-            print(textBuffer.append(delta));
-        } else if (event instanceof AgentEvent.TextReset) {
+            thinkingRoundOpen = false;
+            print(textBuffer.append(prefix + delta));
+        } else if (event instanceof AgentEvent.TextReset(String subagentId, String subagentName)) {
             textBuffer.reset();
-        } else if (event instanceof AgentEvent.ThinkingDelta(String delta)) {
+            thinkingRoundOpen = false;
+        } else if (event instanceof AgentEvent.ThinkingDelta(String delta, String subagentId, String subagentName)) {
             if (showThinking) {
-                // the reasoning stream is part of the answer flow: print it dimmed on stderr so
-                // /thinking show visibly works in every verbosity, not only in raw mode
+                if (!thinkingRoundOpen) {
+                    thinkingRoundOpen = true;
+                    System.err.println(MarkdownColorizer.thinking(prefix + "thinking..."));
+                }
                 stopSpinner();
-                System.err.print(MarkdownColorizer.thinking(delta));
+                System.err.print(MarkdownColorizer.thinking(prefix + delta));
                 System.err.flush();
             } else {
-                beginSpinner("thinking");
+                beginSpinner(prefix + "thinking");
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();
             toolStreamed = false;
+            thinkingRoundOpen = false;
             onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
             toolStreamed = true;
             if (verbosity == CliVerbosity.RAW) {
-                System.err.print(t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n");
+                System.err.print(prefix + (t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n"));
             } else if (verbosity == CliVerbosity.VERBOSE) {
-                System.err.print(MarkdownColorizer.dim(t.fragment()));
+                System.err.print(MarkdownColorizer.dim(prefix + t.fragment()));
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             stats.incToolsRun();
@@ -243,18 +268,26 @@ public class AnsiShellFrontend implements ShellFrontend {
                 onToolFinished(t);
             }
             if (!showThinking) {
-                beginSpinner("thinking");
+                beginSpinner(prefix + "thinking");
             }
-        } else if (event instanceof AgentEvent.Compacted(String kind, String mode)) {
+        } else if (event
+                instanceof AgentEvent.Compacted(String kind, String mode, String subagentId, String subagentName)) {
             stopSpinner();
-            System.err.println(MarkdownColorizer.status(
-                    symbols.infoMarker() + "context " + kind + " applied (" + mode.toLowerCase(Locale.ROOT) + ")"));
-        } else if (event instanceof AgentEvent.Notice(var level, String message, var finishReason)) {
-            notice(level, message);
-        } else if (event instanceof AgentEvent.Status(String message)) {
-            status(message);
-        } else if (event instanceof AgentEvent.Error(String message)) {
-            error(message);
+            System.err.println(MarkdownColorizer.status(prefix + symbols.infoMarker() + " context " + kind
+                    + " applied (" + mode.toLowerCase(Locale.ROOT) + ")"));
+        } else if (event
+                instanceof
+                AgentEvent.Notice(
+                        var level,
+                        String message,
+                        var finishReason,
+                        String subagentId,
+                        String subagentName)) {
+            notice(level, prefix + message);
+        } else if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
+            status(prefix + message);
+        } else if (event instanceof AgentEvent.Error(String message, String subagentId, String subagentName)) {
+            error(prefix + message);
         } else if (event instanceof final AgentEvent.UsageUpdated u) {
             stats.recordUsage(u);
         } else if (event instanceof final AgentEvent.TurnMetrics tm) {
@@ -262,44 +295,99 @@ public class AnsiShellFrontend implements ShellFrontend {
         }
     }
 
+    private String subagentPrefix(final AgentEvent event) {
+        String subagentId = null;
+        String subagentName = null;
+        if (event instanceof AgentEvent.TextDelta(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.TextReset(String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ThinkingDelta(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolStream(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolFinished(var _, var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Compacted(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Status(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Error(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event
+                instanceof AgentEvent.TurnMetrics(var _, var _, var _, var _, var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.TurnDone(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolTimingEvent(var _, var _, var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        }
+        if (subagentId != null) {
+            final var displayName =
+                    subagentName != null ? subagentName : subagentId.substring(0, Math.min(8, subagentId.length()));
+            return "[" + displayName + "] ";
+        }
+        return "";
+    }
+
     private void onToolStarted(final AgentEvent.ToolStarted t) {
         if (!showToolOutput) {
             return;
         }
+        final var prefix = subagentPrefix(t);
         if (verbosity == CliVerbosity.RAW) {
-            System.err.println(MarkdownColorizer.status("[tool] " + t.name() + " " + t.args()));
+            System.err.println(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
             return;
         }
-        System.err.println(MarkdownColorizer.bold(symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+        System.err.println(
+                MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
         if (verbosity == CliVerbosity.COMPACT && t.name().equals("bash")) {
-            beginSpinner("running " + presenter.summarize(t.name(), t.args()));
+            beginSpinner(prefix + "running " + presenter.summarize(t.name(), t.args()));
         }
     }
 
     private void onToolFinished(final AgentEvent.ToolFinished t) {
         stopSpinner();
+        final var prefix = subagentPrefix(t);
+        final var indent = "  ";
         if (verbosity == CliVerbosity.RAW) {
             if (!t.success() && t.output() != null && !t.output().isBlank()) {
-                System.err.println(MarkdownColorizer.error(t.output()));
+                System.err.println(MarkdownColorizer.error(prefix + t.output()));
             }
             return;
         }
-        final var indent = "  ";
         final var result = presenter.result(t.name(), t.output(), t.success());
-        System.err.println(MarkdownColorizer.dim(indent + symbols.resultPrefix())
+        System.err.println(MarkdownColorizer.dim(prefix + indent + symbols.resultPrefix())
                 + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
         if (verbosity == CliVerbosity.VERBOSE) {
             // show the full result for tools that did not stream their output live (e.g. bash streams,
             // most other tools only surface their output through ToolFinished)
             if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
                 for (final var line : t.output().stripTrailing().split("\n")) {
-                    System.err.println(MarkdownColorizer.dim("  " + line));
+                    System.err.println(MarkdownColorizer.dim(prefix + indent + line));
                 }
             }
         }
         if (verbosity == CliVerbosity.COMPACT) {
             for (final var line : presenter.diff(t.name(), null, DIFF_MAX_LINES)) {
-                System.err.println(indent + colorizeDiff(line));
+                System.err.println(prefix + indent + colorizeDiff(line));
             }
         }
     }

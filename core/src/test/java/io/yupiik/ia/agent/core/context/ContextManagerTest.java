@@ -87,6 +87,44 @@ class ContextManagerTest {
     }
 
     @Test
+    void forceCompactsAHistoryThatWouldOtherwiseStayUntouched() {
+        final var digest = "summary: forced";
+        // tiny tail budget: without force the keep floor swallows the whole history
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) {
+                return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 5; i++) {
+            messages.add(Message.user("step " + i));
+        }
+        // a weighty tail turn: its estimate must exceed the forced (halved) tail budget
+        messages.add(Message.user("step 5 " + "y".repeat(4_000)));
+        // same history, no force: below the keep floor, compaction is a no-op
+        assertEquals(CompactionResult.Mode.NONE, manager.compact(messages).mode());
+        // force: halved tail floor lets the compaction actually run
+        final var forced = manager.compact(messages, true);
+        assertEquals(CompactionResult.Mode.SUMMARY, forced.mode());
+        assertTrue(
+                forced.messages().stream()
+                        .anyMatch(m -> m.content() instanceof String s && s.contains("<compacted-context>")),
+                "forced compaction must produce a summary");
+    }
+
+    @Test
     void compactKeepsTheDigestWholeWhenShrinkingTheTailOverflow() throws Exception {
         final var digest = "summary: " + "x".repeat(1_200);
         final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
@@ -193,7 +231,8 @@ class ContextManagerTest {
                 Map.ofEntries(
                         Map.entry("yca.pruning.protectTurns", "1"),
                         Map.entry("yca.pruning.minPruneTokens", "1000"),
-                        Map.entry("yca.pruning.protectRecentTokens", "1000")));
+                        Map.entry("yca.pruning.protectRecentTokens", "1000"),
+                        Map.entry("yca.pruning.shrinkOutputChars", "0")));
         final var manager = manager(cfg, null);
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
@@ -239,6 +278,112 @@ class ContextManagerTest {
         final var result = manager.prune(messages);
         assertEquals(CompactionResult.Mode.NONE, result.mode());
         assertSame(messages, result.messages(), "below the churn minimum the history must stay untouched");
+    }
+
+    @Test
+    void pruneShrinksOldVerboseToolOutputsBeforeAnyClear() {
+        final var cfg = config(
+                2,
+                8_000,
+                Map.ofEntries(
+                        Map.entry("yca.pruning.protectTurns", "1"),
+                        Map.entry("yca.pruning.minPruneTokens", "1000"),
+                        Map.entry("yca.pruning.protectRecentTokens", "1000")));
+        final var manager = manager(cfg, null);
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        messages.add(Message.user("goal"));
+        messages.add(Message.tool("t1", "old output " + "{\"data\":\"value\",".repeat(300)));
+        messages.add(Message.tool("t2", "old output " + "{\"data\":\"value\",".repeat(300)));
+        messages.add(Message.user("follow-up"));
+        messages.add(Message.assistant("working", null));
+        messages.add(Message.tool("t3", "recent output " + "z".repeat(4_000)));
+        final var result = manager.prune(messages);
+        assertEquals(CompactionResult.Mode.SHRUNK, result.mode());
+        assertEquals(7, result.messages().size(), "shrinking keeps the message list shape");
+        final var shrunk = result.messages().get(2).content().toString();
+        assertTrue(shrunk.startsWith("old output "), "the head of the old output must be kept");
+        assertTrue(shrunk.contains("chars elided"), "the elision marker must describe what was dropped");
+        assertTrue(
+                shrunk.length() < 2_200,
+                "the old output must be capped near " + cfg.pruning().shrinkOutputChars() + " chars");
+        assertEquals("t1", result.messages().get(2).toolCallId());
+        assertSame(
+                messages.get(3),
+                result.messages().get(3),
+                "the newest old tool output is inside the protected token budget");
+        assertSame(messages.get(6), result.messages().get(6), "the most recent turn's tool output must stay untouched");
+        assertEquals("system", result.messages().get(0).content());
+    }
+
+    @Test
+    void pruneDisablingShrinkKeepsTheLegacyClearBehavior() {
+        final var cfg = config(
+                2,
+                8_000,
+                Map.ofEntries(
+                        Map.entry("yca.pruning.protectTurns", "1"),
+                        Map.entry("yca.pruning.minPruneTokens", "1000"),
+                        Map.entry("yca.pruning.protectRecentTokens", "1000"),
+                        Map.entry("yca.pruning.shrinkOutputChars", "0")));
+        final var manager = manager(cfg, null);
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        messages.add(Message.user("goal"));
+        messages.add(Message.tool("t1", "old output " + "{\"data\":\"value\",".repeat(300)));
+        messages.add(Message.tool("t2", "old output " + "{\"data\":\"value\",".repeat(300)));
+        messages.add(Message.user("follow-up"));
+        messages.add(Message.assistant("working", null));
+        messages.add(Message.tool("t3", "recent output " + "z".repeat(4_000)));
+        final var result = manager.prune(messages);
+        assertEquals(CompactionResult.Mode.CLEARED, result.mode());
+        assertEquals(
+                CompactionCoordinator.PRUNE_CLEARED_MARKER,
+                result.messages().get(2).content(),
+                "with the shrink pass disabled the old output must be cleared outright");
+        assertSame(messages.get(3), result.messages().get(3), "the protected zone must stay untouched");
+    }
+
+    @Test
+    void pruneClearsWhenShrinkingAloneCannotReclaimEnough() {
+        final var cfg = config(
+                2,
+                8_000,
+                Map.ofEntries(
+                        Map.entry("yca.pruning.protectTurns", "1"),
+                        Map.entry("yca.pruning.minPruneTokens", "1000"),
+                        Map.entry("yca.pruning.protectRecentTokens", "10"),
+                        Map.entry("yca.pruning.shrinkOutputChars", "2000")));
+        final var manager = manager(cfg, null);
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        messages.add(Message.user("goal"));
+        // just over the shrink cap but mostly prose: splicing it would reclaim almost nothing
+        messages.add(Message.tool("t1", "verbose output " + "p".repeat(2_200)));
+        for (var i = 0; i < 8; i++) {
+            messages.add(Message.tool("s" + i, "short output " + "p".repeat(450)));
+        }
+        messages.add(Message.user("follow-up"));
+        messages.add(Message.assistant("working", null));
+        messages.add(Message.tool("t3", "recent output " + "z".repeat(4_000)));
+        final var result = manager.prune(messages);
+        assertEquals(CompactionResult.Mode.CLEARED, result.mode());
+        assertEquals(
+                CompactionCoordinator.PRUNE_CLEARED_MARKER,
+                result.messages().get(2).content(),
+                "a shrink candidate whose reclaim misses the minimum must fall back to the full clear");
+        for (var i = 3; i <= 9; i++) {
+            assertEquals(
+                    CompactionCoordinator.PRUNE_CLEARED_MARKER,
+                    result.messages().get(i).content(),
+                    "all old short outputs must be cleared too");
+        }
+        assertSame(
+                messages.get(10),
+                result.messages().get(10),
+                "the most recent old output is inside the protected token budget");
+        assertEquals(
+                "recent output " + "z".repeat(4_000), result.messages().get(13).content());
     }
 
     @Test

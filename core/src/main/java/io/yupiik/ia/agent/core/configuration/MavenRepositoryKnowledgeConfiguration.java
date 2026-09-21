@@ -75,9 +75,9 @@ public record MavenRepositoryKnowledgeConfiguration(
         boolean force,
 
         @Property(
-                defaultValue = "true",
+                defaultValue = "false",
                 documentation =
-                        "Load per-artifact skills at session start by dereferencing the -skills.md manifests of the session's main entry-point artifacts.")
+                        "Load per-artifact skills at session start by dereferencing the -skills.md manifests of the session's main entry-point artifacts. Off by default so no Maven/LLM work happens before the first prompt; when enabled the warm-up runs (asynchronously unless synchronous is set).")
         boolean skillsAtSessionStart,
 
         @Property(

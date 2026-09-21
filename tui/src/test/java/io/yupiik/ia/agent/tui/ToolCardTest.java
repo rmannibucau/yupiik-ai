@@ -33,6 +33,28 @@ class ToolCardTest {
     }
 
     @Test
+    void parsesOrdinalWithDuration() {
+        final var card = ToolCard.parse("*streaming `bash`: ls* (#12, 123 ms)\n\n```text\nout\n```");
+        assertEquals(12, card.ordinal());
+        assertEquals(123, card.elapsedMs());
+        assertEquals("ls", card.args());
+    }
+
+    @Test
+    void parsesFailedCardWithOrdinal() {
+        final var card = ToolCard.parse("> tool `bash` failed: boom (#7, 42 ms)");
+        assertTrue(card.failed());
+        assertEquals(7, card.ordinal());
+        assertEquals(42, card.elapsedMs());
+    }
+
+    @Test
+    void legacyHeaderHasNoOrdinal() {
+        final var card = ToolCard.parse("*streaming `bash`: ls* (123 ms)");
+        assertEquals(-1, card.ordinal());
+    }
+
+    @Test
     void parsesStarlessDuration() {
         final var card = ToolCard.parse("*streaming `git diff`: --stat* (5 ms)\n\n```text\n 1 file changed\n```");
         assertEquals("git diff", card.name());

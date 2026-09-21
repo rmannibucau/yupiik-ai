@@ -180,7 +180,7 @@ public abstract class AbstractDialect implements Dialect {
     protected CompletionStage<Flow.Publisher<LlmStreamEvent>> streamError(final StreamAttempt attempt) {
         final var body = attempt.errorBody() == null ? "" : new String(attempt.errorBody(), StandardCharsets.UTF_8);
         if (isFlavorMissing(attempt.statusCode())) {
-            return failed(new DialectNotSupportedException(name()));
+            return failed(new DialectNotSupportedException(name() + describeBody(body)));
         }
         if (ContextWindowExceededException.isCause(attempt.statusCode(), body)) {
             return failed(new ContextWindowExceededException());
@@ -369,6 +369,22 @@ public abstract class AbstractDialect implements Dialect {
         return FLAVOR_MISSING_CODES.contains("(" + statusCode + ")");
     }
 
+    /**
+     * Surface the provider's error body when present so the real cause (e.g. {@code Model 'x' not found})
+     * is not hidden behind a generic "dialect not supported" message.
+     *
+     * @param body the raw response body, possibly blank.
+     * @return a {@code ": "}-prefixed bounded excerpt of {@code body}, empty when it carries no useful content.
+     */
+    protected static String describeBody(final String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        final var trimmed = body.trim();
+        final var excerpt = trimmed.length() <= 300 ? trimmed : trimmed.substring(0, 300) + "...";
+        return ": " + excerpt;
+    }
+
     private CompletionStage<HttpResponse<String>> classify(final HttpResponse<String> response) {
         if (response.statusCode() < 400) {
             return CompletableFuture.completedFuture(response);
@@ -376,7 +392,7 @@ public abstract class AbstractDialect implements Dialect {
         final var body = response.body();
         final IOException failure;
         if (isFlavorMissing(response.statusCode())) {
-            failure = new DialectNotSupportedException(name());
+            failure = new DialectNotSupportedException(name() + describeBody(body));
         } else if (ContextWindowExceededException.isCause(response.statusCode(), body)) {
             failure = new ContextWindowExceededException();
         } else {

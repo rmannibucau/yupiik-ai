@@ -78,39 +78,87 @@ public class RunShellFrontend implements ShellFrontend {
 
     @Override
     public void onEvent(final AgentEvent event) {
+        final var prefix = subagentPrefix(event);
         if (event instanceof final AgentEvent.TextDelta t) {
-            System.out.print(t.delta());
+            System.out.print(prefix + t.delta());
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             if (showThinking) {
-                System.err.print(t.delta());
+                System.err.print(prefix + t.delta());
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             toolStreamed.set(false);
-            LOGGER.info(() -> "tool started: " + t.name());
+            LOGGER.info(() -> prefix + "tool started: " + t.name());
         } else if (event instanceof final AgentEvent.ToolStream t) {
             toolStreamed.set(true);
-            LOGGER.info(() -> "[" + t.name() + "] " + t.fragment());
+            LOGGER.info(() -> prefix + "[" + t.name() + "] " + t.fragment());
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             if (!t.success()) {
-                LOGGER.warning(() -> "tool failed: " + t.name());
+                LOGGER.warning(() -> prefix + "tool failed: " + t.name());
             } else if (showToolOutput
                     && !toolStreamed.get()
                     && t.output() != null
                     && !t.output().isBlank()) {
-                LOGGER.info(() -> "[" + t.name() + "] " + t.output().stripTrailing());
+                LOGGER.info(() -> prefix + "[" + t.name() + "] " + t.output().stripTrailing());
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
-            LOGGER.info(() -> "context " + c.kind() + " applied (" + c.mode().toLowerCase(Locale.ROOT) + ")");
-        } else if (event instanceof AgentEvent.Notice(var level, String message, var finishReason)) {
-            notice(level, message);
-        } else if (event instanceof AgentEvent.Status(String message)) {
-            status(message);
-        } else if (event instanceof AgentEvent.Error(String message)) {
-            error(message);
+            LOGGER.info(() ->
+                    prefix + "context " + c.kind() + " applied (" + c.mode().toLowerCase(Locale.ROOT) + ")");
+        } else if (event
+                instanceof
+                AgentEvent.Notice(
+                        var level,
+                        String message,
+                        var finishReason,
+                        String subagentId,
+                        String subagentName)) {
+            notice(level, prefix + message);
+        } else if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
+            status(prefix + message);
+        } else if (event instanceof AgentEvent.Error(String message, String subagentId, String subagentName)) {
+            error(prefix + message);
         }
     }
 
     private void log(final Level level, final String message) {
         LOGGER.log(level, message);
+    }
+
+    private String subagentPrefix(final AgentEvent event) {
+        String subagentId = null;
+        String subagentName = null;
+        if (event instanceof AgentEvent.TextDelta(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ThinkingDelta(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolStream(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.ToolFinished(var _, var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Compacted(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Status(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event instanceof AgentEvent.Error(var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        }
+        if (subagentId != null) {
+            final var displayName =
+                    subagentName != null ? subagentName : subagentId.substring(0, Math.min(8, subagentId.length()));
+            return "[" + displayName + "] ";
+        }
+        return "";
     }
 }

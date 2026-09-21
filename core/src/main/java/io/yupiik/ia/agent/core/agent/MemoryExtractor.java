@@ -119,6 +119,7 @@ public class MemoryExtractor {
                                     "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
                             Message.user(excerpt)),
                     null,
+                    null,
                     false,
                     null,
                     null,
@@ -243,6 +244,7 @@ public class MemoryExtractor {
                                         + "capturing durable facts, decisions and user preferences. Keep long-lived knowledge only, "
                                         + "drop transient task state. Reply with only the snippet text, a few short sentences, no preamble."),
                         Message.user(excerpt)),
+                null,
                 null,
                 false,
                 null,

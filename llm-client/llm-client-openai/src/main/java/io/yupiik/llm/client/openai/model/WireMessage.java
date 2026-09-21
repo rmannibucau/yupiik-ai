@@ -16,10 +16,12 @@
 package io.yupiik.llm.client.openai.model;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmToolCall;
 import java.util.List;
+import java.util.Map;
 
 /**
  * OpenAPI /chat/completions wire message (also reused for assistant/tool turns).
@@ -29,6 +31,7 @@ import java.util.List;
  * @param name optional participant name.
  * @param toolCalls tool calls requested by the assistant.
  * @param toolCallId identifier of the tool call this message answers, for {@code tool} roles.
+ * @param others unknown wire fields kept as-is (eg. message-level caching hints).
  */
 @JsonModel
 public record WireMessage(
@@ -36,7 +39,8 @@ public record WireMessage(
         Object content,
         String name,
         @JsonProperty("tool_calls") List<WireToolCall> toolCalls,
-        @JsonProperty("tool_call_id") String toolCallId) {
+        @JsonProperty("tool_call_id") String toolCallId,
+        @JsonOthers Map<String, Object> others) {
 
     /**
      * Maps a neutral message to its wire representation.
@@ -45,12 +49,14 @@ public record WireMessage(
      * @return the wire message.
      */
     public static WireMessage from(final LlmMessage message) {
+        final var extensions = message.extensions();
         return new WireMessage(
                 message.role(),
                 message.content(),
                 message.name(),
                 toToolCalls(message.toolCalls()),
-                message.toolCallId());
+                message.toolCallId(),
+                extensions == null || extensions.isEmpty() ? null : extensions);
     }
 
     /**

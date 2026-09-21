@@ -136,7 +136,16 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         try {
             final var res = chatClient.chatStructured(
                     new ChatCompletionRequest(
-                            null, List.of(Message.system(prompt + suffix)), null, false, null, null, null, null, null),
+                            null,
+                            List.of(Message.system(prompt + suffix)),
+                            null,
+                            null,
+                            false,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null),
                     "entry_points",
                     schema);
             dumpSample(
@@ -196,6 +205,7 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
                                             + " the main entry points a coding agent should know about first. Return only"
                                             + " the chosen coordinates in the same format as received.\n\n" + sb)),
                             null,
+                            null,
                             false,
                             null,
                             null,
@@ -253,6 +263,7 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
                     new ChatCompletionRequest(
                             null,
                             List.of(Message.system(system), Message.user(content == null ? "" : content)),
+                            null,
                             null,
                             false,
                             null,

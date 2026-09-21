@@ -178,5 +178,18 @@ class StdioMcpClient implements McpClient {
         if (process != null && process.isAlive()) {
             process.destroy();
         }
+        closeQuietly(reader);
+        closeQuietly(writer);
+    }
+
+    private static void closeQuietly(final AutoCloseable resource) {
+        if (resource == null) {
+            return;
+        }
+        try {
+            resource.close();
+        } catch (final Exception e) {
+            // best-effort: the process is already destroyed
+        }
     }
 }

@@ -25,6 +25,28 @@ import org.junit.jupiter.api.io.TempDir;
 
 class PromptHistoryTest {
     @Test
+    void replaceWithSeedsFromDiskAndResetsCursor() {
+        final var h = new PromptHistory(10);
+        h.add("draft-in-progress");
+        final var loaded = new PromptHistory(10);
+        loaded.add("newest");
+        loaded.add("older");
+        h.replaceWith(loaded);
+        // entries are most-recent-first ("older" was added last)
+        assertEquals(java.util.List.of("older", "newest"), h.entries());
+        // cursor was reset: the first Older recall returns the most recent entry
+        assertEquals("older", h.olderPush("draft"));
+        // walking back down to the baseline restores the draft
+        assertEquals("draft-restored", h.newerPull("draft-restored"));
+    }
+
+    @Test
+    void capacityAccessorMatchesBound() {
+        assertEquals(7, new PromptHistory(7).capacity());
+        assertTrue(new PromptHistory().capacity() >= 1);
+    }
+
+    @Test
     void storesMostRecentFirstDeduplicated() {
         final var h = new PromptHistory(10);
         h.add("first");

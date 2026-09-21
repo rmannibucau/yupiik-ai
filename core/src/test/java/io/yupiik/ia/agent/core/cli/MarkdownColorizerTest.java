@@ -73,6 +73,16 @@ class MarkdownColorizerTest {
     }
 
     @Test
+    void chunkDimmingIsResetAware() {
+        final var dimmed = MarkdownColorizer.dimChunk("a\u001b[0mb");
+        assertTrue(dimmed.startsWith("\u001b[2m"), dimmed);
+        assertTrue(dimmed.contains("\u001b[0m\u001b[2m"), "dim must be re-applied after nested resets: " + dimmed);
+        assertTrue(dimmed.endsWith("\u001b[0m"), dimmed);
+        assertTrue(MarkdownColorizer.thinkChunk("x").startsWith("\u001b[38;5;240m"));
+        assertTrue(MarkdownColorizer.thinkChunk("x").endsWith("\u001b[0m"));
+    }
+
+    @Test
     void disabledColorizerLeavesNewStyleOutputUnstyled() {
         final var colorizer = new MarkdownColorizer(false);
         assertEquals("final var i = 0;", colorizer.colorizeLine("final var i = 0;"));

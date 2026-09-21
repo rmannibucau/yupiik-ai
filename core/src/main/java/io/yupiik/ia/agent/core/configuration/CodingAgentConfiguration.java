@@ -105,6 +105,9 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Agent tool settings (built-in tool server and web search).")
         ToolsConfiguration tools,
 
+        @Property(documentation = "Sub-agent settings (spawn_subagent, check_subagents).")
+        SubagentConfiguration subagents,
+
         @Property(documentation = "Metrics display settings (LLM calls, thinking duration, tool duration).")
         MetricsConfiguration metrics,
 

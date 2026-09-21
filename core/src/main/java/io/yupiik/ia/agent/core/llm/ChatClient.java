@@ -16,11 +16,13 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -39,15 +41,20 @@ import java.io.IOException;
 import java.net.http.HttpClient;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 
 /**
@@ -80,6 +87,9 @@ public class ChatClient implements AutoCloseable {
     private final RoutingLlmClient routing;
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
     private volatile String modelOverride;
+    private volatile String variantOverride;
+    private volatile ModelsResponse cachedModels;
+    private volatile SamplingOverride samplingOverride;
     private volatile ProviderConfiguration targetProvider;
     private volatile boolean structuredOutputUnsupported = false;
     private volatile Consumer<PauseEvent> pauses = event -> {};
@@ -168,7 +178,8 @@ public class ChatClient implements AutoCloseable {
     private record ClientKey(ApiFlavor flavor, ProviderConfiguration provider) {}
 
     public ApiFlavor flavor() {
-        return effectiveFlavor();
+        // report the flavor actually used for routing (AUTO resolves to a concrete route for bare /v1)
+        return flavorForRouting();
     }
 
     /**
@@ -195,7 +206,17 @@ public class ChatClient implements AutoCloseable {
     /** The concrete flavor handed to the router: AUTO resolves to probing the responses route first. */
     private ApiFlavor flavorForRouting() {
         final var flavor = effectiveFlavor();
-        return flavor == ApiFlavor.AUTO ? ApiFlavor.RESPONSES : flavor;
+        if (flavor != ApiFlavor.AUTO) {
+            return flavor;
+        }
+        // A bare base URL (no recognizable /responses, /chat/completions or /messages route) cannot be
+        // pinned reliably; default to chat completions, the common OpenAI-compatible layout opencode
+        // uses, so reasoning_content flows without requiring an explicit reasoning_effort.
+        final var current = providerManager == null ? null : providerManager.current();
+        if (current != null && ChatRoutes.detectFlavor(current.baseUrl()) == null) {
+            return ApiFlavor.COMPLETIONS;
+        }
+        return ApiFlavor.RESPONSES;
     }
 
     /** The resilient dialect client for a (flavor, provider) pair, built on first use and cached. */
@@ -312,14 +333,136 @@ public class ChatClient implements AutoCloseable {
 
     public void setModel(final String model) {
         this.modelOverride = model == null || model.isBlank() ? null : model;
+        this.samplingOverride = null;
+        this.cachedModels = null;
+    }
+
+    /** The currently selected variant name, or null when none is forced (implicit family defaults apply). */
+    public String variant() {
+        return variantOverride;
+    }
+
+    /** Select a named runtime variant in-memory (session only, never persisted). Blank clears the selection. */
+    public void setVariant(final String variant) {
+        this.variantOverride = variant == null || variant.isBlank() ? null : variant;
+    }
+
+    /**
+     * The in-memory sampling overrides for the current model (session only, never persisted), or
+     * null when none are set.
+     */
+    public SamplingOverride sampling() {
+        return samplingOverride;
+    }
+
+    /**
+     * Replace the in-memory sampling overrides. A null clears them all. Each field of the override
+     * distinguishes "unset" (absent), a concrete value, or {@link Setting#none()} to force-omit the
+     * field from the wire payload and bypass the variant and implicit tuner defaults.
+     */
+    public void setSampling(final SamplingOverride override) {
+        this.samplingOverride = override == null || override.isEmpty() ? null : override;
+    }
+
+    /** Variants available for the current model, provider-level or per-model, else the implicit tuner presets. */
+    public List<ModelVariantConfiguration> variants() {
+        final var provider = target();
+        if (provider == null) {
+            return List.of();
+        }
+        String model = modelOverride;
+        if (model == null || model.isBlank()) {
+            model = provider.model();
+        }
+        return effectiveVariants(provider, model);
+    }
+
+    /**
+     * Variants available for a specific model name against the current provider, without changing the
+     * active model. Used to resolve the variants of a model being typed or picked in {@code /model}
+     * before it becomes the active one. Blank model falls back to the current model.
+     */
+    public List<ModelVariantConfiguration> variants(final String model) {
+        final var provider = target();
+        if (provider == null) {
+            return List.of();
+        }
+        if (model == null || model.isBlank()) {
+            return variants();
+        }
+        return effectiveVariants(provider, model.trim());
+    }
+
+    /**
+     * The effective implicit "default" variant for the current model, i.e. the sampling values the
+     * tuner would apply when no named variant and no override is set, or null when the model has no
+     * implicit defaults. The trio respects a current in-memory override: a width-omitted field (none)
+     * surfaces as null so callers know it would not be sent; a forced value surfaces as that value.
+     */
+    public ModelVariantConfiguration implicitVariant() {
+        final var provider = target();
+        final var providerId = provider == null ? null : provider.id();
+        String model = modelOverride;
+        if (model == null || model.isBlank()) {
+            model = provider == null ? null : provider.model();
+        }
+        if (model == null) {
+            return null;
+        }
+        Double temperature = DefaultModelTuner.temperature(model, providerId);
+        Double topP = DefaultModelTuner.topP(model, providerId);
+        Double topK = DefaultModelTuner.topK(model, providerId);
+        final var sampling = this.samplingOverride;
+        if (sampling != null) {
+            final var t = sampling.get(SamplingField.TEMPERATURE);
+            if (t != null) {
+                temperature = t.orElse(null);
+            }
+            final var p = sampling.get(SamplingField.TOP_P);
+            if (p != null) {
+                topP = p.orElse(null);
+            }
+            final var k = sampling.get(SamplingField.TOP_K);
+            if (k != null) {
+                topK = k.orElse(null);
+            }
+        }
+        if (temperature == null && topP == null && topK == null) {
+            return null;
+        }
+        return new ModelVariantConfiguration("default", temperature, topP, topK, null, null, null);
+    }
+
+    /**
+     * The implicit {@code default} variant for a specific model name against the current provider,
+     * without changing the active model. A blank model falls back to the current model. The current
+     * in-memory sampling override is not applied here since the model is not yet the active one.
+     */
+    public ModelVariantConfiguration implicitVariant(final String model) {
+        final var provider = target();
+        final var providerId = provider == null ? null : provider.id();
+        if (model == null || model.isBlank()) {
+            return implicitVariant();
+        }
+        final var m = model.trim();
+        Double temperature = DefaultModelTuner.temperature(m, providerId);
+        Double topP = DefaultModelTuner.topP(m, providerId);
+        Double topK = DefaultModelTuner.topK(m, providerId);
+        if (temperature == null && topP == null && topK == null) {
+            return null;
+        }
+        return new ModelVariantConfiguration("default", temperature, topP, topK, null, null, null);
     }
 
     public void setProvider(final String id) {
         providerManager.setProvider(id);
         this.modelOverride = null;
+        this.variantOverride = null;
+        this.samplingOverride = null;
         this.resolved = ApiFlavor.AUTO;
         this.structuredOutputUnsupported = false;
         this.targetProvider = null;
+        this.cachedModels = null;
         this.dialectClients.clear();
     }
 
@@ -414,45 +557,406 @@ public class ChatClient implements AutoCloseable {
             throw new IOException(
                     "no model configured: set yca.provider.model (--yca-provider-model, configuration.json or YCA_PROVIDER_MODEL)");
         }
-        return model;
-    }
-
-    /** Merge the resolved provider-specific options into the request extra payload, provider JSON winning. */
-    private Map<String, Object> mergeOptions(final Map<String, Object> base) {
-        final var options = providerManager.providerOptions(target());
-        if (options.isEmpty()) {
-            return base;
-        }
-        final var merged = new LinkedHashMap<String, Object>();
-        if (base != null) {
-            merged.putAll(base);
-        }
-        merged.putAll(options);
-        return merged;
+        return model.trim();
     }
 
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
+        return withPromotedExtras(applyModelDefaults(request));
+    }
+
+    /**
+     * Enrich a request with the resolved model plus its effective tuning defaults (provider-level and
+     * per-model {@code providerSpecificOptions}), an optional selected named variant, and the implicit
+     * per-family sampling defaults. Every facet follows a put-if-absent semantic: an explicit request
+     * value wins, then the selected variant, then the implicit family default; nothing is forced.
+     * The provider routing is resolved here so the variant and defaults are those of the target model.
+     */
+    private ChatCompletionRequest applyModelDefaults(final ChatCompletionRequest request) throws IOException {
         final var model = resolveModel();
-        final var others = mergeOptions(request.others());
-        final var reasoningEffort = resolveReasoningEffort(request, others, model);
-        final ChatCompletionRequest effective;
-        if (model.equals(request.model())
-                && others == request.others()
-                && Objects.equals(reasoningEffort, request.reasoningEffort())) {
-            effective = request;
-        } else {
-            effective = new ChatCompletionRequest(
-                    model,
-                    request.messages(),
-                    request.temperature(),
-                    request.stream(),
-                    request.tools(),
-                    request.toolChoice(),
-                    request.maxTokens(),
-                    reasoningEffort,
-                    others);
+        final var provider = target();
+        final var providerId = provider == null ? null : provider.id();
+        final var others = new LinkedHashMap<String, Object>();
+        if (request.others() != null) {
+            others.putAll(request.others());
         }
-        return withPromotedExtras(effective);
+        final var providerOptions = providerManager.providerOptions(provider);
+        if (!providerOptions.isEmpty()) {
+            others.putAll(providerOptions);
+        }
+        final var tuning = providerManager.tuning(provider, model);
+        final var tuningOptions = providerManager.tuningOptions(tuning);
+        deepMergePutIfAbsent(others, tuningOptions);
+        final var variant = selectedVariant(provider, model);
+        if (variant != null && variant.extra() != null && variant.extra().startsWith("{")) {
+            deepMergePutIfAbsent(others, parseRaw(variant.extra()));
+        }
+
+        final var temperature = resolveSampling(
+                SamplingField.TEMPERATURE,
+                request.temperature(),
+                "temperature",
+                false,
+                others,
+                variant == null ? null : variant::temperature,
+                DefaultModelTuner::temperature,
+                model,
+                providerId);
+        final var topP = resolveSampling(
+                SamplingField.TOP_P,
+                request.topP(),
+                "top_p",
+                false,
+                others,
+                variant == null ? null : variant::topP,
+                DefaultModelTuner::topP,
+                model,
+                providerId);
+        final var topK = resolveSampling(
+                SamplingField.TOP_K,
+                null,
+                "top_k",
+                true,
+                others,
+                variant == null ? null : variant::topK,
+                DefaultModelTuner::topK,
+                model,
+                providerId);
+        if (topK != null) {
+            others.put("top_k", topK);
+        }
+        Integer maxTokens = request.maxTokens();
+        if (maxTokens == null && variant != null && variant.maxTokens() != null && variant.maxTokens() > 0) {
+            final var flavor = effectiveFlavor();
+            if (flavor == ApiFlavor.ANTHROPIC || flavor == ApiFlavor.AUTO) {
+                maxTokens = variant.maxTokens();
+            } else {
+                others.putIfAbsent("max_completion_tokens", variant.maxTokens());
+            }
+        }
+        final var reasoningEffort = resolveReasoningEffort(
+                request.reasoningEffort(),
+                others,
+                model,
+                variant == null ? null : variant.reasoningEffort(),
+                tuning == null ? null : tuning.reasoningEffort(),
+                providerId);
+        if (isClaude(model) && reasoningEffort != null) {
+            applyClaudeThinking(others, reasoningEffort);
+        }
+        return new ChatCompletionRequest(
+                model,
+                applyCaching(request.messages(), providerId),
+                temperature,
+                topP,
+                request.stream(),
+                request.tools(),
+                request.toolChoice(),
+                maxTokens,
+                reasoningEffort,
+                others);
+    }
+
+    /**
+     * Resolves the effective value of one sampling field for the request, folding in any in-memory
+     * override plus the selected variant and the implicit per-family tuner default. Precedence within a
+     * field: an in-memory override of {@code none} (force-omit) beats everything; then the explicit
+     * request value; then, when a raw value was already supplied through {@code others} and the caller
+     * opts in via {@code respectOthersGuard}, that raw value is kept; then the override value; then the
+     * variant value; finally the {@link DefaultModelTuner} value. When the override is {@code none} any
+     * previously injected raw value for {@code wireKey} is dropped so the payload omits the field and the
+     * provider default applies.
+     */
+    private Double resolveSampling(
+            final SamplingField field,
+            final Double requestValue,
+            final String wireKey,
+            final boolean respectOthersGuard,
+            final Map<String, Object> others,
+            final Supplier<Double> variantValue,
+            final BiFunction<String, String, Double> tuner,
+            final String model,
+            final String providerId) {
+        final var overridden = samplingOverride == null ? null : samplingOverride.get(field);
+        if (overridden != null && overridden.isEmpty()) {
+            // none: force-omit, so the server default applies; drop any request/raw value
+            if (wireKey != null) {
+                others.remove(wireKey);
+            }
+            return null;
+        }
+        if (requestValue != null) {
+            return requestValue;
+        }
+        if (respectOthersGuard && wireKey != null && others.containsKey(wireKey)) {
+            return null;
+        }
+        if (overridden != null && overridden.isPresent()) {
+            return overridden.get();
+        }
+        if (variantValue != null) {
+            return variantValue.get();
+        }
+        return tuner.apply(model, providerId);
+    }
+
+    /**
+     * Message-level prompt caching, highly inspired from opencode's applyCaching: the first two system
+     * messages and the last two non-system messages carry a provider-specific cache breakpoint so the
+     * stable prefix (system prompt, tools) and the tail (turning context) become cache hits across turns.
+     * The cache key depends on the provider family. Array-content messages are cached at each block level,
+     * plain-text messages at the message level. Disabled for providers without a caching story.
+     */
+    private static List<Message> applyCaching(final List<Message> messages, final String providerId) {
+        if (messages == null || messages.size() <= 1 || providerId == null) {
+            return messages;
+        }
+        final var cache = cacheMarker(providerId);
+        if (cache == null) {
+            return messages;
+        }
+        final var systems = new ArrayList<Message>();
+        final var others = new ArrayList<Message>();
+        for (final var m : messages) {
+            if ("system".equals(m.role())) {
+                systems.add(m);
+            } else {
+                others.add(m);
+            }
+        }
+        if (systems.isEmpty()) {
+            return messages;
+        }
+        final var marked = new HashSet<Integer>();
+        for (int i = 0; i < systems.size() && i < 2; i++) {
+            marked.add(i);
+        }
+        final int lastIdx = messages.size() - 1;
+        if (others.size() > 1) {
+            // within the flat list, mark the two non-system tail messages
+            for (int i = 0; i < others.size() && i < 2; i++) {
+                marked.add(lastIdx - i);
+            }
+        }
+        if (marked.isEmpty()) {
+            return messages;
+        }
+        var changed = false;
+        final var out = new Message[messages.size()];
+        for (final var idx : marked) {
+            final var m = messages.get(idx);
+            final var updated = cacheMessage(m, cache);
+            out[idx] = updated;
+            changed |= updated != m;
+        }
+        if (!changed) {
+            return messages;
+        }
+        for (int i = 0; i < messages.size(); i++) {
+            if (out[i] == null) {
+                out[i] = messages.get(i);
+            }
+        }
+        return List.of(out);
+    }
+
+    /**
+     * The provider-specific cache breakpoint marker, or null when this provider does not expose message
+     * caching. The key mirrors the target dialect's wire field: <ul>
+     * <li>Anthropic-like and most OpenAI-compatible proxies use {@code cache_control} with
+     * {@code {"type":"ephemeral"}};</li>
+     * <li>Bedrock providers use a {@code cachePoint} flag.</li></ul>
+     */
+    private static Map<String, Object> cacheMarker(final String providerId) {
+        final var id = providerId.toLowerCase(Locale.ROOT);
+        if (id.contains("bedrock")) {
+            return Map.of("cachePoint", true, "mapping", "cachePoint");
+        }
+        if (id.contains("anthropic") || id.contains("openrouter") || id.contains("alibaba")) {
+            return Map.of("cache_control", Map.of("type", "ephemeral"), "mapping", "cache_control");
+        }
+        return null;
+    }
+
+    private static Message cacheMessage(final Message message, final Map<String, Object> cache) {
+        final var key = String.valueOf(cache.get("mapping"));
+        final Object marker = cache.get(key);
+        final var content = message.content();
+        if (content instanceof List<?> blocks && !blocks.isEmpty()) {
+            final Object last = blocks.get(blocks.size() - 1);
+            if (last instanceof Map<?, ?> lastBlock) {
+                final var outBlocks = new ArrayList<Map<String, Object>>();
+                for (int i = 0; i < blocks.size() - 1; i++) {
+                    @SuppressWarnings("unchecked")
+                    final var m = (Map<String, Object>) blocks.get(i);
+                    outBlocks.add(m);
+                }
+                final var block = new LinkedHashMap<String, Object>();
+                lastBlock.forEach((k, v) -> block.put(String.valueOf(k), v));
+                block.put(key, marker);
+                outBlocks.add(block);
+                return new Message(
+                        message.role(),
+                        outBlocks,
+                        message.name(),
+                        message.toolCalls(),
+                        message.toolCallId(),
+                        message.others());
+            }
+        }
+        final var others = message.others();
+        if (others != null && others.containsKey(key)) {
+            return message;
+        }
+        final java.util.Map<String, Object> merged = new LinkedHashMap<>();
+        if (others != null) {
+            merged.putAll(others);
+        }
+        merged.put(key, marker);
+        return new Message(
+                message.role(), message.content(), message.name(), message.toolCalls(), message.toolCallId(), merged);
+    }
+
+    /** The named variant requested via {@code /model}, validated against the configured variants, else null. */
+    private ModelVariantConfiguration selectedVariant(final ProviderConfiguration provider, final String model) {
+        final var selected = variantOverride;
+        if (selected == null || selected.isBlank()) {
+            return null;
+        }
+        for (final var variant : effectiveVariants(provider, model)) {
+            if (selected.equals(variant.name())) {
+                return variant;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The variants to consider for a model: the configured ones (per-model or provider-level), or,
+     * when none are configured, the implicit reasoning-effort presets derived from the model family
+     * and the API flavor of the target provider.
+     */
+    private List<ModelVariantConfiguration> effectiveVariants(
+            final ProviderConfiguration provider, final String model) {
+        final var configured = providerManager.variants(provider, model);
+        if (!configured.isEmpty()) {
+            return configured;
+        }
+        final var flavor = flavorOf(provider);
+        final var releaseDate = provider == null ? null : provider.releaseDate();
+        final var budget = outputTokens(provider, model);
+        return DefaultModelTuner.variants(new DefaultModelTuner.ModelContext(
+                model, provider == null ? null : provider.id(), flavor, budget, releaseDate));
+    }
+
+    /**
+     * Resolve the request flavor from a provider: an explicitly resolved flavor wins, then the configured
+     * provider flavor, then the flavor deduced from the provider base URL route, defaulting to the plain
+     * OpenAI-compatible chat wire (chat completions) when it cannot be pinned.
+     */
+    private static ApiFlavor flavorOf(final ProviderConfiguration provider) {
+        if (provider == null) {
+            return ApiFlavor.COMPLETIONS;
+        }
+        final var configured = provider.api();
+        if (configured != null && configured != ApiFlavor.AUTO) {
+            return configured;
+        }
+        final var detected = ChatRoutes.detectFlavor(provider.baseUrl());
+        return detected == null ? ApiFlavor.COMPLETIONS : detected;
+    }
+
+    /** The resolved output budget for an explicit provider + model, like {@link #outputTokens()} but unbound to the active model. */
+    private int outputTokens(final ProviderConfiguration provider, final String model) {
+        if (provider == null) {
+            return OutputBudgetResolver.DEFAULT_MAX_TOKEN;
+        }
+        final var detectedMax = contextWindowCache == null
+                ? null
+                : contextWindowCache.getMaxTokens(provider.id(), model).orElse(null);
+        final Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
+        final var resolvedWindow = contextWindow != null
+                ? contextWindow
+                : (contextWindowCache == null
+                        ? null
+                        : contextWindowCache.get(provider.id(), model).orElse(null));
+        return OutputBudgetResolver.resolve(
+                null,
+                providerManager.outputTokensOverride(provider, model),
+                provider.outputTokens(),
+                detectedMax,
+                resolvedWindow);
+    }
+
+    /**
+     * Resolve the effective {@code reasoning_effort} with put-if-absent: an explicit request value wins,
+     * then a value already merged in the extra payload is left untouched, then the selected variant default,
+     * then the per-model/provider tuning default, then the implicit per-family default. When the payload
+     * already carries one, null keeps the dedicated field unset so the provider option flows to the wire
+     * through the extras.
+     */
+    private static String resolveReasoningEffort(
+            final String requestEffort,
+            final Map<String, Object> merged,
+            final String model,
+            final String variantEffort,
+            final String configEffort,
+            final String providerId) {
+        if (requestEffort != null && !requestEffort.isBlank()) {
+            return requestEffort;
+        }
+        if (merged != null && merged.containsKey("reasoning_effort")) {
+            return null;
+        }
+        if (variantEffort != null && !variantEffort.isBlank()) {
+            return variantEffort;
+        }
+        if (configEffort != null && !configEffort.isBlank()) {
+            return configEffort;
+        }
+        return DefaultModelTuner.reasoningEffort(model, providerId);
+    }
+
+    /** Anthropic claude models map a reasoning effort hint to an explicit thinking budget. */
+    private static boolean isClaude(final String model) {
+        return model != null && model.startsWith("claude");
+    }
+
+    private static void applyClaudeThinking(final Map<String, Object> others, final String effort) {
+        final int budget =
+                switch (effort) {
+                    case "low" -> 1024;
+                    case "high", "xhigh", "max" -> 8192;
+                    default -> 2048;
+                };
+        others.put("thinking", Map.of("type", "enabled", "budget_tokens", budget));
+    }
+
+    /**
+     * Parse a raw JSON object string into a map, empty when not parseable as an object.
+     */
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseRaw(final String json) {
+        if (json == null || json.isBlank() || !json.startsWith("{")) {
+            return Map.of();
+        }
+        final var parsed = mapper.fromString(Object.class, json);
+        return parsed instanceof Map ? (Map<String, Object>) parsed : Map.of();
+    }
+
+    /** Deep-merge {@code overrides} into {@code target}: nested maps are merged recursively, leaves are put-if-absent. */
+    @SuppressWarnings("unchecked")
+    private static void deepMergePutIfAbsent(final Map<String, Object> target, final Map<String, Object> overrides) {
+        if (overrides == null || overrides.isEmpty()) {
+            return;
+        }
+        for (final var entry : overrides.entrySet()) {
+            final var existing = target.get(entry.getKey());
+            if (existing instanceof Map && entry.getValue() instanceof Map) {
+                deepMergePutIfAbsent((Map<String, Object>) existing, (Map<String, Object>) entry.getValue());
+            } else if (!target.containsKey(entry.getKey())) {
+                target.put(entry.getKey(), entry.getValue());
+            }
+        }
     }
 
     /**
@@ -468,7 +972,8 @@ public class ChatClient implements AutoCloseable {
                 || extras.isEmpty()
                 || (!extras.containsKey("temperature")
                         && !extras.containsKey("max_tokens")
-                        && !extras.containsKey("max_output_tokens"))) {
+                        && !extras.containsKey("max_output_tokens")
+                        && !extras.containsKey("top_p"))) {
             return request;
         }
         Double temperature = request.temperature();
@@ -479,9 +984,16 @@ public class ChatClient implements AutoCloseable {
         if (maxTokens == null) {
             maxTokens = extrasNumber(extras, "max_tokens", "max_output_tokens");
         }
+        Double topP = request.topP();
+        if (topP == null && extras.get("top_p") instanceof Number n) {
+            topP = n.doubleValue();
+        }
         final var stripped = new LinkedHashMap<String, Object>(extras.size());
         extras.forEach((k, v) -> {
-            if (!"temperature".equals(k) && !"max_tokens".equals(k) && !"max_output_tokens".equals(k)) {
+            if (!"temperature".equals(k)
+                    && !"max_tokens".equals(k)
+                    && !"max_output_tokens".equals(k)
+                    && !"top_p".equals(k)) {
                 stripped.put(k, v);
             }
         });
@@ -489,6 +1001,7 @@ public class ChatClient implements AutoCloseable {
                 request.model(),
                 request.messages(),
                 temperature,
+                topP,
                 request.stream(),
                 request.tools(),
                 request.toolChoice(),
@@ -505,24 +1018,6 @@ public class ChatClient implements AutoCloseable {
             }
         }
         return null;
-    }
-
-    /**
-     * Resolve the effective {@code reasoning_effort} for a request with a put-if-absent semantic: an
-     * explicit value carried by the request wins, then a value already merged in the extra payload
-     * (eg. from {@code providerSpecificOptions}) is left untouched, and only then the per-model
-     * behavior default applies. When the request and the payload already carry one, null keeps the
-     * dedicated field unset so the provider option flows to the wire through the extras.
-     */
-    private String resolveReasoningEffort(
-            final ChatCompletionRequest request, final Map<String, Object> merged, final String model) {
-        if (request.reasoningEffort() != null && !request.reasoningEffort().isBlank()) {
-            return request.reasoningEffort();
-        }
-        if (merged != null && merged.containsKey("reasoning_effort")) {
-            return null;
-        }
-        return providerManager.reasoningEffort(target(), model);
     }
 
     /**
@@ -566,6 +1061,7 @@ public class ChatClient implements AutoCloseable {
                 model,
                 request.messages(),
                 request.temperature(),
+                request.topP(),
                 request.stream(),
                 request.tools(),
                 request.toolChoice(),
@@ -621,48 +1117,45 @@ public class ChatClient implements AutoCloseable {
         if (request.others() != null) {
             base.putAll(request.others());
         }
-        final var otherOptions = mergeOptions(null);
-        if (otherOptions != null) {
-            base.putAll(otherOptions);
-        }
-        final var reasoningEffort = resolveReasoningEffort(request, base, model);
-        final var plainReq = withPromotedExtras(new ChatCompletionRequest(
+        final var plainReq = new ChatCompletionRequest(
                 model,
                 request.messages(),
                 request.temperature(),
+                request.topP(),
                 false,
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                reasoningEffort,
-                base));
-        final var structuredReq = withPromotedExtras(new ChatCompletionRequest(
+                request.reasoningEffort(),
+                base);
+        final var structuredReq = new ChatCompletionRequest(
                 model,
                 request.messages(),
                 request.temperature(),
+                request.topP(),
                 false,
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                reasoningEffort,
-                withStructuredField(base, flavor, schemaName, schema)));
+                request.reasoningEffort(),
+                withStructuredField(base, flavor, schemaName, schema));
         if (structuredOutputUnsupported) {
-            return new StructuredResult(chatInternal(plainReq), false);
+            return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
         }
         try {
-            return new StructuredResult(chatInternal(structuredReq), true);
+            return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(structuredReq))), true);
         } catch (final IOException first) {
             if (!isStatus400(first)) {
                 throw first;
             }
             try {
-                return new StructuredResult(chatInternal(plainReq), false);
+                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
             } catch (final IOException second) {
                 if (!isStatus400(second)) {
                     throw second;
                 }
                 structuredOutputUnsupported = true;
-                return new StructuredResult(chatInternal(plainReq), false);
+                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
             }
         }
     }
@@ -726,18 +1219,18 @@ public class ChatClient implements AutoCloseable {
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var model = resolveModel();
-        final var others = mergeOptions(request.others());
-        final var effective = withPromotedExtras(new ChatCompletionRequest(
+        final var effective = applyModelDefaults(new ChatCompletionRequest(
                 model,
                 request.messages(),
                 request.temperature(),
+                request.topP(),
                 true,
                 request.tools(),
                 request.toolChoice(),
                 request.maxTokens(),
-                resolveReasoningEffort(request, others, model),
-                others));
-        return doWithFallback(effective, cancelled, true, onDelta);
+                request.reasoningEffort(),
+                request.others()));
+        return doWithFallback(withPromotedExtras(effective), cancelled, true, onDelta);
     }
 
     @SuppressWarnings("unchecked")
@@ -748,7 +1241,7 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
-        final var effective = applyOutputBudget(request, effectiveFlavor());
+        final var effective = applyOutputBudget(request, flavorForRouting());
         try {
             if (stream) {
                 final var publisher = LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled));
@@ -765,17 +1258,24 @@ public class ChatClient implements AutoCloseable {
     }
 
     public ModelsResponse models() throws IOException, InterruptedException {
+        final var cached = cachedModels;
+        if (cached != null) {
+            return cached;
+        }
         final var flavor = effectiveFlavor();
         try {
-            return LlmWire.toModelsResponse(
+            final var fetched = LlmWire.toModelsResponse(
                     LlmWire.join(dialectClient(flavor == ApiFlavor.AUTO ? ApiFlavor.COMPLETIONS : flavor, target())
                             .models()));
+            cachedModels = fetched;
+            return fetched;
         } catch (final DialectNotSupportedException e) {
             return new ModelsResponse(List.of());
         }
     }
 
     @Override
+    @Destroy
     public void close() {
         if (dialectClients != null) {
             dialectClients.values().forEach(DialectLlmClient::close);
@@ -786,6 +1286,61 @@ public class ChatClient implements AutoCloseable {
             } catch (final RuntimeException e) {
                 // ignore close failures on shutdown
             }
+        }
+    }
+
+    /**
+     * In-memory sampling overrides keyed by field. Semantics per field:
+     * <ul>
+     * <li>key absent - not overridden; normal request -&gt; variant -&gt; implicit tuner precedence applies;</li>
+     * <li>{@link Setting#none()} - force-omit: the field is dropped from the wire payload and the variant and
+     * implicit tuner defaults are skipped, letting the server default apply;</li>
+     * <li>a concrete {@link Setting#of(double)} - the field is set to that value.</li>
+     * </ul>
+     */
+    public record SamplingOverride(Map<SamplingField, Optional<Double>> values) {
+
+        public static SamplingOverride of(final Map<SamplingField, Optional<Double>> values) {
+            return new SamplingOverride(values == null ? Map.of() : values);
+        }
+
+        public boolean isEmpty() {
+            return values == null || values.isEmpty();
+        }
+
+        /** The overridden value for the field: null if unset, empty Optional for force-omit, present for a value. */
+        public Optional<Double> get(final SamplingField field) {
+            if (values == null) {
+                return null;
+            }
+            return values.get(field);
+        }
+    }
+
+    /** The sampling fields a user can override in-memory. */
+    public enum SamplingField {
+        TEMPERATURE,
+        TOP_K,
+        TOP_P
+    }
+
+    /** A setting value: {@link #none()} force-omits the field, {@link #of(double)} sets it. */
+    public record Setting(Double value) {
+
+        public static Setting none() {
+            return new Setting(null);
+        }
+
+        public static Setting of(final double value) {
+            return new Setting(value);
+        }
+
+        public boolean isNone() {
+            return value == null;
+        }
+
+        public Optional<Double> asOptional() {
+            return value == null ? Optional.empty() : Optional.of(value);
         }
     }
 }

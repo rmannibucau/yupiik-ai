@@ -18,6 +18,8 @@ package io.yupiik.ia.agent.core.wiring;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import java.util.Collections;
@@ -42,6 +44,8 @@ public class ProviderManager {
 
     private volatile String currentProviderId;
     private final ConcurrentHashMap<ProviderConfiguration, Map<String, Object>> optionsCache =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<ModelTuningConfiguration, Map<String, Object>> tuningOptionsCache =
             new ConcurrentHashMap<>();
 
     public ProviderManager(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
@@ -179,28 +183,115 @@ public class ProviderManager {
 
     /**
      * Resolve the effective output token budget override for a model of a provider: the {@code behavior.outputTokens}
-     * of the first matching model entry - exact id first, then first pattern contained in the model name - else 0 when
-     * no override applies. The provider {@code outputTokens} default is not folded in here so the caller can
-     * distinguish "override" from "default".
+     * of the first matching model entry - exact id first, then first pattern contained in the model name - else the
+     * provider-level {@code tuning.outputTokens}, else 0 when no override applies. The provider {@code outputTokens}
+     * default is not folded in here so the caller can distinguish "override" from "default".
      */
     public int outputTokensOverride(final ProviderConfiguration provider, final String model) {
         final var entry = matchModel(provider, model);
-        if (entry == null || entry.behavior() == null || entry.behavior().outputTokens() == null) {
-            return 0;
+        if (entry != null && entry.behavior() != null && entry.behavior().outputTokens() != null) {
+            final var tokens = entry.behavior().outputTokens();
+            if (tokens > 0) {
+                return tokens;
+            }
         }
-        final var tokens = entry.behavior().outputTokens();
-        return tokens <= 0 ? 0 : tokens;
+        final var tuning = providerTuning(provider);
+        return tuning != null && tuning.outputTokens() != null && tuning.outputTokens() > 0 ? tuning.outputTokens() : 0;
     }
 
-    /** Resolve the per-model reasoning effort default: {@code behavior.reasoningEffort} of the first matching entry, or null. */
+    /**
+     * Resolve the per-model reasoning effort default: {@code behavior.reasoningEffort} of the first matching entry, else the
+     * provider-level {@code tuning.reasoningEffort}, else null.
+     */
     public String reasoningEffort(final ProviderConfiguration provider, final String model) {
         final var entry = matchModel(provider, model);
-        return entry == null
-                        || entry.behavior() == null
-                        || entry.behavior().reasoningEffort() == null
-                        || entry.behavior().reasoningEffort().isBlank()
+        final var perModel = entry == null || entry.behavior() == null
                 ? null
                 : entry.behavior().reasoningEffort();
+        if (perModel != null && !perModel.isBlank()) {
+            return perModel;
+        }
+        final var tuning = providerTuning(provider);
+        return tuning == null
+                        || tuning.reasoningEffort() == null
+                        || tuning.reasoningEffort().isBlank()
+                ? null
+                : tuning.reasoningEffort();
+    }
+
+    /**
+     * Resolve the effective tuning defaults for a model of a provider: the {@code behavior} of the first matching model entry,
+     * else the provider-level {@code tuning}. Returns null only when neither is configured.
+     */
+    public ModelTuningConfiguration tuning(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null) {
+            return entry.behavior();
+        }
+        return providerTuning(provider);
+    }
+
+    /** The provider-level tuning record, or null. */
+    private ModelTuningConfiguration providerTuning(final ProviderConfiguration provider) {
+        return provider == null ? null : provider.tuning();
+    }
+
+    /**
+     * Resolve the named runtime variants for a model of a provider, with fallback: the per-model {@code behavior.variants},
+     * else the provider-level variants, else an empty list (implicit per-family discovery applies). Unmodifiable.
+     */
+    public List<ModelVariantConfiguration> variants(final ProviderConfiguration provider, final String model) {
+        final var tuning = tuning(provider, model);
+        if (tuning != null && tuning.variants() != null && !tuning.variants().isEmpty()) {
+            return List.copyOf(tuning.variants());
+        }
+        return List.of();
+    }
+
+    /**
+     * Effective raw provider specific options JSON string for a model of a provider: the per-model
+     * {@code behavior.providerSpecificOptions}, else the provider-level {@code providerSpecificOptions}. Null when neither.
+     */
+    public String providerSpecificOptions(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        final var perModel =
+                entry == null || entry.behavior() == null || entry.behavior().providerSpecificOptions() == null
+                        ? null
+                        : entry.behavior().providerSpecificOptions();
+        if (perModel != null && !perModel.isBlank()) {
+            return perModel;
+        }
+        if (provider != null
+                && provider.providerSpecificOptions() != null
+                && !provider.providerSpecificOptions().isBlank()) {
+            return provider.providerSpecificOptions();
+        }
+        return null;
+    }
+
+    /**
+     * Parse a model-level {@code providerSpecificOptions} JSON object into an unmodifiable map, or an empty map when it is
+     * blank or does not start with '{'. Cached per tuning record.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> tuningOptions(final ModelTuningConfiguration tuning) {
+        if (tuning == null
+                || tuning.providerSpecificOptions() == null
+                || !tuning.providerSpecificOptions().startsWith("{")) {
+            return Collections.emptyMap();
+        }
+        return tuningOptionsCache.computeIfAbsent(tuning, t -> {
+            try {
+                final var parsed = mapper.fromString(Object.class, t.providerSpecificOptions());
+                if (!(parsed instanceof Map)) {
+                    return Collections.emptyMap();
+                }
+                return Collections.unmodifiableMap(new HashMap<>((Map<String, Object>) parsed));
+            } catch (final RuntimeException e) {
+                throw new IllegalArgumentException(
+                        "Invalid providerSpecificOptions JSON for a model tuning: " + e.getMessage(), e);
+            }
+        });
     }
 
     /** Index of the first matching model entry within the provider {@code models} list, or -1 when the model is unlisted. */

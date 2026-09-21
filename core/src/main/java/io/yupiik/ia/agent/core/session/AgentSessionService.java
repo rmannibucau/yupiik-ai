@@ -268,11 +268,21 @@ public class AgentSessionService {
      * could not run (so the frontend never shows a false success).
      */
     public CompactionApplied compact(final String sessionId) {
+        return compact(sessionId, false);
+    }
+
+    /**
+     * Compacts the context window of a persisted session. {@code force} bypasses the
+     * within-budget guard so compaction runs even below the thresholds. Returns nothing
+     * to compact when empty, and reports a fallback/error when the summarizer could not
+     * run (so the frontend never shows a false success).
+     */
+    public CompactionApplied compact(final String sessionId, final boolean force) {
         final var history = sessionStore.load(sessionId);
         if (history.isEmpty()) {
             return new CompactionApplied(false, "nothing to compact", null);
         }
-        final var result = contextManager.compact(history);
+        final var result = contextManager.compact(history, force);
         if (!result.changed()) {
             return new CompactionApplied(false, "context already within budget", null);
         }
@@ -280,6 +290,7 @@ public class AgentSessionService {
         return switch (result.mode()) {
             case SUMMARY -> new CompactionApplied(true, "context compacted (summarized)", null);
             case CLEARED -> new CompactionApplied(true, "old tool outputs cleared", null);
+            case SHRUNK -> new CompactionApplied(true, "verbose tool outputs shrunk", null);
             case TRUNCATE ->
                 new CompactionApplied(true, "context truncated locally (summarizer failed)", result.error());
             case NONE -> new CompactionApplied(false, "context already within budget", null);

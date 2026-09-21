@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.List;
 
 @RootConfiguration("yca.tui")
 @JsonModel
@@ -46,7 +47,7 @@ public record TuiConfiguration(
         String error,
 
         @Property(
-                defaultValue = "\"#56b6c2\"",
+                defaultValue = "\"#b896d8\"",
                 documentation = "Info color (hex), used for gauges and informational values.")
         String info,
 
@@ -59,15 +60,15 @@ public record TuiConfiguration(
         String textMuted,
 
         @Property(
-                defaultValue = "0.85",
+                defaultValue = "0.6",
                 documentation =
-                        "Opacity (0..1) of the thinking/reasoning text, blended over the panel background, so thoughts stay distinguishable from the assistant output.")
+                        "Transparency (0..1) of the thinking/reasoning text toward the panel background: 0 is fully opaque, higher values fade thoughts out (terminals have no alpha, the color is pre-blended).")
         double thinkingOpacity,
 
         @Property(
-                defaultValue = "0.85",
+                defaultValue = "0.35",
                 documentation =
-                        "Opacity (0..1) of the tool output text, blended over the panel background, so assistant answers stand out.")
+                        "Transparency (0..1) of the tool output text toward the panel background: 0 is fully opaque, higher values fade tool output out (terminals have no alpha, the color is pre-blended).")
         double toolOutputOpacity,
 
         @Property(defaultValue = "\"#484848\"", documentation = "Panel border color (hex).")
@@ -89,6 +90,35 @@ public record TuiConfiguration(
                 documentation =
                         "How long (milliseconds) a transient toast notice stays visible. Set to 0 to disable toasts.")
         long toastDurationMillis,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Persist submitted prompts to <storageHome>/history so they survive restarts. "
+                                + "Set to false to disable history persistence entirely (in-memory Up/Down recall for the current session stays active).")
+        boolean history,
+
+        @Property(
+                defaultValue = "\"unicode\"",
+                documentation = "Glyph set: unicode (default) or ascii for terminals with limited font coverage.")
+        String glyphs,
+
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Syntax highlighting color theme: auto (follows the UI theme), one-dark or one-light.")
+        String codeTheme,
+
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Tool output formatting: auto detects and reformats markdown/JSON/XML/YAML/diffs, "
+                        + "off keeps raw output only.")
+        String toolOutputFormat,
+
+        @Property(
+                documentation = "Optional pricing table used to estimate the session cost, entries formatted "
+                        + "`model-substring=in/out` with USD per million tokens, e.g. `gpt-4.1-mini=0.4/1.6`. "
+                        + "The first matching entry wins; leave empty to hide cost display.")
+        List<String> pricing,
 
         @Property(documentation = "Conversation transcript retention settings.")
         TuiTranscriptConfiguration transcript) {}

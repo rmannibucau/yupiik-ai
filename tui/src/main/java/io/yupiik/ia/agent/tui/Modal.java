@@ -57,8 +57,8 @@ public final class Modal {
 
     /** Centered box: width/height, y placed at a fraction (0..1) of the remaining frame height. */
     public static Rect rect(final Frame frame, final int width, final int height, final double yFraction) {
-        final var w = Math.min(Math.max(1, width), frame.width());
-        final var h = Math.min(Math.max(1, height), frame.height());
+        final var w = Math.clamp(width, 1, frame.width());
+        final var h = Math.clamp(height, 1, frame.height());
         final var x = Math.max(0, (frame.width() - w) / 2);
         final var y = Math.max(0, (int) ((frame.height() - h) * yFraction));
         return new Rect(x, y, w, h);

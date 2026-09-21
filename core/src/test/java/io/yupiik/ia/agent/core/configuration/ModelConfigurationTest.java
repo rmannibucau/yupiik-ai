@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ModelConfigurationTest {
@@ -35,5 +37,25 @@ class ModelConfigurationTest {
     @Test
     void resolvedPruneCanBeBlankWhenBothAreBlank() {
         assertEquals("", new ModelConfiguration("", "").resolvedPrune());
+    }
+
+    @Test
+    void variantExposesSamplingFacetsWithWireMappedNames() {
+        final var variant = new ModelVariantConfiguration(
+                "balanced", 0.7, 0.9, 40.0, 2048, "high", "{\"thinking\":{\"type\":\"enabled\"}}");
+        assertEquals("balanced", variant.name());
+        assertEquals(0.7, variant.temperature());
+        assertEquals(0.9, variant.topP());
+        assertEquals(40.0, variant.topK());
+        assertEquals(2048, variant.maxTokens());
+        assertEquals("high", variant.reasoningEffort());
+        assertEquals("{\"thinking\":{\"type\":\"enabled\"}}", variant.extra());
+    }
+
+    @Test
+    void tuningUnsetNullableFacetsAreNull() {
+        final var tuning = new ModelTuningConfiguration("", null, List.of(), "");
+        assertNull(tuning.outputTokens());
+        assertEquals(List.of(), tuning.variants());
     }
 }

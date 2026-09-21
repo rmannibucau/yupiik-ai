@@ -50,10 +50,10 @@ public class UsageTracker {
     private final AtomicLong auxiliaryPromptTokens = new AtomicLong();
     private final AtomicLong auxiliaryCompletionTokens = new AtomicLong();
     private final AtomicLong auxiliaryRequests = new AtomicLong();
-    private final Clock clock;
+    protected final Clock clock;
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
-    private volatile Anchor anchor;
+    protected volatile Anchor anchor;
 
     /**
      * Last real API usage observation: the prompt tokens billed by the provider for the exact
@@ -61,7 +61,7 @@ public class UsageTracker {
      * ratio between both calibrates later estimates so they stop being over-aggressive against
      * the ground truth.
      */
-    private record Anchor(int realPromptTokens, int estimateAtAnchor) {}
+    record Anchor(int realPromptTokens, int estimateAtAnchor) {}
 
     public UsageTracker(
             final ProviderManager providerManager,

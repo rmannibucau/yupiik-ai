@@ -35,20 +35,17 @@ import java.util.regex.Pattern;
  */
 public class SyntaxHighlighter {
 
-    private static final Pattern FENCE =
-            Pattern.compile("(?m)^\\s*```([A-Za-z0-9_+.-]*)\\s*\\n(.*?)^\\s*```\\s*$", Pattern.DOTALL);
+    // a fence closes only on its own opening delimiter: a backreference to a
+    // non-participating group fails in Java, so each alternative only matches
+    // its own token; an info string may follow the language tag
+    private static final Pattern FENCE = Pattern.compile(
+            "(?m)^[ \\t]*(?:(?<bt>```)|(?<tt>~~~))(?<lang>[A-Za-z0-9_+.-]*)[^\\n]*\\n(?<body>.*?)^[ \\t]*(?:\\k<bt>|\\k<tt>)[ \\t]*$",
+            Pattern.DOTALL);
 
     private static final int DEFAULT_MAX_LINE_LENGTH = 10_000;
 
     private int maxLineLength = DEFAULT_MAX_LINE_LENGTH;
-
-    private static final Style STRING = token("e5c07b");
-    private static final Style COMMENT = token("7f848e");
-    private static final Style NUMBER = token("d19a66");
-    private static final Style KEYWORD = token("c678dd");
-    private static final Style TYPE = token("61afef");
-    private static final Style TAG = token("e06c75");
-    private static final Style ATTR = token("56b6c2");
+    private CodeTheme theme = CodeTheme.ONE_DARK;
 
     private interface Highlighter {
         Pattern pattern();
@@ -76,12 +73,18 @@ public class SyntaxHighlighter {
 
     public SyntaxHighlighter() {}
 
+    /** Sets the token color theme (see {@link CodeTheme}). */
+    public SyntaxHighlighter theme(final CodeTheme theme) {
+        this.theme = theme == null ? CodeTheme.ONE_DARK : theme;
+        return this;
+    }
+
     public SyntaxHighlighter maxLineLength(final int maxLineLength) {
         this.maxLineLength = Math.max(1, maxLineLength);
         return this;
     }
 
-    private static Style token(final String hex) {
+    private Style token(final String hex) {
         return Style.EMPTY.fg(Color.hex(hex));
     }
 
@@ -390,6 +393,15 @@ public class SyntaxHighlighter {
                     "uuid"));
     private static final Highlighter XML = language(
             List.of("xmlns", "version", "encoding", "standalone", "DOCTYPE", "ENTITY", "SYSTEM", "PUBLIC"), List.of());
+    private static final Highlighter YAML = new RegexHighlighter(Pattern.compile(
+            "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'[^'\\n]*(?:''[^'\\n]*)*+')"
+                    + "|(?<com>#[^\\n]*+)"
+                    + "|(?<ty>^[ \\t]*-(?:[ \\t]|$))"
+                    + "|(?<attr>^[ \\t]*[&*][A-Za-z0-9_-]+)"
+                    + "|(?<tag>^[ \\t]*(?:- )?[A-Za-z_][A-Za-z0-9_. -]*(?=:(?:[ \\t]|$)))"
+                    + "|(?<kw>\\b(?:true|false|null|True|False|Null|TRUE|FALSE|NULL|yes|no|on|off|Yes|No|On|Off)\\b|~)"
+                    + "|(?<num>\\b\\d+(?:\\.\\d+)?\\b)",
+            Pattern.MULTILINE));
     private static final Highlighter GENERIC = language(
             List.of(
                     "return",
@@ -440,7 +452,9 @@ public class SyntaxHighlighter {
                 out.add(new Segment(Segment.Type.TEXT, null, before));
             }
             out.add(new Segment(
-                    Segment.Type.CODE, m.group(1) == null ? "" : m.group(1).strip(), m.group(2)));
+                    Segment.Type.CODE,
+                    m.group("lang") == null ? "" : m.group("lang").strip(),
+                    m.group("body")));
             last = m.end();
         }
         if (last < markdown.length()) {
@@ -460,6 +474,17 @@ public class SyntaxHighlighter {
             result.add(Line.from(colored(tokenizer, line).toArray(Span[]::new)));
         }
         return Text.from(result);
+    }
+
+    /** Same tokenization as {@link #highlight(String, String)} but as a line list (cards/overlay friendly). */
+    public List<Line> highlightLines(final String lang, final String code) {
+        final var tokenizer = pick(lang);
+        final var lines = code.replace("\r\n", "\n").split("\n", -1);
+        final var result = new ArrayList<Line>(lines.length);
+        for (final var line : lines) {
+            result.add(Line.from(colored(tokenizer, line).toArray(Span[]::new)));
+        }
+        return result;
     }
 
     private List<Span> colored(final Highlighter h, final String line) {
@@ -485,26 +510,26 @@ public class SyntaxHighlighter {
         return out;
     }
 
-    private static Style styleOf(final Matcher m) {
+    private Style styleOf(final Matcher m) {
         if (m.group("str") != null) {
-            return STRING;
+            return token(theme.string());
         }
         if (m.group("com") != null) {
-            return COMMENT;
+            return token(theme.comment());
         }
         if (m.group("num") != null) {
-            return NUMBER;
+            return token(theme.number());
         }
         if (m.group("tag") != null) {
-            return TAG;
+            return token(theme.tag());
         }
         if (m.group("attr") != null) {
-            return ATTR;
+            return token(theme.attr());
         }
         if (m.group("kw") != null) {
-            return KEYWORD;
+            return token(theme.keyword());
         }
-        return TYPE;
+        return token(theme.type());
     }
 
     private static Highlighter pick(final String lang) {
@@ -523,6 +548,9 @@ public class SyntaxHighlighter {
         }
         if (l.contains("sql")) {
             return SQL;
+        }
+        if (l.equals("yaml") || l.equals("yml")) {
+            return YAML;
         }
         if (l.contains("xml") || l.contains("html") || l.contains("svg") || l.contains("css")) {
             return XML;

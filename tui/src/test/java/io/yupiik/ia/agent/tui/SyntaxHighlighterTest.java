@@ -60,6 +60,34 @@ class SyntaxHighlighterTest {
     }
 
     @Test
+    void tildesDoNotCloseBacktickFence() {
+        // a fence discussing fences: the ~~~ line must not truncate the block
+        final var segments = highlighter.split("```java\n\ncode\n~~~\nafter\n```");
+        assertEquals(1, segments.size());
+        assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
+        assertEquals("java", segments.get(0).language());
+        assertTrue(segments.get(0).text().contains("~~~"), "body must keep the tilde line");
+        assertEquals("\ncode\n~~~\nafter\n", segments.get(0).text());
+    }
+
+    @Test
+    void tildeFenceIsHighlightedAndClosesOnlyOnTildes() {
+        final var segments = highlighter.split("before\n\n~~~sql\nSELECT 1;\n~~~\n\nafter");
+        assertEquals(3, segments.size());
+        assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(1).type());
+        assertEquals("sql", segments.get(1).language());
+        assertEquals("SELECT 1;\n", segments.get(1).text());
+    }
+
+    @Test
+    void fenceInfoStringMayCarryExtraTokens() {
+        final var segments = highlighter.split("```java title=App.java\nint a;\n```");
+        assertEquals(1, segments.size());
+        assertEquals("java", segments.get(0).language());
+        assertEquals("int a;\n", segments.get(0).text());
+    }
+
+    @Test
     void splitSkipsBlankTextSegments() {
         final var segments = highlighter.split("```java\nint a;\n```");
         assertEquals(1, segments.size());
@@ -155,5 +183,22 @@ class SyntaxHighlighterTest {
         assertEquals(1, line.spans().size());
         assertEquals(longLine, line.spans().get(0).content());
         assertTrue(line.spans().get(0).style().fg().isEmpty(), "over-long line should not be tokenized");
+    }
+
+    @Test
+    void yamlIsHighlighted() {
+        final var lines = highlighter.highlightLines("yaml", "key: value\n# comment\n- item\nflag: true");
+        assertEquals(4, lines.size());
+        assertTrue(
+                lines.stream()
+                        .flatMap(l -> l.spans().stream())
+                        .anyMatch(s -> s.style().fg().isPresent()),
+                "expected at least one styled span");
+        final var text = lines.stream()
+                .flatMap(l -> l.spans().stream())
+                .map(dev.tamboui.text.Span::content)
+                .reduce("", String::concat);
+        assertTrue(text.contains("key: value"), text);
+        assertTrue(text.contains("flag: true"), text);
     }
 }

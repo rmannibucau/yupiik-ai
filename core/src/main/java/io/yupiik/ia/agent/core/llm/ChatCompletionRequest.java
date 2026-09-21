@@ -26,9 +26,24 @@ public record ChatCompletionRequest(
         String model,
         List<Message> messages,
         Double temperature,
+        Double topP,
         Boolean stream,
         List<Tool> tools,
         @JsonProperty("tool_choice") String toolChoice,
         @JsonProperty("max_tokens") Integer maxTokens,
         @JsonProperty("reasoning_effort") String reasoningEffort,
-        @JsonOthers Map<String, Object> others) {}
+        @JsonOthers Map<String, Object> others) {
+
+    public ChatCompletionRequest(
+            String model,
+            List<Message> messages,
+            Double temperature,
+            Boolean stream,
+            List<Tool> tools,
+            String toolChoice,
+            Integer maxTokens,
+            String reasoningEffort,
+            Map<String, Object> others) {
+        this(model, messages, temperature, null, stream, tools, toolChoice, maxTokens, reasoningEffort, others);
+    }
+}

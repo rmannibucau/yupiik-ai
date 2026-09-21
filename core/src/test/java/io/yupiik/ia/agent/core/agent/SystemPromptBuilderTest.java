@@ -89,53 +89,49 @@ class SystemPromptBuilderTest {
     }
 
     @Test
-    void includesGlobalSkillIndexOnly() throws Exception {
+    void skillsAreNotInjectedInThePromptButExposedViaTheSkillToolCatalog() throws Exception {
         final var skill = storageHome.resolve("skills").resolve("my-skill").resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: custom-name\ndescription: a skill\n---\nUse the skill body here.");
-        final var builder = new SystemPromptBuilder(
-                config(Map.of(
-                        "yca.storageHome", storageHome.toString(),
-                        "yca.workingDir", project.toString(),
-                        "yca.skills.enabled", "true")),
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null);
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.skills.enabled", "true"));
+        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null);
         final var prompt = builder.build();
-        assertTrue(prompt.contains("<skill name=\"custom-name\">"));
-        assertTrue(prompt.contains("a skill"));
+        assertFalse(
+                prompt.contains("<skill name=\"custom-name\">"),
+                "no skill block should be inlined in the system prompt (mirroring opencode)");
         assertFalse(
                 prompt.contains("Use the skill body here."),
-                "skill bodies should be index-only; the full body loads on demand via the skill tool");
+                "skill bodies should never be inlined; they load on demand via the skill tool");
+        final var catalog = SkillLocator.availableSkillsCatalog(cfg);
+        assertTrue(catalog.contains("<skill><name>custom-name</name>"), "catalog should list the skill: " + catalog);
+        assertTrue(
+                catalog.contains("<description>a skill</description>"),
+                "catalog should carry the description: " + catalog);
     }
 
     @Test
-    void includesProjectSkillFromConventionalDirIndexOnly() throws Exception {
+    void skillsAreNotInjectedInThePromptForProjectSkillsEither() throws Exception {
         final var skill = project.resolve(".opencode")
                 .resolve("skills")
                 .resolve("proj-skill")
                 .resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: proj-skill\n---\nproject skill body");
-        final var builder = new SystemPromptBuilder(
-                config(Map.of(
-                        "yca.storageHome", storageHome.toString(),
-                        "yca.workingDir", project.toString(),
-                        "yca.skills.enabled", "true")),
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null);
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.skills.enabled", "true"));
+        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null);
         final var prompt = builder.build();
-        assertTrue(prompt.contains("<skill name=\"proj-skill\">"));
-        assertTrue(prompt.contains("project skill body"));
+        assertFalse(
+                prompt.contains("<skill name=\"proj-skill\">"),
+                "no skill block should be inlined in the system prompt");
+        assertTrue(
+                SkillLocator.availableSkillsCatalog(cfg).contains("<skill><name>proj-skill</name>"),
+                "the skill tool catalog should still list project skills");
     }
 
     @Test
@@ -143,18 +139,11 @@ class SystemPromptBuilderTest {
         final var skill = storageHome.resolve("skills").resolve("my-skill").resolve("SKILL.md");
         Files.createDirectories(skill.getParent());
         Files.writeString(skill, "---\nname: my-skill\n---\nbody");
-        final var builder = new SystemPromptBuilder(
-                config(Map.of(
-                        "yca.storageHome", storageHome.toString(),
-                        "yca.workingDir", project.toString(),
-                        "yca.skills.enabled", "false")),
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null);
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.skills.enabled", "false"));
+        final var builder = new SystemPromptBuilder(cfg, null, null, null, null, null, null, null);
         final var prompt = builder.build();
         assertFalse(prompt.contains("<skill name=\"my-skill\">"));
     }

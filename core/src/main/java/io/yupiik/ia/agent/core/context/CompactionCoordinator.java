@@ -39,10 +39,11 @@ import java.util.logging.Logger;
  * exists and replaying the last user message when the tail does not cover it. When the summarizer
  * fails it degrades to a deterministic local truncation.
  *
- * <p>{@link #prune(List)} is a local, LLM-free clearing of old tool outputs (the way to reclaim
- * bulk space cheaply): recent turns and a token budget of recent tool outputs are protected, and
- * older tool results are replaced by a short marker only when the prunable volume clears a
- * minimum, so the operation never churns the history for a tiny gain.
+ * <p>{@link #prune(List)} is a local, LLM-free reduction of old tool outputs (the way to reclaim
+ * bulk space cheaply): recent turns and a token budget of recent tool outputs are protected, then
+ * old verbose tool outputs are first spliced down to their head and tail (the shrink rung) and only
+ * cleared to a short marker when the volume still clears a minimum, so the operation never churns
+ * the history for a tiny gain.
  */
 @ApplicationScoped
 public class CompactionCoordinator {
@@ -74,6 +75,9 @@ public class CompactionCoordinator {
 
     /** Replacement content of tool outputs cleared by {@link #prune(List)}. */
     public static final String PRUNE_CLEARED_MARKER = "[old tool result cleared]";
+
+    /** Fragment of the elision marker inserted by {@link #splice(String, int)}; detects already spliced outputs. */
+    private static final String SPLICE_MARKER_FRAGMENT = " chars elided ...]";
 
     private static final String COMPACTED_MARKER = "<compacted-context>";
 
@@ -118,9 +122,10 @@ public class CompactionCoordinator {
     }
 
     /**
-     * Clears old tool outputs locally (no LLM call): the most recent turns and a budget of the
-     * most recent tool outputs are protected, older tool results are replaced by a marker but only
-     * when their total clears {@code yca.pruning.minPruneTokens}, otherwise nothing happens.
+     * Reduces old tool outputs locally (no LLM call): the most recent turns and a budget of the
+     * most recent tool outputs are protected, then old verbose tool outputs are first spliced to
+     * their head and tail ({@code yca.pruning.shrinkOutputChars}) and only cleared to a marker when
+     * the prunable volume still clears {@code yca.pruning.minPruneTokens}, otherwise nothing happens.
      */
     public CompactionResult prune(final List<Message> messages) {
         final var p = configuration.pruning();
@@ -139,9 +144,12 @@ public class CompactionCoordinator {
             }
         }
 
+        final var shrinkCap = p.shrinkOutputChars();
         final var toClear = new ArrayList<Integer>();
+        final var toShrink = new ArrayList<Integer>();
         var protectedTokens = 0;
         var prunableTokens = 0;
+        var shrinkableTokens = 0;
         for (var i = boundary - 1; i >= from; i--) {
             final var m = messages.get(i);
             if (!"tool".equals(m.role())) {
@@ -158,6 +166,29 @@ public class CompactionCoordinator {
             }
             toClear.add(i);
             prunableTokens += tokens;
+            if (shrinkCap > 0 && content.length() > shrinkCap && !content.contains(SPLICE_MARKER_FRAGMENT)) {
+                toShrink.add(i);
+                shrinkableTokens += Math.max(0, tokens - TokenEstimator.estimate(splice(content, shrinkCap)));
+            }
+        }
+        if (shrinkableTokens >= p.minPruneTokens()) {
+            final var out = new ArrayList<Message>(messages);
+            for (final var i : toShrink) {
+                final var m = messages.get(i);
+                out.set(
+                        i,
+                        new Message(
+                                m.role(),
+                                splice(str(m.content()), shrinkCap),
+                                m.name(),
+                                m.toolCalls(),
+                                m.toolCallId(),
+                                m.others()));
+            }
+            final var shrunkCount = toShrink.size();
+            final var reclaimedTokens = shrinkableTokens;
+            LOGGER.fine(() -> "prune shrunk " + shrunkCount + " tool output(s) (~" + reclaimedTokens + " tokens)");
+            return new CompactionResult(List.copyOf(out), Mode.SHRUNK, "");
         }
         if (prunableTokens < p.minPruneTokens()) {
             return new CompactionResult(messages, Mode.NONE, "");
@@ -472,6 +503,7 @@ public class CompactionCoordinator {
                     final var res = chatClient.chat(new ChatCompletionRequest(
                             model,
                             List.of(Message.system(systemPrompt), Message.user(prompt)),
+                            null,
                             null,
                             false,
                             null,

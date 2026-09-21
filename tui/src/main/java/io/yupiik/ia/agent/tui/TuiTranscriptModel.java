@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 
 /**
  * Terminal UI view state on top of the shared {@link ConversationTranscript}:
@@ -28,33 +29,94 @@ import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 public class TuiTranscriptModel extends ConversationTranscript {
     private volatile int scrollBack;
 
+    /** The splitter is injected by Fusion and shared; each transcript gets its own stream parser. */
+    public TuiTranscriptModel(final ThinkTagSplitter thinkTags) {
+        super(thinkTags);
+    }
+
+    private volatile boolean userScrolled;
+
     @Override
     public synchronized void onEvent(final AgentEvent event) {
         super.onEvent(event);
         if (event instanceof AgentEvent.TextDelta
+                || event instanceof AgentEvent.ThinkingDelta
                 || event instanceof AgentEvent.ToolStarted
+                || event instanceof AgentEvent.ToolFinished
                 || event instanceof AgentEvent.TurnDone
                 || event instanceof AgentEvent.Error) {
-            scrollBack = 0;
+            // auto-follow only while the user has not scrolled away: streamed events
+            // must never yank the viewport while reasoning/tool history is being read
+            if (!userScrolled) {
+                scrollBack = 0;
+            }
         }
     }
 
     @Override
     public synchronized void clearConversation() {
         super.clearConversation();
+        userScrolled = false;
         scrollBack = 0;
     }
 
     @Override
     public synchronized void startUserTurn(final String text) {
         super.startUserTurn(text);
+        // a new turn re-pins the view to the live tail on purpose
+        userScrolled = false;
         scrollBack = 0;
     }
 
     @Override
     public synchronized void reset() {
         super.reset();
+        userScrolled = false;
         scrollBack = 0;
+    }
+
+    /** A plain (non thought/tool) markdown segment belonging to one speaker. */
+    public record TurnSegment(String text, boolean user) {}
+
+    /**
+     * Splits plain transcript markdown into speaker turns: a {@code ---} thematic break
+     * followed by a {@code **You**} or {@code **Assistant**} heading starts a new segment
+     * ({@code user} tells them apart). Plain {@code ---} breaks that are not followed by a
+     * speaker heading stay inside the current segment. Content before the first boundary is
+     * assistant. Code fences never reach this method (extracted before rendering).
+     */
+    public static java.util.List<TurnSegment> splitTurns(final String text) {
+        final var lines = text.split("\n", -1);
+        final var out = new java.util.ArrayList<TurnSegment>();
+        var start = 0;
+        var user = false;
+        for (var i = 0; i < lines.length; i++) {
+            if (!"---".equals(lines[i].strip())) {
+                continue;
+            }
+            var j = i + 1;
+            while (j < lines.length && lines[j].isBlank()) {
+                j++;
+            }
+            if (j >= lines.length) {
+                continue;
+            }
+            final var speaker = lines[j].strip();
+            if (!speaker.startsWith("**You**") && !speaker.startsWith("**Assistant**")) {
+                continue;
+            }
+            if (i > start) {
+                out.add(new TurnSegment(
+                        String.join("\n", java.util.Arrays.asList(lines).subList(start, i)), user));
+            }
+            user = speaker.startsWith("**You**");
+            start = j;
+        }
+        if (start < lines.length) {
+            out.add(new TurnSegment(
+                    String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)), user));
+        }
+        return out;
     }
 
     public int scrollBack() {
@@ -63,5 +125,19 @@ public class TuiTranscriptModel extends ConversationTranscript {
 
     public void scrollBack(final int value) {
         this.scrollBack = value;
+    }
+
+    /**
+     * Sticky-scrollback flag: {@code true} while the user has explicitly moved the view
+     * away from the bottom (wheel, PgUp/PgDn, Ctrl+Home/End, tool/search jumps). While
+     * set, streamed events no longer re-pin the view to the bottom; it clears when the
+     * view returns to the bottom or a new user turn starts.
+     */
+    public boolean userScrolled() {
+        return userScrolled;
+    }
+
+    public void userScrolled(final boolean value) {
+        this.userScrolled = value;
     }
 }
