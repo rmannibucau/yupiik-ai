@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import java.util.regex.Pattern;
 
 /**
@@ -29,6 +30,7 @@ import java.util.regex.Pattern;
 public record ToolCard(
         String name, String args, String output, boolean failed, long elapsedMs, boolean running, long ordinal) {
     private static final Pattern DURATION = Pattern.compile("\\(\\s*(?:#(\\d+)\\s*,\\s*)?(\\d+)\\s*ms\\s*\\)");
+    private static final int KEY_COMMAND_MAX = 48;
 
     public static ToolCard parse(final String regionText) {
         final var text = regionText.strip();
@@ -131,6 +133,22 @@ public record ToolCard(
     /** True when the captured output looks like a git/udiff patch. */
     public boolean isDiff() {
         return DiffLines.looksLikeDiff(output);
+    }
+
+    /**
+     * Short, significant command marker for the condensed rendering: the
+     * meaningful tail of a compound command line (eg. {@code cd /foo && ls -la}
+     * -> {@code ls -la}) instead of the full command. Running cards carry the
+     * raw command as name (args are not parsed yet); failed cards carry the
+     * error first line. Blank when there is nothing worth showing.
+     */
+    public String keyCommand() {
+        final var raw = args.isBlank() && running ? name : args;
+        final var significant = ToolPresenter.significantCommand(raw);
+        if (significant.length() <= KEY_COMMAND_MAX) {
+            return significant;
+        }
+        return significant.substring(0, KEY_COMMAND_MAX) + "...";
     }
 
     private record Args(String args, long elapsed, long ordinal) {}

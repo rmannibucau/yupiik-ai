@@ -19,6 +19,8 @@ import io.yupiik.fusion.json.JsonMapper;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Turns raw tool-call data into short, human-readable descriptions for the
@@ -28,6 +30,10 @@ import java.util.Map;
  */
 public final class ToolPresenter {
     private static final int RAW_TRUNCATE = 120;
+    private static final Pattern ENV_ASSIGNMENT =
+            Pattern.compile("^[A-Za-z_][A-Za-z0-9_]*=(\"[^\"]*\"|'[^']*'|\\S*)\\s+");
+    private static final Set<String> NAVIGATION =
+            Set.of("cd", "pushd", "popd", "export", "source", "unset", "set", "alias");
 
     private final JsonMapper mapper;
     private final AskUserAnswersFormatter askUserAnswersFormatter;
@@ -104,6 +110,85 @@ public final class ToolPresenter {
             return truncate(lastMeaningfulLine(output));
         }
         return truncate(firstMeaningfulLine(output));
+    }
+
+    /**
+     * Extracts the most significant command of a compound shell command line:
+     * environment assignments are dropped and navigation segments ({@code cd},
+     * {@code export}, ...) are skipped, so {@code FOO=1 cd /tmp && mvn -q test}
+     * yields {@code mvn -q test}. Shared by the CLI summary and the TUI
+     * condensed tool lines. Line continuations and newlines are flattened to
+     * spaces; blank-safe.
+     */
+    public static String significantCommand(final String raw) {
+        if (raw == null) {
+            return "";
+        }
+        final var flat = raw.replace("\\\r\n", " ")
+                .replace("\\\n", " ")
+                .replace("\r", " ")
+                .replace("\n", " ")
+                .strip();
+        if (flat.isBlank()) {
+            return "";
+        }
+        for (final var segment : splitSegments(flat)) {
+            final var stripped = stripNavigation(stripEnvAssignments(segment));
+            if (!stripped.isBlank()) {
+                return stripped;
+            }
+        }
+        return flat;
+    }
+
+    /** Splits on {@code &&}, {@code ||} and {@code ;}, ignoring separators inside quotes. */
+    private static List<String> splitSegments(final String command) {
+        final var segments = new ArrayList<String>();
+        final var current = new StringBuilder();
+        var quote = '\0';
+        for (var i = 0; i < command.length(); i++) {
+            final var c = command.charAt(i);
+            if (quote != '\0') {
+                if (c == quote) {
+                    quote = '\0';
+                }
+                current.append(c);
+                continue;
+            }
+            if (c == '"' || c == '\'') {
+                quote = c;
+                current.append(c);
+                continue;
+            }
+            if (c == ';' || (c == '&' && command.startsWith("&&", i)) || (c == '|' && command.startsWith("||", i))) {
+                segments.add(current.toString());
+                current.setLength(0);
+                if (c != ';') {
+                    i++;
+                }
+                continue;
+            }
+            current.append(c);
+        }
+        segments.add(current.toString());
+        return segments;
+    }
+
+    private static String stripEnvAssignments(final String segment) {
+        var result = segment.strip();
+        var matcher = ENV_ASSIGNMENT.matcher(result);
+        while (matcher.lookingAt()) {
+            result = result.substring(matcher.end()).strip();
+            matcher = ENV_ASSIGNMENT.matcher(result);
+        }
+        return result;
+    }
+
+    private static String stripNavigation(final String segment) {
+        final var t = segment.strip();
+        final var space = t.indexOf(' ');
+        final var first = space < 0 ? t : t.substring(0, space);
+        return NAVIGATION.contains(first) ? "" : t;
     }
 
     private Map<String, Object> parse(final String argsJson) {

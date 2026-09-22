@@ -58,6 +58,46 @@ class ToolPresenterTest {
     }
 
     @Test
+    void significantCommandKeepsSimpleCommand() {
+        assertEquals("mvn -q test", ToolPresenter.significantCommand("mvn -q test"));
+    }
+
+    @Test
+    void significantCommandSkipsNavigationPreamble() {
+        assertEquals("ls -la", ToolPresenter.significantCommand("cd /foo && ls -la"));
+        assertEquals("mvn -q test", ToolPresenter.significantCommand("cd /foo && cd bar && mvn -q test"));
+        assertEquals("ls -la", ToolPresenter.significantCommand("export FOO=1; ls -la"));
+    }
+
+    @Test
+    void significantCommandKeepsFirstRealSegment() {
+        assertEquals("mvn test", ToolPresenter.significantCommand("mvn test && echo done"));
+    }
+
+    @Test
+    void significantCommandDropsEnvAssignments() {
+        assertEquals("mvn test", ToolPresenter.significantCommand("FOO=bar mvn test"));
+        assertEquals("mvn test", ToolPresenter.significantCommand("FOO=\"a b\" BAR=2 mvn test"));
+    }
+
+    @Test
+    void significantCommandIgnoresSeparatorsInsideQuotes() {
+        assertEquals("echo \"a && b\"", ToolPresenter.significantCommand("echo \"a && b\""));
+        assertEquals("ls -la", ToolPresenter.significantCommand("cd /a; ls -la"));
+    }
+
+    @Test
+    void significantCommandFlattensLineContinuations() {
+        assertEquals("mvn test", ToolPresenter.significantCommand("cd /w && \\\n  mvn test"));
+    }
+
+    @Test
+    void significantCommandIsBlankSafe() {
+        assertEquals("", ToolPresenter.significantCommand(null));
+        assertEquals("", ToolPresenter.significantCommand("   \n  "));
+    }
+
+    @Test
     void summarizesBashWithWorkdir() {
         assertEquals("Bash(ls · build)", presenter.summarize("bash", "{\"command\":\"ls\",\"workdir\":\"build\"}"));
     }

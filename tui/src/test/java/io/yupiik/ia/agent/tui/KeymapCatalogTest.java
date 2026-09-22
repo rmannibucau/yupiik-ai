@@ -66,6 +66,6 @@ class KeymapCatalogTest {
         assertTrue(md.contains("Ctrl+Z"));
         assertTrue(md.contains("Alt+K/J"));
         assertTrue(md.contains("Alt+Backspace"));
-        assertTrue(md.contains("Ctrl+/"));
+        assertTrue(md.contains("Alt+?"));
     }
 }

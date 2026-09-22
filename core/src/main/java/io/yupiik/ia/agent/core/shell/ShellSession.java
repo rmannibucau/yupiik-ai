@@ -26,8 +26,8 @@ import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 public class ShellSession {
     private String sessionId;
     private String activeAgent;
-    private boolean showThinking = true;
-    private boolean showToolOutput = true;
+    private volatile boolean showThinking = true;
+    private volatile boolean showToolOutput;
     private volatile boolean busy;
     private MetricsConfiguration metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT);
 

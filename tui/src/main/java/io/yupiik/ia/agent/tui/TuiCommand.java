@@ -357,7 +357,7 @@ public class TuiCommand implements Runnable {
         final var state = new UiState(model, clock);
         state.sessionId = sessionStore.create();
         state.showThinking = conf.showThinking();
-        session.sessionId(state.sessionId).activeAgent(state.activeAgent).showThinking(conf.showThinking());
+        session.sessionId(state.sessionId).activeAgent(state.activeAgent);
         slashCommands.bind(arg -> {
             final var current = uiState;
             return current == null ? ShellOutcome.none() : themeOutcome(arg, current);
@@ -726,6 +726,13 @@ public class TuiCommand implements Runnable {
     }
 
     private void onEvent(final AgentEvent event, final UiState state) {
+        if (event instanceof AgentEvent.Status status) {
+            // informational progress (output optimization, graph refresh, provider pauses,
+            // stale-read invalidations...): appended to the trailing notification slot instead
+            // of replacing the leading agent state, which must stay short and stable
+            notify(state, status.message());
+            return;
+        }
         state.model.onEvent(event);
         if (event instanceof AgentEvent.ToolStarted started) {
             state.spinnerTick = 0;
@@ -841,10 +848,13 @@ public class TuiCommand implements Runnable {
                 // tool card headers: clicking toggles that card's collapse
                 for (final var anchor : state.toolAnchors) {
                     if (anchor.ordinal() >= 0 && anchor.header().contains(mouse.x(), mouse.y())) {
-                        if (!state.collapsedTools.remove(anchor.ordinal())) {
+                        state.selection.clear();
+                        if (!state.showToolActions) {
+                            // condensed mode: the dim one-liner itself opens the full output
+                            openToolOverlay(state, anchor.ordinal());
+                        } else if (!state.collapsedTools.remove(anchor.ordinal())) {
                             state.collapsedTools.add(anchor.ordinal());
                         }
-                        state.selection.clear();
                         return true;
                     }
                 }
@@ -917,12 +927,12 @@ public class TuiCommand implements Runnable {
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('t')) {
             state.showThinking = !state.showThinking;
-            // keep the session flag in sync so /thinking (no arg) reports the rendered state
-            session.showThinking(state.showThinking);
+            // UI state is authoritative for the TUI; the /thinking command routes through
+            // the frontend which reflects the same toggle, so no session mirror is kept here
             notify(state, "thinking blocks " + (state.showThinking ? "shown" : "hidden"));
             return true;
         }
-        if (key.hasCtrl() && key.isChar('/')) {
+        if (key.hasAlt() && key.isChar('?')) {
             state.shortcutsOpen = !state.shortcutsOpen;
             state.shortcutsScroll = 0;
             return true;
@@ -2124,7 +2134,7 @@ public class TuiCommand implements Runnable {
         }
         bottomConstraints.add(Constraint.length(inputRows));
         bottomConstraints.add(Constraint.length(1));
-        bottomConstraints.add(Constraint.length(state.errorMessage != null ? 3 : 2));
+        bottomConstraints.add(Constraint.length(statusStripRows(state)));
         final var root = Layout.vertical()
                 .constraints(bottomConstraints.toArray(Constraint[]::new))
                 .split(frame.area());
@@ -2689,9 +2699,19 @@ public class TuiCommand implements Runnable {
     /** Single dim summary line shown for a tool action when tool blocks are hidden. */
     private Line hiddenToolLine(final ToolCard card) {
         final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
-        final var label = new StringBuilder(card.name());
-        if (card.ordinal() >= 0) {
-            label.append(" #").append(card.ordinal());
+        final var label = new StringBuilder();
+        if (card.running()) {
+            // live cards carry the raw command as name: show its significant part
+            label.append(card.keyCommand());
+        } else {
+            label.append(card.name());
+            if (card.ordinal() >= 0) {
+                label.append(" #").append(card.ordinal());
+            }
+            final var key = card.keyCommand();
+            if (!key.isBlank()) {
+                label.append(" - ").append(key);
+            }
         }
         if (card.running()) {
             label.append(" - running...");
@@ -3046,18 +3066,23 @@ public class TuiCommand implements Runnable {
         if (metrics.showSessionTotals() && usageTracker != null && usageTracker.requests() > 0) {
             parts.add(Span.styled(" · session: " + usageTracker.requests() + " LLM calls  ", muted));
         }
-        // flexible informational messages (code graph refreshes, clipboard feedback, queue notices...)
-        // are wide and variable, so they trail the fixed segments and wrap instead of pushing
-        // model/permission/metrics off the leading line
-        if (state.notification != null && !state.notification.isBlank()) {
-            final var notifColor = activeError(state) ? palette.error() : palette.warning();
-            parts.add(Span.styled("  ⓘ " + state.notification + "  ", Style.EMPTY.fg(Color.hex(notifColor))));
-        }
-        final var line = Line.from(parts.toArray(Span[]::new));
         // the status strip reserves a right edge for the clickable "?" shortcuts affordance
-        final var helpText = "  [?]     ";
+        final var helpText = "  [Alt+?] ";
         final var helpW = Math.min(helpText.length(), Math.max(1, rect.width()));
         final var statusW = Math.max(1, rect.width() - helpW);
+        // flexible informational messages (code graph refreshes, clipboard feedback, queue notices...)
+        // trail the fixed segments: clipped with an ellipsis to the space left on the leading row
+        // so they never wrap onto a second line nor push model/permission/metrics out
+        if (state.notification != null && !state.notification.isBlank()) {
+            final var fixedWidth = parts.stream().mapToInt(Span::width).sum();
+            final var notifColor = activeError(state) ? palette.error() : palette.warning();
+            final var notifPrefix = "  ⓘ ";
+            final var remaining = statusW - fixedWidth - CharWidth.of(notifPrefix) - 2; // trailing "  "
+            parts.add(Span.styled(
+                    notifPrefix + ellipsize(state.notification, Math.max(8, remaining)) + "  ",
+                    Style.EMPTY.fg(Color.hex(notifColor))));
+        }
+        final var line = Line.from(parts.toArray(Span[]::new));
         final var statusSplit = helpW >= rect.width()
                 ? List.of(rect)
                 : List.of(
@@ -3087,12 +3112,13 @@ public class TuiCommand implements Runnable {
                     "⚠  context at " + percent + "% (will compact at " + compactionThreshold
                             + "%) - consider /compact  ",
                     Style.EMPTY.fg(Color.hex(palette.warning()))));
+            // the strip grows a row for this warning: draw it below the status line, not over it
             frame.renderWidget(
                     Paragraph.builder()
                             .text(Text.from(banner))
                             .overflow(dev.tamboui.style.Overflow.CLIP)
                             .build(),
-                    rect);
+                    new Rect(rect.x(), rect.y() + rect.height() - 1, rect.width(), 1));
         }
         if (state.errorMessage != null) {
             final var err = Line.from(Span.styled(
@@ -4179,6 +4205,17 @@ public class TuiCommand implements Runnable {
                 : configuration.compaction().thresholdPercent();
     }
 
+    /**
+     * Height of the status strip: 3 rows while a boxed error is shown, 2 rows when the context
+     * compaction warning banner is active (it occupies the strip's last row), 1 row otherwise.
+     */
+    private int statusStripRows(final UiState state) {
+        if (state.errorMessage != null) {
+            return 3;
+        }
+        return state.model.contextPercent() >= compactionThreshold() ? 2 : 1;
+    }
+
     /** The pruning threshold in %, falling back to a safe default when configuration is absent (rendering tests). */
     private int pruningThreshold() {
         return configuration == null || configuration.pruning() == null
@@ -4684,7 +4721,7 @@ public class TuiCommand implements Runnable {
         private volatile Wait wait;
         private volatile String activeAgent = "";
         private volatile boolean showThinking;
-        private volatile boolean showToolActions = true;
+        private volatile boolean showToolActions;
         private volatile boolean showTodos;
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;

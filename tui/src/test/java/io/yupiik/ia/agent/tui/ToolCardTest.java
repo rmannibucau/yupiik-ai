@@ -119,4 +119,43 @@ class ToolCardTest {
         final var card = ToolCard.parse("*streaming `bash`* (7 ms)\n\n```text\nhello world\nfoo bar\n```");
         assertFalse(card.isDiff());
     }
+
+    @Test
+    void keyCommandExtractsSignificantCommand() {
+        final var card = ToolCard.parse("*streaming `bash`: cd /foo && ls -la* (#31, 3 ms)");
+        assertEquals("ls -la", card.keyCommand());
+    }
+
+    @Test
+    void keyCommandKeepsPlainCommand() {
+        final var card = ToolCard.parse("*streaming `bash`: mvn -q test* (#1, 5 ms)");
+        assertEquals("mvn -q test", card.keyCommand());
+    }
+
+    @Test
+    void keyCommandTruncatesLongCommands() {
+        final var card = ToolCard.parse("*streaming `bash`: echo " + "x".repeat(120) + "* (#2, 5 ms)");
+        final var key = card.keyCommand();
+        assertEquals(48 + "...".length(), key.length());
+        assertTrue(key.endsWith("..."));
+    }
+
+    @Test
+    void keyCommandCondensesRunningCommand() {
+        final var card = ToolCard.parse("`| running cd /tmp && tail -f log`");
+        assertTrue(card.running());
+        assertEquals("tail -f log", card.keyCommand());
+    }
+
+    @Test
+    void keyCommandEmptyWithoutArgs() {
+        final var card = ToolCard.parse("*streaming `think`* (1 ms)");
+        assertEquals("", card.keyCommand());
+    }
+
+    @Test
+    void keyCommandShowsFailedReason() {
+        final var card = ToolCard.parse("> tool `bash` failed: boom (#7, 42 ms)");
+        assertEquals("boom", card.keyCommand());
+    }
 }

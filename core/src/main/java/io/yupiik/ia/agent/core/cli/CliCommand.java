@@ -199,7 +199,7 @@ public class CliCommand implements Runnable {
             @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.")
             boolean showThinking,
 
-            @Property(defaultValue = "true", documentation = "Show tool invocations and output on stderr.")
+            @Property(defaultValue = "false", documentation = "Show tool invocations and output on stderr.")
             boolean showToolOutput,
 
             @Property(

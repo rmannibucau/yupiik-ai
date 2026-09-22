@@ -22,6 +22,8 @@ import dev.tamboui.tui.TuiRunner;
 import dev.tamboui.tui.event.KeyCode;
 import dev.tamboui.tui.event.KeyEvent;
 import dev.tamboui.tui.event.KeyModifiers;
+import dev.tamboui.tui.event.MouseButton;
+import dev.tamboui.tui.event.MouseEvent;
 import dev.tamboui.tui.event.PasteEvent;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
@@ -170,6 +172,31 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(new PasteEvent("/theme"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("ⓘ"); // notification glyph present in the status strip
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void agentStatusEventsAppendNotificationAndNeverReplaceAgentState() throws Exception {
+        // AgentEvent.Status carries informational progress (output optimization, graph
+        // refresh...): it must land in the trailing notification slot, ellipsized when too
+        // long, while the leading agent state (ready) stays untouched
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-agent-status-notification-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.active().frontend().onEvent(new AgentEvent.Status("MARKER" + "x".repeat(300) + "TAIL"));
+
+        awaitText("ⓘ");
+        awaitText("MARKER");
+        awaitText("..."); // clipped to the leading row width
+        awaitTextGone("TAIL");
+        awaitText("ready"); // agent state still first and untouched
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -451,7 +478,7 @@ class TuiCommandRenderTest {
     }
 
     @Test
-    void toolOutputHideKeepsDimLineAndRestoresCards() throws Exception {
+    void toolOutputCondensedByDefaultAndCtrlYRestoresCards() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
         uiThread = new Thread(command, "tui-tool-output-test");
@@ -460,17 +487,47 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"cd /tmp && ls -la\"}"));
         shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt"));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true));
-        awaitText("ls -la"); // full card with args + output
+        // condensed by default: the dim one-liner carries the significant command, not the output
+        awaitText("✓ bash");
+        awaitText("ls -la");
+        awaitTextGone("file.txt");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
-        awaitTextGone("ls -la"); // args and output hidden
-        awaitText("✓ bash"); // dim one-liner remains (tool finished in <1ms: no duration)
+        awaitText("file.txt"); // full card restored with args and output
 
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
-        awaitText("ls -la"); // full card restored
+        awaitTextGone("file.txt"); // condensed again
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void clickingCondensedToolLineOpensFullOutput() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-click-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "out-a\nout-b"));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "out-a\nout-b", true));
+        awaitText("✓ bash"); // condensed dim line
+
+        // clicking the dim line opens the full-output modal even while blocks are hidden
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+        awaitText("out-a");
+        awaitText("full output");
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("full output");
+        awaitTextGone("out-a"); // back to the condensed line, cards stay hidden
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -488,12 +545,12 @@ class TuiCommandRenderTest {
 
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}"));
         shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
-        awaitText("streamed line"); // live tool stream visible
+        awaitTextGone("streamed line"); // condensed default hides the live stream
+        awaitText("tail -f log"); // dim one-liner with the significant command
+        awaitText("running...");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
-        awaitTextGone("streamed line");
-        awaitText("tail -f log"); // dim one-liner with the command
-        awaitText("running...");
+        awaitText("streamed line"); // cards shown: live stream visible
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -683,7 +740,7 @@ class TuiCommandRenderTest {
     }
 
     @Test
-    void shortcutOverlayOpensWithCtrlSlash() throws Exception {
+    void shortcutOverlayOpensWithAltQuestion() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         uiThread = new Thread(command, "tui-shortcuts-overlay-test");
         uiThread.setDaemon(true);
@@ -695,8 +752,8 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('?'));
         awaitText("?");
 
-        // the overlay toggle is reserved to Ctrl+/
-        tuiRef.get().dispatch(KeyEvent.ofChar('/', KeyModifiers.CTRL));
+        // the overlay toggle is reserved to Alt+?
+        tuiRef.get().dispatch(KeyEvent.ofChar('?', KeyModifiers.ALT));
         awaitText("Up/Down scroll"); // overlay footer: only rendered while the popup is open
         awaitText("send prompt"); // first binding listed in the Input group
 
@@ -849,6 +906,19 @@ class TuiCommandRenderTest {
                 final var idx = lines[row].indexOf(token);
                 if (idx >= 0) {
                     return idx;
+                }
+            }
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + token + "'");
+        }
+    }
+
+    /** Screen row index of the first row containing {@code token}. */
+    private int rowOf(final String token) throws InterruptedException {
+        while (true) {
+            final var lines = backend.text().split("\n");
+            for (var y = 0; y < lines.length; y++) {
+                if (lines[y].contains(token)) {
+                    return y;
                 }
             }
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + token + "'");
