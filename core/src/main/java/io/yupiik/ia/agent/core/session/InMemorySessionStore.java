@@ -76,7 +76,8 @@ public class InMemorySessionStore implements SessionStore {
                         m.role(),
                         m.content(),
                         m.toolCalls(),
-                        m.toolCallId()))
+                        m.toolCallId(),
+                        m.name()))
                 .toList();
         sessions.put(id, new ArrayList<>(entries));
     }

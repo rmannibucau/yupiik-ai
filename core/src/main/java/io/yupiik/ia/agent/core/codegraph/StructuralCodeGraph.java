@@ -80,7 +80,7 @@ import java.util.logging.Logger;
  * root with typed links between them.
  */
 @ApplicationScoped
-public class StructuralCodeGraph {
+public class StructuralCodeGraph implements AutoCloseable {
     private static final Logger LOGGER = Logger.getLogger(StructuralCodeGraph.class.getName());
     private static final Set<String> PROJECT_MARKERS = Set.of(
             "pom.xml",

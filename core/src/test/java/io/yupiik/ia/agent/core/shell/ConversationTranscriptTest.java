@@ -21,6 +21,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -203,7 +205,33 @@ class ConversationTranscriptTest {
         assertFalse(md.contains("ignored"));
         assertTrue(md.contains("---\n\n**You**\n\nquestion"));
         assertTrue(md.contains("---\n\n**Assistant**\n\nreply"));
-        assertTrue(md.contains("*tool `null` -> tool output*"));
+        assertTrue(md.contains("*tool -> tool output*"));
+    }
+
+    @Test
+    void replayResolvesToolNameFromAssistantCall() {
+        final var t = new ConversationTranscript();
+        t.replay(List.of(
+                Message.assistant(
+                        "reading", List.of(new ToolCall("call-1", "function", new FunctionCall("grep", "{}"), null))),
+                Message.tool("call-1", "tool output\nmore")));
+
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("*tool `grep` -> tool output*"));
+        assertFalse(md.contains("null"));
+    }
+
+    @Test
+    void replayUsesStoredToolNameOnToolMessage() {
+        final var t = new ConversationTranscript();
+        t.replay(List.of(
+                Message.assistant(
+                        "reading", List.of(new ToolCall("call-1", "function", new FunctionCall("grep", "{}"), null))),
+                Message.toolResult("call-1", "tool output\nmore", "grep")));
+
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("*tool `grep` -> tool output*"));
+        assertFalse(md.contains("null"));
     }
 
     @Test

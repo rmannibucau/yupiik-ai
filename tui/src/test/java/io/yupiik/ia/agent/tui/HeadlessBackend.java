@@ -20,7 +20,9 @@ import dev.tamboui.buffer.DiffResult;
 import dev.tamboui.layout.Position;
 import dev.tamboui.layout.Rect;
 import dev.tamboui.layout.Size;
+import dev.tamboui.style.Color;
 import dev.tamboui.terminal.Backend;
+import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 
@@ -124,6 +126,26 @@ final class HeadlessBackend implements Backend {
                 sb.append(line.toString().stripTrailing()).append('\n');
             }
             return sb.toString();
+        }
+    }
+
+    /** Symbol at a screen coordinate, or a space when the cell is empty. */
+    String symbol(final int x, final int y) {
+        synchronized (lock) {
+            return y < 0
+                            || y >= buffer.height()
+                            || x < 0
+                            || x >= buffer.width()
+                            || buffer.get(x, y).isEmpty()
+                    ? " "
+                    : buffer.get(x, y).symbol();
+        }
+    }
+
+    /** Foreground color at a screen coordinate. */
+    Optional<Color> fg(final int x, final int y) {
+        synchronized (lock) {
+            return buffer.get(x, y).style().fg();
         }
     }
 }

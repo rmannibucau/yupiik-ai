@@ -95,6 +95,7 @@ public class SyntaxHighlighter {
                         + "|(?<num>\\b\\d+(?:\\.\\d+)?\\b)"
                         + "|(?<tag><\\/?[A-Za-z][A-Za-z0-9:-]*|/?>)"
                         + "|(?<attr>(?<![A-Za-z0-9_])[A-Za-z_:][A-Za-z0-9_:.-]*=)"
+                        + "|(?<ann>@[A-Za-z_][A-Za-z0-9_$]*)"
                         + "|(?<kw>(" + String.join("|", keywords) + "))"
                         + "|(?<ty>(" + String.join("|", types) + "))",
                 Pattern.MULTILINE));
@@ -148,7 +149,8 @@ public class SyntaxHighlighter {
                     "assert",
                     "native",
                     "transient",
-                    "volatile"),
+                    "volatile",
+                    "strictfp"),
             List.of(
                     "String",
                     "int",
@@ -165,11 +167,33 @@ public class SyntaxHighlighter {
                     "Boolean",
                     "Double",
                     "Float",
+                    "Byte",
+                    "Short",
+                    "Character",
+                    "CharSequence",
+                    "StringBuilder",
+                    "StringBuffer",
                     "List",
+                    "ArrayList",
+                    "LinkedList",
                     "Map",
+                    "HashMap",
+                    "LinkedHashMap",
                     "Set",
+                    "HashSet",
                     "Collection",
-                    "Optional"));
+                    "Optional",
+                    "OptionalInt",
+                    "OptionalDouble",
+                    "Stream",
+                    "Collectors",
+                    "CompletableFuture",
+                    "BigDecimal",
+                    "BigInteger",
+                    "Arrays",
+                    "Objects",
+                    "Path",
+                    "Iterable"));
     private static final Highlighter TS = language(
             List.of(
                     "const",
@@ -525,6 +549,9 @@ public class SyntaxHighlighter {
         }
         if (m.group("attr") != null) {
             return token(theme.attr());
+        }
+        if (m.pattern().namedGroups().containsKey("ann") && m.group("ann") != null) {
+            return token(theme.annotation());
         }
         if (m.group("kw") != null) {
             return token(theme.keyword());

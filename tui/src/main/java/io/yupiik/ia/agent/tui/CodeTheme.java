@@ -23,11 +23,18 @@ import java.util.Locale;
  * one-dark on the dark theme and one-light on the light theme.
  */
 public record CodeTheme(
-        String string, String comment, String number, String keyword, String type, String tag, String attr) {
+        String string,
+        String comment,
+        String number,
+        String keyword,
+        String type,
+        String tag,
+        String attr,
+        String annotation) {
     public static final CodeTheme ONE_DARK =
-            new CodeTheme("e5c07b", "7f848e", "d19a66", "c678dd", "61afef", "e06c75", "56b6c2");
+            new CodeTheme("e5c07b", "7f848e", "d19a66", "c678dd", "61afef", "e06c75", "56b6c2", "c586c0");
     public static final CodeTheme ONE_LIGHT =
-            new CodeTheme("50a14f", "a0a1a7", "986801", "a626a4", "4078f2", "e45649", "0184bc");
+            new CodeTheme("50a14f", "a0a1a7", "986801", "a626a4", "4078f2", "e45649", "0184bc", "008080");
 
     /**
      * @param name       configured value: auto, one-dark or one-light

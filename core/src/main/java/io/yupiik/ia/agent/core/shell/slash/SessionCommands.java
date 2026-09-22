@@ -142,8 +142,15 @@ public class SessionCommands implements SlashCommandSet {
                 .append(dump.messages().size())
                 .append(" messages)**\n\n");
         for (final var message : dump.messages()) {
+            if ("assistant".equals(message.role())
+                    && message.content() != null
+                    && message.content().isBlank()) {
+                continue;
+            }
+            final var toolName = message.toolName();
             sb.append("- **")
                     .append(message.role())
+                    .append(toolName == null ? "" : " (" + toolName + ")")
                     .append("**: ")
                     .append(SlashRegistry.firstLine(String.valueOf(message.content()), 120))
                     .append('\n');

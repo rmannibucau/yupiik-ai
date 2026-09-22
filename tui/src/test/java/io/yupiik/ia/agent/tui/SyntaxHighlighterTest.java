@@ -121,6 +121,38 @@ class SyntaxHighlighterTest {
     }
 
     @Test
+    void highlightColorsJavaAnnotations() {
+        final var line = highlighter
+                .highlight("java", "@Override\n@Deprecated void run()")
+                .lines()
+                .get(0);
+        final Optional<dev.tamboui.style.Color> annotation = line.spans().stream()
+                .filter(s -> s.content().equals("@Override"))
+                .findFirst()
+                .flatMap(s -> s.style().fg());
+        assertTrue(annotation.isPresent(), "expected the annotation to carry a foreground color");
+        assertEquals(0xc5, annotation.get().toRgb().r());
+        assertEquals(0x86, annotation.get().toRgb().g());
+        assertEquals(0xc0, annotation.get().toRgb().b());
+    }
+
+    @Test
+    void highlightColorsJavaTypes() {
+        final var line = highlighter
+                .highlight("java", "CompletableFuture<String> f;")
+                .lines()
+                .get(0);
+        final Optional<dev.tamboui.style.Color> type = line.spans().stream()
+                .filter(s -> s.content().equals("CompletableFuture"))
+                .findFirst()
+                .flatMap(s -> s.style().fg());
+        assertTrue(type.isPresent(), "expected the type to carry a foreground color");
+        assertEquals(0x61, type.get().toRgb().r());
+        assertEquals(0xaf, type.get().toRgb().g());
+        assertEquals(0xef, type.get().toRgb().b());
+    }
+
+    @Test
     void highlightColorsStrings() {
         final var line =
                 highlighter.highlight("java", "var s = \"str\";").lines().get(0);

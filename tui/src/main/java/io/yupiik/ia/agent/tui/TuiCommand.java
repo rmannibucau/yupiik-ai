@@ -23,6 +23,7 @@ import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Color;
 import dev.tamboui.style.Overflow;
 import dev.tamboui.style.Style;
+import dev.tamboui.text.CharWidth;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import dev.tamboui.text.Text;
@@ -85,6 +86,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -106,6 +108,7 @@ import java.util.regex.Pattern;
 public class TuiCommand implements Runnable {
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
+    private static final Logger LOG = Logger.getLogger(TuiCommand.class.getName());
 
     private String help() {
         return "\n\n" + slashRegistry.helpMarkdown();
@@ -143,6 +146,9 @@ public class TuiCommand implements Runnable {
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
     private volatile long completionGeneration;
+    private final CompletionCache completionCache = new CompletionCache();
+    private volatile String cachedGitBranch;
+    private volatile long cachedGitBranchAt;
     private final TuiSlashCommands slashCommands;
     private final SlashRegistry slashRegistry;
     private final ShellSession session = new ShellSession();
@@ -167,6 +173,10 @@ public class TuiCommand implements Runnable {
     private static final int RESUME_SUMMARY_WIDTH = 80;
     /** Inline preview lines kept in a tool card; the rest lives behind the expand link / Ctrl+O. */
     private static final int MAX_INLINE_TOOL_LINES = 3;
+    /** TTL for the git branch filesystem lookup so the render thread does not stat/log each frame. */
+    private static final long GIT_BRANCH_CACHE_TTL_MILLIS = 3_000;
+    /** If the render thread has not ticked for this long while an approval/feedback gate waits, fail closed. */
+    private static final long RENDER_STALL_TIMEOUT_MILLIS = 5_000;
 
     private static final Pattern SPLIT_COMMAND = Pattern.compile("\\s+");
 
@@ -232,7 +242,7 @@ public class TuiCommand implements Runnable {
         this.persistHistory = tuiConfiguration.history();
         this.completionEngine = new CompletionEngine(
                 slashRegistry,
-                this::completionModels,
+                completionCache::models,
                 () -> providerManager == null || providerManager.providers() == null
                         ? List.of()
                         : providerManager.providers().stream()
@@ -243,16 +253,18 @@ public class TuiCommand implements Runnable {
                         : agentProvider.agents().stream()
                                 .map(AgentConfiguration::name)
                                 .toList(),
-                this::sessionsForCompletion,
-                this::toolsForCompletion,
+                completionCache::sessions,
+                completionCache::tools,
                 () -> agentProvider == null || agentProvider.agents() == null
                         ? List.of()
                         : agentProvider.agents().stream()
                                 .map(AgentConfiguration::name)
                                 .toList(),
-                this::completionVariants);
+                completionCache::variants);
         this.promptHistory = new PromptHistory();
         applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
+        // warm the completion cache off the render thread so TAB never blocks on the network
+        refreshCompletionCache();
     }
 
     @RootConfiguration("tui")
@@ -443,7 +455,7 @@ public class TuiCommand implements Runnable {
             tui.runLater(() -> state.approval = new Approval(title, detail, latch, outcome));
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted) {
+                    if (state.interrupted || renderStalled(state)) {
                         tui.runLater(() -> {
                             if (state.approval != null && state.approval.latch() == latch) {
                                 state.approval = null;
@@ -469,7 +481,7 @@ public class TuiCommand implements Runnable {
             tui.runLater(() -> state.feedbackPrompt = new FeedbackPrompt(questions, latch, answers, answered));
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted) {
+                    if (state.interrupted || renderStalled(state)) {
                         tui.runLater(() -> {
                             if (state.feedbackPrompt != null && state.feedbackPrompt.latch() == latch) {
                                 state.feedbackPrompt = null;
@@ -484,6 +496,12 @@ public class TuiCommand implements Runnable {
             }
             return answered.get() ? answers : null;
         };
+    }
+
+    /** True when the render/UI thread has not produced a frame for {@link RENDER_STALL_TIMEOUT_MILLIS}. */
+    private boolean renderStalled(final UiState state) {
+        final var last = state.lastRenderTick;
+        return last != 0 && clock.millis() - last >= RENDER_STALL_TIMEOUT_MILLIS;
     }
 
     private boolean onFeedbackKey(final Event event, final TuiRunner runner, final UiState state) {
@@ -717,7 +735,7 @@ public class TuiCommand implements Runnable {
             final var runner = state.runner;
             if (runner != null && !state.model.busy()) {
                 final var next = state.pendingPrompts.removeFirst();
-                runner.runLater(() -> submit(next, runner, state));
+                runner.runLater(() -> submit(next, runner, state, false));
             }
         }
     }
@@ -739,6 +757,9 @@ public class TuiCommand implements Runnable {
         }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
+        }
+        if (state.shortcutsOpen) {
+            return onShortcutsKey(event, state);
         }
         if (state.searchOpen) {
             return onSearchKey(event, state);
@@ -775,15 +796,22 @@ public class TuiCommand implements Runnable {
         if (event instanceof final MouseEvent mouse) {
             if (mouse.isScroll()) {
                 if (mouse.kind() == MouseEventKind.SCROLL_UP) {
-                    state.model.scrollBack(state.model.scrollBack() + 3);
+                    state.model.anchorRow(state.model.anchorRow() - 3);
                     state.model.userScrolled(true);
                 } else if (mouse.kind() == MouseEventKind.SCROLL_DOWN) {
-                    state.model.scrollBack(Math.max(0, state.model.scrollBack() - 3));
-                    state.model.userScrolled(state.model.scrollBack() > 0);
+                    state.model.anchorRow(state.model.anchorRow() + 3);
+                    state.model.userScrolled(state.model.anchorRow() < state.maxViewOffset);
                 }
                 return true;
             }
             if (mouse.isPress() && mouse.isLeftButton()) {
+                // shortcuts appearance: clicking the "?" opens the full list
+                if (state.shortcutRect != null && state.shortcutRect.contains(mouse.x(), mouse.y())) {
+                    state.selection.clear();
+                    state.shortcutsOpen = !state.shortcutsOpen;
+                    state.shortcutsScroll = 0;
+                    return true;
+                }
                 // queued prompts: clicking a queued row removes it
                 for (var i = 0; i < state.queueRects.size(); i++) {
                     if (state.queueRects.get(i).contains(mouse.x(), mouse.y())) {
@@ -884,6 +912,11 @@ public class TuiCommand implements Runnable {
             state.model.status("thinking blocks " + (state.showThinking ? "shown" : "hidden"));
             return true;
         }
+        if ((key.hasCtrl() && key.isChar('/')) || (!key.hasCtrl() && !key.hasAlt() && key.isChar('?'))) {
+            state.shortcutsOpen = !state.shortcutsOpen;
+            state.shortcutsScroll = 0;
+            return true;
+        }
         if (key.hasCtrl() && key.isCharIgnoreCase('p')) {
             if (state.showTodos && !state.showTodosCollapsed) {
                 state.showTodosCollapsed = true;
@@ -970,6 +1003,13 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
+            final var pending = pendingLine;
+            if (pending != null) {
+                state.input.clear();
+                pendingLine = null;
+                pending.complete(Optional.empty());
+                return true;
+            }
             if (state.completion != null) {
                 dismissCompletion(state);
                 return true;
@@ -985,22 +1025,22 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isPageUp()) {
-            state.model.scrollBack(state.model.scrollBack() + 10);
+            state.model.anchorRow(state.model.anchorRow() - 10);
             state.model.userScrolled(true);
             return true;
         }
         if (key.isPageDown()) {
-            state.model.scrollBack(Math.max(0, state.model.scrollBack() - 10));
-            state.model.userScrolled(state.model.scrollBack() > 0);
+            state.model.anchorRow(state.model.anchorRow() + 10);
+            state.model.userScrolled(state.model.anchorRow() < state.maxViewOffset);
             return true;
         }
         if (key.hasCtrl() && key.isKey(KeyCode.HOME)) {
-            state.model.scrollBack(Integer.MAX_VALUE);
+            state.model.anchorRow(0);
             state.model.userScrolled(true);
             return true;
         }
         if (key.hasCtrl() && key.isKey(KeyCode.END)) {
-            state.model.scrollBack(0);
+            state.model.anchorRow(state.maxViewOffset);
             state.model.userScrolled(false);
             return true;
         }
@@ -1066,10 +1106,18 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isConfirm() && !key.hasShift() && !key.hasAlt()) {
+            final var pending = pendingLine;
+            if (pending != null) {
+                final var answer = state.input.text();
+                state.input.clear();
+                pendingLine = null;
+                pending.complete(Optional.of(answer));
+                return true;
+            }
             final var text = state.input.text().strip();
             state.input.clear();
             if (!text.isEmpty()) {
-                submit(text, runner, state);
+                submit(text, runner, state, true);
             }
             return true;
         }
@@ -1168,7 +1216,7 @@ public class TuiCommand implements Runnable {
         copyText(runner, state, code);
     }
 
-    private void submit(final String text, final TuiRunner runner, final UiState state) {
+    private void submit(final String text, final TuiRunner runner, final UiState state, final boolean pinToBottom) {
         this.uiRunner = runner;
         promptHistory.add(text);
         dismissCompletion(state);
@@ -1191,7 +1239,7 @@ public class TuiCommand implements Runnable {
         if (state.title == null || state.title.isBlank()) {
             state.title = TuiInputSupport.firstLine(text);
         }
-        state.model.startUserTurn(text);
+        state.model.startUserTurn(text, pinToBottom);
         state.interrupted = false;
         waiting(state, "thinking...", SpinnerStyle.CLOCK);
         final var override = agentSessionService.agentOverride(text);
@@ -1249,7 +1297,7 @@ public class TuiCommand implements Runnable {
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
         uiState = state;
-        state.model.transcript().append("\n\n---\n\n**You**\n\n`").append(text).append("`\n");
+        state.model.appendTranscript("\n\n---\n\n**You**\n\n`" + text + "`\n");
         // the TUI keeps its modal-driven plan editor (Enter/Esc handling needs the widget stack)
         final var parts = SPLIT_COMMAND.split(text.substring(1), 2);
         if ("editplan".equals(parts[0].toLowerCase(Locale.ROOT))) {
@@ -1274,8 +1322,7 @@ public class TuiCommand implements Runnable {
         switch (outcome) {
             case ShellOutcome.None none -> {}
             case ShellOutcome.Status(String message) -> state.model.status(message);
-            case ShellOutcome.Transcript(String markdown) ->
-                state.model.transcript().append(markdown);
+            case ShellOutcome.Transcript(String markdown) -> state.model.appendTranscript(markdown);
             case ShellOutcome.Error(String message) -> modelError(state, message);
             case ShellOutcome.Quit quit -> {
                 awaitInFlight(state);
@@ -1307,32 +1354,32 @@ public class TuiCommand implements Runnable {
 
             @Override
             public void status(final String message) {
-                state.model.status(message);
+                runner.runLater(() -> state.model.status(message));
             }
 
             @Override
             public void notice(final AgentEvent.Notice.Level level, final String message) {
-                state.model.status(message);
+                runner.runLater(() -> state.model.status(message));
             }
 
             @Override
             public void transcript(final String markdown) {
-                state.model.transcript().append(markdown);
+                runner.runLater(() -> state.model.appendTranscript(markdown));
             }
 
             @Override
             public void error(final String message) {
-                modelError(state, message);
+                runner.runLater(() -> modelError(state, message));
             }
 
             @Override
             public void showThinking(final boolean value) {
-                state.showThinking = value;
+                runner.runLater(() -> state.showThinking = value);
             }
 
             @Override
             public void showToolOutput(final boolean value) {
-                state.showToolActions = value;
+                runner.runLater(() -> state.showToolActions = value);
             }
 
             @Override
@@ -1542,64 +1589,79 @@ public class TuiCommand implements Runnable {
         return line.substring(start, end);
     }
 
-    private List<String> sessionsForCompletion() {
-        if (sessionStore == null) {
-            return List.of();
-        }
+    /** Asynchronously reloads the completion value cache so render/onKey never does network or IO. */
+    private void refreshCompletionCache() {
         try {
-            final var sessions = sessionStore.list();
-            if (sessions == null || sessions.isEmpty()) {
-                return List.of();
-            }
-            return sessions.stream().map(SessionStore.SessionInfo::id).toList();
+            executor.execute(() -> {
+                if (chatClient != null) {
+                    try {
+                        final var ids = chatClient.models().ids();
+                        completionCache.models(ids == null ? List.of() : List.copyOf(ids));
+                    } catch (final Exception e) {
+                        LOG.log(Level.SEVERE, "model list refresh failed; keeping previous completion cache", e);
+                    }
+                }
+                if (mcpManager != null) {
+                    try {
+                        final var byServer = mcpManager.toolsByServer();
+                        if (byServer == null || byServer.isEmpty()) {
+                            completionCache.tools(List.of());
+                        } else {
+                            completionCache.tools(byServer.values().stream()
+                                    .flatMap(List::stream)
+                                    .map(EmbeddedTool::name)
+                                    .distinct()
+                                    .sorted()
+                                    .toList());
+                        }
+                    } catch (final RuntimeException e) {
+                        LOG.log(Level.SEVERE, "tools refresh failed; keeping previous completion cache", e);
+                    }
+                }
+                if (sessionStore != null) {
+                    try {
+                        final var sessions = sessionStore.list();
+                        if (sessions == null || sessions.isEmpty()) {
+                            completionCache.sessions(List.of());
+                        } else {
+                            completionCache.sessions(sessions.stream()
+                                    .map(SessionStore.SessionInfo::id)
+                                    .toList());
+                        }
+                    } catch (final RuntimeException e) {
+                        LOG.log(Level.SEVERE, "sessions refresh failed; keeping previous completion cache", e);
+                    }
+                }
+                if (chatClient != null) {
+                    final var variants = new LinkedHashMap<String, List<String>>();
+                    for (final var model : completionCache.models()) {
+                        final var selected = new ArrayList<String>();
+                        if (chatClient.implicitVariant(model) != null) {
+                            selected.add("default");
+                        }
+                        try {
+                            final var raw = chatClient.variants(model);
+                            if (raw != null) {
+                                for (final var v : raw) {
+                                    selected.add(v.name());
+                                }
+                            }
+                        } catch (final Exception e) {
+                            LOG.log(
+                                    Level.SEVERE,
+                                    "variants refresh failed for model " + model + "; using implicit defaults",
+                                    e);
+                        }
+                        if (!selected.isEmpty()) {
+                            variants.put(model, List.copyOf(selected));
+                        }
+                    }
+                    completionCache.variants(variants);
+                }
+            });
         } catch (final RuntimeException e) {
-            return List.of();
-        }
-    }
-
-    private List<String> completionModels() {
-        if (chatClient == null) {
-            return List.of();
-        }
-        try {
-            final var ids = chatClient.models().ids();
-            return ids == null ? List.of() : ids;
-        } catch (final Exception e) {
-            return List.of();
-        }
-    }
-
-    private List<String> completionVariants(final String model) {
-        final var selected = new ArrayList<String>();
-        if (chatClient.implicitVariant(model) != null) {
-            selected.add("default");
-        }
-        final var variants = chatClient.variants(model);
-        if (variants != null) {
-            for (final var v : variants) {
-                selected.add(v.name());
-            }
-        }
-        return selected;
-    }
-
-    private List<String> toolsForCompletion() {
-        if (mcpManager == null) {
-            return List.of();
-        }
-        try {
-            final var byServer = mcpManager.toolsByServer();
-            if (byServer == null || byServer.isEmpty()) {
-                return List.of();
-            }
-            return byServer.values().stream()
-                    .flatMap(List::stream)
-                    .map(EmbeddedTool::name)
-                    .distinct()
-                    .sorted()
-                    .toList();
-        } catch (final RuntimeException e) {
-            return List.of();
+            // warm-up is best-effort: a closing executor or transient failure must not break construction
+            LOG.log(Level.SEVERE, "completion cache warm-up skipped", e);
         }
     }
 
@@ -1794,6 +1856,7 @@ public class TuiCommand implements Runnable {
                     try {
                         chatClient.setModel(selected);
                         state.model.status("model: " + selected);
+                        refreshCompletionCache();
                     } catch (final RuntimeException e) {
                         state.model.status("model failed: " + e.getMessage());
                     }
@@ -1815,11 +1878,9 @@ public class TuiCommand implements Runnable {
         state.editPlan = new PendingEditPlan(export.path(), export.original(), null, null);
         state.model.status("plan exported to " + export.path()
                 + " - edit it, save, then press Enter to reload (Esc or click Cancel to abort)");
-        state.model
-                .transcript()
-                .append("\n\n> plan exported to `")
-                .append(export.path())
-                .append("` - edit it, save, then press Enter to reload, or Esc to abort\n");
+        state.model.appendTranscript("\n\n> plan exported to `"
+                + export.path()
+                + "` - edit it, save, then press Enter to reload, or Esc to abort\n");
     }
 
     private boolean onEditPlanKey(final KeyEvent key, final TuiRunner runner, final UiState state) {
@@ -1948,11 +2009,7 @@ public class TuiCommand implements Runnable {
                 final var result = agentSessionService.resyncGraph();
                 runner.runLater(() -> {
                     state.model.status("structural code graph resynced");
-                    state.model
-                            .transcript()
-                            .append("\n\n> structural code graph: `")
-                            .append(result)
-                            .append("`\n");
+                    state.model.appendTranscript("\n\n> structural code graph: `" + result + "`\n");
                 });
             } catch (final RuntimeException e) {
                 runner.runLater(() -> modelError(state, "resync failed: " + e.getMessage()));
@@ -1973,26 +2030,12 @@ public class TuiCommand implements Runnable {
                     state.model.status(result.message());
                     if (result.applied()) {
                         if (result.error() != null) {
-                            state.model
-                                    .transcript()
-                                    .append("\n\n> ⚠ ")
-                                    .append(result.message())
-                                    .append(": ")
-                                    .append(result.error())
-                                    .append('\n');
+                            state.model.appendTranscript("\n\n> ⚠ " + result.message() + ": " + result.error() + "\n");
                         } else {
-                            state.model
-                                    .transcript()
-                                    .append("\n\n> ")
-                                    .append(result.message())
-                                    .append('\n');
+                            state.model.appendTranscript("\n\n> " + result.message() + "\n");
                         }
                     } else {
-                        state.model
-                                .transcript()
-                                .append("\n\n> ")
-                                .append(result.message())
-                                .append('\n');
+                        state.model.appendTranscript("\n\n> " + result.message() + "\n");
                     }
                 });
             } catch (final RuntimeException e) {
@@ -2002,6 +2045,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void render(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        state.lastRenderTick = clock.millis();
         if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
             state.spinnerTick++;
         }
@@ -2018,9 +2062,14 @@ public class TuiCommand implements Runnable {
                 state.showTodos = true;
             }
         }
+        // responsive: drop the sidebar on narrow terminals to give the chat room
+        final var screenWidth = frame.width();
+        final var narrow = screenWidth < 68;
+        final var sidebarWidth = narrow ? 0 : (screenWidth < 95 ? 22 : 28);
         // the prompt grows with its content (multiline pastes) up to a sane maximum,
         // and queued prompts get a compact strip right above it
-        final var inputRows = Math.min(8, 2 + Math.max(1, state.input.lineCount()));
+        final var inputWidth = Math.max(20, screenWidth - sidebarWidth - 2 - 2 - 2);
+        final var inputRows = Math.min(8, 2 + visualRows(state.input, inputWidth));
         final var queueRows = Math.min(3, state.pendingPrompts.size());
         final var bottomConstraints = new ArrayList<Constraint>();
         bottomConstraints.add(Constraint.fill());
@@ -2029,14 +2078,10 @@ public class TuiCommand implements Runnable {
         }
         bottomConstraints.add(Constraint.length(inputRows));
         bottomConstraints.add(Constraint.length(1));
-        bottomConstraints.add(Constraint.length(2));
+        bottomConstraints.add(Constraint.length(state.errorMessage != null ? 3 : 2));
         final var root = Layout.vertical()
                 .constraints(bottomConstraints.toArray(Constraint[]::new))
                 .split(frame.area());
-        // responsive: drop the sidebar on narrow terminals to give the chat room
-        final var screenWidth = frame.width();
-        final var narrow = screenWidth < 68;
-        final var sidebarWidth = narrow ? 0 : (screenWidth < 95 ? 22 : 28);
         final var body = Layout.horizontal()
                 .constraints(Constraint.fill(), Constraint.length(sidebarWidth))
                 .split(root.getFirst());
@@ -2044,11 +2089,6 @@ public class TuiCommand implements Runnable {
             renderSidebar(body.get(1), frame, state);
         }
         var chat = accentGutter(body.get(0), frame);
-        final var withHints = Layout.vertical()
-                .constraints(Constraint.fill(), Constraint.length(1))
-                .split(chat);
-        chat = withHints.get(0);
-        renderHints(withHints.get(1), frame, state, narrow);
         if (state.showTodos) {
             final var withTodos = Layout.horizontal()
                     .constraints(Constraint.fill(), Constraint.length(state.showTodosCollapsed ? 14 : 34))
@@ -2068,6 +2108,12 @@ public class TuiCommand implements Runnable {
         bottomIndex++;
         renderCalling(root.get(bottomIndex++), frame, state);
         renderStatus(root.get(bottomIndex), frame, state, narrow);
+        if (state.searchOpen) {
+            renderSearchBar(frame, state);
+        }
+        if (state.shortcutsOpen) {
+            renderShortcutsOverlay(frame, state);
+        }
         if (state.picker != null) {
             renderPicker(frame, state);
         }
@@ -2215,16 +2261,27 @@ public class TuiCommand implements Runnable {
         final var total = chunks.stream().mapToInt(RenderedChunk::height).sum();
         final var maxViewOffset = Math.max(0, total - Math.max(1, inner.height()));
         state.maxViewOffset = maxViewOffset;
+        state.model.maxViewOffset(maxViewOffset);
         if (state.pendingJumpRow >= 0) {
             // jump (search match or Alt+Up/Down tool navigation): bring the target row
             // into view with a third of a screen of context above it
-            state.model.scrollBack(Math.clamp(
-                    maxViewOffset - state.pendingJumpRow + Math.max(1, inner.height() / 3), 0, maxViewOffset));
+            state.model.anchorRow(Math.clamp(state.pendingJumpRow - Math.max(1, inner.height() / 3), 0, maxViewOffset));
             // an explicit jump counts as user navigation: pin the view there
-            state.model.userScrolled(state.model.scrollBack() > 0);
+            state.model.userScrolled(state.model.anchorRow() < maxViewOffset);
             state.pendingJumpRow = -1;
+        } else if (!state.model.userScrolled()) {
+            // auto-follow: glue the view to the live tail. the anchored row may re-pin
+            // to maxViewOffset as the bottom grows while streaming
+            state.model.anchorRow(maxViewOffset);
+        } else {
+            // user browsing: keep the absolute anchor stable even as content grows below;
+            // clamp if the content shrank, and reaching the bottom re-arms auto-follow
+            state.model.anchorRow(Math.min(state.model.anchorRow(), maxViewOffset));
+            if (state.model.anchorRow() >= maxViewOffset) {
+                state.model.userScrolled(false);
+            }
         }
-        final var viewOffset = Math.clamp(maxViewOffset - state.model.scrollBack(), 0, maxViewOffset);
+        final var viewOffset = state.model.anchorRow();
         // expose tool card header hit areas for mouse clicks and Alt+Up/Down navigation.
         // rows are absolute transcript rows (not screen rows) so every card gets an
         // anchor even when scrolled out of view: navigation must reach off-screen cards
@@ -2655,9 +2712,6 @@ public class TuiCommand implements Runnable {
         if (inner.isEmpty()) {
             return;
         }
-        if (state.showTodosCollapsed) {
-            return;
-        }
         final var render = todosRender;
         final var text = Text.from(render.isBlank() || "(empty)".equals(render) ? "(no todos)" : render);
         final var overflow = Math.max(0, text.height() - inner.height());
@@ -2675,10 +2729,90 @@ public class TuiCommand implements Runnable {
         if (inner.isEmpty()) {
             return;
         }
-        final var area = TextArea.builder()
-                .placeholder(state.model.busy() ? "waiting for the agent..." : "type a prompt, Enter to send")
-                .build();
-        area.renderWithCursor(inner, frame.buffer(), state.input, frame);
+        final var width = inner.width();
+        if (state.input.text().isEmpty()) {
+            final var style = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(Line.from(Span.styled(
+                                    state.model.busy() ? "waiting for the agent..." : "type a prompt, Enter to send",
+                                    style))))
+                            .overflow(Overflow.CLIP)
+                            .build(),
+                    inner);
+            return;
+        }
+        // soft-wrap each logical line to display width; vertical rows follow the
+        // wrapped fragments so long pasted lines grow the text area instead of
+        // scrolling horizontally
+        final var visual = new ArrayList<Line>();
+        final var cursor = new int[2];
+        for (var row = 0; row < state.input.lineCount(); row++) {
+            final var fragment = wrappedFragments(state.input.getLine(row), width);
+            for (var f = 0; f < fragment.size(); f++) {
+                visual.add(Line.from(Span.styled(fragment.get(f), textInputStyle())));
+                if (row == state.input.cursorRow()) {
+                    // cursor sits on the visual row holding the logical column
+                    cursor[0] = visual.size() - 1;
+                    cursor[1] = fragmentRowColumn(fragment, f, state.input.cursorCol());
+                }
+            }
+        }
+        final var visible = inner.height();
+        final var maxScroll = Math.max(0, visual.size() - visible);
+        final var baseScroll = Math.clamp(state.input.scrollRow(), 0, maxScroll);
+        // keep the cursor row within the viewport
+        final var scroll = Math.clamp(Math.min(baseScroll, cursor[0] - visible + 1), 0, maxScroll);
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(visual.stream().skip(scroll).toList().toArray(Line[]::new)))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                inner);
+        // cursor: logical col offset by the wrapped fragment start, clamped to width
+        final var rel = cursor[0] - scroll;
+        if (rel >= 0 && rel < visible && cursor[1] < width) {
+            frame.buffer().setStyle(new Rect(inner.x() + cursor[1], inner.y() + rel, 1, 1), Style.EMPTY.reversed());
+        }
+    }
+
+    private Style textInputStyle() {
+        return Style.EMPTY.fg(Color.hex(palette.text()));
+    }
+
+    private static List<String> wrappedFragments(final String line, final int width) {
+        if (width <= 0 || line.isEmpty()) {
+            return List.of(line);
+        }
+        final var out = new ArrayList<String>();
+        var rem = line;
+        while (CharWidth.of(rem) > width) {
+            final var piece = CharWidth.substringByWidth(rem, width);
+            out.add(piece);
+            rem = rem.substring(CharWidth.of(piece) == 0 ? 1 : piece.length());
+        }
+        out.add(rem);
+        return out;
+    }
+
+    /** Display column of {@code logicalCol} within a wrapped fragment; only the last fragment can hold it. */
+    private static int fragmentRowColumn(final List<String> fragment, final int index, final int logicalCol) {
+        if (index + 1 < fragment.size() || fragment.isEmpty()) {
+            return 0;
+        }
+        return CharWidth.of(String.join("", fragment.subList(0, index)));
+    }
+
+    /** Number of visual (wrapped) rows the current input needs for the given inner width. */
+    private static int visualRows(final TextAreaState area, final int width) {
+        if (width <= 0) {
+            return Math.max(1, area.lineCount());
+        }
+        var rows = 0;
+        for (var i = 0; i < area.lineCount(); i++) {
+            rows += wrappedFragments(area.getLine(i), width).size();
+        }
+        return Math.max(1, rows);
     }
 
     /**
@@ -2836,12 +2970,32 @@ public class TuiCommand implements Runnable {
             parts.add(Span.styled(" · session: " + usageTracker.requests() + " LLM calls  ", muted));
         }
         final var line = Line.from(parts.toArray(Span[]::new));
+        // the status strip reserves a right edge for the clickable "?" shortcuts affordance
+        final var helpText = "  [?]     ";
+        final var helpW = Math.min(helpText.length(), Math.max(1, rect.width()));
+        final var statusW = Math.max(1, rect.width() - helpW);
+        final var statusSplit = helpW >= rect.width()
+                ? List.of(rect)
+                : List.of(
+                        new Rect(rect.x(), rect.y(), statusW, rect.height()),
+                        new Rect(rect.x() + statusW, rect.y(), helpW, rect.height()));
+        state.shortcutRect = statusSplit.size() == 2 ? statusSplit.get(1) : null;
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(line))
                         .overflow(dev.tamboui.style.Overflow.WRAP_WORD)
                         .build(),
-                rect);
+                statusSplit.getFirst());
+        if (state.shortcutRect != null) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(Line.from(Span.styled(
+                                    helpText,
+                                    Style.EMPTY.fg(Color.hex(palette.accent())).bold()))))
+                            .overflow(dev.tamboui.style.Overflow.CLIP)
+                            .build(),
+                    state.shortcutRect);
+        }
         final var percent = state.model.contextPercent();
         final var compactionThreshold = compactionThreshold();
         if (percent >= compactionThreshold) {
@@ -2860,51 +3014,126 @@ public class TuiCommand implements Runnable {
             final var err = Line.from(Span.styled(
                     glyphs.cross() + "  " + state.errorMessage + "  (Alt+E for details) ",
                     Style.EMPTY.fg(Color.hex(palette.error()))));
-            frame.renderWidget(
-                    Paragraph.builder()
-                            .text(Text.from(err))
-                            .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
-                            .build(),
-                    rect);
+            final var errBlock = Block.builder()
+                    .borders(Borders.ALL)
+                    .borderType(BorderType.ROUNDED)
+                    .borderColor(Color.hex(palette.error()))
+                    .build();
+            frame.renderWidget(errBlock, rect);
+            final var inner = errBlock.inner(rect);
+            if (!inner.isEmpty()) {
+                frame.renderWidget(
+                        Paragraph.builder()
+                                .text(Text.from(err))
+                                .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
+                                .build(),
+                        inner);
+            }
         }
     }
 
-    private void renderHints(
-            final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state, final boolean narrow) {
-        final Line hints;
-        if (state.searchOpen) {
-            // find bar replaces the hints while Ctrl+F search is open
-            final var counter = state.search.active()
-                    ? "  "
-                            + (state.search.count() == 0
-                                    ? "no match"
-                                    : state.search.currentMatch() + "/" + state.search.count())
-                    : "";
-            hints = Line.from(
-                    Span.styled(
-                            " find: ",
-                            Style.EMPTY.fg(Color.hex(palette.accent())).bold()),
-                    Span.styled(state.search.query() + "_", Style.EMPTY.fg(Color.hex(palette.text()))),
-                    Span.styled(
-                            counter + "  Enter/Ctrl+N next  Ctrl+P prev  Esc close",
-                            Style.EMPTY.fg(Color.hex(palette.textMuted()))));
-        } else {
-            final var overlayOpen = state.toolOverlay != null
-                    || (state.errorDetail != null && state.errorOpen)
-                    || state.approval != null;
-            hints = HintsBar.render(state.model.busy(), overlayOpen, palette, rect.width());
+    /** Floating find bar popup shown while Ctrl+F search is open. */
+    private void renderSearchBar(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var width = Math.min(66, frame.width() - 4);
+        final var height = Math.min(3, frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.72);
+        final var inner = Modal.box(frame, rect, " find ", Color.hex(palette.accent()));
+        if (inner == null) {
+            return;
         }
+        final var counter = state.search.active()
+                ? "  "
+                        + (state.search.count() == 0
+                                ? "no match"
+                                : state.search.currentMatch() + "/" + state.search.count())
+                : "";
+        final var hints = Line.from(
+                Span.styled(state.search.query() + "_", Style.EMPTY.fg(Color.hex(palette.text()))),
+                Span.styled(
+                        counter + "  Enter/Ctrl+N next  Ctrl+P prev  Esc close",
+                        Style.EMPTY.fg(Color.hex(palette.textMuted()))));
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(hints))
                         .overflow(dev.tamboui.style.Overflow.ELLIPSIS)
                         .build(),
-                rect);
+                inner);
     }
 
     private void openSearch(final UiState state) {
         state.searchOpen = true;
         state.search.recompute(state.flatRows);
+    }
+
+    /** Key handling while the shortcuts overlay is open. */
+    private boolean onShortcutsKey(final Event event, final UiState state) {
+        if (event instanceof PasteEvent || event instanceof MouseEvent) {
+            return true;
+        }
+        if (!(event instanceof final KeyEvent key)) {
+            return false;
+        }
+        if (key.isCancel() || key.isKey(KeyCode.ESCAPE) || key.isCharIgnoreCase('?')) {
+            state.shortcutsOpen = false;
+            return true;
+        }
+        if (key.isKey(KeyCode.PAGE_UP) || (key.hasAlt() && key.isCharIgnoreCase('u'))) {
+            state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 10);
+        } else if (key.isKey(KeyCode.PAGE_DOWN) || (key.hasAlt() && key.isCharIgnoreCase('d'))) {
+            state.shortcutsScroll += 10;
+        } else if (key.isKey(KeyCode.UP)) {
+            state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 1);
+        } else if (key.isKey(KeyCode.DOWN)) {
+            state.shortcutsScroll += 1;
+        }
+        return true;
+    }
+
+    /** Scrollable modal listing every documented key binding, opened by the "?" affordance. */
+    private void renderShortcutsOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 4 / 5), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.12);
+        final var inner = Modal.box(frame, rect, " shortcuts ", Color.hex(palette.accent()));
+        if (inner == null) {
+            return;
+        }
+        final var title = Style.EMPTY.fg(Color.hex(palette.accent())).bold();
+        final var key = Style.EMPTY.fg(Color.hex(palette.text())).bold();
+        final var label = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var rows = new ArrayList<Line>();
+        var group = "";
+        for (final var binding : KeymapCatalog.all()) {
+            if (!binding.group().equals(group)) {
+                group = binding.group();
+                rows.add(Line.empty());
+                rows.add(Line.from(Span.styled(group, title)));
+            }
+            rows.add(Line.from(Span.styled("  " + binding.key(), key), Span.styled(" - " + binding.label(), label)));
+        }
+        final var splits = Layout.vertical()
+                .constraints(Constraint.fill(), Constraint.length(1))
+                .split(inner);
+        final var text = Text.from(rows.toArray(Line[]::new));
+        final var maxScroll =
+                Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
+        state.shortcutsScroll = Math.clamp(state.shortcutsScroll, 0, maxScroll);
+        if (!splits.getFirst().isEmpty()) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(text)
+                            .overflow(Overflow.CLIP)
+                            .scroll(state.shortcutsScroll)
+                            .build(),
+                    splits.getFirst());
+        }
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(
+                                "  Up/Down scroll  Esc close  ", Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                splits.get(1));
     }
 
     private void closeSearch(final UiState state) {
@@ -3873,22 +4102,36 @@ public class TuiCommand implements Runnable {
     }
 
     private String gitBranch() {
+        final var now = clock.millis();
+        final var cachedAt = cachedGitBranchAt;
+        if (cachedGitBranch != null && now - cachedAt < GIT_BRANCH_CACHE_TTL_MILLIS) {
+            return cachedGitBranch;
+        }
         var dir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
         while (dir != null) {
             final var head = dir.resolve(".git").resolve("HEAD");
             if (Files.isRegularFile(head)) {
                 try {
                     final var content = Files.readString(head).strip();
+                    final String branch;
                     if (content.startsWith("ref: refs/heads/")) {
-                        return content.substring("ref: refs/heads/".length());
+                        branch = content.substring("ref: refs/heads/".length());
+                    } else {
+                        branch = content.length() > 7 ? content.substring(0, 7) : content;
                     }
-                    return content.length() > 7 ? content.substring(0, 7) : content;
+                    cachedGitBranch = branch;
+                    cachedGitBranchAt = now;
+                    return branch;
                 } catch (final IOException e) {
+                    cachedGitBranch = null;
+                    cachedGitBranchAt = now;
                     return null;
                 }
             }
             dir = dir.getParent();
         }
+        cachedGitBranch = null;
+        cachedGitBranchAt = now;
         return null;
     }
 
@@ -4274,6 +4517,52 @@ public class TuiCommand implements Runnable {
         return prompt.questions().get(idx).ownAnswer();
     }
 
+    /**
+     * Cached completion value sources. Populated asynchronously on the shared
+     * executor so the render thread never blocks on a network/IO round-trip
+     * while completing. Each field is replaced atomically with an immutable
+     * list (or map); readers just call get.
+     */
+    private static final class CompletionCache {
+        private volatile List<String> models = List.of();
+        private volatile List<String> sessions = List.of();
+        private volatile List<String> tools = List.of();
+        private volatile Map<String, List<String>> variants = Map.of();
+
+        List<String> models() {
+            return models;
+        }
+
+        void models(final List<String> value) {
+            models = value == null ? List.of() : value;
+        }
+
+        List<String> sessions() {
+            return sessions;
+        }
+
+        void sessions(final List<String> value) {
+            sessions = value == null ? List.of() : value;
+        }
+
+        List<String> tools() {
+            return tools;
+        }
+
+        void tools(final List<String> value) {
+            tools = value == null ? List.of() : value;
+        }
+
+        List<String> variants(final String model) {
+            final var map = variants;
+            return model == null ? List.of() : map.getOrDefault(model, List.of());
+        }
+
+        void variants(final Map<String, List<String>> value) {
+            variants = value == null ? Map.of() : value;
+        }
+    }
+
     private static final class UiState {
         private record Wait(String message, SpinnerStyle style) {}
 
@@ -4304,6 +4593,7 @@ public class TuiCommand implements Runnable {
         private volatile boolean showTodos;
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;
+        private volatile long lastRenderTick;
         private volatile boolean quitArmed;
         private volatile CompletableFuture<Boolean> inFlight;
         private volatile boolean historyActive;
@@ -4340,6 +4630,9 @@ public class TuiCommand implements Runnable {
         private volatile long thinkingStartedAtMillis = -1;
 
         private final java.util.List<Rect> queueRects = new ArrayList<>();
+        private volatile boolean shortcutsOpen;
+        private volatile int shortcutsScroll;
+        private volatile Rect shortcutRect;
         private volatile String lastCodeBlock;
         private volatile String lastToolArgs;
         private volatile long focusedToolOrdinal = -1;

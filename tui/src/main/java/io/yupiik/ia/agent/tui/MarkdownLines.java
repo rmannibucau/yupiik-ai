@@ -106,26 +106,52 @@ public final class MarkdownLines {
     }
 
     /**
-     * Splits {@code markdown} into prose/markdown segments and bare XML-block segments. A bare XML
-     * block is a contiguous run of two or more lines each starting (after whitespace) with an XML tag,
-     * delimited by blank lines or the input boundaries. Because custom tags like {@code <plan>} or
-     * {@code <files>} are not block-level HTML in commonmark, they would otherwise parse as a paragraph
-     * and have their indentation collapsed; extracting them here and rendering through the
-     * character-exact code path keeps the structure intact while leaving ordinary prose untouched.
+     * Splits {@code markdown} into prose/markdown segments and character-exact block segments.
+     * A bare XML block is a contiguous run of two or more lines each starting (after whitespace)
+     * with an XML tag. An indented code block is a contiguous run of two or more lines each
+     * starting with four or more whitespace characters (blank lines inside the run are kept).
+     * Both are delimited by blank lines or the input boundaries. Because custom tags like
+     * {@code <plan>} or {@code <files>} are not block-level HTML in commonmark, and because
+     * commonmark dedents indented code blocks, they would otherwise parse as a paragraph (or a
+     * dedented code block) and have their indentation collapsed; extracting them here and
+     * rendering through the character-exact code path keeps the structure intact while leaving
+     * ordinary prose untouched.
      */
     private static List<Segment> splitSegments(final String markdown) {
         final var lines = markdown == null || markdown.isEmpty() ? new String[0] : markdown.split("\n", -1);
         final var blocks = new ArrayList<int[]>();
         var i = 0;
         while (i < lines.length) {
+            // an XML-looking line is only claimed by the XML branch when it forms a
+            // valid XML block; otherwise (e.g. code that happens to start with "<div>")
+            // it falls through to the indented-code branch below
             if (isXmlLine(lines[i])) {
                 var j = i + 1;
                 while (j < lines.length && isXmlLine(lines[j])) {
                     j++;
                 }
+                if (isValidBlock(lines, i, j, 2)) {
+                    blocks.add(new int[] {i, j});
+                    i = j;
+                    continue;
+                }
+            }
+            if (isIndentedCodeLine(lines[i]) && !precededByListItem(lines, i)) {
+                var j = i + 1;
+                // an interior blank line stays in the code run (commonmark absorbs it too)
+                while (j < lines.length && (isIndentedCodeLine(lines[j]) || lines[j].isBlank())) {
+                    j++;
+                }
+                // stop right after the last real code line so the blank that closes the
+                // block stays put for the delimiter bookkeeping below
+                while (j > i + 1 && lines[j - 1].isBlank()) {
+                    j--;
+                }
+                // unlike a paragraph interruption rule we only need a leading delimiter
+                // (or start of input): commonmark also ends a code block on the first
+                // non-indented line without requiring a blank after it
                 final var precededByBlank = i == 0 || lines[i - 1].isBlank();
-                final var followedByBlank = j == lines.length || lines[j].isBlank();
-                if (j - i >= 2 && precededByBlank && followedByBlank) {
+                if (precededByBlank && (j - i) >= 1) {
                     blocks.add(new int[] {i, j});
                     i = j;
                     continue;
@@ -149,7 +175,7 @@ public final class MarkdownLines {
                 literal.append('\n');
             }
             out.add(new Segment(literal.toString(), true));
-            cursor = block[1] + 1;
+            cursor = block[1] + (block[1] < lines.length && lines[block[1]].isBlank() ? 1 : 0);
         }
         if (cursor < lines.length) {
             out.add(new Segment(join(lines, cursor, lines.length), false));
@@ -176,6 +202,76 @@ public final class MarkdownLines {
         }
         final var idx = t.charAt(1) == '/' ? 2 : 1;
         return idx < t.length() && (Character.isLetter(t.charAt(idx)) || t.charAt(idx) == '_');
+    }
+
+    /**
+     * True when the line is a non-blank line indented by at least four columns, i.e. a line
+     * commonmark would treat as (part of) an indented code block. A tab advances to the next
+     * multiple of four, matching commonmark's tab-stop handling.
+     */
+    private static boolean isIndentedCodeLine(final String line) {
+        if (line.isBlank()) {
+            return false;
+        }
+        var col = 0;
+        var i = 0;
+        while (i < line.length()) {
+            final var c = line.charAt(i);
+            if (c == ' ') {
+                col++;
+            } else if (c == '\t') {
+                col += 4 - (col % 4);
+            } else {
+                break;
+            }
+            i++;
+        }
+        return col >= 4;
+    }
+
+    /**
+     * A block candidate spanning {@code lines[i..j)} (exclusive of {@code j}) is only extracted
+     * when it has at least {@code minLines} lines and is delimited by a blank line (or the input
+     * boundary) on both sides. This mirrors commonmark's own rule for starting an indented code
+     * block (it cannot interrupt a paragraph) and keeps us from stealing list or prose content.
+     */
+    private static boolean isValidBlock(final String[] lines, final int i, final int j, final int minLines) {
+        final var precededByBlank = i == 0 || lines[i - 1].isBlank();
+        final var followedByBlank = j == lines.length || lines[j].isBlank();
+        return (j - i) >= minLines && precededByBlank && followedByBlank;
+    }
+
+    /**
+     * True when the last non-blank line before {@code i} is a list item marker. Indented lines
+     * under a list item belong to that item (e.g. a nested code block), not to a top-level code
+     * block, so they must be left to commonmark to keep the list structure intact.
+     */
+    private static boolean precededByListItem(final String[] lines, final int i) {
+        var k = i - 1;
+        while (k >= 0 && lines[k].isBlank()) {
+            k--;
+        }
+        if (k < 0) {
+            return false;
+        }
+        final var t = lines[k].strip();
+        if (t.length() < 2) {
+            return false;
+        }
+        final var c = t.charAt(0);
+        final var bullet = (c == '-' || c == '*' || c == '+') && Character.isWhitespace(t.charAt(1));
+        if (bullet) {
+            return true;
+        }
+        var d = 0;
+        while (d < t.length() && Character.isDigit(t.charAt(d))) {
+            d++;
+        }
+        return d > 0
+                && d < t.length()
+                && (t.charAt(d) == '.' || t.charAt(d) == ')')
+                && d + 1 < t.length()
+                && Character.isWhitespace(t.charAt(d + 1));
     }
 
     private record Segment(String text, boolean block) {}

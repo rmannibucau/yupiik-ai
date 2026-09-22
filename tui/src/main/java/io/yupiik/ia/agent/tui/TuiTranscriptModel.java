@@ -27,7 +27,11 @@ import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
  */
 @ApplicationScoped
 public class TuiTranscriptModel extends ConversationTranscript {
-    private volatile int scrollBack;
+    /** Absolute transcript row shown at the top of the viewport, in {@code [0, maxViewOffset]}. */
+    private volatile int anchorRow;
+
+    /** Last known max scroll offset (total rows - viewport height), set by the renderer each frame. */
+    private volatile int maxViewOffset;
 
     /** The splitter is injected by Fusion and shared; each transcript gets its own stream parser. */
     public TuiTranscriptModel(final ThinkTagSplitter thinkTags) {
@@ -48,7 +52,7 @@ public class TuiTranscriptModel extends ConversationTranscript {
             // auto-follow only while the user has not scrolled away: streamed events
             // must never yank the viewport while reasoning/tool history is being read
             if (!userScrolled) {
-                scrollBack = 0;
+                anchorRow = maxViewOffset;
             }
         }
     }
@@ -57,22 +61,37 @@ public class TuiTranscriptModel extends ConversationTranscript {
     public synchronized void clearConversation() {
         super.clearConversation();
         userScrolled = false;
-        scrollBack = 0;
+        anchorRow = 0;
+        maxViewOffset = 0;
     }
 
     @Override
     public synchronized void startUserTurn(final String text) {
+        startUserTurn(text, true);
+    }
+
+    /**
+     * Starts a new user turn, optionally re-pinning the view to the live tail.
+     * Explicit submissions ({@code pinToBottom=true}) jump to the bottom and re-arm
+     * auto-follow. Queued/continuation turns ({@code pinToBottom=false}) leave the
+     * scroll position untouched: while the user is browsing, streamed events keep the
+     * view where it is, and auto-follow only resumes once the user scrolls back to the
+     * bottom.
+     */
+    public synchronized void startUserTurn(final String text, final boolean pinToBottom) {
         super.startUserTurn(text);
-        // a new turn re-pins the view to the live tail on purpose
-        userScrolled = false;
-        scrollBack = 0;
+        if (pinToBottom) {
+            userScrolled = false;
+            anchorRow = maxViewOffset;
+        }
     }
 
     @Override
     public synchronized void reset() {
         super.reset();
         userScrolled = false;
-        scrollBack = 0;
+        anchorRow = 0;
+        maxViewOffset = 0;
     }
 
     /** A plain (non thought/tool) markdown segment belonging to one speaker. */
@@ -119,19 +138,27 @@ public class TuiTranscriptModel extends ConversationTranscript {
         return out;
     }
 
-    public int scrollBack() {
-        return scrollBack;
+    public int anchorRow() {
+        return anchorRow;
     }
 
-    public void scrollBack(final int value) {
-        this.scrollBack = value;
+    public void anchorRow(final int value) {
+        this.anchorRow = value;
+    }
+
+    public int maxViewOffset() {
+        return maxViewOffset;
+    }
+
+    public void maxViewOffset(final int value) {
+        this.maxViewOffset = value;
     }
 
     /**
      * Sticky-scrollback flag: {@code true} while the user has explicitly moved the view
      * away from the bottom (wheel, PgUp/PgDn, Ctrl+Home/End, tool/search jumps). While
      * set, streamed events no longer re-pin the view to the bottom; it clears when the
-     * view returns to the bottom or a new user turn starts.
+     * view returns to the bottom or an explicit user turn starts.
      */
     public boolean userScrolled() {
         return userScrolled;

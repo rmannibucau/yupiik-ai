@@ -213,6 +213,16 @@ class TuiCommandRenderTest {
             final boolean showThinking,
             final UsageTracker usageTracker) {
         final var mapper = MockLlmServer.mapper();
+        return command(shellRegistry, agentLoop, showThinking, usageTracker, new TodoStore(configuration(), mapper));
+    }
+
+    private TuiCommand command(
+            final ShellRegistry shellRegistry,
+            final AgentLoop agentLoop,
+            final boolean showThinking,
+            final UsageTracker usageTracker,
+            final TodoStore todoStore) {
+        final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
@@ -236,7 +246,6 @@ class TuiCommandRenderTest {
         };
         final var chatClient =
                 new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
-        final var todoStore = new TodoStore(configuration, mapper);
         final var mcpManager = new McpManager(
                 configuration,
                 mapper,
@@ -334,6 +343,40 @@ class TuiCommandRenderTest {
         awaitTextGone("pondering");
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
         awaitText("pondering");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void collapsedTodosStillRenderTheList() throws Exception {
+        final var shellRegistry = testRegistry();
+        // a store whose render() yields a real todo so the panel auto-shows (expanded)
+        final var todoStore = new TodoStore(configuration(), MockLlmServer.mapper()) {
+            @Override
+            public String render() {
+                return "[> ] fix header padding";
+            }
+        };
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker(), todoStore);
+        uiThread = new Thread(command, "tui-todos-collapse-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("fix header padding");
+
+        // collapsed still renders the list in the narrow column
+        tuiRef.get().dispatch(KeyEvent.ofChar('p', KeyModifiers.CTRL));
+        awaitText("fix header padding");
+
+        // collapsed -> hidden drops the list
+        tuiRef.get().dispatch(KeyEvent.ofChar('p', KeyModifiers.CTRL));
+        awaitTextGone("fix header padding");
+
+        // hidden -> expanded brings it back
+        tuiRef.get().dispatch(KeyEvent.ofChar('p', KeyModifiers.CTRL));
+        awaitText("fix header padding");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -467,6 +510,47 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("lines:2"); // submitted as a single prompt
         org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void longPromptSoftWrapsInsteadOfClipping() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-softwrap-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        final var tail = "--soft-wrap-tail";
+        final var longLine = "wrap".repeat(30) + tail;
+        tuiRef.get().dispatch(new PasteEvent(longLine));
+        // the tail is far beyond one line of the 120-col prompt: it is only visible
+        // once the long line wraps onto a subsequent visual row rather than clipping
+        awaitText(tail);
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void shortcutOverlayOpensWithQuestionMark() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-shortcuts-overlay-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('?'));
+        awaitText("Up/Down scroll"); // overlay footer: only rendered while the popup is open
+        awaitText("send prompt"); // first binding listed in the Input group
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("Up/Down scroll");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);

@@ -265,7 +265,8 @@ public class FileSessionStore implements SessionStore {
         synchronized (fileLock) {
             final var sb = new StringBuilder();
             for (final var m : messages) {
-                sb.append(mapper.toString(SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId())))
+                sb.append(mapper.toString(
+                                SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId(), m.name())))
                         .append('\n');
             }
             final var target = path(id);

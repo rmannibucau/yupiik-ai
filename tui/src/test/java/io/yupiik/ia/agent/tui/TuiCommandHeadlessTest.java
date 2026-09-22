@@ -16,9 +16,11 @@
 package io.yupiik.ia.agent.tui;
 
 import static java.time.Duration.ofMillis;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.tamboui.style.Color;
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
 import dev.tamboui.tui.event.KeyCode;
@@ -48,6 +50,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -82,7 +85,14 @@ class TuiCommandHeadlessTest {
     static void boot() throws IOException {
         llm = new MockLlmServer();
         Files.createDirectories(temp.resolve("home").resolve("sessions"));
-        container = ConfiguringContainer.of()
+        container = bootContainer();
+        try (final var depsInstance = container.lookup(TuiDeps.class)) {
+            deps = depsInstance.instance();
+        }
+    }
+
+    private static RuntimeContainer bootContainer() {
+        return ConfiguringContainer.of()
                 .register(new ProvidedInstanceBean<>(
                         DefaultScoped.class,
                         ArgsConfigSource.class,
@@ -107,7 +117,6 @@ class TuiCommandHeadlessTest {
                     }
                 })
                 .start();
-        deps = container.lookup(TuiDeps.class).instance();
     }
 
     @AfterAll
@@ -149,46 +158,22 @@ class TuiCommandHeadlessTest {
 
     @Test
     void wiresTheFullBeanGraph() {
-        assertNotNull(container.lookup(TuiCommand.class).instance());
-        assertNotNull(container.lookup(RunCommand.class).instance());
-        assertNotNull(container.lookup(TuiTranscriptModel.class).instance());
-        assertNotNull(container
-                .lookup(io.yupiik.ia.agent.tui.prompt.SlashCommandCompleter.class)
-                .instance());
-        assertNotNull(container.lookup(TuiRunnerFactory.class).instance());
+        try (final var cmd = container.lookup(TuiCommand.class);
+                final var run = container.lookup(RunCommand.class);
+                final var model = container.lookup(TuiTranscriptModel.class);
+                final var completer = container.lookup(io.yupiik.ia.agent.tui.prompt.SlashCommandCompleter.class);
+                final var factory = container.lookup(TuiRunnerFactory.class)) {
+            assertNotNull(cmd.instance());
+            assertNotNull(run.instance());
+            assertNotNull(model.instance());
+            assertNotNull(completer.instance());
+            assertNotNull(factory.instance());
+        }
     }
 
     @Test
     void answersThroughRealAgentLoop() throws Exception {
-        final var d = deps;
-        final var tuiSlashCommands = new TuiSlashCommands();
-        final var command = new TuiCommand(
-                new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
-                d.tuiConfiguration(),
-                d.configuration(),
-                d.agentLoop(),
-                container.lookup(ShellRegistry.class).instance(),
-                d.permissionService(),
-                d.userFeedbackService(),
-                d.sessionStore(),
-                d.todoStore(),
-                d.chatClient(),
-                d.modelStyleService(),
-                d.mcpManager(),
-                d.executor(),
-                d.providerManager(),
-                d.agentProvider(),
-                d.agentSessionService(),
-                new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
-                container.lookup(TurnRunner.class).instance(),
-                d.model(),
-                headlessFactory(),
-                tuiSlashCommands,
-                new SlashRegistry(List.of(tuiSlashCommands)),
-                Clock.systemUTC(),
-                new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
-                new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
-                new ToolOutputFormat(formatMapper));
+        final var command = newUiCommand(container, deps);
 
         uiThread = new Thread(command::run, "tui-headless-test");
         uiThread.setDaemon(true);
@@ -213,6 +198,80 @@ class TuiCommandHeadlessTest {
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void errorBannerUsesErrorColoredBorder() throws Exception {
+        // the shared container's executor is shut down when a TUI quits, so this
+        // second boot needs its own container to avoid poisoning the other tests
+        try (final var isolated = bootContainer()) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var command = newUiCommand(isolated, isolatedDeps);
+
+            uiThread = new Thread(command::run, "tui-headless-error");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+
+            tuiRef.get().dispatch(new PasteEvent("/agent definitely-not-an-agent"));
+            awaitText("/agent definitely-not-an-agent");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("unknown agent: definitely-not-an-agent");
+            awaitText("Alt+E for details");
+
+            final var lines = backend.text().split("\n", -1);
+            final var errorRow = IntStream.range(0, lines.length)
+                    .filter(i -> lines[i].contains("Alt+E for details"))
+                    .findFirst()
+                    .orElseThrow();
+            // the error banner is a full-width rounded box: border rows on either side of the text
+            assertEquals("╭", backend.symbol(0, errorRow - 1));
+            assertEquals("╰", backend.symbol(0, errorRow + 1));
+            final var expected = Color.hex("#e06c75");
+            assertEquals(expected, backend.fg(0, errorRow - 1).orElseThrow());
+            assertEquals(expected, backend.fg(0, errorRow + 1).orElseThrow());
+        }
+    }
+
+    private static TuiDeps lookupDeps(final RuntimeContainer container) {
+        try (final var depsInstance = container.lookup(TuiDeps.class)) {
+            return depsInstance.instance();
+        }
+    }
+
+    private TuiCommand newUiCommand(final RuntimeContainer container, final TuiDeps d) {
+        final var tuiSlashCommands = new TuiSlashCommands();
+        try (final var shellRegistry = container.lookup(ShellRegistry.class);
+                final var slashRegistry = container.lookup(SlashRegistry.class);
+                final var turnRunner = container.lookup(TurnRunner.class)) {
+            return new TuiCommand(
+                    new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
+                    d.tuiConfiguration(),
+                    d.configuration(),
+                    d.agentLoop(),
+                    shellRegistry.instance(),
+                    d.permissionService(),
+                    d.userFeedbackService(),
+                    d.sessionStore(),
+                    d.todoStore(),
+                    d.chatClient(),
+                    d.modelStyleService(),
+                    d.mcpManager(),
+                    d.executor(),
+                    d.providerManager(),
+                    d.agentProvider(),
+                    d.agentSessionService(),
+                    new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
+                    turnRunner.instance(),
+                    d.model(),
+                    headlessFactory(),
+                    tuiSlashCommands,
+                    slashRegistry.instance(),
+                    Clock.systemUTC(),
+                    new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
+                    new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
+                    new ToolOutputFormat(formatMapper));
+        }
     }
 
     private TuiRunnerFactory headlessFactory() {

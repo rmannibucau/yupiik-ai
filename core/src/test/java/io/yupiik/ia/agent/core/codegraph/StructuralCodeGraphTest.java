@@ -50,10 +50,25 @@ class StructuralCodeGraphTest {
     Path temp;
 
     private final List<ChatClient> chatClients = new java.util.ArrayList<>();
+    private final List<StructuralCodeGraph> graphs = new java.util.ArrayList<>();
 
     @AfterEach
     void tearDown() {
+        graphs.forEach(StructuralCodeGraph::close);
         chatClients.forEach(ChatClient::close);
+    }
+
+    private StructuralCodeGraph newGraph(final CodingAgentConfiguration config, final JsonMapper mapper) {
+        final var graph = new StructuralCodeGraph(
+                config,
+                List.of(new JavaGraphParser()),
+                mapper,
+                new StatusReporter(),
+                chatClient(config, mapper),
+                providerManager(config, mapper),
+                Clock.systemUTC());
+        graphs.add(graph);
+        return graph;
     }
 
     private ChatClient chatClient(final CodingAgentConfiguration config, final JsonMapper mapper) {
@@ -83,14 +98,7 @@ class StructuralCodeGraphTest {
         final var config = config(project, Map.of());
 
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
 
         graph.ensureReady();
         graph.flushPersist();
@@ -167,14 +175,7 @@ class StructuralCodeGraphTest {
                 "deleted file symbols must be dropped by the refresh");
 
         // reload from disk must match in-memory state
-        final var reloaded = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
         assertEquals(afterDelete.symbols().size(), reloaded.graph().symbols().size());
     }
@@ -189,14 +190,7 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
         assertEquals(2, graph.graph().symbols().size());
 
@@ -224,14 +218,7 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
         assertTrue(
                 graph.graph().symbols().isEmpty(),
@@ -243,14 +230,7 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("scaffold"));
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
         assertTrue(
                 graph.graph().symbols().isEmpty(),
@@ -288,14 +268,7 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
         final var symbols = graph.graph().symbols();
@@ -334,14 +307,7 @@ class StructuralCodeGraphTest {
         final var config = config(project, Map.of("yca.structuralCodeGraph.ignoreGlobs", "custom/**"));
 
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
         final var symbols = graph.graph().symbols();
@@ -359,14 +325,7 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
         final var docRoot = Path.of(config.structuralCodeGraph().resolvedStoreDir(project.toString()))
@@ -433,14 +392,7 @@ class StructuralCodeGraphTest {
                 .start()) {
             final JsonMapper mapper = container.lookup(JsonMapper.class).instance();
 
-            final var graph = new StructuralCodeGraph(
-                    config,
-                    List.of(new JavaGraphParser()),
-                    mapper,
-                    new StatusReporter(),
-                    chatClient(config, mapper),
-                    providerManager(config, mapper),
-                    Clock.systemUTC());
+            final var graph = newGraph(config, mapper);
 
             final String status = graph.resync();
             graph.flushPersist();
@@ -461,14 +413,7 @@ class StructuralCodeGraphTest {
             assertEquals(graph.graph().symbols().size(), stored.symbols().size());
 
             // a fresh instance re-loaded from the same binary index must reproduce the same symbols
-            final var reloaded = new StructuralCodeGraph(
-                    config,
-                    List.of(new JavaGraphParser()),
-                    mapper,
-                    new StatusReporter(),
-                    chatClient(config, mapper),
-                    providerManager(config, mapper),
-                    Clock.systemUTC());
+            final var reloaded = newGraph(config, mapper);
             reloaded.ensureReady();
             assertEquals(stored.symbols().size(), reloaded.graph().symbols().size());
         }
@@ -585,14 +530,7 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var graph = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var graph = newGraph(config, mapper);
         graph.ensureReady();
         graph.flushPersist();
         assertTrue(
@@ -622,14 +560,7 @@ class StructuralCodeGraphTest {
         assertTrue(!meta.contains("other/Bar.java"), "sidecar must forget the deleted file, got:\n" + meta);
 
         // a fresh session must reload the reconciled index: no ghost symbols survive
-        final var reloaded = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
         assertEquals(
                 after.symbols().size(),
@@ -645,26 +576,12 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var built = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var built = newGraph(config, mapper);
         built.ensureReady();
 
         // add a file offline: every known mtime still matches, only the #count gate can notice the addition
         Files.writeString(project.resolve("Baz.java"), "package demo;\npublic class Baz { public void stop() {} }\n");
-        final var reloaded = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
 
         final var symbols = reloaded.graph().symbols();
@@ -687,14 +604,7 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
         final JsonMapper mapper = newMapper();
-        final var built = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var built = newGraph(config, mapper);
         built.ensureReady();
         built.flushPersist();
 
@@ -703,14 +613,7 @@ class StructuralCodeGraphTest {
         final var newMtime =
                 Files.getLastModifiedTime(project.resolve("Foo.java")).toMillis() + 60_000;
         Files.setLastModifiedTime(project.resolve("Foo.java"), java.nio.file.attribute.FileTime.fromMillis(newMtime));
-        final var reloaded = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
         final var meta = Files.readString(project.resolve(".yca/generated/graph/index.meta"));
         assertTrue(
@@ -718,14 +621,7 @@ class StructuralCodeGraphTest {
                 "sidecar must carry the new mtime after a hash-identical patch, got:\n" + meta);
 
         // ... so the next session hits the fresh fast path and serves the same symbols
-        final var third = new StructuralCodeGraph(
-                config,
-                List.of(new JavaGraphParser()),
-                mapper,
-                new StatusReporter(),
-                chatClient(config, mapper),
-                providerManager(config, mapper),
-                Clock.systemUTC());
+        final var third = newGraph(config, mapper);
         third.ensureReady();
         assertEquals(reloaded.graph().symbols().size(), third.graph().symbols().size());
     }

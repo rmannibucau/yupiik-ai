@@ -228,6 +228,50 @@ class MarkdownLinesTest {
                 plain(renderer.render(text, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
     }
 
+    @Test
+    void indentedCodeBlockKeepsIndentationVerbatim() {
+        // commonmark's IndentedCodeBlock.getLiteral() strips the common 4-space indent;
+        // we must keep the source bytes exactly as written
+        final var md = String.join(
+                "\n", "Before the block.", "", "    if (a) {", "        b();", "    }", "", "After the block.");
+        assertEquals(
+                List.of("Before the block.", "", "    if (a) {", "        b();", "    }", "", "After the block."),
+                plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void leadingIndentedLineAtStartIsPreserved() {
+        final var md = String.join("\n", "    indented", "", "text");
+        assertEquals(
+                List.of("    indented", "", "text"),
+                plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void interiorBlankLineInsideIndentedCodeIsKept() {
+        final var md = String.join("\n", "", "    first", "", "    second", "");
+        assertEquals(
+                List.of("", "    first", "", "    second", ""),
+                plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void indentedLineUnderListItemIsLeftToTheList() {
+        // a nested code block inside a list item must not be stolen as a top-level block
+        final var md = String.join("\n", "- item", "", "      nested code", "", "tail");
+        final var rendered = String.join("\n", plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        assertTrue(rendered.contains("nested code"), rendered);
+        assertTrue(rendered.contains("item"), rendered);
+        assertTrue(rendered.contains("tail"), rendered);
+    }
+
+    @Test
+    void indentedContinuationAfterParagraphIsNotExtracted() {
+        // no blank line before: commonmark treats this as a lazy paragraph continuation
+        final var md = String.join("\n", "para", "    indent");
+        assertEquals(List.of("para", "indent"), plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
     private static List<String> plain(final List<Line> lines) {
         return lines.stream().map(Line::rawContent).toList();
     }

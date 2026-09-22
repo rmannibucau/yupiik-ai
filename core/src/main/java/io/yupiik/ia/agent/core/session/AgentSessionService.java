@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -241,7 +242,7 @@ public class AgentSessionService {
         return agentProvider.byName(name) == null ? null : name;
     }
 
-    public record ContextMessage(String role, String firstLine, String content) {}
+    public record ContextMessage(String role, String firstLine, String content, String toolName) {}
 
     public record ContextDump(String systemPrompt, String sessionId, List<ContextMessage> messages) {}
 
@@ -252,10 +253,12 @@ public class AgentSessionService {
      */
     public ContextDump context(final String sessionId) {
         final var messages = sessionStore.load(sessionId);
+        final var toolNamesByCallId = Message.toolNames(messages);
         final var lines = new ArrayList<ContextMessage>(messages.size());
         for (final var message : messages) {
             final var content = String.valueOf(message.content());
-            lines.add(new ContextMessage(message.role(), firstLine(content), content));
+            lines.add(new ContextMessage(
+                    message.role(), firstLine(content), content, Message.toolName(message, toolNamesByCallId)));
         }
         return new ContextDump(systemPromptBuilder.build(), sessionId, lines);
     }

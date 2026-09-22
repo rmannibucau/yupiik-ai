@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.llm;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -48,5 +49,47 @@ public record Message(
 
     public static Message tool(final String toolCallId, final String content, final boolean isError) {
         return new Message("tool", content, null, null, toolCallId, isError ? Map.of("is_error", true) : null);
+    }
+
+    public static Message toolResult(final String toolCallId, final String content, final String name) {
+        return new Message("tool", content, name, null, toolCallId, null);
+    }
+
+    /**
+     * Builds the call id -> tool name lookup from assistant messages carrying
+     * tool calls: legacy sessions do not persist the name on tool results, so
+     * rendering can recover it from the matching assistant call.
+     */
+    public static Map<String, String> toolNames(final List<Message> messages) {
+        final var out = new HashMap<String, String>();
+        if (messages == null) {
+            return out;
+        }
+        for (final var message : messages) {
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call != null
+                        && call.id() != null
+                        && call.function() != null
+                        && call.function().name() != null) {
+                    out.putIfAbsent(call.id(), call.function().name());
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Resolves the tool name of a persisted message: prefers the stored name,
+     * falls back to the assistant tool call of the same id, {@code null} when
+     * the name is unknown.
+     */
+    public static String toolName(final Message message, final Map<String, String> toolNamesByCallId) {
+        if (message == null || message.name() != null) {
+            return message == null ? null : message.name();
+        }
+        return message.toolCallId() == null ? null : toolNamesByCallId.get(message.toolCallId());
     }
 }

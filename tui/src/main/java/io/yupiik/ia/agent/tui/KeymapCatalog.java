@@ -58,6 +58,7 @@ public final class KeymapCatalog {
                 new Binding("Ctrl+T", "toggle thinking", "View", false),
                 new Binding("Ctrl+Y", "toggle tool blocks", "View", false),
                 new Binding("Ctrl+P", "cycle todos panel", "View", false),
+                new Binding("Ctrl+/", "show all shortcuts", "View", true),
                 // session
                 new Binding("Ctrl+S", "compact context", "Session", false),
                 new Binding("Ctrl+L", "clear conversation", "Session", false),

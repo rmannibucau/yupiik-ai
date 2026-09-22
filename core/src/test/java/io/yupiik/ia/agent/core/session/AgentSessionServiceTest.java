@@ -23,11 +23,14 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -326,6 +329,52 @@ class AgentSessionServiceTest {
     }
 
     @Test
+    void contextResolvesToolNameFromAssistantCall() {
+        final var store = new SessionStore() {
+            @Override
+            public List<Message> load(final String id) {
+                return List.of(
+                        Message.user("hi"),
+                        Message.assistant(
+                                "reading",
+                                List.of(new ToolCall(
+                                        "call-1",
+                                        "function",
+                                        new FunctionCall("read_file", "{\"path\":\"a.txt\"}"),
+                                        null))),
+                        Message.tool("call-1", "file body"));
+            }
+        };
+        final var service = service(store);
+
+        final var dump = service.context("s1");
+
+        assertEquals(3, dump.messages().size());
+        assertNull(dump.messages().get(0).toolName());
+        assertNull(dump.messages().get(1).toolName());
+        assertEquals("read_file", dump.messages().get(2).toolName());
+    }
+
+    @Test
+    void contextKeepsStoredToolName() {
+        final var store = new SessionStore() {
+            @Override
+            public List<Message> load(final String id) {
+                return List.of(
+                        Message.assistant(
+                                "reading",
+                                List.of(new ToolCall("call-1", "function", new FunctionCall("grep", "{}"), null))),
+                        Message.toolResult("call-1", "1 match(es)", "grep"));
+            }
+        };
+        final var service = service(store);
+
+        final var dump = service.context("s1");
+
+        assertEquals("grep", dump.messages().get(1).toolName());
+    }
+
+    @Test
     void compactReturnsNullForEmptyHistory() {
         final var store = new SessionStore() {
             @Override
@@ -439,7 +488,25 @@ class AgentSessionServiceTest {
 
     private static AgentSessionService service(final SessionStore store) {
         return new AgentSessionService(
-                null, null, null, null, store, null, null, null, null, null, null, null, cfg(), null);
+                null,
+                null,
+                null,
+                null,
+                store,
+                null,
+                new SystemPromptBuilder() {
+                    @Override
+                    public String build() {
+                        return "<system>";
+                    }
+                },
+                null,
+                null,
+                null,
+                null,
+                null,
+                cfg(),
+                null);
     }
 
     private static AgentSessionService service(final MemoryStore memoryStore) {

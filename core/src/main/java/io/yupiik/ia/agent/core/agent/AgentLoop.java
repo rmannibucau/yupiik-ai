@@ -1116,7 +1116,8 @@ public class AgentLoop {
         final var output = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
         messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
         if (outcome.persist()) {
-            sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "tool", output, null, outcome.callId()));
+            sessionStore.append(
+                    sessionId, SessionEntry.of(clock.millis(), "tool", output, null, outcome.callId(), outcome.name()));
         }
         final var invalidated = staleReads.onLanded(messages, outcome);
         if (invalidated > 0) {

@@ -182,6 +182,27 @@ class SessionStoreTest {
     }
 
     @Test
+    void replaceKeepsToolName() {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "user", "hi", null, null));
+        store.append(
+                id,
+                SessionEntry.of(
+                        2,
+                        "assistant",
+                        "reading",
+                        List.of(new ToolCall("c1", "function", new FunctionCall("grep", "{}"), null)),
+                        null));
+        store.append(id, SessionEntry.of(3, "tool", "1 match(es)", null, "c1", "grep"));
+        store.replace(id, store.load(id));
+
+        final var loaded = store.load(id);
+        assertEquals("grep", loaded.get(2).name());
+        assertEquals("c1", loaded.get(2).toolCallId());
+    }
+
+    @Test
     void loadRemapsLegacyToolNameToolCallId() {
         final var store = newStore();
         final var id = store.create();

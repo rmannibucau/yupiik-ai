@@ -39,8 +39,33 @@ class TuiTranscriptModelTest {
         model.startUserTurn("do it");
         assertTrue(model.transcript().toString().contains("**You**\n\ndo it"));
         assertTrue(model.busy());
-        assertEquals(0, model.scrollBack());
+        assertEquals(0, model.anchorRow());
         assertTrue(model.markdown("|", "welcome").contains("do it"));
+    }
+
+    @Test
+    void startUserTurnWithoutPinPreservesScrollWhileUserIsBrowsing() {
+        model.maxViewOffset(120);
+        model.anchorRow(42);
+        model.userScrolled(true);
+        model.startUserTurn("queued", false);
+        assertEquals(42, model.anchorRow());
+        assertTrue(model.userScrolled());
+        assertTrue(model.transcript().toString().contains("**You**\n\nqueued"));
+        assertTrue(model.busy());
+
+        model.onEvent(new AgentEvent.TextDelta("more output"));
+        assertEquals(42, model.anchorRow());
+    }
+
+    @Test
+    void startUserTurnWithPinRePinsScrollToLiveTail() {
+        model.maxViewOffset(120);
+        model.anchorRow(42);
+        model.userScrolled(true);
+        model.startUserTurn("explicit", true);
+        assertEquals(120, model.anchorRow());
+        assertFalse(model.userScrolled());
     }
 
     @Test
@@ -65,9 +90,19 @@ class TuiTranscriptModelTest {
 
     @Test
     void thinkingDeltaRePinsScrollToLiveTail() {
-        model.scrollBack(42);
+        model.maxViewOffset(80);
+        model.anchorRow(42);
         model.onEvent(new AgentEvent.ThinkingDelta("pondering"));
-        assertEquals(0, model.scrollBack());
+        assertEquals(80, model.anchorRow());
+    }
+
+    @Test
+    void streamedEventLeavesAnchorRowUntouchedWhileUserBrowsing() {
+        model.maxViewOffset(120);
+        model.anchorRow(42);
+        model.userScrolled(true);
+        model.onEvent(new AgentEvent.TextDelta("more"));
+        assertEquals(42, model.anchorRow());
     }
 
     @Test
@@ -319,7 +354,7 @@ class TuiTranscriptModelTest {
         model.clearConversation();
         assertEquals("", model.transcript().toString());
         assertEquals("", model.thinking().toString());
-        assertEquals(0, model.scrollBack());
+        assertEquals(0, model.anchorRow());
         assertEquals("busy", model.status());
     }
 
@@ -336,7 +371,7 @@ class TuiTranscriptModelTest {
         assertEquals("", model.pending().toString());
         assertEquals("", model.thinking().toString());
         assertNull(model.runningTool());
-        assertEquals(0, model.scrollBack());
+        assertEquals(0, model.anchorRow());
         assertEquals(0, model.promptTokens());
         assertEquals(0, model.completionTokens());
         assertEquals(0, model.estimatedContext());

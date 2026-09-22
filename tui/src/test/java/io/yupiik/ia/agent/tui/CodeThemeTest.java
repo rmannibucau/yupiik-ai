@@ -54,7 +54,8 @@ class CodeThemeTest {
             CodeTheme.ONE_DARK.number(),
             CodeTheme.ONE_DARK.type(),
             CodeTheme.ONE_DARK.tag(),
-            CodeTheme.ONE_DARK.attr()
+            CodeTheme.ONE_DARK.attr(),
+            CodeTheme.ONE_DARK.annotation()
         }) {
             assertTrue(hex != null && !hex.isBlank(), "missing token color");
         }

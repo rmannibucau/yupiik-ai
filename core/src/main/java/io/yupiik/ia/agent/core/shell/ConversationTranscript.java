@@ -447,6 +447,7 @@ public class ConversationTranscript {
             return "";
         }
         final var start = transcript.length();
+        final var toolNamesByCallId = Message.toolNames(history);
         for (final var message : history) {
             switch (message.role()) {
                 case "user" ->
@@ -473,13 +474,15 @@ public class ConversationTranscript {
                             .append(parts.visible())
                             .append('\n');
                 }
-                case "tool" ->
+                case "tool" -> {
+                    final var name = Message.toolName(message, toolNamesByCallId);
                     transcript
-                            .append("\n\n*tool `")
-                            .append(message.name())
-                            .append("` -> ")
+                            .append("\n\n*tool ")
+                            .append(name == null ? "" : "`" + name + "` ")
+                            .append("-> ")
                             .append(firstLine(String.valueOf(message.content())))
                             .append("*\n");
+                }
                 default -> {}
             }
         }
@@ -521,6 +524,16 @@ public class ConversationTranscript {
         turnToolWallMs = 0;
         turnToolsRun = 0;
         turnDurationMs = 0;
+    }
+
+    /**
+     * Appends raw markdown to the conversation under the transcript lock so it
+     * never races with render-thread readers ({@code markdown} / {@code trim}).
+     * Use this from worker threads instead of {@link #transcript()} which hand
+     * out the live (unlocked) builder.
+     */
+    public synchronized void appendTranscript(final String markdown) {
+        transcript.append(markdown);
     }
 
     public StringBuilder transcript() {
