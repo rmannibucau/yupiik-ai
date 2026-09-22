@@ -157,6 +157,25 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void wideStatusMessagesRenderInLastPositionOfStatusStrip() throws Exception {
+        // /theme (no arg) produces a wide informational message routed to the trailing
+        // notification channel rather than replacing the agent state at the strip head
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-status-notification-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("/theme"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("ⓘ"); // notification glyph present in the status strip
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
     void clearRestoresWelcomeScreen() throws Exception {
         final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
@@ -226,8 +245,9 @@ class TuiCommandRenderTest {
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
-                "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", 0.85, 0.85,
-                "#484848", "#606060", "#141414", "#ff5555", 4000L, true, "unicode", "auto", "auto", List.of(), null);
+                "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
+                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, true, "unicode", "auto", "auto",
+                List.of(), null);
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -343,6 +363,27 @@ class TuiCommandRenderTest {
         awaitTextGone("pondering");
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
         awaitText("pondering");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void thinkingRegionsRenderFencedCodeInline() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-thinking-code-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // reasoning containing a fenced block must survive the split/highlight path and
+        // render the code text inline (it used to fall through as plain prose)
+        shellRegistry.onEvent(
+                new AgentEvent.ThinkingDelta("let's inspect\n```java\npublic int x() {\n return 1;\n}\n```"));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer"));
+        awaitText("public int x()");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -537,7 +578,112 @@ class TuiCommandRenderTest {
     }
 
     @Test
-    void shortcutOverlayOpensWithQuestionMark() throws Exception {
+    void promptCursorTrackColumnInsteadOfFixingToZero() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-cursor-col-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("hello"));
+        awaitText("hello");
+        // the prompt interior starts at the column of the first typed char; the
+        // cursor used to always be pinned to that start column by the disabled
+        // visual-column computation, so it never followed the caret
+        final var promptStart = columnOfLineContaining("hello");
+        final var atEnd = awaitCursorCell();
+        org.junit.jupiter.api.Assertions.assertTrue(
+                atEnd[0] > promptStart,
+                "cursor must sit past the start column after typing; start=" + promptStart + " cursor=" + atEnd[0]);
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.HOME));
+        final var atHome = awaitCursorAt(promptStart);
+        org.junit.jupiter.api.Assertions.assertEquals(
+                promptStart, atHome[0], "HOME must move the cursor to the first character of the line");
+        org.junit.jupiter.api.Assertions.assertEquals(atEnd[1], atHome[1], "HOME must not change the cursor row");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void promptCursorTracksColumnInsideAsoftWrappedFragment() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-cursor-softwrap-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        final var longLine = "wrap".repeat(30);
+        tuiRef.get().dispatch(new PasteEvent(longLine));
+        awaitText("wrap"); // rendered (wrapped across visual rows) in the prompt
+        final var promptStart = columnOfLineContaining("wrap");
+
+        // move to the line start, then a few columns right, so the caret sits in
+        // the middle of the first wrapped fragment; it must land beyond the
+        // fragment-start column rather than being reset to it
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.HOME));
+        for (var i = 0; i < 5; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.RIGHT));
+        }
+        final var moved = awaitCursorAt(promptStart + 5);
+        org.junit.jupiter.api.Assertions.assertTrue(
+                moved[0] > promptStart,
+                "cursor must sit inside the wrapped fragment, not pinned to its start; start=" + promptStart
+                        + " cursor=" + moved[0]);
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void ctrlWOnEmptyPromptDoesNotCrash() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-ctrlw-empty-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // ctrl+w used to throw StringIndexOutOfBoundsException on an empty prompt
+        // (previousWord charAt(0) on a length-0 line); it must be a plain no-op.
+        tuiRef.get().dispatch(KeyEvent.ofChar('w', KeyModifiers.CTRL));
+        awaitText("yca coding agent"); // still rendering -> no crash
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void ctrlWAtLineStartKillsPreviousLineLastWord() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-ctrlw-linejoin-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // two-line prompt; cursor sits on the last line after pasting
+        tuiRef.get().dispatch(new PasteEvent("foo bar\nbaz"));
+        awaitText("baz");
+        // HOME moves the cursor to the start of the last line (col 0)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.HOME));
+        awaitCursorAt(columnOfLineContaining("baz"));
+        // ctrl+w at a line start must kill the previous line's last word ("bar")
+        tuiRef.get().dispatch(KeyEvent.ofChar('w', KeyModifiers.CTRL));
+        awaitTextGone("foo bar");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void shortcutOverlayOpensWithCtrlSlash() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         uiThread = new Thread(command, "tui-shortcuts-overlay-test");
         uiThread.setDaemon(true);
@@ -545,7 +691,12 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
+        // plain "?" must type into the prompt, not open the overlay
         tuiRef.get().dispatch(KeyEvent.ofChar('?'));
+        awaitText("?");
+
+        // the overlay toggle is reserved to Ctrl+/
+        tuiRef.get().dispatch(KeyEvent.ofChar('/', KeyModifiers.CTRL));
         awaitText("Up/Down scroll"); // overlay footer: only rendered while the popup is open
         awaitText("send prompt"); // first binding listed in the Input group
 
@@ -658,6 +809,49 @@ class TuiCommandRenderTest {
         while (screen.contains(expected)) {
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "' to clear");
             screen = backend.text();
+        }
+    }
+
+    /** Polls until the bottommost reversed-video cell sits at {@code expectedColumn}. */
+    private int[] awaitCursorAt(final int expectedColumn) throws InterruptedException {
+        var cell = backend.lastReversed();
+        while (cell == null || cell[0] != expectedColumn) {
+            assertTrue(
+                    backend.awaitFrame(1_000),
+                    "no frame received while waiting for the cursor at column " + expectedColumn);
+            cell = backend.lastReversed();
+        }
+        return cell;
+    }
+
+    /** Bottommost reversed-video cell, which is the prompt input cursor. */
+    private int[] awaitCursorCell() throws InterruptedException {
+        var cell = backend.lastReversed();
+        while (cell == null) {
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for the reversed cursor cell");
+            cell = backend.lastReversed();
+        }
+        return cell;
+    }
+
+    /** Screen column where {@code token} first appears on the lowest row that contains it. */
+    private int columnOfLineContaining(final String token) throws InterruptedException {
+        while (true) {
+            final var lines = backend.text().split("\n");
+            var row = -1;
+            for (var y = lines.length - 1; y >= 0; y--) {
+                if (lines[y].contains(token)) {
+                    row = y;
+                    break;
+                }
+            }
+            if (row >= 0) {
+                final var idx = lines[row].indexOf(token);
+                if (idx >= 0) {
+                    return idx;
+                }
+            }
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + token + "'");
         }
     }
 

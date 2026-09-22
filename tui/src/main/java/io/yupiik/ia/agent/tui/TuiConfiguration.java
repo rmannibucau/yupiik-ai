@@ -60,10 +60,25 @@ public record TuiConfiguration(
         String textMuted,
 
         @Property(
-                defaultValue = "0.6",
+                defaultValue = "-1.0",
                 documentation =
-                        "Transparency (0..1) of the thinking/reasoning text toward the panel background: 0 is fully opaque, higher values fade thoughts out (terminals have no alpha, the color is pre-blended).")
+                        "Transparency (0..1) of the thinking/reasoning text toward the panel background: 0 is fully opaque, darker prose, "
+                                + "higher values fade thoughts out (terminals have no alpha, the color is pre-blended). "
+                                + "Use -1 (default) for a theme-aware value derived from thinkingOpacityDark/thinkingOpacityLight, "
+                                + "so thoughts read as italic and slightly dimmed but stay clearly legible.")
         double thinkingOpacity,
+
+        @Property(
+                defaultValue = "0.22",
+                documentation =
+                        "Theme-aware default thought fade (see thinkingOpacity) used on the dark theme when thinkingOpacity is auto (-1).")
+        double thinkingOpacityDark,
+
+        @Property(
+                defaultValue = "0.14",
+                documentation =
+                        "Theme-aware default thought fade (see thinkingOpacity) used on the light theme when thinkingOpacity is auto (-1).")
+        double thinkingOpacityLight,
 
         @Property(
                 defaultValue = "0.35",

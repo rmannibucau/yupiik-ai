@@ -64,17 +64,17 @@ public final class TuiInputSupport {
     }
 
     public static int previousWord(final String s, final int col) {
-        var i = Math.min(col, s.length());
-        if (i > 0) {
+        if (s.isEmpty() || col <= 0) {
+            return 0;
+        }
+        var i = Math.min(col, s.length()) - 1;
+        while (i >= 0 && i < s.length() && s.charAt(i) == ' ') {
             i--;
         }
-        while (i >= 0 && s.charAt(i) == ' ') {
+        while (i >= 0 && i < s.length() && s.charAt(i) != ' ') {
             i--;
         }
-        while (i >= 0 && s.charAt(i) != ' ') {
-            i--;
-        }
-        return Math.max(0, i + 1);
+        return i + 1;
     }
 
     public static String firstLine(final String text) {

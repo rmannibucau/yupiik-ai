@@ -54,6 +54,15 @@ class TuiInputSupportTest {
     }
 
     @Test
+    void previousWordDoesNotCrashOnEmptyLine() {
+        assertEquals(0, TuiInputSupport.previousWord("", 0));
+        assertEquals(0, TuiInputSupport.previousWord(" ", 0));
+        assertEquals(0, TuiInputSupport.previousWord("   ", 0));
+        assertEquals(0, TuiInputSupport.previousWord("   ", 3));
+        assertEquals(0, TuiInputSupport.previousWord("  foo", 0));
+    }
+
+    @Test
     void firstLineExtractsAndCaps() {
         assertEquals("first", TuiInputSupport.firstLine("first\nsecond"));
         assertEquals("", TuiInputSupport.firstLine(null));

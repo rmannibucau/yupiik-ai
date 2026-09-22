@@ -21,6 +21,7 @@ import dev.tamboui.layout.Position;
 import dev.tamboui.layout.Rect;
 import dev.tamboui.layout.Size;
 import dev.tamboui.style.Color;
+import dev.tamboui.style.Modifier;
 import dev.tamboui.terminal.Backend;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
@@ -146,6 +147,30 @@ final class HeadlessBackend implements Backend {
     Optional<Color> fg(final int x, final int y) {
         synchronized (lock) {
             return buffer.get(x, y).style().fg();
+        }
+    }
+
+    /** True when the cell at the coordinate carries the reversed-video modifier. */
+    boolean reversed(final int x, final int y) {
+        synchronized (lock) {
+            if (y < 0 || y >= buffer.height() || x < 0 || x >= buffer.width()) {
+                return false;
+            }
+            return buffer.get(x, y).style().effectiveModifiers().contains(Modifier.REVERSED);
+        }
+    }
+
+    /** Last reversed-video cell in the buffer (bottommost, rightmost), or {@code null} when none. */
+    int[] lastReversed() {
+        synchronized (lock) {
+            for (var y = buffer.height() - 1; y >= 0; y--) {
+                for (var x = buffer.width() - 1; x >= 0; x--) {
+                    if (buffer.get(x, y).style().effectiveModifiers().contains(Modifier.REVERSED)) {
+                        return new int[] {x, y};
+                    }
+                }
+            }
+            return null;
         }
     }
 }
