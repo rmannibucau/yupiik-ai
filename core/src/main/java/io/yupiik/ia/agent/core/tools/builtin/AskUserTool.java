@@ -99,12 +99,28 @@ public class AskUserTool implements EmbeddedTool {
                 return ToolResult.error("each question must be an object with an id and a prompt");
             }
             final var id = String.valueOf(map.get("id"));
-            final var prompt = String.valueOf(map.get("prompt"));
+            String prompt = String.valueOf(map.get("prompt"));
             final var options = new ArrayList<String>();
             if (map.get("options") instanceof final List<?> opts) {
                 for (final var opt : opts) {
-                    options.add(String.valueOf(opt));
+                    if (opt instanceof final Map<?, ?> optMap) {
+                        // Option object with prompt/description fields
+                        final var optPrompt = String.valueOf(optMap.get("prompt"));
+                        final var optDesc = String.valueOf(optMap.get("description"));
+                        final var value = !"null".equals(optPrompt) && !optPrompt.isBlank()
+                                ? optPrompt
+                                : (!"null".equals(optDesc) && !optDesc.isBlank()
+                                        ? optDesc
+                                        : String.valueOf(optMap.get("id")));
+                        options.add(value);
+                    } else {
+                        options.add(String.valueOf(opt));
+                    }
                 }
+            }
+            // Fallback: if question prompt is missing/null, use first option's prompt
+            if ("null".equals(prompt) || prompt.isBlank()) {
+                prompt = options.isEmpty() ? "" : options.get(0);
             }
             final var multiple = Boolean.TRUE.equals(map.get("multiple"));
             questions.add(new Question(id, prompt, options, multiple));
