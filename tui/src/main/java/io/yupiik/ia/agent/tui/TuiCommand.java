@@ -2105,6 +2105,17 @@ public class TuiCommand implements Runnable {
         if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
             state.spinnerTick++;
         }
+        // thinking timer lifecycle: armed on the first frame with live reasoning and
+        // cleared as soon as it stops, independent of busy/runningTool so both the
+        // in-pane indicator and the pinned footer read a correct elapsed time even
+        // while a tool runs and across consecutive turns
+        if (state.model.thinkingLength() > 0) {
+            if (state.thinkingStartedAtMillis < 0) {
+                state.thinkingStartedAtMillis = clock.millis();
+            }
+        } else {
+            state.thinkingStartedAtMillis = -1;
+        }
         state.model.trim();
         if (state.toast != null
                 && tuiConfiguration.toastDurationMillis() > 0
@@ -2987,16 +2998,13 @@ public class TuiCommand implements Runnable {
                 final Line line;
                 if (state.model.thinkingLength() > 0) {
                     // pinned "thinking" progress line with elapsed time, stays at the
-                    // bottom while the reasoning streams inline above
-                    if (state.thinkingStartedAtMillis < 0) {
-                        state.thinkingStartedAtMillis = clock.millis();
-                    }
+                    // bottom while the reasoning streams inline above (timer lifecycle
+                    // is managed once per frame in render())
                     final var secs = Math.max(0, (clock.millis() - state.thinkingStartedAtMillis) / 1000);
                     line = Line.from(Span.styled(
                             spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " thinking (" + secs + " s)",
                             palette.blended(palette.info(), 0.35)));
                 } else {
-                    state.thinkingStartedAtMillis = -1;
                     line = Line.from(Span.styled(
                             spinnerFrame(SpinnerStyle.DOTS, state.spinnerTick) + " agent is working...", muted));
                 }

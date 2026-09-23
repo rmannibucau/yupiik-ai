@@ -268,6 +268,16 @@ class TuiCommandRenderTest {
             final boolean showThinking,
             final UsageTracker usageTracker,
             final TodoStore todoStore) {
+        return command(shellRegistry, agentLoop, showThinking, usageTracker, todoStore, Clock.systemUTC());
+    }
+
+    private TuiCommand command(
+            final ShellRegistry shellRegistry,
+            final AgentLoop agentLoop,
+            final boolean showThinking,
+            final UsageTracker usageTracker,
+            final TodoStore todoStore,
+            final Clock clock) {
         final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, showThinking, "dark", true);
@@ -291,8 +301,7 @@ class TuiCommandRenderTest {
                 // no-op: render tests never delete a real session
             }
         };
-        final var chatClient =
-                new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
+        final var chatClient = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), clock);
         final var mcpManager = new McpManager(
                 configuration,
                 mapper,
@@ -366,7 +375,7 @@ class TuiCommandRenderTest {
                 factory,
                 tuiSlashCommands,
                 new SlashRegistry(List.of(tuiSlashCommands, configCommands)),
-                Clock.systemUTC(),
+                clock,
                 usageTracker,
                 new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                 new ToolOutputFormat(formatMapper));
@@ -390,6 +399,75 @@ class TuiCommandRenderTest {
         awaitTextGone("pondering");
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
         awaitText("pondering");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void thinkingTimerAdvancesWhileToolRunning() throws Exception {
+        final var clock = new MutableClock(0);
+        final var shellRegistry = testRegistry();
+        final var command = command(
+                shellRegistry,
+                stubAgentLoop(),
+                true,
+                newUsageTracker(),
+                new TodoStore(configuration(), MockLlmServer.mapper()),
+                clock);
+        uiThread = new Thread(command, "tui-thinking-tool-timer-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // reasoning deltas can stream while a tool is running (subagent output, parallel
+        // batches): the timer must arm on the first indicator frame even though the
+        // pinned footer is busy showing the tool line
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering while building"));
+        awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
+
+        clock.advance(5_000);
+        awaitTextWithin("thinking... (5 s)", TIMEOUT_MS);
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void thinkingTimerRestartsOnEachTurn() throws Exception {
+        final var clock = new MutableClock(0);
+        final var shellRegistry = testRegistry();
+        final var command = command(
+                shellRegistry,
+                stubAgentLoop(),
+                true,
+                newUsageTracker(),
+                new TodoStore(configuration(), MockLlmServer.mapper()),
+                clock);
+        uiThread = new Thread(command, "tui-thinking-timer-reset-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first round"));
+        awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
+        clock.advance(30_000);
+        awaitTextWithin("thinking... (30 s)", TIMEOUT_MS);
+
+        // the turn ends while no idle frame may ever catch the reset condition: the
+        // next thinking round must restart from zero, not resume the stale timer
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer"));
+        awaitText("answer");
+        awaitTextGoneWithin("thinking... (30 s)", TIMEOUT_MS);
+
+        clock.advance(5_000);
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("second round"));
+        awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
+        clock.advance(2_000);
+        awaitTextWithin("thinking... (2 s)", TIMEOUT_MS);
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -861,6 +939,37 @@ class TuiCommandRenderTest {
         }
     }
 
+    /**
+     * Like {@link #awaitText(String)} but fails after {@code timeoutMillis} instead of
+     * looping forever: frames keep rendering on ticks, so a never-matching text would
+     * otherwise hang the test.
+     */
+    private void awaitTextWithin(final String expected, final long timeoutMillis) throws InterruptedException {
+        final var deadline = System.nanoTime() + timeoutMillis * 1_000_000;
+        var screen = backend.text();
+        while (!screen.contains(expected)) {
+            final var snapshot = screen;
+            assertTrue(
+                    System.nanoTime() < deadline && backend.awaitFrame(200),
+                    () -> "'" + expected + "' did not appear within " + timeoutMillis + " ms; last screen:\n"
+                            + snapshot);
+            screen = backend.text();
+        }
+    }
+
+    private void awaitTextGoneWithin(final String expected, final long timeoutMillis) throws InterruptedException {
+        final var deadline = System.nanoTime() + timeoutMillis * 1_000_000;
+        var screen = backend.text();
+        while (screen.contains(expected)) {
+            final var snapshot = screen;
+            assertTrue(
+                    System.nanoTime() < deadline && backend.awaitFrame(200),
+                    () -> "'" + expected + "' did not clear within " + timeoutMillis + " ms; last screen:\n"
+                            + snapshot);
+            screen = backend.text();
+        }
+    }
+
     private void awaitTextGone(final String expected) throws InterruptedException {
         var screen = backend.text();
         while (screen.contains(expected)) {
@@ -932,5 +1041,33 @@ class TuiCommandRenderTest {
                 // no-op: events are dispatched through ShellRegistry.onEvent in tests
             }
         });
+    }
+
+    /** Clock the test controls explicitly so elapsed-time rendering is deterministic. */
+    private static final class MutableClock extends Clock {
+        private final java.util.concurrent.atomic.AtomicLong millis;
+
+        MutableClock(final long initialMillis) {
+            this.millis = new java.util.concurrent.atomic.AtomicLong(initialMillis);
+        }
+
+        void advance(final long ms) {
+            millis.addAndGet(ms);
+        }
+
+        @Override
+        public java.time.ZoneId getZone() {
+            return java.time.ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(final java.time.ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public java.time.Instant instant() {
+            return java.time.Instant.ofEpochMilli(millis.get());
+        }
     }
 }
