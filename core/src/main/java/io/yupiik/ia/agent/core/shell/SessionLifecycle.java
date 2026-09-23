@@ -82,6 +82,7 @@ public class SessionLifecycle {
     public void installGates(
             final ApprovalGate approvalGate, final FeedbackGate feedbackGate, final boolean permitAll) {
         permissionService.setPermitAll(permitAll);
+        permissionService.setPermissionMode(null);
         permissionService.setGate(approvalGate);
         userFeedbackService.setGate(feedbackGate);
     }
@@ -93,6 +94,7 @@ public class SessionLifecycle {
     public void release(final String sessionId) {
         permissionService.setGate(null);
         permissionService.setPermitAll(false);
+        permissionService.setPermissionMode(null);
         userFeedbackService.setGate(null);
         if (sessionId != null && sessionStore.isEmpty(sessionId)) {
             sessionStore.delete(sessionId);

@@ -40,8 +40,8 @@ public interface ShellFrontend {
     /** Reflects the "show thinking" toggle of {@link ShellSession}. */
     void showThinking(boolean value);
 
-    /** Reflects the "show tool output" toggle of {@link ShellSession}. */
-    void showToolOutput(boolean value);
+    /** Reflects the "tool output visibility" toggle of {@link ShellSession}. */
+    void showToolOutput(ToolOutputVisibility value);
 
     /**
      * Shows a busy/busy-with-label indicator (spinner, status line, ...).

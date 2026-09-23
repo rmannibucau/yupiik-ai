@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -128,7 +129,7 @@ class SlashRegistryTest {
         }
 
         @Override
-        public void showToolOutput(final boolean value) {
+        public void showToolOutput(final ToolOutputVisibility value) {
             calls.add("showToolOutput:" + value);
         }
     }

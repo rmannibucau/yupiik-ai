@@ -27,7 +27,7 @@ public class ShellSession {
     private String sessionId;
     private String activeAgent;
     private volatile boolean showThinking = true;
-    private volatile boolean showToolOutput;
+    private volatile ToolOutputVisibility showToolOutput = ToolOutputVisibility.COLLAPSED;
     private volatile boolean busy;
     private MetricsConfiguration metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT);
 
@@ -71,11 +71,11 @@ public class ShellSession {
         return this;
     }
 
-    public boolean showToolOutput() {
+    public ToolOutputVisibility showToolOutput() {
         return showToolOutput;
     }
 
-    public ShellSession showToolOutput(final boolean showToolOutput) {
+    public ShellSession showToolOutput(final ToolOutputVisibility showToolOutput) {
         this.showToolOutput = showToolOutput;
         return this;
     }

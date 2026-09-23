@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -130,8 +131,9 @@ public final class CompletionEngine {
             case SESSIONS -> complete(prefixInner, tokenStart, sessions.get(), "session");
             case TOOLS -> complete(prefixInner, tokenStart, tools.get(), "tool");
             case MODE -> suggestionsWithHint("build", "plan", prefixInner, tokenStart);
-            case PERMISSIONS -> suggestionsWithHint("all", "none", "show", prefixInner, tokenStart);
+            case PERMISSIONS -> complete(prefixInner, tokenStart, permissionCandidates(), "option");
             case SHOW_HIDE -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
+            case SHOW_COLLAPSE_HIDE -> suggestionsWithHint("show", "collapse", "hide", prefixInner, tokenStart);
             case PATH -> {
                 final var items = pathCandidates(prefixInner);
                 yield items.isEmpty() ? Suggestion.none() : new Suggestion(items, tokenStart, cursor, "path");
@@ -145,6 +147,15 @@ public final class CompletionEngine {
         return items.isEmpty()
                 ? Suggestion.none()
                 : new Suggestion(items, replaceStart, replaceStart + token.length(), label);
+    }
+
+    /** Accepted /permissions values: the permission-mode enum plus the toggle extras. */
+    private static List<String> permissionCandidates() {
+        final var out = new ArrayList<String>(PermissionMode.VALUES);
+        out.add("all");
+        out.add("none");
+        out.add("show");
+        return out;
     }
 
     private Suggestion suggestionsWithHint(

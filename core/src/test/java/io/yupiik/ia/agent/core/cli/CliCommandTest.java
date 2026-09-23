@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
@@ -54,7 +55,7 @@ class CliCommandTest {
 
     @Test
     void verbosePrintsFullOutputForNonStreamedTool() throws Exception {
-        final var dispatcher = dispatcher("verbose", true);
+        final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN);
 
         dispatcher.accept(new AgentEvent.ToolStarted("read_file", "{}"));
         dispatcher.accept(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
@@ -66,7 +67,7 @@ class CliCommandTest {
 
     @Test
     void verboseDoesNotReprintStreamedToolOutput() throws Exception {
-        final var dispatcher = dispatcher("verbose", true);
+        final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN);
 
         dispatcher.accept(new AgentEvent.ToolStarted("bash", "{}"));
         dispatcher.accept(new AgentEvent.ToolStream("bash", "streamed line"));
@@ -84,7 +85,7 @@ class CliCommandTest {
     }
 
     private static java.util.function.Consumer<AgentEvent> dispatcher(
-            final String presentation, final boolean showToolOutput) {
+            final String presentation, final ToolOutputVisibility showToolOutput) {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),

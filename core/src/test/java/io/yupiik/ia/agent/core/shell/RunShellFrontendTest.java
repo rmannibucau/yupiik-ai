@@ -82,7 +82,7 @@ class RunShellFrontendTest {
 
     @Test
     void answerStreamsOnStdoutAndEventsAreLogged() {
-        final var frontend = new RunShellFrontend(false, false);
+        final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED);
 
         frontend.onEvent(new AgentEvent.TextDelta("hel"));
         frontend.onEvent(new AgentEvent.TextDelta("lo"));
@@ -101,7 +101,7 @@ class RunShellFrontendTest {
 
     @Test
     void toolOutputPrintsOnceWhenNotStreamedAndEnabled() {
-        final var frontend = new RunShellFrontend(false, true);
+        final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN);
 
         frontend.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
 
@@ -111,7 +111,7 @@ class RunShellFrontendTest {
 
     @Test
     void streamedToolOutputIsNotReprinted() {
-        final var frontend = new RunShellFrontend(false, true);
+        final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN);
 
         frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
         frontend.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true));
@@ -122,7 +122,7 @@ class RunShellFrontendTest {
 
     @Test
     void failuresAndNoticesUseTheRightLevels() {
-        final var frontend = new RunShellFrontend(false, false);
+        final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED);
 
         frontend.onEvent(new AgentEvent.ToolFinished("bash", "oops", false));
         frontend.onEvent(AgentEvent.Notice.warn("careful"));
@@ -134,7 +134,7 @@ class RunShellFrontendTest {
 
     @Test
     void thinkingStreamStaysRawOnStderrWhenEnabled() {
-        final var frontend = new RunShellFrontend(true, false);
+        final var frontend = new RunShellFrontend(true, ToolOutputVisibility.COLLAPSED);
 
         frontend.onEvent(new AgentEvent.ThinkingDelta("thinking..."));
 

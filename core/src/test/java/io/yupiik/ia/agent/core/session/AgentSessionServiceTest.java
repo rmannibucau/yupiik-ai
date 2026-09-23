@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
@@ -135,6 +136,25 @@ class AgentSessionServiceTest {
         assertTrue(permissions.isPermitAll());
         assertEquals(Boolean.FALSE, service.setPermissions("none"));
         assertFalse(permissions.isPermitAll());
+    }
+
+    @Test
+    void setPermissionsRoutesPermissionModes() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+
+        assertEquals(Boolean.TRUE, service.setPermissions("yolo"));
+        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+
+        assertEquals(Boolean.TRUE, service.setPermissions("auto_edit"));
+        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.AUTO_EDIT, permissions.permissionMode());
+
+        assertEquals(Boolean.FALSE, service.setPermissions("ask"));
+        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.ASK, permissions.permissionMode());
+        assertNull(service.setPermissions("bogus"));
     }
 
     @Test

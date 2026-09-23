@@ -194,7 +194,14 @@ public class AgentSessionService {
         }
         if (v.equals("none") || v.equals("safe")) {
             permissionService.setPermitAll(false);
+            permissionService.setPermissionMode(PermissionMode.ASK);
             return false;
+        }
+        if (PermissionMode.isValue(v)) {
+            permissionService.setPermitAll(false);
+            final var resolved = PermissionMode.fromConfigurationString(v);
+            permissionService.setPermissionMode(resolved);
+            return resolved != PermissionMode.ASK;
         }
         return null;
     }
@@ -207,10 +214,11 @@ public class AgentSessionService {
      * Session grants are explicitly session-scoped (in-memory, lost on restart).
      */
     public PermissionsInfo permissionsInfo() {
-        final var configured = configuration.permissions();
-        final var mode = configured == null ? null : configured.mode();
         return new PermissionsInfo(
-                permissionService.isPermitAll(), permissionService.mode(), mode, permissionService.sessionGrants());
+                permissionService.isPermitAll(),
+                permissionService.mode(),
+                permissionService.permissionMode(),
+                permissionService.sessionGrants());
     }
 
     /**

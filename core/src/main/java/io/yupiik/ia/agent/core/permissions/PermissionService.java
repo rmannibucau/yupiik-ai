@@ -33,6 +33,7 @@ public class PermissionService {
     private volatile ApprovalGate gate;
     private final Set<String> sessionGrants = ConcurrentHashMap.newKeySet();
     private volatile AgentMode mode;
+    private volatile PermissionMode permissionMode;
     private volatile boolean permitAll;
 
     public PermissionService(final CodingAgentConfiguration configuration) {
@@ -79,6 +80,26 @@ public class PermissionService {
         }
         final var configured = configuration.mode();
         return configured != null ? configured : AgentMode.PLAN;
+    }
+
+    /**
+     * Overrides the effective permission mode (ask/auto_edit/yolo) at runtime. Unlike the static
+     * {@code yca.permissions.mode} config this lets entry points (TUI slash commands, /permissions)
+     * switch the permission level that {@link #check} actually enforces, keeping the reported state in
+     * sync with behaviour. A {@code null} resets to the configured default.
+     */
+    public void setPermissionMode(final PermissionMode permissionMode) {
+        this.permissionMode = permissionMode;
+    }
+
+    /** The effective permission mode: the runtime override when set, otherwise the configured default (ASK). */
+    public PermissionMode permissionMode() {
+        final var override = permissionMode;
+        if (override != null) {
+            return override;
+        }
+        final var permissions = configuration.permissions();
+        return permissions != null && permissions.mode() != null ? permissions.mode() : PermissionMode.ASK;
     }
 
     public record Decision(boolean allowed, String reason) {
@@ -132,7 +153,7 @@ public class PermissionService {
         if (matchesSessionGrant(toolName, args)) {
             return Decision.allow();
         }
-        final var mode = permissions.mode();
+        final var mode = permissionMode();
         if (mode == PermissionMode.YOLO) {
             return Decision.allow();
         }

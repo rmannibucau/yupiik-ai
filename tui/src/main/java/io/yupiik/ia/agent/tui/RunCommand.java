@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.shell.RunShellFrontend;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
@@ -107,11 +108,12 @@ public class RunCommand implements Runnable {
 
             @Property(
                     value = "show-tool-output",
-                    defaultValue = "false",
+                    defaultValue = "\"collapsed\"",
                     documentation =
-                            "Print each successful tool's output (result of the tool call) on stderr. Tools that streamed "
-                                    + "their output live (e.g. bash) are not re-printed since their output was already shown.")
-            boolean showToolOutput,
+                            "Tool output presentation: shown (print each non-streamed tool output), collapsed (log tool "
+                                    + "calls only, no output body) or hidden (log nothing). Accepts the legacy booleans "
+                                    + "true/false (true = shown, false = collapsed/off).")
+            String showToolOutput,
 
             @Property(
                     value = "metrics-output-file",
@@ -145,7 +147,9 @@ public class RunCommand implements Runnable {
         final var started = System.nanoTime();
         final var detailLog = Detail.of(conf.metricsDetailFile());
         final var userCancelled = new AtomicBoolean();
-        final var frontend = new RunShellFrontend(conf.showThinking(), conf.showToolOutput()) {
+        final var parsedToolOutput = ToolOutputVisibility.parse(conf.showToolOutput());
+        final var showToolOutput = parsedToolOutput == null ? ToolOutputVisibility.COLLAPSED : parsedToolOutput;
+        final var frontend = new RunShellFrontend(conf.showThinking(), showToolOutput) {
             @Override
             public void onEvent(final AgentEvent event) {
                 super.onEvent(event);

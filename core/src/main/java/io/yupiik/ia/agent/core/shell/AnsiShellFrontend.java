@@ -47,7 +47,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     private final TurnStats stats = new TurnStats();
 
     private volatile boolean showThinking;
-    private volatile boolean showToolOutput;
+    private volatile ToolOutputVisibility showToolOutput;
     private volatile boolean toolStreamed;
     /** Whether the dim 'thinking...' header was printed for the current reasoning round. */
     private boolean thinkingRoundOpen;
@@ -63,7 +63,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             final CliVerbosity verbosity,
             final boolean tty,
             final boolean showThinking,
-            final boolean showToolOutput) {
+            final ToolOutputVisibility showToolOutput) {
         this.colorizer = colorizer;
         this.symbols = symbols;
         this.presenter = presenter;
@@ -90,7 +90,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         return showThinking;
     }
 
-    public boolean showToolOutput() {
+    public ToolOutputVisibility showToolOutput() {
         return showToolOutput;
     }
 
@@ -100,7 +100,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     }
 
     @Override
-    public void showToolOutput(final boolean value) {
+    public void showToolOutput(final ToolOutputVisibility value) {
         this.showToolOutput = value;
     }
 
@@ -256,15 +256,15 @@ public class AnsiShellFrontend implements ShellFrontend {
             onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
             toolStreamed = true;
-            if (verbosity == CliVerbosity.RAW) {
+            if (showToolOutput.shown() && verbosity == CliVerbosity.RAW) {
                 System.err.print(prefix + (t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n"));
-            } else if (verbosity == CliVerbosity.VERBOSE) {
+            } else if (showToolOutput.shown() && verbosity == CliVerbosity.VERBOSE) {
                 System.err.print(MarkdownColorizer.dim(prefix + t.fragment()));
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             stats.incToolsRun();
             stopSpinner();
-            if (showToolOutput) {
+            if (showToolOutput.shown()) {
                 onToolFinished(t);
             }
             if (!showThinking) {
@@ -348,17 +348,20 @@ public class AnsiShellFrontend implements ShellFrontend {
     }
 
     private void onToolStarted(final AgentEvent.ToolStarted t) {
-        if (!showToolOutput) {
+        if (!showToolOutput.shown() && !showToolOutput.collapsed()) {
             return;
         }
+        final var collapsed = showToolOutput.collapsed();
         final var prefix = subagentPrefix(t);
         if (verbosity == CliVerbosity.RAW) {
-            System.err.println(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
+            if (!collapsed) {
+                System.err.println(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
+            }
             return;
         }
         System.err.println(
                 MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
-        if (verbosity == CliVerbosity.COMPACT && t.name().equals("bash")) {
+        if (verbosity == CliVerbosity.COMPACT && !collapsed && t.name().equals("bash")) {
             beginSpinner(prefix + "running " + presenter.summarize(t.name(), t.args()));
         }
     }

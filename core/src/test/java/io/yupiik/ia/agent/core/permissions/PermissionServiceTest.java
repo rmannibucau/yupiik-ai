@@ -86,6 +86,50 @@ class PermissionServiceTest {
     }
 
     @Test
+    void runtimePermissionModeOverridesStaticConfig() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        // statically ASK so without a gate the edit tool would fall through to the gate
+        assertFalse(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
+        service.setPermissionMode(PermissionMode.YOLO);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                .allowed());
+        assertTrue(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
+    }
+
+    @Test
+    void runtimePermissionModeAsyncGivesAutoEdit() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setPermissionMode(PermissionMode.AUTO_EDIT);
+        assertTrue(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+    }
+
+    @Test
+    void clearPermissionModeRestoresConfiguredDefault() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setPermissionMode(PermissionMode.YOLO);
+        assertTrue(service.permissionMode() == PermissionMode.YOLO);
+        service.setPermissionMode(null);
+        assertEquals(PermissionMode.ASK, service.permissionMode());
+    }
+
+    @Test
+    void permissionModeValuesRecogniseAcceptedForms() {
+        assertTrue(PermissionMode.isValue("ask"));
+        assertTrue(PermissionMode.isValue("auto_edit"));
+        assertTrue(PermissionMode.isValue("autoedit"));
+        assertTrue(PermissionMode.isValue("yolo"));
+        assertFalse(PermissionMode.isValue(""));
+        assertFalse(PermissionMode.isValue(null));
+        assertFalse(PermissionMode.isValue("bogus"));
+        // the completion/usage hints are derived from the enum, so they must be self consistent
+        assertTrue(PermissionMode.VALUES.contains("auto_edit"));
+        assertTrue(PermissionMode.VALUES.contains("yolo"));
+        assertTrue(PermissionMode.VALUES.contains("ask"));
+    }
+
+    @Test
     void askDeniesWithoutGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final var decision = service.check("write_file", ToolCategory.EDIT, Map.of("path", "a.txt"));

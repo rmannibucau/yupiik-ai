@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import java.util.List;
 import java.util.Locale;
 
 public enum PermissionMode {
@@ -22,11 +23,25 @@ public enum PermissionMode {
     AUTO_EDIT,
     YOLO;
 
+    /** User-facing string forms accepted by /permissions and CLI parsing, matching {@link #fromConfigurationString}. */
+    public static final List<String> VALUES = List.of("ask", "auto_edit", "yolo");
+
+    public static boolean isValue(final String value) {
+        if (value == null) {
+            return false;
+        }
+        return fromConfigurationString(value) != ASK || "ask".equals(strip(value));
+    }
+
+    private static String strip(final String value) {
+        return value.strip().toLowerCase(Locale.ROOT).replace('-', '_');
+    }
+
     public static PermissionMode fromConfigurationString(final String value) {
         if (value == null || value.isBlank()) {
             return ASK;
         }
-        return switch (value.strip().toLowerCase(Locale.ROOT).replace('-', '_')) {
+        return switch (strip(value)) {
             case "auto_edit", "autoedit" -> AUTO_EDIT;
             case "yolo" -> YOLO;
             default -> ASK;

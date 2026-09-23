@@ -121,7 +121,7 @@ class ShellRegistryTest {
         }
 
         @Override
-        public void showToolOutput(final boolean value) {
+        public void showToolOutput(final ToolOutputVisibility value) {
             calls.add("showToolOutput:" + value);
         }
     }

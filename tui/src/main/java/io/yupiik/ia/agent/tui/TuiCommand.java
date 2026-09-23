@@ -76,6 +76,7 @@ import io.yupiik.ia.agent.core.shell.ShellIO;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -849,10 +850,11 @@ public class TuiCommand implements Runnable {
                 for (final var anchor : state.toolAnchors) {
                     if (anchor.ordinal() >= 0 && anchor.header().contains(mouse.x(), mouse.y())) {
                         state.selection.clear();
-                        if (!state.showToolActions) {
+                        if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
                             // condensed mode: the dim one-liner itself opens the full output
                             openToolOverlay(state, anchor.ordinal());
-                        } else if (!state.collapsedTools.remove(anchor.ordinal())) {
+                        } else if (state.showToolActions == ToolOutputVisibility.SHOWN
+                                && !state.collapsedTools.remove(anchor.ordinal())) {
                             state.collapsedTools.add(anchor.ordinal());
                         }
                         return true;
@@ -964,10 +966,10 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('y')) {
-            state.showToolActions = !state.showToolActions;
+            state.showToolActions = state.showToolActions.next();
             // keep the session flag in sync so /tool-output (no arg) reports the rendered state
             session.showToolOutput(state.showToolActions);
-            notify(state, "tool blocks " + (state.showToolActions ? "shown" : "hidden"));
+            notify(state, "tool blocks " + state.showToolActions.name().toLowerCase(Locale.ROOT));
             return true;
         }
         if (key.hasCtrl() && key.isCharIgnoreCase('f')) {
@@ -1407,7 +1409,7 @@ public class TuiCommand implements Runnable {
             }
 
             @Override
-            public void showToolOutput(final boolean value) {
+            public void showToolOutput(final ToolOutputVisibility value) {
                 runner.runLater(() -> state.showToolActions = value);
             }
 
@@ -2623,9 +2625,13 @@ public class TuiCommand implements Runnable {
             final List<UiState.FooterLink> footerLinks,
             final List<String> rows) {
         final var card = ToolCard.parse(regionText);
+        if (state.showToolActions == ToolOutputVisibility.HIDDEN) {
+            // hidden mode (Ctrl+Y): render nothing at all for tool blocks
+            return;
+        }
         final var collapsed = card.ordinal() >= 0 && state.collapsedTools.contains(card.ordinal());
-        if (!state.showToolActions || collapsed) {
-            // hidden mode (Ctrl+Y) or per-card collapse: keep a single dim summary line
+        if (state.showToolActions == ToolOutputVisibility.COLLAPSED || collapsed) {
+            // collapsed mode (Ctrl+Y) or per-card collapse: keep a single dim summary line
             final var top = out.stream().mapToInt(RenderedChunk::height).sum();
             if (card.ordinal() >= 0) {
                 toolTops.add(new UiState.ToolTop(card.ordinal(), top));
@@ -3103,12 +3109,20 @@ public class TuiCommand implements Runnable {
                     notifPrefix + ellipsize(state.notification, Math.max(8, remaining)) + "  ",
                     Style.EMPTY.fg(Color.hex(notifColor))));
         }
+        // errors trail the metrics in error red: clipped with an ellipsis to the remaining row width so
+        // the message never wraps nor pushes model/metrics out (full text + stack live behind Alt+E)
+        if (state.errorMessage != null) {
+            final var fixedWidth = parts.stream().mapToInt(Span::width).sum();
+            final var errPrefix = "  ✗ ";
+            final var remaining = statusW - fixedWidth - CharWidth.of(errPrefix) - 2; // trailing "  "
+            parts.add(Span.styled(
+                    errPrefix + ellipsize(state.errorMessage, Math.max(8, remaining)) + "  ",
+                    Style.EMPTY.fg(Color.hex(palette.error()))));
+        }
         final var line = Line.from(parts.toArray(Span[]::new));
         final var statusSplit = helpW >= rect.width()
                 ? List.of(rect)
-                : List.of(
-                        new Rect(rect.x(), rect.y(), statusW, rect.height()),
-                        new Rect(rect.x() + statusW, rect.y(), helpW, rect.height()));
+                : List.of(new Rect(rect.x(), rect.y(), statusW, 1), new Rect(rect.x() + statusW, rect.y(), helpW, 1));
         state.shortcutRect = statusSplit.size() == 2 ? statusSplit.get(1) : null;
         frame.renderWidget(
                 Paragraph.builder()
@@ -3145,13 +3159,16 @@ public class TuiCommand implements Runnable {
             final var err = Line.from(Span.styled(
                     glyphs.cross() + "  " + state.errorMessage + "  (Alt+E for details) ",
                     Style.EMPTY.fg(Color.hex(palette.error()))));
+            // the boxed banner lives below the single-row status line (row 0) so it never covers it:
+            // the strip already grows a row for the status line on top of the box's own 3 rows
+            final var bannerRect = new Rect(rect.x(), rect.y() + 1, rect.width(), Math.max(1, rect.height() - 1));
             final var errBlock = Block.builder()
                     .borders(Borders.ALL)
                     .borderType(BorderType.ROUNDED)
                     .borderColor(Color.hex(palette.error()))
                     .build();
-            frame.renderWidget(errBlock, rect);
-            final var inner = errBlock.inner(rect);
+            frame.renderWidget(errBlock, bannerRect);
+            final var inner = errBlock.inner(bannerRect);
             if (!inner.isEmpty()) {
                 frame.renderWidget(
                         Paragraph.builder()
@@ -3705,21 +3722,20 @@ public class TuiCommand implements Runnable {
         state.notification = message;
     }
 
-    /** True when the error recorded via {@link #modelError} is the one currently shown as status. */
+    /** True while an error recorded via {@link #modelError} is awaiting acknowledgment. */
     private static boolean activeError(final UiState state) {
-        return state.errorMessage != null && state.errorMessage.equals(state.model.status());
+        return state.errorMessage != null;
     }
 
     private static void modelError(final UiState state, final String message) {
         modelError(state, message, null);
     }
 
-    /** Records an error: status line + persisted detail (message + stack) openable with Alt+E. */
+    /** Records an error: persisted detail (message + stack) openable with Alt+E; the status strip shows it in red. */
     private static void modelError(final UiState state, final String message, final Throwable error) {
         state.errorMessage = message;
         state.errorDetail = new UiState.ErrorDetail(message, error == null ? null : stackTraceOf(error));
         state.errorScroll = 0;
-        state.model.status(message);
     }
 
     private static String stackTraceOf(final Throwable error) {
@@ -4227,12 +4243,13 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Height of the status strip: 3 rows while a boxed error is shown, 2 rows when the context
-     * compaction warning banner is active (it occupies the strip's last row), 1 row otherwise.
+     * Height of the status strip: 4 rows while a boxed error is shown (1 status line + the 3-row
+     * error banner below it, so the model/metrics stay visible), 2 rows when the context compaction
+     * warning banner is active (it occupies the strip's last row), 1 row otherwise.
      */
     private int statusStripRows(final UiState state) {
         if (state.errorMessage != null) {
-            return 3;
+            return 4;
         }
         return state.model.contextPercent() >= compactionThreshold() ? 2 : 1;
     }
@@ -4742,7 +4759,7 @@ public class TuiCommand implements Runnable {
         private volatile Wait wait;
         private volatile String activeAgent = "";
         private volatile boolean showThinking;
-        private volatile boolean showToolActions;
+        private volatile ToolOutputVisibility showToolActions = ToolOutputVisibility.COLLAPSED;
         private volatile boolean showTodos;
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;

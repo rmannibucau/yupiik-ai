@@ -30,10 +30,12 @@ public enum ArgCompletion {
     TOOLS,
     /** Fixed "build|plan" options. */
     MODE,
-    /** Fixed "all|none|show" options. */
+    /** Permission-mode values (from {@code PermissionMode.VALUES}) plus "all|none|show" toggles. */
     PERMISSIONS,
     /** Fixed "show|hide" options. */
     SHOW_HIDE,
+    /** Fixed "show|collapse|hide" options. */
+    SHOW_COLLAPSE_HIDE,
     /** Filesystem path. */
     PATH
 }

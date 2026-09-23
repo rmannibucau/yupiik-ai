@@ -32,10 +32,10 @@ public class RunShellFrontend implements ShellFrontend {
     private static final Logger LOGGER = Logger.getLogger(RunShellFrontend.class.getName());
 
     private final boolean showThinking;
-    private final boolean showToolOutput;
+    private final ToolOutputVisibility showToolOutput;
     private final AtomicBoolean toolStreamed = new AtomicBoolean();
 
-    public RunShellFrontend(final boolean showThinking, final boolean showToolOutput) {
+    public RunShellFrontend(final boolean showThinking, final ToolOutputVisibility showToolOutput) {
         this.showThinking = showThinking;
         this.showToolOutput = showToolOutput;
     }
@@ -72,7 +72,7 @@ public class RunShellFrontend implements ShellFrontend {
     }
 
     @Override
-    public void showToolOutput(final boolean value) {
+    public void showToolOutput(final ToolOutputVisibility value) {
         // fixed by the run configuration
     }
 
@@ -94,7 +94,7 @@ public class RunShellFrontend implements ShellFrontend {
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             if (!t.success()) {
                 LOGGER.warning(() -> prefix + "tool failed: " + t.name());
-            } else if (showToolOutput
+            } else if (showToolOutput.shown()
                     && !toolStreamed.get()
                     && t.output() != null
                     && !t.output().isBlank()) {

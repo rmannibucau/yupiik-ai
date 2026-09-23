@@ -23,10 +23,12 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -93,7 +95,7 @@ public class ConfigCommands implements SlashCommandSet {
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/permissions",
-                                "all|none|show",
+                                String.join("|", PermissionMode.VALUES) + "|all|none|show",
                                 "allow all tools, ask for approval, or show current (session-scoped) settings",
                                 SlashGroup.CONFIG),
                         ArgCompletion.PERMISSIONS,
@@ -109,10 +111,10 @@ public class ConfigCommands implements SlashCommandSet {
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/tool-output",
-                                "show|hide",
-                                "show or hide tool invocations and output",
+                                "show|collapse|hide",
+                                "show, collapse to a summary line, or hide tool invocations and output",
                                 SlashGroup.CONFIG),
-                        ArgCompletion.SHOW_HIDE,
+                        ArgCompletion.SHOW_COLLAPSE_HIDE,
                         SlashAction.sync(ConfigCommands::toolOutput)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -431,7 +433,8 @@ public class ConfigCommands implements SlashCommandSet {
         }
         final var permitAll = agentSessionService.setPermissions(value);
         if (permitAll == null) {
-            return ShellOutcome.status("usage: /permissions all|none|show");
+            return ShellOutcome.status("invalid /permissions value '" + value + "'; expected one of: "
+                    + String.join("|", PermissionMode.VALUES) + "|all|none|show");
         }
         return ShellOutcome.status(permitAll ? "permissions: all tools allowed" : "permissions: asking for approval");
     }
@@ -449,15 +452,19 @@ public class ConfigCommands implements SlashCommandSet {
     }
 
     private static ShellOutcome toolOutput(final String arg, final ShellEnv env) {
-        return toggle(
-                env,
-                arg,
-                "tool output",
-                value -> {
-                    env.session().showToolOutput(value);
-                    env.frontend().showToolOutput(value);
-                },
-                env.session().showToolOutput());
+        final var current = env.session().showToolOutput();
+        if (arg == null || arg.isBlank()) {
+            return ShellOutcome.status("tool output is " + current.name().toLowerCase(Locale.ROOT)
+                    + " - usage: /tool-output show|collapse|hide");
+        }
+        final var value = ToolOutputVisibility.parse(arg.strip());
+        if (value == null) {
+            return ShellOutcome.status("tool output is " + current.name().toLowerCase(Locale.ROOT)
+                    + " - usage: /tool-output show|collapse|hide");
+        }
+        env.session().showToolOutput(value);
+        env.frontend().showToolOutput(value);
+        return ShellOutcome.status("tool output " + value.name().toLowerCase(Locale.ROOT));
     }
 
     private static ShellOutcome toggle(

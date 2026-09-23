@@ -56,7 +56,7 @@ public final class KeymapCatalog {
                 new Binding("Ctrl+Home/End", "jump top/bottom", "View", false),
                 new Binding("Ctrl+Shift+C", "copy selection", "View", false),
                 new Binding("Ctrl+T", "toggle thinking", "View", false),
-                new Binding("Ctrl+Y", "toggle tool blocks", "View", false),
+                new Binding("Ctrl+Y", "cycle tool blocks (shown/collapsed/hidden)", "View", false),
                 new Binding("Ctrl+P", "cycle todos panel", "View", false),
                 new Binding("Alt+?", "show all shortcuts", "View", true),
                 // session

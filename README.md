@@ -63,8 +63,8 @@ java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatja
 Plan mode is the default for every command. `run` is read-only by default; pass
 `--yca-run-mode build` to allow applying changes, or `--yca-run-permitAll`
 (`--yca-tui-permitAll` for the `tui` command) to bypass permission prompts and
-allow every tool call without asking. `--yca-run-show-tool-output` prints each
-successful tool's output (non-streamed tools) on stderr.
+allow every tool call without asking. `--yca-run-show-tool-output` controls tool output presentation (shown, collapsed
+or hidden; booleans accepted for backward compatibility).
 
 The `cli` command gets full line editing when the fatjar is used: Up/Down browse
 the in-memory history, Alt-b/Alt-f move by word, Alt-Backspace and Ctrl-W delete
@@ -311,10 +311,11 @@ Project instructions and skills are loaded into the system prompt:
 - `Ctrl+T` toggles all thinking blocks (live stream + transcript history):
   hides every block when shown, shows them all back when hidden - nothing is
   lost, blocks stay in memory (same as `/thinking show|hide`, kept in sync)
-- `Ctrl+Y` toggles all executed tool blocks: hidden mode keeps a single dim
-  line per tool (name + duration, failures marked) and hides args, output and
-  the live running stream; showing them back restores the full cards (same as
-  `/tool-output show|hide`, kept in sync)
+- `Ctrl+Y` cycles executed tool blocks through three states: `shown` (full
+  cards with args, output and the live stream), `collapsed` (a single dim line
+  per tool - name and duration, failures marked - hiding args, output and the
+  live stream) and `hidden` (nothing rendered for tools at all). The same
+  states are available via `/tool-output show|collapse|hide`, kept in sync.
 - Paste works through the terminal (ctrl+shift+v, middle-click, ...):
   bracketed paste is enabled so multiline content lands as-is in the prompt
   (newlines preserved, CRLF normalized) instead of being split into multiple

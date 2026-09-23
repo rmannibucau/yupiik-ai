@@ -64,18 +64,24 @@ class AnsiShellFrontendTest {
     }
 
     private AnsiShellFrontend frontend(final boolean showThinking, final boolean showToolOutput) {
-        return frontend(false, showThinking, showToolOutput);
+        return frontend(false, showThinking, ToolOutputVisibility.fromBoolean(showToolOutput));
+    }
+
+    private AnsiShellFrontend frontend(
+            final boolean tty, final boolean showThinking, final ToolOutputVisibility showToolOutput) {
+        return frontend(new MarkdownColorizer(false), tty, showThinking, showToolOutput);
     }
 
     private AnsiShellFrontend frontend(final boolean tty, final boolean showThinking, final boolean showToolOutput) {
-        return frontend(new MarkdownColorizer(false), tty, showThinking, showToolOutput);
+        return frontend(
+                new MarkdownColorizer(false), tty, showThinking, ToolOutputVisibility.fromBoolean(showToolOutput));
     }
 
     private AnsiShellFrontend frontend(
             final MarkdownColorizer colorizer,
             final boolean tty,
             final boolean showThinking,
-            final boolean showToolOutput) {
+            final ToolOutputVisibility showToolOutput) {
         if (jsonMapper == null) {
             jsonMapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
         }
@@ -153,11 +159,11 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(true, true);
 
         assertTrue(frontend.showThinking());
-        assertTrue(frontend.showToolOutput());
+        assertEquals(ToolOutputVisibility.SHOWN, frontend.showToolOutput());
         frontend.showThinking(false);
-        frontend.showToolOutput(false);
+        frontend.showToolOutput(ToolOutputVisibility.COLLAPSED);
         assertFalse(frontend.showThinking());
-        assertFalse(frontend.showToolOutput());
+        assertEquals(ToolOutputVisibility.COLLAPSED, frontend.showToolOutput());
     }
 
     @Test
@@ -200,7 +206,7 @@ class AnsiShellFrontendTest {
 
     @Test
     void replayedTranscriptDimsThoughtAndToolRegions() {
-        final var frontend = frontend(new MarkdownColorizer(true), false, true, true);
+        final var frontend = frontend(new MarkdownColorizer(true), false, true, ToolOutputVisibility.SHOWN);
         frontend.transcript(ConversationTranscript.THOUGHT_BEGIN + "\n**Thinking**\n\nsecret\n"
                 + ConversationTranscript.THOUGHT_END
                 + "\nplain answer\n\n"

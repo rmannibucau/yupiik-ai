@@ -41,6 +41,7 @@ import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
@@ -145,7 +146,9 @@ public class CliCommand implements Runnable {
         this.interruptor = new InterruptCoordinator(clock);
         this.configuration = configuration;
         session.metrics(configuration.metrics());
-        session.showThinking(conf.showThinking()).showToolOutput(conf.showToolOutput());
+        final var parsedToolOutput = ToolOutputVisibility.parse(conf.showToolOutput());
+        final var showToolOutput = parsedToolOutput == null ? ToolOutputVisibility.COLLAPSED : parsedToolOutput;
+        session.showThinking(conf.showThinking()).showToolOutput(showToolOutput);
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.symbols = new Symbols(conf.ascii());
         this.frontend = new AnsiShellFrontend(
@@ -155,7 +158,7 @@ public class CliCommand implements Runnable {
                 CliVerbosity.parse(conf.presentation()),
                 System.console() != null,
                 conf.showThinking(),
-                conf.showToolOutput());
+                showToolOutput);
         this.io = new AnsiShellIO(prompt, symbols, this::onInterrupt, frontend::suspendOutput, frontend::resumeOutput);
     }
 
@@ -199,8 +202,13 @@ public class CliCommand implements Runnable {
             @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.")
             boolean showThinking,
 
-            @Property(defaultValue = "false", documentation = "Show tool invocations and output on stderr.")
-            boolean showToolOutput,
+            @Property(
+                    defaultValue = "\"collapsed\"",
+                    documentation =
+                            "Tool output verbosity on stderr: shown (full invocation and output), collapsed (a single "
+                                    + "summary line per tool) or hidden (nothing). Accepts the legacy booleans true/false "
+                                    + "(true = shown, false = collapsed/off).")
+            String showToolOutput,
 
             @Property(
                     defaultValue = "false",

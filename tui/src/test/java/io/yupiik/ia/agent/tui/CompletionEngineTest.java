@@ -39,7 +39,7 @@ class CompletionEngineTest {
                 spec("/mode", ArgCompletion.MODE, SlashGroup.CONFIG),
                 spec("/permissions", ArgCompletion.PERMISSIONS, SlashGroup.CONFIG),
                 spec("/thinking", ArgCompletion.SHOW_HIDE, SlashGroup.CONFIG),
-                spec("/tool-output", ArgCompletion.SHOW_HIDE, SlashGroup.CONFIG),
+                spec("/tool-output", ArgCompletion.SHOW_COLLAPSE_HIDE, SlashGroup.CONFIG),
                 spec("/context", ArgCompletion.PATH, SlashGroup.INSPECT),
                 spec("/editplan", ArgCompletion.PATH, SlashGroup.MAINTAIN));
         return new SlashRegistry(List.of(set));
@@ -110,8 +110,16 @@ class CompletionEngineTest {
 
     @Test
     void completesPermissionsParam() {
-        final var s = engine().suggest("/permissions a", 14);
-        assertTrue(s.items().contains("all"));
+        final var all = engine().suggest("/permissions a", 14);
+        assertTrue(all.items().contains("all"));
+        final var y = engine().suggest("/permissions y", 14);
+        assertTrue(y.items().contains("yolo"));
+        final var auto = engine().suggest("/permissions auto", 17);
+        assertTrue(auto.items().contains("auto_edit"));
+        final var n = engine().suggest("/permissions n", 14);
+        assertTrue(n.items().contains("none"));
+        final var s = engine().suggest("/permissions sh", 15);
+        assertTrue(s.items().contains("show"));
     }
 
     @Test
@@ -124,6 +132,7 @@ class CompletionEngineTest {
     void completesToolOutputParam() {
         final var s = engine().suggest("/tool-output ", 13);
         assertTrue(s.items().contains("show"));
+        assertTrue(s.items().contains("collapse"));
         assertTrue(s.items().contains("hide"));
     }
 

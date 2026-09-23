@@ -180,7 +180,7 @@ class TurnRunnerTest {
         public void showThinking(final boolean value) {}
 
         @Override
-        public void showToolOutput(final boolean value) {}
+        public void showToolOutput(final ToolOutputVisibility value) {}
 
         @Override
         public void beginTurn() {

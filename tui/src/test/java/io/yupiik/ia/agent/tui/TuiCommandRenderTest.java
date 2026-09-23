@@ -58,6 +58,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -197,6 +198,37 @@ class TuiCommandRenderTest {
         awaitText("..."); // clipped to the leading row width
         awaitTextGone("TAIL");
         awaitText("ready"); // agent state still first and untouched
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void severeLogErrorRendersRedAfterMetricsAndKeepsStatusText() throws Exception {
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-severe-error-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        // redirectLoggerToUi routes a SEVERE record on the "io.yupiik" logger into modelError
+        Logger.getLogger("io.yupiik").severe("LLM request failed (429) retry-after=1");
+
+        // the trailing red segment (single space after the cross glyph) shows the error after the
+        // metrics; the boxed banner below uses a double space, so this matches only the trailing one
+        awaitText("✗ LLM request failed (429) retry-after=1");
+        // the far-left status text must keep the normal "ready", not be replaced by the error
+        awaitText("ready");
+
+        // the error segment must be painted in the error red (#e06c75)
+        final var col = columnOfLineContaining("✗ LLM request failed");
+        final var row = rowOf("✗ LLM request failed");
+        final var rgb = backend.fg(col, row).map(c -> c.toRgb()).orElse(null);
+        assertTrue(
+                rgb != null && rgb.r() == 0xe0 && rgb.g() == 0x6c && rgb.b() == 0x75,
+                "expected the error segment to be painted in the error red, fg=" + backend.fg(col, row));
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -593,7 +625,7 @@ class TuiCommandRenderTest {
     }
 
     @Test
-    void toolOutputCondensedByDefaultAndCtrlYRestoresCards() throws Exception {
+    void toolOutputCondensedByDefaultAndCtrlYCyclesThreeStates() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
         uiThread = new Thread(command, "tui-tool-output-test");
@@ -605,16 +637,52 @@ class TuiCommandRenderTest {
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"cd /tmp && ls -la\"}"));
         shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt"));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true));
-        // condensed by default: the dim one-liner carries the significant command, not the output
+        // collapsed by default: the dim one-liner carries the significant command, not the output
         awaitText("✓ bash");
         awaitText("ls -la");
         awaitTextGone("file.txt");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
-        awaitText("file.txt"); // full card restored with args and output
+        awaitText("file.txt"); // shown: full card restored with args and output
 
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
-        awaitTextGone("file.txt"); // condensed again
+        awaitTextGone("file.txt"); // hidden: nothing rendered any more
+        awaitTextGone("✓ bash");
+        awaitTextGone("ls -la");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitText("✓ bash"); // collapsed again
+        awaitText("ls -la");
+        awaitTextGone("file.txt");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void toolOutputSlashCommandHidesAndCollapses() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-output-slash-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "secret-out"));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "secret-out", true));
+        awaitText("✓ bash"); // collapsed default
+
+        tuiRef.get().dispatch(new PasteEvent("/tool-output hide"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitTextGone("✓ bash");
+        awaitTextGone("ls -la");
+
+        tuiRef.get().dispatch(new PasteEvent("/tool-output collapse"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("✓ bash");
+        awaitTextGone("secret-out");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
