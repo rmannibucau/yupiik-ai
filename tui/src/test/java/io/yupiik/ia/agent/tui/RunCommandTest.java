@@ -253,7 +253,7 @@ class RunCommandTest {
 
         command.run();
 
-        assertFalse(allowed.get(), "plan mode must hard-deny the tool call without consulting the gate");
+        assertFalse(allowed.get(), "state-changing bash must be refused in headless mode via the gate");
     }
 
     @Test
@@ -292,7 +292,7 @@ class RunCommandTest {
     }
 
     @Test
-    void planModeDenialSuggestsBuildMode() {
+    void planModeStateChangingToolReachesGate() {
         final var configuration = CodingAgentConfigurations.builder()
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
@@ -325,10 +325,12 @@ class RunCommandTest {
 
         command.run();
 
+        // plan mode no longer hard-denies a state-changing command up front: it is routed
+        // to the headless gate, which refuses it with the generic gate denial reason
         assertFalse(reason.get().contains("[denied]"));
         assertTrue(
-                reason.get().contains("--yca-run-mode build"),
-                "plan-mode denial must suggest build mode: " + reason.get());
+                reason.get().contains("refused by the user"),
+                "plan-mode state-changing tool must be refused by the gate: " + reason.get());
     }
 
     @Test
