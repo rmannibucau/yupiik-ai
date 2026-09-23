@@ -44,7 +44,10 @@ class ThinkTagSplitterTest {
         }
         assertEquals("Hello\n\nHere is ", visible.toString());
         assertEquals("private reasoning", thinking.toString());
-        assertEquals("json\n{\"x\": 1}\n", fenced.toString());
+        // the FENCED channel round-trips the ``` delimiters so reassembling the stream
+        // keeps faithful fenced-code markdown (the delimiters were historically dropped,
+        // flattening code blocks to bare prose with collapsed indentation)
+        assertEquals("```json\n{\"x\": 1}\n```", fenced.toString());
     }
 
     @Test
@@ -118,6 +121,17 @@ class ThinkTagSplitterTest {
     @Test
     void splitPassesPlainTextThrough() {
         assertEquals(new Parts("just text", ""), splitter.split("just text"));
+    }
+
+    @Test
+    void splitPreservesFencedCodeDelimitersInVisibleContent() {
+        // an assistant answer with a normal (non-thinking) fenced java block must keep its
+        // ``` delimiters so downstream renderers can still box + syntax-highlight it
+        final var code = "public int x() {\n    return 1;\n}\n";
+        final var parts = splitter.split("here is the method:\n```java\n" + code + "```");
+        assertEquals("", parts.thinking());
+        assertTrue(parts.visible().contains("```java"), parts.visible());
+        assertTrue(parts.visible().contains("```"), parts.visible());
     }
 
     private static void append(

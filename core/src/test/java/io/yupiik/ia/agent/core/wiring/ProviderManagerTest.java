@@ -49,12 +49,15 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.models.0.model", "claude"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.outputTokens", "1000"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.reasoningEffort", "low"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.systemPromptMaxChars", "4000"),
                 Map.entry("yca.provider.providers.0.models.1.model", "claude-sonnet-5"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.outputTokens", "2000"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.reasoningEffort", "high"),
+                Map.entry("yca.provider.providers.0.models.1.behavior.systemPromptMaxChars", "9000"),
                 Map.entry("yca.provider.providers.0.models.2.model", "haiku"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.outputTokens", "-1"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.reasoningEffort", ""),
+                Map.entry("yca.provider.providers.0.models.2.behavior.systemPromptMaxChars", "-1"),
                 Map.entry("yca.provider.providers.1.id", "p1"),
                 Map.entry("yca.provider.providers.1.model", "fallback-1")));
     }
@@ -82,6 +85,20 @@ class ProviderManagerTest {
         assertEquals(0, manager.outputTokensOverride(provider, "haiku-4-5"));
         // unlisted model
         assertEquals(0, manager.outputTokensOverride(provider, "gpt-5"));
+    }
+
+    @Test
+    void systemPromptMaxCharsIsExactThenContainsAndIgnoresInvalid() {
+        final var manager = twoProviders();
+        final var provider = manager.providers().get(0);
+        // exact match wins over the earlier contains entry
+        assertEquals(9000, manager.systemPromptMaxChars(provider, "claude-sonnet-5"));
+        // contains fallback follows the list order
+        assertEquals(4000, manager.systemPromptMaxChars(provider, "claude-opus-4"));
+        // zero/negative override is ignored (falls back to 0 = unset)
+        assertEquals(0, manager.systemPromptMaxChars(provider, "haiku-4-5"));
+        // unlisted model returns 0 = no override
+        assertEquals(0, manager.systemPromptMaxChars(provider, "gpt-5"));
     }
 
     @Test
@@ -127,6 +144,7 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.providerSpecificOptions", "{\"echo\":1}"),
                 Map.entry("yca.provider.providers.0.tuning.reasoningEffort", "medium"),
                 Map.entry("yca.provider.providers.0.tuning.outputTokens", "4096"),
+                Map.entry("yca.provider.providers.0.tuning.systemPromptMaxChars", "5000"),
                 Map.entry("yca.provider.providers.0.tuning.providerSpecificOptions", "{\"frequency_penalty\":0.5}"),
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "2"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
@@ -151,6 +169,7 @@ class ProviderManagerTest {
         assertEquals(4096, tuning.outputTokens());
         assertEquals("medium", manager.reasoningEffort(provider, "gpt-5"));
         assertEquals(4096, manager.outputTokensOverride(provider, "gpt-5"));
+        assertEquals(5000, manager.systemPromptMaxChars(provider, "gpt-5"));
         assertEquals(2, manager.variants(provider, "gpt-5").size());
     }
 

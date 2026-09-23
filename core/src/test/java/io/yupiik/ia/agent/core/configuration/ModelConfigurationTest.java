@@ -54,8 +54,9 @@ class ModelConfigurationTest {
 
     @Test
     void tuningUnsetNullableFacetsAreNull() {
-        final var tuning = new ModelTuningConfiguration("", null, List.of(), "");
+        final var tuning = new ModelTuningConfiguration("", null, null, List.of(), "");
         assertNull(tuning.outputTokens());
+        assertNull(tuning.systemPromptMaxChars());
         assertEquals(List.of(), tuning.variants());
     }
 }

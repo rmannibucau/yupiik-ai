@@ -200,21 +200,52 @@ public class SystemPromptBuilder {
         if (!memory.isBlank()) {
             sb.append('\n').append(memory).append('\n');
         }
-        return capSystemPrompt(sb.toString());
+        return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
     }
 
     /**
-     * Keeps the assembled system prompt within {@link #SYSTEM_PROMPT_CAP} characters, trimming the
+     * Resolves the effective system prompt max character budget for the current provider/model, following the
+     * cascade: per-model {@code behavior.systemPromptMaxChars} > per-provider {@code tuning.systemPromptMaxChars} >
+     * the global {@code llm.systemPromptMaxChars} > a value derived from the provider context window (big windows keep
+     * {@link #SYSTEM_PROMPT_CAP}, small ones shrink to leave the usable input budget room for the messages and tools).
+     */
+    private int resolvedSystemPromptCap() {
+        final var provider = providerManager == null ? null : providerManager.current();
+        final var resolved = providerManager == null ? null : providerManager.resolveDefault();
+        final var model = resolved == null ? null : resolved.model();
+        final var perModel =
+                provider == null || model == null ? 0 : providerManager.systemPromptMaxChars(provider, model);
+        if (perModel > 0) {
+            return perModel;
+        }
+        final var global = configuration == null || configuration.llm() == null
+                ? 0
+                : configuration.llm().systemPromptMaxChars();
+        if (global > 0) {
+            return global;
+        }
+        final var window = provider == null ? 0 : provider.contextWindow();
+        if (window <= 0) {
+            return SYSTEM_PROMPT_CAP;
+        }
+        // mirror UsageTracker.usableWindow(): reserve a quarter of the window (capped at 20k) for output
+        final var usable = window - Math.min(window / 4, 20_000);
+        // budget roughly half of the usable input for the system prompt, ~4 chars per token, clamped to the hard cap
+        return Math.max(2_000, Math.min(SYSTEM_PROMPT_CAP, (usable / 2) * 4));
+    }
+
+    /**
+     * Keeps the assembled system prompt within {@code maxChars} characters, trimming the
      * front (the generic preamble) and keeping the tail (environment, project context, skills,
      * agent instructions and session state) which carries the most load-bearing durable instructions.
      */
-    private static String capSystemPrompt(final String prompt) {
-        if (prompt.length() <= SYSTEM_PROMPT_CAP) {
+    private static String capSystemPrompt(final String prompt, final int maxChars) {
+        if (prompt.length() <= maxChars) {
             return prompt;
         }
-        return "[...system prompt exceeded the " + SYSTEM_PROMPT_CAP
-                + " char budget; " + (prompt.length() - SYSTEM_PROMPT_CAP) + " leading chars elided...]\n"
-                + prompt.substring(prompt.length() - SYSTEM_PROMPT_CAP);
+        return "[...system prompt exceeded the " + maxChars
+                + " char budget; " + (prompt.length() - maxChars) + " leading chars elided...]\n"
+                + prompt.substring(prompt.length() - maxChars);
     }
 
     private void appendTodoGuidance(final StringBuilder sb) {

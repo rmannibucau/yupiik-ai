@@ -38,6 +38,11 @@ public record ModelTuningConfiguration(
         Integer outputTokens,
 
         @Property(
+                documentation =
+                        "Default system prompt maximum character budget override for this model (put-if-absent too). Unset or zero/negative keeps the provider tuning, then the global llm default, then a value derived from the provider context window (big windows keep ~32k, small windows shrink).")
+        Integer systemPromptMaxChars,
+
+        @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Named tuning presets (variants) selectable at runtime via the /model command. Unset defers to the provider-level variants, then to the implicit per-family scheme.")

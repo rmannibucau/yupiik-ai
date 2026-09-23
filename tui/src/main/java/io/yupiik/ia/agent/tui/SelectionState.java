@@ -129,20 +129,25 @@ final class SelectionState {
 
     /**
      * Reverses the style of the selected cells so the selection is visible.
+     * <p>
+     * The highlight is clipped to the {@link #zone(List) zone} holding the
+     * selection's anchor, so the shaded area matches what
+     * {@link #copy(String[][], List)} would extract; when no zone holds the
+     * anchor the whole selected span is lit.
      */
-    void highlight(final Buffer buffer) {
+    void highlight(final Buffer buffer, final List<Rect> zones) {
         if (!hasSelection()) {
             return;
         }
         final var width = buffer.width();
         final var bounds = bounds(width);
+        final var zone = zone(zones);
         for (var y = bounds.fromY(); y <= bounds.toY(); y++) {
-            final var startX = bounds.startX(y);
-            final var endX = Math.min(bounds.endX(y), width - 1);
-            if (endX < startX) {
+            final var span = span(bounds, width, zone, y);
+            if (span == null) {
                 continue;
             }
-            buffer.setStyle(new Rect(startX, y, endX - startX + 1, 1), Style.EMPTY.reversed());
+            buffer.setStyle(new Rect(span.startX, y, span.endX - span.startX + 1, 1), Style.EMPTY.reversed());
         }
     }
 
@@ -150,21 +155,32 @@ final class SelectionState {
      * Extracts the selected text from the last rendered frame snapshot:
      * trailing whitespace is stripped from each row and trailing empty rows
      * are dropped.
+     * <p>
+     * The selection is clipped to the {@link #zone(List) zone} holding its
+     * anchor: rows outside that zone's vertical span are skipped and each
+     * row's start/end columns are clamped into the zone's horizontal span. This
+     * keeps a multi-line drag from pulling the left gutter/bar or the right
+     * sidebar/todos into the copied text. When no zone holds the anchor the
+     * whole frame is copied.
      *
+     * @param zones the candidate rectangles to confine the selection to (chat body, prompt input...)
      * @return the selected text, possibly empty, or null when nothing is selected
      */
-    String copy(final String[][] grid) {
+    String copy(final String[][] grid, final List<Rect> zones) {
         if (!hasSelection() || grid.length == 0 || grid[0].length == 0) {
             return null;
         }
         final var width = grid[0].length;
         final var bounds = bounds(width);
+        final var zone = zone(zones);
         final var rows = new ArrayList<String>(bounds.toY() - bounds.fromY() + 1);
         for (var y = bounds.fromY(); y <= bounds.toY() && y < grid.length; y++) {
-            final var startX = bounds.startX(y);
-            final var endX = Math.min(bounds.endX(y), width - 1);
-            final var row = new StringBuilder(Math.max(0, endX - startX + 1));
-            for (var x = startX; x <= endX; x++) {
+            final var span = span(bounds, width, zone, y);
+            if (span == null) {
+                continue;
+            }
+            final var row = new StringBuilder(Math.max(0, span.endX - span.startX + 1));
+            for (var x = span.startX; x <= span.endX; x++) {
                 row.append(grid[y][x]);
             }
             rows.add(row.toString().stripTrailing());
@@ -174,6 +190,44 @@ final class SelectionState {
         }
         return String.join("\n", rows);
     }
+
+    /**
+     * Selects the zone the selection's anchor fell into, so a drag that starts
+     * in the chat body is confined to the chat and one starting in the prompt
+     * input to the input. Returns null (whole frame) when the anchor is not in
+     * any of the given zones or there is none.
+     */
+    private Rect zone(final List<Rect> zones) {
+        if (zones == null) {
+            return null;
+        }
+        for (final var candidate : zones) {
+            if (candidate != null && !candidate.isEmpty() && candidate.contains(anchorX, anchorY)) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Computes the cell span of the selection on the given row, clamped into
+     * the zone (when any). Returns null for rows outside the zone's vertical
+     * span or when the horizontal span collapses.
+     */
+    private static Span span(final Bounds bounds, final int width, final Rect zone, final int y) {
+        final var clip = zone != null && !zone.isEmpty() ? zone : null;
+        if (clip != null && (y < clip.y() || y >= clip.bottom())) {
+            return null;
+        }
+        final var startX = Math.max(bounds.startX(y), clip == null ? 0 : clip.x());
+        final var endX = Math.min(bounds.endX(y), Math.min(width - 1, clip == null ? width - 1 : clip.right() - 1));
+        if (endX < startX) {
+            return null;
+        }
+        return new Span(startX, endX);
+    }
+
+    private record Span(int startX, int endX) {}
 
     private Bounds bounds(final int width) {
         final var topIsAnchor = anchorY <= focusY;

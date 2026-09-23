@@ -495,6 +495,43 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void assistantAnswerRendersFencedCodeIndentedAndHighlighted() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-answer-code-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a fenced java block inside a final assistant ANSWER must be split, boxed and
+        // syntax-highlighted like it is inside a thought: indentation kept + keyword colored.
+        final var code = """
+                public static native BiPredicate declaredType(Object value);
+
+                public BiPredicate declaredType() {
+                    return (BiPredicate) field.get(null);
+                }
+                """;
+        shellRegistry.onEvent(new AgentEvent.TurnDone("here is the method:\n```java\n" + code + "```"));
+
+        // the code reached rendering (not dropped) and its body indentation survived
+        awaitText("public static native BiPredicate declaredType");
+        awaitText("    return (BiPredicate) field.get(null);");
+
+        // a java keyword is coloured for real (not plain prose) when the CODE path is taken
+        final var col = columnOfLineContaining("public BiPredicate declaredType()");
+        final var row = rowOf("public BiPredicate declaredType()");
+        assertTrue(
+                col >= 0 && row >= 0 && backend.fg(col, row).isPresent(),
+                "expected the 'public' keyword to be syntax-coloured on the row containing it, fg="
+                        + backend.fg(col, row));
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
     void collapsedTodosStillRenderTheList() throws Exception {
         final var shellRegistry = testRegistry();
         // a store whose render() yields a real todo so the panel auto-shows (expanded)

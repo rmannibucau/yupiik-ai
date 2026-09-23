@@ -162,6 +162,13 @@ public class ThinkTagSplitter {
                 state = State.FENCED;
             }
             emit(Channel.VISIBLE, 0, at);
+            if (state == State.FENCED) {
+                // the opening delimiter was consumed as a boundary above; re-add it as the
+                // first FENCED segment so callers reassembling the stream keep faithful
+                // fenced-code markdown (otherwise the ``` delimiters are lost and the block
+                // flattens to bare prose, losing both box + syntax highlighting downstream)
+                out.add(new Segment(Channel.FENCED, fenceToken));
+            }
             return true;
         }
 
@@ -196,9 +203,9 @@ public class ThinkTagSplitter {
                 }
                 return false;
             }
-            // emit the prefix first: the deletion shifts the closing token to index 0
-            emit(Channel.FENCED, 0, at);
-            carry.delete(0, fenceToken.length());
+            // emit the body and the closing delimiter together so the fence round-trips
+            // through the FENCED channel (opener was re-added in scanNormal)
+            emit(Channel.FENCED, 0, at + fenceToken.length());
             fenceToken = null;
             state = State.NORMAL;
             return true;

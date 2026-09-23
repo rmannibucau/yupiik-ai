@@ -1195,11 +1195,20 @@ public class TuiCommand implements Runnable {
      * avoid accidental clipboard overwrites.
      */
     private void copySelection(final TuiRunner runner, final UiState state) {
-        final var text = state.selection.copy(state.screenGrid);
+        final var text = state.selection.copy(state.screenGrid, copyZones(state));
         if (text == null || text.length() <= 1 || text.isBlank()) {
             return;
         }
         copyText(runner, state, text);
+    }
+
+    /**
+     * The zones a selection may be confined to, most specific first: the chat
+     * body (conversation) and the prompt input. The selection engine clips to
+     * whichever zone holds the drag's anchor.
+     */
+    private static java.util.List<Rect> copyZones(final UiState state) {
+        return java.util.List.of(state.copyZone, state.inputZone);
     }
 
     /**
@@ -2166,6 +2175,9 @@ public class TuiCommand implements Runnable {
         // thinking streams inline in the conversation panel (dimmed, thin left bar),
         // gated by showThinking, so no dedicated stacked panel is needed anymore
         renderTranscript(chat, frame, state);
+        // the copy-safe zone is the chat body: chat already excludes the accent gutter
+        // (column 0) and the sidebar/todos; +2 skips the per-region left bar ("│ "/"┃ ")
+        state.copyZone = new Rect(chat.x() + 2, chat.y(), Math.max(1, chat.width() - 2), Math.max(1, chat.height()));
         var bottomIndex = 1;
         if (queueRows > 0) {
             renderQueue(root.get(bottomIndex++), frame, state);
@@ -2200,7 +2212,7 @@ public class TuiCommand implements Runnable {
             renderErrorDetail(frame, state);
         }
         renderToast(frame, state);
-        state.selection.highlight(frame.buffer());
+        state.selection.highlight(frame.buffer(), copyZones(state));
         state.screenGrid = SelectionState.snapshot(frame.buffer());
     }
 
@@ -2828,6 +2840,7 @@ public class TuiCommand implements Runnable {
         final var block = activeBlock(" prompt ");
         frame.renderWidget(block, withGutter.get(1));
         final var inner = block.inner(withGutter.get(1));
+        state.inputZone = inner;
         if (inner.isEmpty()) {
             return;
         }
@@ -4747,6 +4760,8 @@ public class TuiCommand implements Runnable {
         private volatile int completionCursor = -1;
         private final SelectionState selection = new SelectionState();
         private volatile String[][] screenGrid = new String[0][0];
+        private volatile Rect copyZone;
+        private volatile Rect inputZone;
         private volatile int spinnerTick;
         private volatile String lastTodosRender = "";
         private volatile Toast toast;

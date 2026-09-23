@@ -333,6 +333,46 @@ class SystemPromptBuilderTest {
         assertTrue(prompt.contains("any other name will be rejected"));
     }
 
+    @Test
+    void systemPromptCapShrinksToFitSmallWindow() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.model", "m",
+                "yca.provider.providers.0.contextWindow", "8192"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        // 8k window -> usable = 8192 - 8192/4 = 6144; (6144/2)*4 = 12288 char cap
+        assertTrue(prompt.length() <= 12_288, "small window must shrink the system prompt, but got " + prompt.length());
+        assertFalse(prompt.contains("char budget"), "the assembled prompt should already fit the derived cap");
+    }
+
+    @Test
+    void systemPromptIsElidedWithMarkerWhenOverGlobalCap() {
+        final var cfg = config(Map.of(
+                "yca.storageHome",
+                storageHome.toString(),
+                "yca.workingDir",
+                project.toString(),
+                "yca.mode",
+                "build",
+                "yca.llm.systemPromptMaxChars",
+                "1200"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(prompt.contains("char budget"), "over-limit prompt should be elided with the marker");
+        assertTrue(
+                prompt.length() < 2_000,
+                "prompt must be capped to roughly the configured budget (tail 1200 + marker), but got "
+                        + prompt.length());
+        assertTrue(
+                prompt.length() > 1_200,
+                "the marker is prepended on top of the capped tail, so the result is just over the budget");
+        assertFalse(
+                prompt.contains("You are yca, a terminal coding agent. You help the user"),
+                "the leading preamble should be trimmed, keeping only the tail");
+    }
+
     private static TodoPromptResolver todoResolver() {
         return new TodoPromptResolver();
     }

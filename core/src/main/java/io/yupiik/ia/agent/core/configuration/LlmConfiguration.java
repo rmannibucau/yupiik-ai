@@ -73,4 +73,10 @@ public record LlmConfiguration(
                 defaultValue = "2",
                 documentation =
                         "Maximum retries of a streamed LLM request that broke mid-stream (transport failure after partial content was received, eg. a dropped chunked HTTP connection). Each retry restarts the full request after an exponential backoff; 0 ends the turn on the first mid-stream failure.")
-        int streamRetriesMaxAttempts) {}
+        int streamRetriesMaxAttempts,
+
+        @Property(
+                defaultValue = "32000",
+                documentation =
+                        "Global system prompt maximum character budget. The resolved cap is: per-model behavior > per-provider tuning > this value > a value derived from the provider context window (big windows keep ~32k, small windows shrink to fit the input budget).")
+        int systemPromptMaxChars) {}

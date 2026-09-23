@@ -200,6 +200,27 @@ public class ProviderManager {
     }
 
     /**
+     * Resolve the effective system prompt max character budget override for a model of a provider: the
+     * {@code behavior.systemPromptMaxChars} of the first matching model entry - exact id first, then first pattern
+     * contained in the model name - else the provider-level {@code tuning.systemPromptMaxChars}, else 0 when no override
+     * applies. The global llm default and the window-derived fallback are not folded in here so the caller can distinguish
+     * "override" from "default".
+     */
+    public int systemPromptMaxChars(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().systemPromptMaxChars() != null) {
+            final var chars = entry.behavior().systemPromptMaxChars();
+            if (chars > 0) {
+                return chars;
+            }
+        }
+        final var tuning = providerTuning(provider);
+        return tuning != null && tuning.systemPromptMaxChars() != null && tuning.systemPromptMaxChars() > 0
+                ? tuning.systemPromptMaxChars()
+                : 0;
+    }
+
+    /**
      * Resolve the per-model reasoning effort default: {@code behavior.reasoningEffort} of the first matching entry, else the
      * provider-level {@code tuning.reasoningEffort}, else null.
      */
