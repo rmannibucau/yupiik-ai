@@ -27,6 +27,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * ANSI terminal frontend shared by the {@code cli} command: streams the answer
@@ -65,6 +66,18 @@ public class AnsiShellFrontend implements ShellFrontend {
     private boolean resumeThinking;
     /** Whether an interaction is pending a trailing newline to leave its card row on resume. */
     private boolean pendingInteractionSeparation;
+
+    /**
+     * Serializes every cursor-mutating terminal write between the stderr
+     * spinner and the stdout interaction prompts so the two never interleave
+     * on the shared physical line. Held for the full spinner frame/erase and
+     * for each interaction card + prompt draw.
+     */
+    private final ReentrantLock renderLock = new ReentrantLock();
+
+    public ReentrantLock renderLock() {
+        return renderLock;
+    }
 
     public AnsiShellFrontend(
             final MarkdownColorizer colorizer,
@@ -189,10 +202,12 @@ public class AnsiShellFrontend implements ShellFrontend {
     /** Resumes rendering and replays the events buffered while suspended. */
     public void resumeOutput() {
         final List<AgentEvent> queued;
+        final boolean turnEnded;
         synchronized (pendingEvents) {
             queued = List.copyOf(pendingEvents);
             pendingEvents.clear();
             suspended = false;
+            turnEnded = queued.stream().anyMatch(AgentEvent.TurnDone.class::isInstance);
         }
         if (tty && pendingInteractionSeparation) {
             pendingInteractionSeparation = false;
@@ -200,9 +215,13 @@ public class AnsiShellFrontend implements ShellFrontend {
             System.out.flush();
         }
         queued.forEach(this::onEvent);
+        // Restart the thinking spinner only when the turn is still genuinely
+        // active and no buffered event ended it: an unconditional restart here
+        // would otherwise leave the spinner spinning forever over the freshly
+        // drawn next prompt once the interaction finished.
         if (resumeThinking) {
             resumeThinking = false;
-            if (!showThinking && spinner == null) {
+            if (!showThinking && !turnEnded && turnActive && spinner == null) {
                 beginSpinner("thinking");
             }
         }
@@ -493,7 +512,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         if (!tty || !turnActive || spinner != null) {
             return;
         }
-        spinner = new Spinner(symbols, System.err, tty);
+        spinner = new Spinner(symbols, System.err, tty, renderLock);
         spinner.start(label);
     }
 

@@ -160,6 +160,26 @@ class AnsiShellFrontendTest {
         assertFalse(frontend.spinnerRunning());
     }
 
+    @Test
+    void resumeDoesNotRestartThinkingAfterBufferedTurnDone() {
+        final var frontend = frontend(true, false, true);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+
+        // the interaction suspends output; while blocked the turn completes and its
+        // TurnDone is buffered. On resume the buffered TurnDone stops the spinner,
+        // and resumeOutput must NOT re-arm it (otherwise it would spin forever over
+        // the freshly drawn prompt once the answer is ready).
+        frontend.suspendOutput();
+        assertFalse(frontend.spinnerRunning());
+        frontend.onEvent(new AgentEvent.TurnDone("answer"));
+        frontend.resumeOutput();
+        assertFalse(frontend.spinnerRunning(), "spinner must stay off after a buffered TurnDone");
+
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
+    }
+
     private static long newlines(final String text) {
         return text.codePoints().filter(c -> c == '\n').count();
     }

@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayOutputStream;
@@ -24,13 +25,14 @@ import java.io.PrintStream;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.Test;
 
 class SpinnerTest {
     @Test
     void inertWithoutTty() {
         final var out = new ByteArrayOutputStream();
-        final var spinner = new Spinner(new Symbols(false), new PrintStream(out, true), false);
+        final var spinner = new Spinner(new Symbols(false), new PrintStream(out, true), false, new ReentrantLock());
         spinner.start("thinking");
         spinner.stop();
         assertEquals(0, out.size());
@@ -39,7 +41,8 @@ class SpinnerTest {
     @Test
     void doubleStartDoesNotOrphanTheFirstAnimationThread() throws InterruptedException {
         final var stream = new RecordingStream();
-        final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, TimeUnit.MINUTES.toMillis(1));
+        final var spinner = new Spinner(
+                new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         spinner.start("thinking");
         assertTrue(stream.awaitFrame(), "spinner did not render a frame");
@@ -52,7 +55,8 @@ class SpinnerTest {
     @Test
     void restartAfterStopAnimatesAgain() throws InterruptedException {
         final var stream = new RecordingStream();
-        final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, TimeUnit.MINUTES.toMillis(1));
+        final var spinner = new Spinner(
+                new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         assertTrue(stream.awaitFrame(), "spinner did not render a frame");
         spinner.stop();
@@ -62,6 +66,20 @@ class SpinnerTest {
         assertTrue(stream.awaitFrame(), "no frames after restart");
         spinner.stop();
         assertTrue(stream.size() > sizeAfterFirstStop, "no frames after restart");
+    }
+
+    @Test
+    void stopReturnsOnlyAfterWorkerExited() throws InterruptedException {
+        final var stream = new RecordingStream();
+        final var spinner = new Spinner(
+                new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
+        spinner.start("thinking");
+        assertTrue(stream.awaitFrame(), "spinner did not render a frame");
+        spinner.stop(); // must join the worker so the erase is the last write
+        stream.nextFrame();
+        // a hypothetical leaked worker would write again and trip this latch promptly;
+        // a clean stop stays silent for the whole bounded wait
+        assertFalse(stream.awaitFrame(), "a stale frame was written after stop() returned");
     }
 
     /**

@@ -32,6 +32,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
 
 /**
@@ -48,14 +50,19 @@ public class AnsiShellIO implements ShellIO {
     private final Runnable onInterrupt;
     private final Runnable onInteractionStart;
     private final Runnable onInteractionEnd;
+    /**
+     * Serializes this card/prompt rendering with the stderr spinner so the two
+     * cursor-mutating writers never interleave on the shared terminal line.
+     */
+    private final Lock renderLock;
 
     public AnsiShellIO(final Prompt prompt, final Symbols symbols, final Runnable onInterrupt) {
-        this(prompt, symbols, onInterrupt, () -> {}, () -> {});
+        this(prompt, symbols, onInterrupt, () -> {}, () -> {}, new ReentrantLock());
     }
 
     public AnsiShellIO(
             final Prompt prompt, final Symbols symbols, final Runnable onInterrupt, final Runnable onInteractionStart) {
-        this(prompt, symbols, onInterrupt, onInteractionStart, () -> {});
+        this(prompt, symbols, onInterrupt, onInteractionStart, () -> {}, new ReentrantLock());
     }
 
     public AnsiShellIO(
@@ -64,19 +71,32 @@ public class AnsiShellIO implements ShellIO {
             final Runnable onInterrupt,
             final Runnable onInteractionStart,
             final Runnable onInteractionEnd) {
+        this(prompt, symbols, onInterrupt, onInteractionStart, onInteractionEnd, new ReentrantLock());
+    }
+
+    public AnsiShellIO(
+            final Prompt prompt,
+            final Symbols symbols,
+            final Runnable onInterrupt,
+            final Runnable onInteractionStart,
+            final Runnable onInteractionEnd,
+            final Lock renderLock) {
         this.prompt = prompt;
         this.lined = prompt instanceof LinedPrompt lp ? lp : null;
         this.symbols = symbols;
         this.onInterrupt = onInterrupt;
         this.onInteractionStart = onInteractionStart;
         this.onInteractionEnd = onInteractionEnd;
+        this.renderLock = renderLock;
     }
 
     private <T> CompletionStage<T> interact(final Supplier<CompletionStage<T>> interaction) {
         onInteractionStart.run();
+        renderLock.lock();
         try {
             return interaction.get();
         } finally {
+            renderLock.unlock();
             onInteractionEnd.run();
         }
     }
@@ -162,9 +182,11 @@ public class AnsiShellIO implements ShellIO {
     public ApprovalGate approvalGate() {
         return (title, detail, toolName, args) -> {
             onInteractionStart.run();
+            renderLock.lock();
             try {
                 return approvalDecision(title, detail);
             } finally {
+                renderLock.unlock();
                 onInteractionEnd.run();
             }
         };
@@ -198,9 +220,11 @@ public class AnsiShellIO implements ShellIO {
                 return Map.of();
             }
             onInteractionStart.run();
+            renderLock.lock();
             try {
                 return collectAnswers(questions);
             } finally {
+                renderLock.unlock();
                 onInteractionEnd.run();
             }
         };

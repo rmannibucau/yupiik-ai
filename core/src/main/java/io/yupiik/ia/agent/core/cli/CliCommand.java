@@ -170,7 +170,13 @@ public class CliCommand implements Runnable {
                 System.console() != null,
                 conf.showThinking(),
                 showToolOutput);
-        this.io = new AnsiShellIO(prompt, symbols, this::onInterrupt, frontend::suspendOutput, frontend::resumeOutput);
+        this.io = new AnsiShellIO(
+                prompt,
+                symbols,
+                this::onInterrupt,
+                frontend::suspendOutput,
+                frontend::resumeOutput,
+                frontend.renderLock());
         this.queueing = prompt instanceof LinedPrompt lined && lined.queuing();
     }
 
