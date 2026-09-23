@@ -51,6 +51,8 @@ public class AnsiShellFrontend implements ShellFrontend {
     private volatile boolean toolStreamed;
     /** Whether the dim 'thinking...' header was printed for the current reasoning round. */
     private boolean thinkingRoundOpen;
+    /** Whether the last stderr emission (a thought delta) did not end with a newline. */
+    private boolean stderrNeedsNewline;
 
     private Spinner spinner;
     private final ArrayDeque<AgentEvent> pendingEvents = new ArrayDeque<>();
@@ -107,6 +109,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     @Override
     public void status(final String message) {
         stopSpinner();
+        ensureStderrNewline();
         System.err.println(MarkdownColorizer.status(symbols.infoMarker() + " " + message));
     }
 
@@ -119,6 +122,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                     case WARN -> symbols.warningMarker();
                     case INFO -> symbols.infoMarker();
                 };
+        ensureStderrNewline();
         System.err.println(MarkdownColorizer.status(marker + " " + message));
     }
 
@@ -145,6 +149,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     @Override
     public void error(final String message) {
         stopSpinner();
+        ensureStderrNewline();
         System.err.println(MarkdownColorizer.error("[error] " + message));
     }
 
@@ -203,6 +208,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         stats.beginTurn();
         textBuffer.reset();
         thinkingRoundOpen = false;
+        stderrNeedsNewline = false;
         stopSpinner();
         if (!showThinking) {
             beginSpinner("thinking");
@@ -245,6 +251,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                 }
                 stopSpinner();
                 System.err.print(MarkdownColorizer.thinking(prefix + delta));
+                stderrNeedsNewline = !delta.endsWith("\n");
                 System.err.flush();
             } else {
                 beginSpinner(prefix + "thinking");
@@ -273,6 +280,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         } else if (event
                 instanceof AgentEvent.Compacted(String kind, String mode, String subagentId, String subagentName)) {
             stopSpinner();
+            ensureStderrNewline();
             System.err.println(MarkdownColorizer.status(prefix + symbols.infoMarker() + " context " + kind
                     + " applied (" + mode.toLowerCase(Locale.ROOT) + ")"));
         } else if (event
@@ -355,10 +363,12 @@ public class AnsiShellFrontend implements ShellFrontend {
         final var prefix = subagentPrefix(t);
         if (verbosity == CliVerbosity.RAW) {
             if (!collapsed) {
+                ensureStderrNewline();
                 System.err.println(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
             }
             return;
         }
+        ensureStderrNewline();
         System.err.println(
                 MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
         if (verbosity == CliVerbosity.COMPACT && !collapsed && t.name().equals("bash")) {
@@ -368,6 +378,7 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     private void onToolFinished(final AgentEvent.ToolFinished t) {
         stopSpinner();
+        ensureStderrNewline();
         final var prefix = subagentPrefix(t);
         final var indent = "  ";
         if (verbosity == CliVerbosity.RAW) {
@@ -460,6 +471,18 @@ public class AnsiShellFrontend implements ShellFrontend {
         if (spinner != null) {
             spinner.stop();
             spinner = null;
+        }
+    }
+
+    /**
+     * Thoughts stream continuously without a trailing newline; before printing a
+     * discrete line on stderr, terminate the open thought line so it is not glued
+     * to the following tool/status line.
+     */
+    private void ensureStderrNewline() {
+        if (stderrNeedsNewline) {
+            System.err.println();
+            stderrNeedsNewline = false;
         }
     }
 

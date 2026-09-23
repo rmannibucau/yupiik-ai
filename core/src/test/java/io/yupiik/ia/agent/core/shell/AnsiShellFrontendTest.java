@@ -205,6 +205,24 @@ class AnsiShellFrontendTest {
     }
 
     @Test
+    void thoughtWithoutNewlineIsTerminatedBeforeToolLine() {
+        final var frontend = frontend(false, true, true);
+        frontend.beginTurn();
+
+        // a thought delta that does not end with a newline
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
+        // a following tool line must not be glued onto the thought line
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls"));
+
+        final var stderr = err.toString(StandardCharsets.UTF_8);
+        // the thought delta is ANSI-wrapped (\u001b[38;5;240m...\u001b[0m); the guard must
+        // insert a newline right after it so the tool line is not glued onto the thought line
+        assertTrue(
+                stderr.contains("reasoning\u001b[0m\n"),
+                "thought must terminate with a newline before the tool line: " + stderr);
+    }
+
+    @Test
     void replayedTranscriptDimsThoughtAndToolRegions() {
         final var frontend = frontend(new MarkdownColorizer(true), false, true, ToolOutputVisibility.SHOWN);
         frontend.transcript(ConversationTranscript.THOUGHT_BEGIN + "\n**Thinking**\n\nsecret\n"

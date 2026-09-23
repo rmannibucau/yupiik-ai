@@ -137,9 +137,10 @@ public class PermissionService {
                     && permissions.isPlanBash(command)) {
                 return Decision.allow();
             }
-            return Decision.deny(
-                    "this " + (category == ToolCategory.BASH ? "command" : "tool")
-                            + " modifies the repository and is not allowed in plan mode (switch to build mode with /mode build or --yca-run-mode build)");
+            // plan mode stays read-only for what is auto-allowed above, but a
+            // state-changing tool is not silently refused: it falls through to the
+            // normal enforcement (deny/allow lists, session grants, permission mode
+            // and, in ask mode, the interactive approval gate) so the user can choose.
         }
         if (permissions.isDenied(toolName)) {
             return Decision.deny("tool " + toolName + " is denied by configuration");

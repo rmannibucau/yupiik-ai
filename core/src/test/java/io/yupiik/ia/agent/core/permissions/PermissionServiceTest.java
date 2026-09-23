@@ -17,7 +17,6 @@ package io.yupiik.ia.agent.core.permissions;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -176,12 +175,14 @@ class PermissionServiceTest {
     void planModeBlocksEditAndBashWithoutGate() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setMode(AgentMode.PLAN);
+        // no gate installed: state-changing tools fall through to the approval flow
+        // which refuses without an interactive gate
         assertFalse(service.check("write_file", ToolCategory.EDIT, Map.of()).allowed());
         assertFalse(service.check("bash", ToolCategory.BASH, Map.of()).allowed());
     }
 
     @Test
-    void planModeHardDeniesStateChangingToolsRegardlessOfGate() {
+    void planModeConsultsGateForStateChangingBash() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final AtomicReference<String> asked = new AtomicReference<>();
         service.setMode(AgentMode.PLAN);
@@ -189,15 +190,15 @@ class PermissionServiceTest {
             asked.set(title);
             return ApprovalGate.Result.ALLOW_ONCE;
         });
-        // non-readonly bash is hard-denied in plan mode: the gate is never consulted
+        // non-readonly bash in plan mode is not hard-denied: it is routed to the
+        // approval gate so the user can approve it
         final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "cd /somewhere && doThing"));
-        assertFalse(decision.allowed());
-        assertTrue(decision.reason().contains("plan mode"));
-        assertNull(asked.get(), "the approval gate must not be invoked in plan mode");
+        assertTrue(decision.allowed());
+        assertTrue(asked.get() != null, "the approval gate must be consulted in plan mode for state-changing tools");
     }
 
     @Test
-    void planModeHardDeniesEditEvenWithGate() {
+    void planModeConsultsGateForEdit() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final AtomicReference<String> asked = new AtomicReference<>();
         service.setMode(AgentMode.PLAN);
@@ -206,9 +207,8 @@ class PermissionServiceTest {
             return ApprovalGate.Result.ALLOW_ONCE;
         });
         final var decision = service.check("edit_file", ToolCategory.EDIT, Map.of("path", "a.txt"));
-        assertFalse(decision.allowed());
-        assertTrue(decision.reason().contains("plan mode"));
-        assertNull(asked.get(), "the approval gate must not be invoked for edit tools in plan mode");
+        assertTrue(decision.allowed());
+        assertTrue(asked.get() != null, "the approval gate must be consulted for edit tools in plan mode");
     }
 
     @Test

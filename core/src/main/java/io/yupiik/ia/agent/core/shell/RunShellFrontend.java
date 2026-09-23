@@ -34,6 +34,7 @@ public class RunShellFrontend implements ShellFrontend {
     private final boolean showThinking;
     private final ToolOutputVisibility showToolOutput;
     private final AtomicBoolean toolStreamed = new AtomicBoolean();
+    private boolean stderrNeedsNewline;
 
     public RunShellFrontend(final boolean showThinking, final ToolOutputVisibility showToolOutput) {
         this.showThinking = showThinking;
@@ -42,11 +43,13 @@ public class RunShellFrontend implements ShellFrontend {
 
     @Override
     public void status(final String message) {
+        ensureStderrNewline();
         LOGGER.info(message);
     }
 
     @Override
     public void notice(final AgentEvent.Notice.Level level, final String message) {
+        ensureStderrNewline();
         log(
                 switch (level) {
                     case ERROR -> Level.SEVERE;
@@ -63,6 +66,7 @@ public class RunShellFrontend implements ShellFrontend {
 
     @Override
     public void error(final String message) {
+        ensureStderrNewline();
         LOGGER.severe(message);
     }
 
@@ -84,14 +88,18 @@ public class RunShellFrontend implements ShellFrontend {
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             if (showThinking) {
                 System.err.print(prefix + t.delta());
+                stderrNeedsNewline = !t.delta().endsWith("\n");
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             toolStreamed.set(false);
+            ensureStderrNewline();
             LOGGER.info(() -> prefix + "tool started: " + t.name());
         } else if (event instanceof final AgentEvent.ToolStream t) {
             toolStreamed.set(true);
+            ensureStderrNewline();
             LOGGER.info(() -> prefix + "[" + t.name() + "] " + t.fragment());
         } else if (event instanceof final AgentEvent.ToolFinished t) {
+            ensureStderrNewline();
             if (!t.success()) {
                 LOGGER.warning(() -> prefix + "tool failed: " + t.name());
             } else if (showToolOutput.shown()
@@ -101,6 +109,7 @@ public class RunShellFrontend implements ShellFrontend {
                 LOGGER.info(() -> prefix + "[" + t.name() + "] " + t.output().stripTrailing());
             }
         } else if (event instanceof final AgentEvent.Compacted c) {
+            ensureStderrNewline();
             LOGGER.info(() ->
                     prefix + "context " + c.kind() + " applied (" + c.mode().toLowerCase(Locale.ROOT) + ")");
         } else if (event
@@ -121,6 +130,18 @@ public class RunShellFrontend implements ShellFrontend {
 
     private void log(final Level level, final String message) {
         LOGGER.log(level, message);
+    }
+
+    /**
+     * The reasoning stream writes to stderr without a trailing newline; before a
+     * discrete event line is emitted, terminate the open thought line so tool/status
+     * lines are not glued to the thinking output.
+     */
+    private void ensureStderrNewline() {
+        if (stderrNeedsNewline) {
+            System.err.println();
+            stderrNeedsNewline = false;
+        }
     }
 
     private String subagentPrefix(final AgentEvent event) {
