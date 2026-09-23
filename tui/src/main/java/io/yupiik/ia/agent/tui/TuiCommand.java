@@ -162,6 +162,18 @@ public class TuiCommand implements Runnable {
     private final io.yupiik.ia.agent.core.context.UsageTracker usageTracker;
     private final Glyphs glyphs;
     private final ToolOutputStore toolOutputs = new ToolOutputStore();
+    // single-entry render memo: when neither the transcript markdown nor the
+    // mutable render inputs changed, the previous frame's chunks are reused
+    // verbatim (only the spinner/animation parts are re-rendered each frame)
+    private final Object contentLock = new Object();
+    private volatile ContentKey lastContentKey;
+    private volatile ContentResult lastContent;
+    // incremental live-thinking memo: the flushed part of the growing stream is
+    // rendered once per stable prefix and the last (still open) line re-rendered
+    private String lastLiveThoughtPrefix = "";
+    private int lastLiveThoughtWidth = -1;
+    private Style lastLiveThoughtStyle;
+    private List<Line> lastLiveThoughtLines;
     private final KillRing killRing = new KillRing();
     private final UndoStack undoStack = new UndoStack();
     private final CostEstimator costEstimator;
@@ -2439,6 +2451,22 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    /** Everything that, when unchanged, lets a frame reuse the previous chunk render. */
+    private record ContentKey(
+            String md,
+            int width,
+            boolean showThinking,
+            ToolOutputVisibility showToolActions,
+            long toolOutputs,
+            int collapsedToolsHash,
+            int paletteId) {}
+
+    private record ContentResult(
+            List<RenderedChunk> chunks,
+            List<String> rows,
+            List<UiState.ToolTop> toolTops,
+            List<UiState.FooterLink> footerLinks) {}
+
     private List<RenderedChunk> chunks(
             final String md,
             final int width,
@@ -2447,24 +2475,14 @@ public class TuiCommand implements Runnable {
             final List<UiState.FooterLink> footerLinks,
             final List<String> rows) {
         final var out = new ArrayList<RenderedChunk>();
+        contentChunks(out, md, width, state, toolTops, footerLinks, rows);
         final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
-        for (final var region : TuiTranscriptModel.regions(md)) {
-            if (region.thought()) {
-                if (!state.showThinking) {
-                    continue;
-                }
-                addThoughtChunk(out, thoughtLines(region.text(), contentWidth), rows);
-            } else if (region.tool()) {
-                addToolCardChunk(out, region.text(), width, state, toolTops, footerLinks, rows);
-            } else if (!region.text().isBlank()) {
-                appendChunks(out, region.text(), contentWidth, state, rows);
-            }
-        }
-        // live (not yet flushed) thinking streams inline on the thought panel
+        // live (not yet flushed) thinking streams inline on the thought panel; it
+        // grows every tick so it stays outside the chunk memo (spinner-sensitive)
         if (state.showThinking && state.model.thinkingLength() > 0) {
             final var live = state.model.thinkingText().stripLeading();
             if (!live.isEmpty()) {
-                addThoughtChunk(out, thoughtLines(live, contentWidth), rows);
+                addThoughtChunk(out, liveThoughtLines(live, contentWidth), rows);
             }
         }
         // in-pane activity indicator: shown even when thoughts are hidden so a
@@ -2473,6 +2491,69 @@ public class TuiCommand implements Runnable {
             addThinkingIndicator(out, state, rows);
         }
         return out;
+    }
+
+    /**
+     * Builds the stable chunk list (flushed regions only) with a single-entry memo:
+     * unless the markdown, width or any mutable render input changed since the last
+     * frame, the previous lists are reused verbatim. The live thinking tail and the
+     * spinner indicator are appended by {@link #chunks(String, int, UiState, List, List, List)}
+     * outside the cache because they change every tick.
+     */
+    private void contentChunks(
+            final List<RenderedChunk> out,
+            final String md,
+            final int width,
+            final UiState state,
+            final List<UiState.ToolTop> toolTops,
+            final List<UiState.FooterLink> footerLinks,
+            final List<String> rows) {
+        final var key = new ContentKey(
+                md,
+                width,
+                state.showThinking,
+                state.showToolActions,
+                toolOutputs.size() + toolOutputs.latestOrdinal(),
+                state.collapsedTools.hashCode(),
+                System.identityHashCode(palette));
+        final ContentResult cached;
+        synchronized (contentLock) {
+            cached = lastContentKey != null && lastContentKey.equals(key) ? lastContent : null;
+        }
+        if (cached != null) {
+            out.addAll(cached.chunks());
+            rows.addAll(cached.rows());
+            toolTops.addAll(cached.toolTops());
+            footerLinks.addAll(cached.footerLinks());
+            return;
+        }
+        final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
+        final var local = new ArrayList<RenderedChunk>();
+        final var localRows = new ArrayList<String>();
+        final var localToolTops = new ArrayList<UiState.ToolTop>();
+        final var localFooterLinks = new ArrayList<UiState.FooterLink>();
+        for (final var region : TuiTranscriptModel.regions(md)) {
+            if (region.thought()) {
+                if (!state.showThinking) {
+                    continue;
+                }
+                addThoughtChunk(local, thoughtLines(region.text(), contentWidth), localRows);
+            } else if (region.tool()) {
+                addToolCardChunk(local, region.text(), width, state, localToolTops, localFooterLinks, localRows);
+            } else if (!region.text().isBlank()) {
+                appendChunks(local, region.text(), contentWidth, state, localRows);
+            }
+        }
+        final var result = new ContentResult(
+                List.copyOf(local), List.copyOf(localRows), List.copyOf(localToolTops), List.copyOf(localFooterLinks));
+        synchronized (contentLock) {
+            lastContentKey = key;
+            lastContent = result;
+        }
+        out.addAll(result.chunks());
+        rows.addAll(result.rows());
+        toolTops.addAll(result.toolTops());
+        footerLinks.addAll(result.footerLinks());
     }
 
     /**
@@ -2490,6 +2571,12 @@ public class TuiCommand implements Runnable {
         }
         final var lines = new ArrayList<Line>();
         lines.add(Line.from(thoughtBar(), Span.styled("thinking", thoughtStyle)));
+        appendThoughtBody(lines, source, width);
+        return lines;
+    }
+
+    /** Renders one thought source region (prose or fenced code) into existing output lines. */
+    private void appendThoughtBody(final List<Line> lines, final String source, final int width) {
         for (final var seg : syntaxHighlighter.split(source)) {
             if (seg.type() == SyntaxHighlighter.Segment.Type.CODE) {
                 final var highlighted = MarkdownLines.wrapCode(
@@ -2501,7 +2588,38 @@ public class TuiCommand implements Runnable {
                         thoughtBar()));
             }
         }
-        return lines;
+    }
+
+    /**
+     * Renders the live (still streaming) thinking tail. The growing text is cut at the last
+     * safe (non-fence) newline: the stable prefix is rendered once and memoized, and only the
+     * still-open suffix is re-rendered each tick. Falls back to the plain whole-region render
+     * until the stream produced a first complete line.
+     */
+    private List<Line> liveThoughtLines(final String text, final int width) {
+        var live = text.stripLeading();
+        if (live.startsWith("**Thinking**")) {
+            live = live.substring("**Thinking**".length()).stripLeading();
+        }
+        final var cut = transcriptRenderer.lastSafeNewline(live);
+        if (cut == 0) {
+            return thoughtLines(live, width);
+        }
+        final var prefix = live.substring(0, cut);
+        final var suffix = live.substring(cut);
+        if (lastLiveThoughtLines == null
+                || !prefix.equals(lastLiveThoughtPrefix)
+                || width != lastLiveThoughtWidth
+                || thoughtStyle != lastLiveThoughtStyle) {
+            lastLiveThoughtPrefix = prefix;
+            lastLiveThoughtWidth = width;
+            lastLiveThoughtStyle = thoughtStyle;
+            lastLiveThoughtLines = thoughtLines(prefix, width);
+        }
+        final var out = new ArrayList<Line>(lastLiveThoughtLines.size() + 16);
+        out.addAll(lastLiveThoughtLines);
+        appendThoughtBody(out, suffix, width);
+        return out;
     }
 
     /** Applies the thought italic to every span of a highlighted code block, preserving token colors. */

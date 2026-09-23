@@ -18,8 +18,12 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
@@ -28,6 +32,15 @@ class SyntaxHighlighterTest {
     private final SyntaxHighlighter highlighter = new SyntaxHighlighter();
 
     private final SyntaxHighlighter shortHighlighter = new SyntaxHighlighter().maxLineLength(2000);
+
+    private final SyntaxHighlighter longHighlighter = new SyntaxHighlighter().maxLineLength(50_000);
+
+    private static String concat(final List<dev.tamboui.text.Line> lines) {
+        return lines.stream()
+                .flatMap(l -> l.spans().stream())
+                .map(dev.tamboui.text.Span::content)
+                .reduce("", String::concat);
+    }
 
     @Test
     void splitWithoutFenceIsSingleTextSegment() {
@@ -232,5 +245,143 @@ class SyntaxHighlighterTest {
                 .reduce("", String::concat);
         assertTrue(text.contains("key: value"), text);
         assertTrue(text.contains("flag: true"), text);
+    }
+
+    @Test
+    void highlightLinesReturnsCachedInstanceOnRepeat() {
+        final var first = highlighter.highlightLines("java", "public class A {\n    int a;\n}");
+        final var second = highlighter.highlightLines("java", "public class A {\n    int a;\n}");
+        assertSame(first, second, "identical blocks must reuse the cached result");
+        assertSame(first.get(0), second.get(0), "identical lines must reuse the cached line");
+        final var other = highlighter.highlightLines("java", "public class B {\n}");
+        assertNotSame(first, other, "a different block must not alias the cache entry");
+    }
+
+    @Test
+    void splitReturnsCachedInstanceOnRepeat() {
+        final var first = highlighter.split("```java\nint a;\n```");
+        final var second = highlighter.split("```java\nint a;\n```");
+        assertSame(first, second, "identical markdown must reuse the cached segments");
+    }
+
+    @Test
+    void themeChangeInvalidatesCachedHighlights() {
+        final var oneDark = highlighter.highlightLines("java", "public class A");
+        highlighter.theme(CodeTheme.ONE_LIGHT);
+        final var oneLight = highlighter.highlightLines("java", "public class A");
+        assertNotSame(oneDark, oneLight, "a theme change must re-tokenize cached blocks");
+        final Optional<dev.tamboui.style.Color> keyword = oneLight.get(0).spans().stream()
+                .filter(s -> s.content().equals("public"))
+                .findFirst()
+                .flatMap(s -> s.style().fg());
+        assertTrue(keyword.isPresent(), "expected the keyword to carry a foreground color");
+        assertEquals(0xa6, keyword.get().toRgb().r());
+        assertEquals(0x26, keyword.get().toRgb().g());
+        assertEquals(0xa4, keyword.get().toRgb().b());
+    }
+
+    @Test
+    void maxLineLengthChangeInvalidatesCachedHighlights() {
+        final var longLine = "var s = \"x\"; " + "a".repeat(10_500);
+        final var plain = shortHighlighter.highlightLines("java", longLine).get(0);
+        assertEquals(1, plain.spans().size());
+        assertEquals(longLine, concat(List.of(plain)));
+        shortHighlighter.maxLineLength(20_000);
+        final var tokenized = shortHighlighter.highlightLines("java", longLine).get(0);
+        assertNotSame(plain, tokenized, "a maxLineLength change must re-tokenize cached blocks");
+        assertTrue(tokenized.spans().size() > 1, "expected tokenization after the maxLineLength bump");
+    }
+
+    @Test
+    void keywordsDoNotMatchInsideWords() {
+        final var publicity = highlighter.highlightLines("java", "publicity").get(0);
+        assertFalse(
+                publicity.spans().stream().anyMatch(s -> s.content().equals("public")),
+                "public must not match inside publicity");
+        assertEquals("publicity", concat(List.of(publicity)));
+
+        final var index = highlighter.highlightLines("typescript", "index").get(0);
+        assertFalse(index.spans().stream().anyMatch(s -> s.content().equals("in")), "in must not match inside index");
+        assertEquals("index", concat(List.of(index)));
+
+        final var print = highlighter.highlightLines("java", "print").get(0);
+        assertFalse(print.spans().stream().anyMatch(s -> s.content().equals("int")), "int must not match inside print");
+        assertEquals("print", concat(List.of(print)));
+
+        final var forLine =
+                highlighter.highlightLines("typescript", "for (const x in y)").get(0);
+        final var inCount =
+                forLine.spans().stream().filter(s -> s.content().equals("in")).count();
+        assertEquals(1, inCount, "keyword in must be matched exactly once");
+        assertEquals("for (const x in y)", concat(List.of(forLine)));
+    }
+
+    @Test
+    void attributesAreStillHighlightedAfterPossessiveStar() {
+        final var xml = highlighter.highlightLines("xml", "<a id=\"x\"></a>").get(0);
+        assertTrue(
+                xml.spans().stream()
+                        .anyMatch(
+                                s -> s.content().equals("id=") && s.style().fg().isPresent()),
+                "expected the id= attribute to be colored");
+        final var assignment = highlighter.highlightLines("javascript", "a=b;").get(0);
+        assertTrue(
+                assignment.spans().stream()
+                        .anyMatch(
+                                s -> s.content().equals("a=") && s.style().fg().isPresent()),
+                "expected the a= attribute to be colored");
+    }
+
+    @Test
+    void highlightLinesIsThreadSafe() {
+        final var errors = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
+        final var threads = new java.util.ArrayList<Thread>();
+        for (var i = 0; i < 8; i++) {
+            final var toggle = i % 2 == 0;
+            threads.add(new Thread(() -> {
+                for (var j = 0; j < 250; j++) {
+                    try {
+                        if (toggle && j % 50 == 0) {
+                            highlighter.theme(j % 100 == 0 ? CodeTheme.ONE_LIGHT : CodeTheme.ONE_DARK);
+                        }
+                        final var lines = highlighter.highlightLines("java", "public class A { int a; }");
+                        assertEquals(
+                                "public class A { int a; }",
+                                concat(lines),
+                                "concurrent tokenization corrupted the line");
+                        final var segments = highlighter.split("```java\nint a;\n```");
+                        assertEquals(
+                                SyntaxHighlighter.Segment.Type.CODE,
+                                segments.get(0).type());
+                    } catch (final Throwable t) {
+                        errors.add(t);
+                    }
+                }
+            }));
+        }
+        threads.forEach(Thread::start);
+        for (final var t : threads) {
+            try {
+                t.join();
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("interrupted", e);
+            }
+        }
+        assertTrue(errors.isEmpty(), () -> "concurrent highlight failed: " + errors);
+    }
+
+    @Test
+    void messyLongLineRendersWithinBudget() {
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(5),
+                () -> {
+                    final var line = "\"a\\\"b\" key=value 010203040506070809 "
+                            .repeat(700)
+                            .concat("a".repeat(9_000));
+                    final var lines = longHighlighter.highlightLines("java", line);
+                    assertEquals(line, concat(lines));
+                },
+                "the possessive-quantified tokenizer must stay linear on messy long lines");
     }
 }

@@ -21,8 +21,10 @@ import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import dev.tamboui.text.Text;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -43,9 +45,47 @@ public class SyntaxHighlighter {
             Pattern.DOTALL);
 
     private static final int DEFAULT_MAX_LINE_LENGTH = 10_000;
+    private static final int MAX_SPLIT_CACHE = 32;
+    private static final int MAX_BLOCK_CACHE = 64;
+    private static final int MAX_LINE_CACHE = 4_096;
 
-    private int maxLineLength = DEFAULT_MAX_LINE_LENGTH;
-    private CodeTheme theme = CodeTheme.ONE_DARK;
+    private volatile int maxLineLength = DEFAULT_MAX_LINE_LENGTH;
+    private volatile CodeTheme theme = CodeTheme.ONE_DARK;
+
+    // memoized tokenization results: rendering reruns the same stable transcript
+    // blocks every frame (live thinking grows append-only), so caching makes a
+    // long session render in O(tail) instead of O(transcript). Keys are plain
+    // strings/records, values are immutable lines/spans safe to share between
+    // frames and threads. Bound is coarse; entries are tiny.
+
+    private record LineKey(long generation, Highlighter highlighter, String line) {}
+
+    private record BlockKey(long generation, String language, String code) {}
+
+    // bumped on every theme/maxLineLength change so an in-flight tokenization
+    // computed with the previous settings can never be stored as "fresh" after
+    // the cache was cleared (a clear-then-put race would otherwise cache stale
+    // colors forever)
+    private volatile long generation;
+
+    private final Map<String, List<Segment>> splitCache = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, List<Segment>> eldest) {
+            return size() > MAX_SPLIT_CACHE;
+        }
+    };
+    private final Map<BlockKey, List<Line>> blockCache = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<BlockKey, List<Line>> eldest) {
+            return size() > MAX_BLOCK_CACHE;
+        }
+    };
+    private final Map<LineKey, List<Span>> lineCache = new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<LineKey, List<Span>> eldest) {
+            return size() > MAX_LINE_CACHE;
+        }
+    };
 
     private interface Highlighter {
         Pattern pattern();
@@ -76,12 +116,27 @@ public class SyntaxHighlighter {
     /** Sets the token color theme (see {@link CodeTheme}). */
     public SyntaxHighlighter theme(final CodeTheme theme) {
         this.theme = theme == null ? CodeTheme.ONE_DARK : theme;
+        clearCaches();
         return this;
     }
 
     public SyntaxHighlighter maxLineLength(final int maxLineLength) {
         this.maxLineLength = Math.max(1, maxLineLength);
+        clearCaches();
         return this;
+    }
+
+    private void clearCaches() {
+        this.generation++;
+        synchronized (splitCache) {
+            splitCache.clear();
+        }
+        synchronized (blockCache) {
+            blockCache.clear();
+        }
+        synchronized (lineCache) {
+            lineCache.clear();
+        }
     }
 
     private Style token(final String hex) {
@@ -92,13 +147,18 @@ public class SyntaxHighlighter {
         return new RegexHighlighter(Pattern.compile(
                 "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'(?:\\\\.|[^'\\\\])*+'|`(?:\\\\.|[^`\\\\])*+`)"
                         + "|(?<com>//[^\\n]*+|/\\*(?:[^*]|\\*(?!/))*+\\*/|#[^\\n]*+|--[^\\n]*+|<!--(?:[^-]|-(?!-))*+-->|\\{\\{-?[^\\n]*+}})"
-                        + "|(?<num>\\b\\d+(?:\\.\\d+)?\\b)"
+                        + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)"
                         + "|(?<tag><\\/?[A-Za-z][A-Za-z0-9:-]*|/?>)"
-                        + "|(?<attr>(?<![A-Za-z0-9_])[A-Za-z_:][A-Za-z0-9_:.-]*=)"
+                        + "|(?<attr>(?<![A-Za-z0-9_])[A-Za-z_:][A-Za-z0-9_:.-]*+=)"
                         + "|(?<ann>@[A-Za-z_][A-Za-z0-9_$]*)"
-                        + "|(?<kw>(" + String.join("|", keywords) + "))"
-                        + "|(?<ty>(" + String.join("|", types) + "))",
+                        + "|(?<kw>\\b(?:" + alternation(keywords) + ")\\b)"
+                        + "|(?<ty>\\b(?:" + alternation(types) + ")\\b)",
                 Pattern.MULTILINE));
+    }
+
+    // an empty word list would compile to the invalid "\b(?)\b"; "(?!)" never matches
+    private static String alternation(final List<String> words) {
+        return words.isEmpty() ? "(?!)" : String.join("|", words);
     }
 
     private static final Highlighter JAVA = language(
@@ -418,13 +478,13 @@ public class SyntaxHighlighter {
     private static final Highlighter XML = language(
             List.of("xmlns", "version", "encoding", "standalone", "DOCTYPE", "ENTITY", "SYSTEM", "PUBLIC"), List.of());
     private static final Highlighter YAML = new RegexHighlighter(Pattern.compile(
-            "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'[^'\\n]*(?:''[^'\\n]*)*+')"
+            "(?<str>\"(?:\\\\.|[^\"\\\\])*+\"|'[^'\\n]*+(?:''[^'\\n]*+)*+')"
                     + "|(?<com>#[^\\n]*+)"
                     + "|(?<ty>^[ \\t]*-(?:[ \\t]|$))"
                     + "|(?<attr>^[ \\t]*[&*][A-Za-z0-9_-]+)"
-                    + "|(?<tag>^[ \\t]*(?:- )?[A-Za-z_][A-Za-z0-9_. -]*(?=:(?:[ \\t]|$)))"
+                    + "|(?<tag>^[ \\t]*(?:- )?[A-Za-z_][A-Za-z0-9_. -]*+(?=:(?:[ \\t]|$)))"
                     + "|(?<kw>\\b(?:true|false|null|True|False|Null|TRUE|FALSE|NULL|yes|no|on|off|Yes|No|On|Off)\\b|~)"
-                    + "|(?<num>\\b\\d+(?:\\.\\d+)?\\b)",
+                    + "|(?<num>\\b\\d++(?:\\.\\d+)?+\\b)",
             Pattern.MULTILINE));
     private static final Highlighter GENERIC = language(
             List.of(
@@ -464,10 +524,17 @@ public class SyntaxHighlighter {
             List.of());
 
     public List<Segment> split(final String markdown) {
-        final var out = new ArrayList<Segment>();
         if (markdown == null || markdown.isBlank()) {
-            return out;
+            return List.of();
         }
+        List<Segment> cached;
+        synchronized (splitCache) {
+            cached = splitCache.get(markdown);
+        }
+        if (cached != null) {
+            return cached;
+        }
+        final var out = new ArrayList<Segment>();
         final Matcher m = FENCE.matcher(markdown);
         var last = 0;
         while (m.find()) {
@@ -487,33 +554,59 @@ public class SyntaxHighlighter {
                 out.add(new Segment(Segment.Type.TEXT, null, rest));
             }
         }
-        return out;
+        final var immutable = List.copyOf(out);
+        synchronized (splitCache) {
+            splitCache.put(markdown, immutable);
+        }
+        return immutable;
     }
 
     public Text highlight(final String lang, final String code) {
-        final var tokenizer = pick(lang);
-        final var lines = code.replace("\r\n", "\n").split("\n", -1);
-        final var result = new ArrayList<Line>(lines.length);
-        for (final var line : lines) {
-            result.add(Line.from(colored(tokenizer, line).toArray(Span[]::new)));
-        }
-        return Text.from(result);
+        return Text.from(highlightLines(lang, code));
     }
 
     /** Same tokenization as {@link #highlight(String, String)} but as a line list (cards/overlay friendly). */
     public List<Line> highlightLines(final String lang, final String code) {
+        if (code == null) {
+            return List.of();
+        }
+        final var generation = this.generation;
+        final var key = new BlockKey(generation, lang == null ? "" : lang, code);
+        List<Line> cached;
+        synchronized (blockCache) {
+            cached = blockCache.get(key);
+        }
+        if (cached != null) {
+            return cached;
+        }
         final var tokenizer = pick(lang);
         final var lines = code.replace("\r\n", "\n").split("\n", -1);
         final var result = new ArrayList<Line>(lines.length);
         for (final var line : lines) {
             result.add(Line.from(colored(tokenizer, line).toArray(Span[]::new)));
         }
-        return result;
+        final var immutable = List.copyOf(result);
+        synchronized (blockCache) {
+            blockCache.put(key, immutable);
+        }
+        return immutable;
     }
 
     private List<Span> colored(final Highlighter h, final String line) {
         if (line.length() > maxLineLength) {
             return List.of(Span.raw(line));
+        }
+        if (line.isBlank()) {
+            return List.of(Span.raw(line));
+        }
+        final var generation = this.generation;
+        final var cacheKey = new LineKey(generation, h, line);
+        List<Span> cached;
+        synchronized (lineCache) {
+            cached = lineCache.get(cacheKey);
+        }
+        if (cached != null) {
+            return cached;
         }
         final var out = new ArrayList<Span>();
         final var m = h.pattern().matcher(line);
@@ -531,7 +624,11 @@ public class SyntaxHighlighter {
         if (out.isEmpty()) {
             out.add(Span.raw(line));
         }
-        return out;
+        final var immutable = List.copyOf(out);
+        synchronized (lineCache) {
+            lineCache.put(cacheKey, immutable);
+        }
+        return immutable;
     }
 
     private Style styleOf(final Matcher m) {
