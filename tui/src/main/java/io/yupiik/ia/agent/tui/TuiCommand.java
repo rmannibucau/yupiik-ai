@@ -761,7 +761,8 @@ public class TuiCommand implements Runnable {
                             finished.output(),
                             !finished.success(),
                             0));
-        } else if (event instanceof AgentEvent.TurnDone && !state.pendingPrompts.isEmpty()) {
+        } else if ((event instanceof AgentEvent.TurnDone || event instanceof AgentEvent.Error)
+                && !state.pendingPrompts.isEmpty()) {
             final var runner = state.runner;
             if (runner != null && !state.model.busy()) {
                 final var next = state.pendingPrompts.removeFirst();
@@ -1271,7 +1272,9 @@ public class TuiCommand implements Runnable {
         if (state.model.busy()) {
             state.pendingPrompts.addLast(text);
             final var n = state.pendingPrompts.size();
-            notify(state, "queued prompt (" + n + " pending) - it will run when the agent finishes");
+            notify(
+                    state,
+                    "queued prompt (" + n + " pending) - it will be picked up as soon as the agent hits a checkpoint");
             state.input.clear();
             return;
         }
@@ -1310,7 +1313,8 @@ public class TuiCommand implements Runnable {
                         agentName,
                         prompt,
                         () -> sessionStore.load(state.sessionId),
-                        () -> state.interrupted))
+                        () -> state.interrupted,
+                        () -> state.pendingPrompts.pollFirst()))
                 .toCompletableFuture();
         state.inFlight.thenAccept(ran -> {
             if (ran == null || !ran) {
@@ -4902,7 +4906,7 @@ public class TuiCommand implements Runnable {
         private volatile Toast toast;
         private volatile long toastShownAt;
         private volatile TuiRunner runner;
-        private final java.util.Deque<String> pendingPrompts = new java.util.ArrayDeque<>();
+        private final java.util.Deque<String> pendingPrompts = new java.util.concurrent.ConcurrentLinkedDeque<>();
         private volatile String errorMessage;
         private volatile ErrorDetail errorDetail;
         private volatile boolean errorOpen;

@@ -57,6 +57,10 @@ public class TurnRunner {
     /**
      * A turn to run: {@code prompt == null} means a resume (re-runs the agent
      * loop on the persisted history without sending any message).
+     *
+     * @param queuedPrompt when non-null the running loop polls this source between iterations and
+     *                     absorbs each returned prompt into the current turn instead of starting a
+     *                     new one; the shell owns the queue backing it.
      */
     public record TurnRequest(
             ShellEnv env,
@@ -64,7 +68,19 @@ public class TurnRunner {
             String agentName,
             String prompt,
             Supplier<List<Message>> history,
-            BooleanSupplier cancelled) {}
+            BooleanSupplier cancelled,
+            Supplier<String> queuedPrompt) {
+
+        public TurnRequest(
+                final ShellEnv env,
+                final String sessionId,
+                final String agentName,
+                final String prompt,
+                final Supplier<List<Message>> history,
+                final BooleanSupplier cancelled) {
+            this(env, sessionId, agentName, prompt, history, cancelled, null);
+        }
+    }
 
     /**
      * Runs the turn after the maven-index gate. Returns {@code false} without
@@ -94,10 +110,20 @@ public class TurnRunner {
         executor.execute(() -> {
             try {
                 if (request.prompt() == null) {
-                    agentLoop.resume(request.agentName(), request.sessionId(), history, request.cancelled());
+                    agentLoop.resume(
+                            request.agentName(),
+                            request.sessionId(),
+                            history,
+                            request.cancelled(),
+                            request.queuedPrompt());
                 } else {
                     agentLoop.run(
-                            request.prompt(), request.agentName(), request.sessionId(), history, request.cancelled());
+                            request.prompt(),
+                            request.agentName(),
+                            request.sessionId(),
+                            history,
+                            request.cancelled(),
+                            request.queuedPrompt());
                 }
             } catch (final Throwable t) {
                 done.completeExceptionally(t);

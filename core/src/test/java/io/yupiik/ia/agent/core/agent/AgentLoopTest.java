@@ -1062,6 +1062,55 @@ class AgentLoopTest {
     }
 
     @Test
+    void queuedPromptIsIntegratedMidToolLoop() {
+        final var requests = new ArrayList<List<Message>>();
+        final var appended = new ArrayList<SessionEntry>();
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                appended.add(entry);
+            }
+        };
+        final var client = scriptedToolClient(
+                requests, List.of(new ToolCall("call-1", "function", new ToolCall.FunctionCall("grep", "{}"), null)));
+        final var polls = new AtomicInteger();
+        final var loop = loop(client, new TodoStore() {}, configuration(true), noPruningManager(), store, null);
+        loop.run("do it", null, "s1", null, () -> false, () -> polls.getAndIncrement() == 1 ? "follow up!" : null);
+        assertEquals(2, requests.size(), "tool round then final answer carrying the injected prompt");
+        final var injected = requests.get(1);
+        assertEquals("user", injected.get(injected.size() - 1).role());
+        assertEquals("follow up!", injected.get(injected.size() - 1).content());
+        assertTrue(
+                events.stream().anyMatch(candidate -> candidate instanceof AgentEvent.PromptIntegrated),
+                "the queued prompt must surface as a PromptIntegrated event");
+        assertTrue(
+                appended.stream().anyMatch(e -> "user".equals(e.role()) && "follow up!".equals(e.content())),
+                "the injected prompt must be persisted as a user entry");
+    }
+
+    @Test
+    void queuedPromptAtFinalAnswerKeepsTheTurnRunning() {
+        final var requests = new ArrayList<List<Message>>();
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply("first answer", "stop", false), new ScriptedReply("second answer", "stop", false)));
+        final var client = chatClient(replies, requests);
+        final var polls = new AtomicInteger();
+        final var loop =
+                loop(client, new TodoStore() {}, configuration(true), noPruningManager(), new SessionStore() {}, null);
+        loop.run("do it", null, "s1", null, () -> false, () -> polls.getAndIncrement() == 1 ? "one more" : null);
+        assertEquals(2, requests.size(), "the queued prompt must trigger a second LLM call");
+        assertTrue(
+                events.stream().anyMatch(candidate -> candidate instanceof AgentEvent.PromptIntegrated),
+                "the queued prompt must surface as a PromptIntegrated event");
+        assertEquals(
+                1,
+                events.stream()
+                        .filter(candidate -> candidate instanceof AgentEvent.TurnDone)
+                        .count(),
+                "TurnDone must be emitted exactly once, when the turn actually ends");
+    }
+
+    @Test
     void resumeAliasesAreConfigurableAndCaseInsensitive() {
         final var cfg = configuration(true, Map.of("yca.resumeAliases", "continue,vas-y"));
         assertTrue(cfg.isResumeAlias("  Continue "));

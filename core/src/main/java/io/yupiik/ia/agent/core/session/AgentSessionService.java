@@ -172,8 +172,13 @@ public class AgentSessionService {
         String seedError = null;
         if (mode == AgentMode.BUILD) {
             try {
-                final var seeded = planTodoSeeder.seedFromLastAssistant(sessionId);
-                seedMessage = seeded ? "todos seeded from the plan" : "no plan found to seed todos from";
+                seedMessage = switch (planTodoSeeder.seedFromLastAssistant(sessionId)) {
+                    case ALREADY_POPULATED -> "todos already present, nothing to seed";
+                    case NO_PLAN -> "no plan found to seed todos from";
+                    case DERIVATION_FAILED -> "found a plan but could not derive todos from it";
+                    case NO_ACTIONABLE_STEPS -> "plan found but contained no actionable steps";
+                    case SEEDED -> "todos seeded from the plan";
+                };
             } catch (final RuntimeException e) {
                 seedError = "todo seeding failed: " + e.getMessage();
             }

@@ -55,8 +55,16 @@ public class AnsiShellFrontend implements ShellFrontend {
     private boolean stderrNeedsNewline;
 
     private Spinner spinner;
+    /** Whether the frontend is inside a turn: async events (subagents, parallel tool workers)
+     * can still stream after {@link #endTurn()}; they must not (re)start the spinner. */
+    private volatile boolean turnActive;
+
     private final ArrayDeque<AgentEvent> pendingEvents = new ArrayDeque<>();
     private boolean suspended;
+    /** Whether the thinking widget was active when output got suspended: restart it on resume. */
+    private boolean resumeThinking;
+    /** Whether an interaction is pending a trailing newline to leave its card row on resume. */
+    private boolean pendingInteractionSeparation;
 
     public AnsiShellFrontend(
             final MarkdownColorizer colorizer,
@@ -171,7 +179,10 @@ public class AnsiShellFrontend implements ShellFrontend {
     public void suspendOutput() {
         synchronized (pendingEvents) {
             suspended = true;
+            resumeThinking = spinner != null || thinkingRoundOpen;
+            pendingInteractionSeparation = true;
         }
+        ensureStderrNewline();
         stopSpinner();
     }
 
@@ -183,7 +194,18 @@ public class AnsiShellFrontend implements ShellFrontend {
             pendingEvents.clear();
             suspended = false;
         }
+        if (tty && pendingInteractionSeparation) {
+            pendingInteractionSeparation = false;
+            System.out.println();
+            System.out.flush();
+        }
         queued.forEach(this::onEvent);
+        if (resumeThinking) {
+            resumeThinking = false;
+            if (!showThinking && spinner == null) {
+                beginSpinner("thinking");
+            }
+        }
     }
 
     /** Renders a markdown block on stdout, colorizing each line when enabled. */
@@ -210,6 +232,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         thinkingRoundOpen = false;
         stderrNeedsNewline = false;
         stopSpinner();
+        turnActive = true;
         if (!showThinking) {
             beginSpinner("thinking");
         }
@@ -222,6 +245,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     @Override
     public void endTurn() {
         stopSpinner();
+        turnActive = false;
         print(textBuffer.flush());
         System.out.flush();
         System.err.flush();
@@ -300,6 +324,12 @@ public class AnsiShellFrontend implements ShellFrontend {
             stats.recordUsage(u);
         } else if (event instanceof final AgentEvent.TurnMetrics tm) {
             stats.recordTurnMetrics(tm);
+        } else if (event instanceof AgentEvent.TurnDone) {
+            // natural terminator for the current actor (main turn or async subagent/tool
+            // worker): a hidden-thinking spinner left running by a late event would otherwise
+            // keep spinning forever once the turn ended
+            stopSpinner();
+            ensureStderrNewline();
         }
     }
 
@@ -460,7 +490,7 @@ public class AnsiShellFrontend implements ShellFrontend {
      * (and one elapsed timer) per delta.
      */
     private void beginSpinner(final String label) {
-        if (!tty || spinner != null) {
+        if (!tty || !turnActive || spinner != null) {
             return;
         }
         spinner = new Spinner(symbols, System.err, tty);

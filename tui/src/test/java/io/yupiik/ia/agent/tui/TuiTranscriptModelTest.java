@@ -106,6 +106,23 @@ class TuiTranscriptModelTest {
     }
 
     @Test
+    void promptIntegratedRePinsScrollToLiveTail() {
+        model.maxViewOffset(90);
+        model.anchorRow(42);
+        model.onEvent(new AgentEvent.PromptIntegrated("boost"));
+        assertEquals(90, model.anchorRow());
+    }
+
+    @Test
+    void promptIntegratedLeavesAnchorRowUntouchedWhileUserBrowsing() {
+        model.maxViewOffset(90);
+        model.anchorRow(42);
+        model.userScrolled(true);
+        model.onEvent(new AgentEvent.PromptIntegrated("boost"));
+        assertEquals(42, model.anchorRow());
+    }
+
+    @Test
     void splitTurnsSeparatesAssistantFromUserBlocks() {
         final var md = "**Assistant**\n\nhello\n\n---\n\n**You**\n\nhi there\n\n---\n\n**Assistant**\n\nbye";
         final var turns = TuiTranscriptModel.splitTurns(md);

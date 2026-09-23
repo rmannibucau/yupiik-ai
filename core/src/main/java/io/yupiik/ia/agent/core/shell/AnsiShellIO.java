@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.cli.MarkdownColorizer;
 import io.yupiik.ia.agent.core.cli.Symbols;
+import io.yupiik.ia.agent.core.cli.prompt.LinedPrompt;
 import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
@@ -42,6 +43,7 @@ import java.util.function.Supplier;
  */
 public class AnsiShellIO implements ShellIO {
     private final Prompt prompt;
+    private final LinedPrompt lined;
     private final Symbols symbols;
     private final Runnable onInterrupt;
     private final Runnable onInteractionStart;
@@ -63,6 +65,7 @@ public class AnsiShellIO implements ShellIO {
             final Runnable onInteractionStart,
             final Runnable onInteractionEnd) {
         this.prompt = prompt;
+        this.lined = prompt instanceof LinedPrompt lp ? lp : null;
         this.symbols = symbols;
         this.onInterrupt = onInterrupt;
         this.onInteractionStart = onInteractionStart;
@@ -76,6 +79,15 @@ public class AnsiShellIO implements ShellIO {
         } finally {
             onInteractionEnd.run();
         }
+    }
+
+    /**
+     * Inline interaction reads go through the dedicated higher-priority lane when
+     * the underlying prompt queue-reads while a turn runs, so an approval answer
+     * is never handed to the REPL as a queued prompt.
+     */
+    private Optional<String> interactionLine(final String promptText) throws IOException {
+        return lined == null ? prompt.readLine(promptText) : lined.readInteractionLine(promptText);
     }
 
     @Override
@@ -93,7 +105,7 @@ public class AnsiShellIO implements ShellIO {
     public CompletionStage<Boolean> confirm(final String question) {
         return interact(() -> {
             try {
-                final var yes = prompt.readLine(MarkdownColorizer.status(question + " [y/N] "))
+                final var yes = interactionLine(MarkdownColorizer.status(question + " [y/N] "))
                         .map(line -> line.strip().toLowerCase(Locale.ROOT))
                         .map(a -> a.equals("y") || a.equals("yes"))
                         .orElse(false);
@@ -118,7 +130,7 @@ public class AnsiShellIO implements ShellIO {
                 System.out.println((i + 1) + ". " + options.get(i));
             }
             try {
-                final var choice = prompt.readLine(
+                final var choice = interactionLine(
                                 MarkdownColorizer.accent("select [1-" + options.size() + "] or Enter/c to cancel: "))
                         .map(line -> line.strip().toLowerCase(Locale.ROOT))
                         .orElse("");
@@ -161,7 +173,7 @@ public class AnsiShellIO implements ShellIO {
     private ApprovalGate.Result approvalDecision(final String title, final String detail) {
         printApprovalBox(title, detail);
         try {
-            final var c = prompt.readLine(
+            final var c = interactionLine(
                             MarkdownColorizer.accent("allow? [y/n/a] (y=once, n=no, a=always this session) "))
                     .map(line -> line.strip().toLowerCase(Locale.ROOT))
                     .orElse("");
@@ -292,7 +304,7 @@ public class AnsiShellIO implements ShellIO {
      */
     private Optional<String> readAnswer(final String promptText) {
         try {
-            return prompt.readLine(promptText);
+            return interactionLine(promptText);
         } catch (final PromptInterruptException e) {
             onInterrupt.run();
             return Optional.empty();

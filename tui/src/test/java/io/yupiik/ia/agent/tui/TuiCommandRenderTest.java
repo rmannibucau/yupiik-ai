@@ -58,6 +58,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -122,6 +123,17 @@ class TuiCommandRenderTest {
                 shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub"));
                 shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub"));
                 return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
             }
         };
         final var command = command(shellRegistry, agentLoop);
@@ -248,6 +260,17 @@ class TuiCommandRenderTest {
                 shellRegistry.onEvent(new AgentEvent.TurnDone("some answer"));
                 return "ok";
             }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
         };
         final var command = command(shellRegistry, agentLoop);
         uiThread = new Thread(command, "tui-clear-test");
@@ -277,6 +300,17 @@ class TuiCommandRenderTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
             }
         };
     }
@@ -776,6 +810,17 @@ class TuiCommandRenderTest {
                 shellRegistry.onEvent(
                         new AgentEvent.TurnDone("lines:" + prompt.lines().count()));
                 return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
             }
         };
         final var command = command(shellRegistry, agentLoop, true, newUsageTracker());

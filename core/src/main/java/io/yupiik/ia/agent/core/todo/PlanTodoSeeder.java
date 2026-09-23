@@ -62,25 +62,47 @@ public class PlanTodoSeeder {
     }
 
     /**
-     * @return true when the todo list got seeded from the plan, false when it was
-     * already populated, no assistant message was found or the derivation failed.
+     * @return the outcome of trying to seed the todo list from the last assistant
+     * plan, so callers can surface an accurate status message.
      */
-    public boolean seedFromLastAssistant(final String sessionId) {
+    public SeedResult seedFromLastAssistant(final String sessionId) {
         if (!todoStore.all().isEmpty()) {
-            return false;
+            return SeedResult.ALREADY_POPULATED;
         }
         final var plan = lastAssistantContent(sessionId);
         if (plan == null || plan.isBlank()) {
-            return false;
+            return SeedResult.NO_PLAN;
         }
         final var items = extract(plan);
+        if (items == null) {
+            return SeedResult.DERIVATION_FAILED;
+        }
         if (items.isEmpty()) {
-            return false;
+            return SeedResult.NO_ACTIONABLE_STEPS;
         }
         todoStore.replace(items);
-        return true;
+        return SeedResult.SEEDED;
     }
 
+    /** Outcomes of attempting to seed the todo list from the last plan. */
+    public enum SeedResult {
+        /** The todo list was already populated (e.g. the model wrote it during plan mode). */
+        ALREADY_POPULATED,
+        /** No assistant message (plan) was found in the session. */
+        NO_PLAN,
+        /** A plan was found but deriving todos from it failed (LLM/parse error). */
+        DERIVATION_FAILED,
+        /** A plan was found but it contained no actionable implementation steps. */
+        NO_ACTIONABLE_STEPS,
+        /** The todo list was successfully seeded. */
+        SEEDED
+    }
+
+    /**
+     * @return the derived todo items, an empty list when the plan has no
+     * actionable steps, or {@code null} when the derivation failed (LLM or
+     * parse error).
+     */
     private List<TodoItem> extract(final String plan) {
         try {
             final var request = new ChatCompletionRequest(
@@ -105,16 +127,14 @@ public class PlanTodoSeeder {
                     res.result().message() == null || res.result().message().content() == null
                             ? ""
                             : String.valueOf(res.result().message().content());
-            if (res.structured()) {
-                return parseSteps(content);
-            }
-            return parse(content);
+            final var parsed = res.structured() ? parseSteps(content) : parse(content);
+            return parsed == null ? List.of() : parsed;
         } catch (final IOException | InterruptedException | RuntimeException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
             LOGGER.warning("Plan todo seeding failed: " + e.getMessage());
-            return List.of();
+            return null;
         }
     }
 
@@ -143,7 +163,7 @@ public class PlanTodoSeeder {
         try {
             final var root = mapper.fromString(Object.class, content);
             if (!(root instanceof Map<?, ?> map) || !(map.get("steps") instanceof List<?> raw)) {
-                return List.of();
+                return null;
             }
             final var out = new ArrayList<TodoItem>();
             for (final var t : todoStore.from(raw)) {
@@ -154,27 +174,36 @@ public class PlanTodoSeeder {
             return out;
         } catch (final RuntimeException e) {
             LOGGER.warning("Plan todo structured parse failed: " + e.getMessage());
-            return List.of();
+            return null;
         }
     }
 
+    /**
+     * @return the parsed todo items, an empty list when the JSON array is empty
+     * or invalid, or {@code null} when the content is not a parseable JSON array.
+     */
     private List<TodoItem> parse(final String content) {
         final var start = content.indexOf('[');
         final var end = content.lastIndexOf(']');
         if (start < 0 || end <= start) {
             return List.of();
         }
-        final var array = mapper.fromString(Object.class, content.substring(start, end + 1));
-        if (!(array instanceof List<?> raw)) {
-            return List.of();
-        }
-        final var out = new ArrayList<TodoItem>();
-        for (final var t : todoStore.from(raw)) {
-            if (t.isValid()) {
-                out.add(t);
+        try {
+            final var array = mapper.fromString(Object.class, content.substring(start, end + 1));
+            if (!(array instanceof List<?> raw)) {
+                return null;
             }
+            final var out = new ArrayList<TodoItem>();
+            for (final var t : todoStore.from(raw)) {
+                if (t.isValid()) {
+                    out.add(t);
+                }
+            }
+            return out;
+        } catch (final RuntimeException e) {
+            LOGGER.warning("Plan todo parse failed: " + e.getMessage());
+            return null;
         }
-        return out;
     }
 
     private String lastAssistantContent(final String sessionId) {

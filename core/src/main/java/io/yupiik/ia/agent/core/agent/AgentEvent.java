@@ -132,6 +132,16 @@ public sealed interface AgentEvent {
     }
 
     /**
+     * A queued prompt was injected into the running turn before it completed, so
+     * the user does not have to wait for the current turn to finish.
+     */
+    record PromptIntegrated(String text, String subagentId, String subagentName) implements AgentEvent {
+        public PromptIntegrated(String text) {
+            this(text, null, null);
+        }
+    }
+
+    /**
      * Per-turn aggregate metrics emitted at turn completion.
      *
      * @param llmCalls              number of LLM requests (UsageUpdated events) in this turn

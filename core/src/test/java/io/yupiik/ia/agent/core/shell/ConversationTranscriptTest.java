@@ -283,4 +283,23 @@ class ConversationTranscriptTest {
         assertEquals(0, t.estimatedContext());
         assertEquals(0, t.turnLlmCalls());
     }
+
+    @Test
+    void queuedPromptIntegratesIntoRunningTurn() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.ThinkingDelta("thought"));
+        t.onEvent(new AgentEvent.PromptIntegrated("follow up"));
+
+        assertTrue(t.busy(), "the turn must stay busy while a queued prompt runs");
+        assertEquals("queued prompt integrated", t.status());
+        assertEquals("", t.thinking().toString(), "pending thinking must be flushed into the transcript");
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("thought"), "flushed thinking must be visible above the prompt: " + md);
+        assertTrue(md.contains("**You**\n\nfollow up"), "queued prompt must be folded under a You block: " + md);
+        assertTrue(md.indexOf("thought") < md.indexOf("**You**\n\nfollow up"));
+
+        t.onEvent(new AgentEvent.TurnDone("answer"));
+        assertFalse(t.busy());
+    }
 }

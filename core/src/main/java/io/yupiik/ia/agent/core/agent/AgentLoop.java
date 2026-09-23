@@ -61,6 +61,7 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -249,7 +250,24 @@ public class AgentLoop {
             final String sessionId,
             final List<Message> history,
             final BooleanSupplier cancelled) {
-        return doRun(prompt, prompt, agentName, sessionId, history, cancelled);
+        return run(prompt, agentName, sessionId, history, cancelled, null);
+    }
+
+    /**
+     * @param queuedPrompt source of a prompt queued while this turn runs; when
+     *                      non-null the loop polls it between iterations and after
+     *                      each assistant reply, appending it as the next user
+     *                      message so the queued prompt is handled by the very
+     *                      same turn instead of waiting for it to finish.
+     */
+    public String run(
+            final String prompt,
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled,
+            final Supplier<String> queuedPrompt) {
+        return doRun(prompt, prompt, agentName, sessionId, history, cancelled, queuedPrompt);
     }
 
     /**
@@ -263,7 +281,20 @@ public class AgentLoop {
             final String sessionId,
             final List<Message> history,
             final BooleanSupplier cancelled) {
-        return doRun(lastUserPrompt(history), null, agentName, sessionId, history, cancelled);
+        return resume(agentName, sessionId, history, cancelled, null);
+    }
+
+    /**
+     * Same as {@link #resume(String, String, List, BooleanSupplier)} but polls
+     * {@code queuedPrompt} so prompts typed while the resume runs are injected.
+     */
+    public String resume(
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled,
+            final Supplier<String> queuedPrompt) {
+        return doRun(lastUserPrompt(history), null, agentName, sessionId, history, cancelled, queuedPrompt);
     }
 
     private String doRun(
@@ -272,7 +303,8 @@ public class AgentLoop {
             final String agentName,
             final String sessionId,
             final List<Message> history,
-            final BooleanSupplier cancelled) {
+            final BooleanSupplier cancelled,
+            final Supplier<String> queuedPrompt) {
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
                 ? null
                 : agentProvider.byName(agentName);
@@ -298,7 +330,7 @@ public class AgentLoop {
         }
 
         try {
-            return loop(sessionId, messages, cancelled);
+            return loop(sessionId, messages, cancelled, queuedPrompt);
         } catch (final IOException e) {
             emit(error(e.getMessage()));
             return null;
@@ -408,6 +440,10 @@ public class AgentLoop {
         return new AgentEvent.Error(message, subagentId, subagentName);
     }
 
+    private AgentEvent.PromptIntegrated promptIntegrated(final String text) {
+        return new AgentEvent.PromptIntegrated(text, subagentId, subagentName);
+    }
+
     private AgentEvent.TurnMetrics turnMetrics(
             final int llmCalls,
             final long thinkingDurationMs,
@@ -432,7 +468,11 @@ public class AgentLoop {
                 toolName, durationMs, wallDurationMs, parallelBatch, subagentId, subagentName);
     }
 
-    private String loop(final String sessionId, final List<Message> messages, final BooleanSupplier cancelled)
+    private String loop(
+            final String sessionId,
+            final List<Message> messages,
+            final BooleanSupplier cancelled,
+            final Supplier<String> queuedPrompt)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         final var maxIterations = configuration.llm().maxIterations();
@@ -461,6 +501,9 @@ public class AgentLoop {
         for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
             if (contextView != null) {
                 contextView.publish(snapshot(messages, toolsTokens));
+            }
+            if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                continue;
             }
             var compactedThisTurn = false;
             if (contextManager.pruneNeeded(messages, toolsTokens)) {
@@ -546,6 +589,10 @@ public class AgentLoop {
                             clock.millis(), "assistant", str(assistant.content()), assistant.toolCalls(), null));
             emitUsage(messages, toolsTokens);
 
+            if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                continue;
+            }
+
             if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
                 final var content = str(assistant.content());
                 final var reason = finishReason[0];
@@ -608,6 +655,28 @@ public class AgentLoop {
         if (content != null) {
             emit(turnDone(content));
         }
+    }
+
+    /**
+     * Polls the queued-prompt source (when set) and, on a non-blank prompt,
+     * appends it as the next user message so the running turn absorbs it.
+     *
+     * @return {@code true} when a prompt was integrated and the iteration must restart
+     */
+    private boolean integrateQueuedPrompt(
+            final String sessionId, final List<Message> messages, final Supplier<String> queuedPrompt) {
+        if (queuedPrompt == null) {
+            return false;
+        }
+        final var prompt = queuedPrompt.get();
+        if (prompt == null || prompt.isBlank()) {
+            return false;
+        }
+        final var text = prompt.strip();
+        messages.add(Message.user(text));
+        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", text, null, null));
+        emit(promptIntegrated(text));
+        return true;
     }
 
     /**

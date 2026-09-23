@@ -32,6 +32,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 
 class TurnRunnerTest {
@@ -217,7 +218,8 @@ class TurnRunnerTest {
                 final String agentName,
                 final String sessionId,
                 final List<Message> history,
-                final BooleanSupplier cancelled) {
+                final BooleanSupplier cancelled,
+                final Supplier<String> queuedPrompt) {
             this.prompt.set(prompt);
             this.sessionId.set(sessionId);
             onRun.run();
@@ -229,7 +231,8 @@ class TurnRunnerTest {
                 final String agentName,
                 final String sessionId,
                 final List<Message> history,
-                final BooleanSupplier cancelled) {
+                final BooleanSupplier cancelled,
+                final Supplier<String> queuedPrompt) {
             this.resumedSession.set(sessionId);
             return null;
         }

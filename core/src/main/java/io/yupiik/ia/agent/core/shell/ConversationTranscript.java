@@ -209,6 +209,13 @@ public class ConversationTranscript {
             }
         } else if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
             status = message;
+        } else if (event instanceof AgentEvent.PromptIntegrated(String text, String subagentId, String subagentName)) {
+            flushThinking();
+            pending.setLength(0);
+            thinking.setLength(0);
+            inlineThink.reset();
+            transcript.append("\n\n---\n\n**You**\n\n").append(text).append('\n');
+            status = "queued prompt integrated";
         } else if (event
                 instanceof
                 AgentEvent.TurnMetrics(

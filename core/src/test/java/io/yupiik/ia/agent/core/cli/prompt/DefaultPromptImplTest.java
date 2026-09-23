@@ -21,9 +21,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class DefaultPromptImplTest {
@@ -39,5 +44,40 @@ class DefaultPromptImplTest {
         assertEquals(Optional.empty(), prompt.readLine("> "));
         assertTrue(out.toString(StandardCharsets.UTF_8).contains("> "));
         assertFalse(prompt.editing());
+    }
+
+    @Test
+    void queuingModeBuffersTypeAheadAndDrainsInOrder() throws Exception {
+        final var in = new ByteArrayInputStream("a\nb\n".getBytes(StandardCharsets.UTF_8));
+        final var prompt = new DefaultPromptImpl(
+                in, new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8), true);
+
+        assertTrue(prompt.queuing());
+        assertEquals(Optional.of("a"), prompt.readLine("> "));
+        assertEquals(Optional.of("b"), prompt.readLine("> "));
+        assertEquals(Optional.empty(), prompt.pollQueue());
+    }
+
+    @Test
+    void queuingRoutesInteractionReadsAheadOfQueuedTurns() throws Exception {
+        final var pipe = new PipedInputStream();
+        final var writer = new PipedOutputStream(pipe);
+        final var prompt = new DefaultPromptImpl(
+                pipe, new PrintStream(new ByteArrayOutputStream(), true, StandardCharsets.UTF_8), true);
+        final var done = new CompletableFuture<Optional<String>>();
+        Thread.ofPlatform().name("interaction-read").start(() -> {
+            try {
+                done.complete(prompt.readInteractionLine("> "));
+            } catch (final IOException e) {
+                done.completeExceptionally(e);
+            }
+        });
+        Thread.sleep(100);
+        writer.write("approve\n".getBytes(StandardCharsets.UTF_8));
+        writer.flush();
+        assertEquals(Optional.of("approve"), done.get(5, TimeUnit.SECONDS), "the interaction lane must win the line");
+        writer.write("next\n".getBytes(StandardCharsets.UTF_8));
+        writer.flush();
+        assertEquals(Optional.of("next"), prompt.readLine("> "), "a later line still reaches the turn read");
     }
 }

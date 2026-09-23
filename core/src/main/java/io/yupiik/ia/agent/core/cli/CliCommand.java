@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.cli.prompt.LinedPrompt;
 import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -53,11 +54,16 @@ import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
 /**
@@ -98,6 +104,11 @@ public class CliCommand implements Runnable {
     private final Symbols symbols;
     private final AnsiShellFrontend frontend;
     private final AnsiShellIO io;
+    private final boolean queueing;
+    private final Deque<String> pendingPrompts = new ConcurrentLinkedDeque<>();
+    private final AtomicInteger activeTurns = new AtomicInteger();
+    private final ReentrantLock turnLock = new ReentrantLock();
+    private volatile CompletableFuture<Boolean> inFlight;
     private volatile boolean quitRequested;
     private String sessionId;
     private String activeAgent = "";
@@ -160,6 +171,7 @@ public class CliCommand implements Runnable {
                 conf.showThinking(),
                 showToolOutput);
         this.io = new AnsiShellIO(prompt, symbols, this::onInterrupt, frontend::suspendOutput, frontend::resumeOutput);
+        this.queueing = prompt instanceof LinedPrompt lined && lined.queuing();
     }
 
     @RootConfiguration("cli")
@@ -406,6 +418,15 @@ public class CliCommand implements Runnable {
     private void repLoop() {
         try {
             while (true) {
+                if (queueing && turnActive()) {
+                    if (awaitAndRouteWhileBusy()) {
+                        if (quitRequested) {
+                            break;
+                        }
+                        continue;
+                    }
+                    break;
+                }
                 println(dividingRule());
                 final Optional<String> line;
                 try {
@@ -448,6 +469,47 @@ public class CliCommand implements Runnable {
         }
     }
 
+    /**
+     * While a turn runs the REPL keeps reading silently; every non-slash line
+     * is queued and integrated by the running turn at its next checkpoint,
+     * mirroring the TUI's prompt queue.
+     *
+     * @return {@code false} when the REPL should exit.
+     */
+    private boolean awaitAndRouteWhileBusy() throws IOException {
+        final Optional<String> line;
+        try {
+            line = awaitLine("");
+        } catch (final PromptInterruptException e) {
+            onInterrupt();
+            return !quitRequested;
+        }
+        if (line.isEmpty() || quitRequested) {
+            return false;
+        }
+        final var text = line.get().strip();
+        if (text.isBlank()) {
+            return true;
+        }
+        if (text.equals("exit")) {
+            println(MarkdownColorizer.status("bye"));
+            return false;
+        }
+        if (text.startsWith("/")) {
+            slash(text);
+            return !quitRequested;
+        }
+        pendingPrompts.addLast(text);
+        println(MarkdownColorizer.status("queued prompt (" + pendingPrompts.size()
+                + " pending) - integrated into the running turn at the next checkpoint"));
+        drainQueueIfIdle();
+        return !quitRequested;
+    }
+
+    private boolean turnActive() {
+        return activeTurns.get() > 0 || session.busy();
+    }
+
     /** Joins the (already completed for terminal IO) asynchronous read of the shell. */
     private Optional<String> awaitLine(final String promptText) throws IOException {
         try {
@@ -478,10 +540,37 @@ public class CliCommand implements Runnable {
     }
 
     private void runTurn(final String input) {
-        final var override = agentSessionService.agentOverride(input);
+        if (queueing) {
+            pendingPrompts.addFirst(input);
+            drainQueueIfIdle();
+            return;
+        }
+        startPromptTurn(input);
+    }
+
+    private void startPromptTurn(final String text) {
+        final var override = agentSessionService.agentOverride(text);
         final var agentName =
                 override.agentName() != null ? override.agentName() : (activeAgent.isBlank() ? null : activeAgent);
-        turn(override.prompt(), agentName, "prompt not sent (maven knowledge index still running)");
+        startTurn(override.prompt(), agentName, "prompt not sent (maven knowledge index still running)");
+    }
+
+    /**
+     * Starts the next queued prompt as a fresh turn, but only when the CLI is
+     * otherwise idle (the running turn already injects the queue directly).
+     */
+    private void drainQueueIfIdle() {
+        turnLock.lock();
+        try {
+            if (!pendingPrompts.isEmpty() && !turnActive() && (inFlight == null || inFlight.isDone())) {
+                final var next = pendingPrompts.pollFirst();
+                if (next != null) {
+                    startPromptTurn(next);
+                }
+            }
+        } finally {
+            turnLock.unlock();
+        }
     }
 
     /**
@@ -489,31 +578,47 @@ public class CliCommand implements Runnable {
      * so continuing an interrupted or truncated turn costs zero extra prompt tokens.
      */
     private void runResume() {
-        turn(null, activeAgent.isBlank() ? null : activeAgent, "resume skipped (maven knowledge index still running)");
+        startTurn(
+                null,
+                activeAgent.isBlank() ? null : activeAgent,
+                "resume skipped (maven knowledge index still running)");
     }
 
     /**
      * Runs one turn through the shared {@link TurnRunner} (prompt {@code null}
-     * means resume) and blocks until it completes - the CLI REPL is
-     * synchronous by nature.
+     * means resume). In queueing mode it returns immediately so the REPL keeps
+     * reading lines (which the running turn integrates); otherwise it blocks
+     * until completion, keeping the CLI REPL synchronous by nature.
      */
-    private void turn(final String prompt, final String agentName, final String blockedMessage) {
+    private void startTurn(final String prompt, final String agentName, final String blockedMessage) {
         cancelled.set(false);
         final var todosBefore = todoStore.all();
-        turnRunner
+        activeTurns.incrementAndGet();
+        final var future = turnRunner
                 .submit(new TurnRunner.TurnRequest(
-                        env(), sessionId, agentName, prompt, () -> sessionStore.load(sessionId), cancelled::get))
-                .thenAccept(ran -> {
-                    if (!ran) {
+                        env(),
+                        sessionId,
+                        agentName,
+                        prompt,
+                        () -> sessionStore.load(sessionId),
+                        cancelled::get,
+                        queueing ? () -> pendingPrompts.pollFirst() : null))
+                .whenComplete((ran, error) -> {
+                    activeTurns.decrementAndGet();
+                    if (Boolean.FALSE.equals(ran)) {
                         println(MarkdownColorizer.status(blockedMessage));
                     }
-                })
-                .whenComplete((r, e) -> {
                     printTodosIfChanged(todosBefore);
                     printUsage();
+                    if (queueing) {
+                        drainQueueIfIdle();
+                    }
                 })
-                .toCompletableFuture()
-                .join();
+                .toCompletableFuture();
+        inFlight = future;
+        if (!queueing) {
+            future.join();
+        }
     }
 
     /**
@@ -675,6 +780,9 @@ public class CliCommand implements Runnable {
                 println(MarkdownColorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
             case QUIT -> {
                 quitRequested = true;
+                if (prompt instanceof LinedPrompt lined) {
+                    lined.wakeAll();
+                }
                 println(MarkdownColorizer.status("bye"));
             }
         }

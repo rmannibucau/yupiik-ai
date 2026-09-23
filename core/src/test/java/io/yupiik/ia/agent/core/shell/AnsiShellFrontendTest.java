@@ -115,6 +115,56 @@ class AnsiShellFrontendTest {
     }
 
     @Test
+    void suspendTerminatesOpenThoughtLineBeforeCard() {
+        final var frontend = frontend(false, true, true);
+        frontend.beginTurn();
+
+        // a thought delta with no trailing newline leaves an open line
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("reasoning"));
+
+        // suspending for an interaction must terminate that line so the stdout card
+        // is never drawn onto the same terminal row
+        frontend.suspendOutput();
+        assertTrue(
+                err.toString(StandardCharsets.UTF_8).endsWith("\n"),
+                "open thought line must terminate on suspend: " + err);
+
+        // events buffered while suspended stay silent until resume
+        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden"));
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+
+        frontend.resumeOutput();
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("hidden"));
+    }
+
+    @Test
+    void interactionResumeSeparatesCardAndRestartsThinking() {
+        final var frontend = frontend(true, false, true);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+
+        // nested/sequential resumes of one interaction must emit a single separation
+        // newline so the thinking line cannot overwrite the card's last row
+        frontend.suspendOutput();
+        assertFalse(frontend.spinnerRunning());
+        System.out.print("answer> "); // card's last prompt row, no trailing newline
+        frontend.resumeOutput(); // separation newline + thinking restart
+        assertTrue(frontend.spinnerRunning());
+        assertEquals(1, newlines(out.toString(StandardCharsets.UTF_8)));
+        frontend.resumeOutput(); // deduplicated: no second newline
+        assertEquals(1, newlines(out.toString(StandardCharsets.UTF_8)));
+        assertTrue(frontend.spinnerRunning());
+
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
+    }
+
+    private static long newlines(final String text) {
+        return text.codePoints().filter(c -> c == '\n').count();
+    }
+
+    @Test
     void streamsAnswerToStdoutAndCountsTools() {
         final var frontend = frontend(false, false);
 
@@ -200,6 +250,43 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(true, false, true);
         frontend.beginTurn();
         assertTrue(frontend.spinnerRunning());
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
+    }
+
+    @Test
+    void lateAsyncEventsAfterEndTurnCannotRestartSpinner() {
+        final var frontend = frontend(true, false, true);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+
+        // the turn finishes and stops the spinner...
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
+
+        // ...then a background subagent (emitting on the shared bus) sends its own
+        // thinking/tool deltas and finally its completion; none of those must re-arm
+        // the spinner now that the turn is over, otherwise it would spin forever
+        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent pondering", "sub-1", "researcher"));
+        assertFalse(frontend.spinnerRunning(), "late thinking delta must not restart the spinner");
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "sub-1", "researcher"));
+        assertFalse(frontend.spinnerRunning(), "late tool start must not restart the spinner");
+        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent ponder again", "sub-1", "researcher"));
+        assertFalse(frontend.spinnerRunning());
+        frontend.onEvent(new AgentEvent.TurnDone("subagent answer", "sub-1", "researcher"));
+        assertFalse(frontend.spinnerRunning());
+    }
+
+    @Test
+    void turnDoneStopsSpinnerEvenBeforeEndTurn() {
+        final var frontend = frontend(true, false, true);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+
+        // the actor completes (main answer streamed, then TurnDone): the spinner must
+        // already be gone before endTurn, so no dangling spin is ever visible at the prompt
+        frontend.onEvent(new AgentEvent.TurnDone("answer"));
+        assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
         assertFalse(frontend.spinnerRunning());
     }

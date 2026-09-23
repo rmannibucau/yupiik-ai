@@ -16,7 +16,7 @@
 package io.yupiik.ia.agent.core.todo;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -59,7 +59,7 @@ class PlanTodoSeederTest {
                 "[{\"content\": \"extract service\", \"status\": \"pending\"}, "
                         + "{\"content\": \"add tests\", \"status\": \"pending\"}]");
 
-        assertTrue(seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id));
         final var all = todos.all();
         assertEquals(2, all.size());
         assertEquals("extract service", all.get(0).content());
@@ -77,7 +77,7 @@ class PlanTodoSeederTest {
         todos.replace(List.of(new TodoItem("existing", "pending")));
         final var seeder = seeder(todos, sessions, "[{\"content\": \"x\", \"status\": \"pending\"}]");
 
-        assertFalse(seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.ALREADY_POPULATED, seeder.seedFromLastAssistant(id));
         assertEquals(1, todos.all().size());
         assertEquals("existing", todos.all().get(0).content());
     }
@@ -91,7 +91,7 @@ class PlanTodoSeederTest {
         final var todos = newTodoStore();
         final var seeder = seeder(todos, sessions, "[{\"content\": \"x\", \"status\": \"pending\"}]");
 
-        assertFalse(seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.NO_PLAN, seeder.seedFromLastAssistant(id));
         assertTrue(todos.all().isEmpty());
     }
 
@@ -104,7 +104,33 @@ class PlanTodoSeederTest {
         final var todos = newTodoStore();
         final var seeder = seeder(todos, sessions, "sorry, I cannot answer that");
 
-        assertFalse(seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id));
+        assertTrue(todos.all().isEmpty());
+    }
+
+    @Test
+    void emptyStepsArrayYieldsNoActionableSteps() {
+        final var sessions = newSessionStore();
+        final var id = sessions.create();
+        sessions.append(id, SessionEntry.of(1, "assistant", "greeting, no plan here", null, null));
+
+        final var todos = newTodoStore();
+        final var seeder = seeder(todos, sessions, "{\"steps\":[]}");
+
+        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id));
+        assertTrue(todos.all().isEmpty());
+    }
+
+    @Test
+    void llmFailureYieldsDerivationFailed() {
+        final var sessions = newSessionStore();
+        final var id = sessions.create();
+        sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
+
+        final var todos = newTodoStore();
+        final var seeder = new PlanTodoSeeder(new FailingChatClient(), todos, sessions, mapper());
+
+        assertSame(PlanTodoSeeder.SeedResult.DERIVATION_FAILED, seeder.seedFromLastAssistant(id));
         assertTrue(todos.all().isEmpty());
     }
 
@@ -122,7 +148,7 @@ class PlanTodoSeederTest {
                         + "{\"content\": \"\", \"status\": \"pending\"}, "
                         + "{\"content\": \"bad status\", \"status\": \"later\"}]");
 
-        assertTrue(seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id));
         assertEquals(1, todos.all().size());
         assertEquals("ok", todos.all().get(0).content());
     }
@@ -174,6 +200,21 @@ class PlanTodoSeederTest {
                 final String schemaName,
                 final java.util.Map<String, Object> schema) {
             return new StructuredResult(new ChatResult(Message.assistant(response, null), Usage.EMPTY), false);
+        }
+    }
+
+    private static final class FailingChatClient extends ChatClient {
+        @Override
+        public ChatResult chat(final ChatCompletionRequest request) {
+            throw new IllegalStateException("boom");
+        }
+
+        @Override
+        public StructuredResult chatStructured(
+                final ChatCompletionRequest request,
+                final String schemaName,
+                final java.util.Map<String, Object> schema) {
+            throw new IllegalStateException("boom");
         }
     }
 }
