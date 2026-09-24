@@ -75,11 +75,13 @@ class SpinnerTest {
                 new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         assertTrue(stream.awaitFrame(), "spinner did not render a frame");
+        final var worker = spinner.worker();
         spinner.stop(); // must join the worker so the erase is the last write
+        assertFalse(worker.isAlive(), "stop() returned before the worker exited");
         stream.nextFrame();
-        // a hypothetical leaked worker would write again and trip this latch promptly;
-        // a clean stop stays silent for the whole bounded wait
-        assertFalse(stream.awaitFrame(), "a stale frame was written after stop() returned");
+        // belt-and-braces: a stale frame written after stop() would trip this latch promptly;
+        // a clean stop stays silent, so the short bound keeps the suite fast
+        assertFalse(stream.awaitFrame(250, TimeUnit.MILLISECONDS), "a stale frame was written after stop() returned");
     }
 
     /**
@@ -98,7 +100,11 @@ class SpinnerTest {
         }
 
         boolean awaitFrame() throws InterruptedException {
-            return frame.get().await(5, TimeUnit.SECONDS);
+            return awaitFrame(5, TimeUnit.SECONDS);
+        }
+
+        boolean awaitFrame(final long timeout, final TimeUnit unit) throws InterruptedException {
+            return frame.get().await(timeout, unit);
         }
 
         int size() {

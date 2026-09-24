@@ -85,6 +85,10 @@ public final class Spinner {
         });
     }
 
+    Thread worker() {
+        return thread;
+    }
+
     /**
      * Erases the spinner line (keeps the current status text as a static line
      * on stderr when {@code keepLabel} is true).
