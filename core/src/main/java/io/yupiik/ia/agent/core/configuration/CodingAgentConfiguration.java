@@ -121,7 +121,10 @@ public record CodingAgentConfiguration(
                 defaultValue = "java.util.List.of(\"continue\", \"go\")",
                 documentation =
                         "Prompts that resume the previous turn instead of sending a message: the agent loop is re-run on the existing history with no user message added or persisted (zero token overhead). Matching is case-insensitive on the stripped input.")
-        List<String> resumeAliases) {
+        List<String> resumeAliases,
+
+        @Property(documentation = "Slash command tunables (e.g. side questions).")
+        SlashCommandConfiguration slashcommands) {
 
     /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
     public boolean isResumeAlias(final String input) {

@@ -15,3 +15,42 @@ feedback gates and the same slash commands.
 For automation, the xref:../cli/run.adoc[`run`] command executes a single
 headless prompt and prints the result on stdout. It exits non-zero on failure,
 making it easy to call from scripts and CI.
+
+== Side questions (/btw)
+
+While a turn runs, `/btw <question>` asks a side question without interrupting
+the running turn.
+The question is an orphan by design: it is not added to the conversation, not
+persisted to the session and not echoed to the transcript, so the next turns
+never see it.
+The answer inherits the session history (minus the reply being streamed) and
+has no tool access: it is a single LLM round-trip, made for quick "what does
+this mean?" questions rather than actions.
+The last few side questions are replayed to the model so follow-up side
+questions stay coherent.
+In the xref:../cli/tui.adoc[`tui`] the answer opens a modal titled `btw`:
+`Up`/`Down` scroll it, `Esc` closes it and cancels the request if still
+running, and the main turn keeps streaming underneath.
+In the xref:../cli/cli.adoc[`cli`] the answer is printed inline as a delimited
+block once ready.
+
+[opts=headers]
+|===
+|Property |Default |Description
+
+|`yca.slashcommands.btw.model`
+|provider model
+|Model answering side questions when set, the session model otherwise.
+
+|`yca.slashcommands.btw.maxTokens`
+|2000
+|Maximum output tokens of an answer.
+
+|`yca.slashcommands.btw.maxHistoryMessages`
+|200
+|Most recent session messages inherited as context, 0 keeps everything.
+
+|`yca.slashcommands.btw.recall`
+|5
+|Previous side questions replayed for follow-ups, 0 disables the replay.
+|===

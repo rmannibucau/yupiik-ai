@@ -127,7 +127,21 @@ public final class MockLlmServer implements AutoCloseable {
                         new Usage$FusionJsonCodec(),
                         new ChatCompletionRequest$FusionJsonCodec(),
                         new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec()),
+                        new ModelsResponse$Model$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec(),
+                        new io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec()),
                 key -> Optional.empty());
     }
 

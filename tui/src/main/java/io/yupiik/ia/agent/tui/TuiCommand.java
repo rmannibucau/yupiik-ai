@@ -78,6 +78,7 @@ import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -97,6 +98,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
 import java.util.logging.Level;
@@ -180,6 +182,8 @@ public class TuiCommand implements Runnable {
     private final boolean persistHistory;
     private final AskUserCardRenderer askUserCardRenderer;
     private final ToolOutputFormat toolOutputFormat;
+    private final BtwAnswerer btwAnswerer;
+    private final AtomicLong btwOrdinal = new AtomicLong();
     private final boolean formatToolOutput;
     private volatile CodeTheme codeTheme = CodeTheme.ONE_DARK;
 
@@ -220,7 +224,8 @@ public class TuiCommand implements Runnable {
             final Clock clock,
             final io.yupiik.ia.agent.core.context.UsageTracker usageTracker,
             final AskUserCardRenderer askUserCardRenderer,
-            final ToolOutputFormat toolOutputFormat) {
+            final ToolOutputFormat toolOutputFormat,
+            final BtwAnswerer btwAnswerer) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
@@ -247,6 +252,7 @@ public class TuiCommand implements Runnable {
         this.usageTracker = usageTracker;
         this.askUserCardRenderer = askUserCardRenderer;
         this.toolOutputFormat = toolOutputFormat;
+        this.btwAnswerer = btwAnswerer;
         this.formatToolOutput = !"off".equalsIgnoreCase(tuiConfiguration.toolOutputFormat());
         this.interruptor = new InterruptCoordinator(clock, true);
         this.syntaxHighlighter = new SyntaxHighlighter().maxLineLength(configuration.maxLineLength());
@@ -924,6 +930,9 @@ public class TuiCommand implements Runnable {
             }
             return true;
         }
+        if (state.btw != null) {
+            return onBtwKey(key, state);
+        }
         if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
             copySelection(runner, state);
             return true;
@@ -1262,7 +1271,9 @@ public class TuiCommand implements Runnable {
 
     private void submit(final String text, final TuiRunner runner, final UiState state, final boolean pinToBottom) {
         this.uiRunner = runner;
-        promptHistory.add(text);
+        if (!text.regionMatches(true, 0, "/btw", 0, 4)) {
+            promptHistory.add(text);
+        }
         dismissCompletion(state);
         clearError(state);
         if (text.startsWith("/")) {
@@ -1344,9 +1355,13 @@ public class TuiCommand implements Runnable {
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
         uiState = state;
+        final var parts = SPLIT_COMMAND.split(text.substring(1), 2);
+        if ("btw".equals(parts[0].toLowerCase(Locale.ROOT))) {
+            btw(parts.length > 1 ? parts[1].strip() : "", runner, state);
+            return;
+        }
         state.model.appendTranscript("\n\n---\n\n**You**\n\n`" + text + "`\n");
         // the TUI keeps its modal-driven plan editor (Enter/Esc handling needs the widget stack)
-        final var parts = SPLIT_COMMAND.split(text.substring(1), 2);
         if ("editplan".equals(parts[0].toLowerCase(Locale.ROOT))) {
             editPlan(parts.length > 1 ? parts[1].strip() : "", runner, state);
             return;
@@ -1363,6 +1378,90 @@ public class TuiCommand implements Runnable {
                 runner.runLater(() -> modelError(state, "command failed: " + cause.getMessage()));
             }
         });
+    }
+
+    private void btw(final String question, final TuiRunner runner, final UiState state) {
+        if (question.isBlank()) {
+            notify(state, "usage: /btw <question>");
+            return;
+        }
+        if (state.btw != null) {
+            notify(state, "a btw answer is already open - close it first (Esc)");
+            return;
+        }
+        final var ordinal = btwOrdinal.incrementAndGet();
+        final var cancelled = new AtomicBoolean(false);
+        state.btw = new UiState.BtwOverlay(ordinal, question, "", null, true, 0, cancelled);
+        final var sessionId = session.sessionId();
+        btwAnswerer
+                .ask(question, sessionId == null ? "" : sessionId, cancelled::get)
+                .whenComplete((answer, error) ->
+                        runner.runLater(() -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
+    }
+
+    private void onBtwAnswer(
+            final UiState state,
+            final long ordinal,
+            final String answer,
+            final Throwable error,
+            final AtomicBoolean cancelled) {
+        if (state.btw == null || state.btw.ordinal() != ordinal) {
+            return;
+        }
+        if (cancelled.get()) {
+            state.btw = null;
+            return;
+        }
+        final var question = state.btw.question();
+        if (error != null) {
+            final var cause = error.getCause() == null ? error : error.getCause();
+            final var message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
+            state.btw = new UiState.BtwOverlay(ordinal, question, "", message, false, 0, cancelled);
+            return;
+        }
+        state.btw = new UiState.BtwOverlay(
+                ordinal,
+                question,
+                answer == null || answer.isBlank() ? "(no answer)" : answer,
+                null,
+                false,
+                0,
+                cancelled);
+    }
+
+    private void closeBtw(final UiState state) {
+        final var btw = state.btw;
+        state.btw = null;
+        if (btw != null) {
+            btw.cancelled().set(true);
+        }
+    }
+
+    private boolean onBtwKey(final KeyEvent key, final UiState state) {
+        if (key.isCancel() || key.isKey(KeyCode.ESCAPE) || key.isConfirm() || key.isChar('q')) {
+            closeBtw(state);
+            return true;
+        }
+        if (key.isKey(KeyCode.UP) || key.isKey(KeyCode.PAGE_UP)) {
+            state.btw = withBtwScroll(state.btw, key.isKey(KeyCode.PAGE_UP) ? -5 : -1);
+            return true;
+        }
+        if (key.isKey(KeyCode.DOWN) || key.isKey(KeyCode.PAGE_DOWN)) {
+            state.btw = withBtwScroll(state.btw, key.isKey(KeyCode.PAGE_DOWN) ? 5 : 1);
+            return true;
+        }
+        return true;
+    }
+
+    private UiState.BtwOverlay withBtwScroll(final UiState.BtwOverlay btw, final int delta) {
+        return new UiState.BtwOverlay(
+                btw.ordinal(),
+                btw.question(),
+                btw.answer(),
+                btw.error(),
+                btw.running(),
+                btw.scroll() + delta,
+                btw.cancelled());
     }
 
     private void apply(final ShellOutcome outcome, final TuiRunner runner, final UiState state) {
@@ -2228,6 +2327,9 @@ public class TuiCommand implements Runnable {
         }
         if (state.errorDetail != null && state.errorOpen) {
             renderErrorDetail(frame, state);
+        }
+        if (state.btw != null) {
+            renderBtw(frame, state);
         }
         renderToast(frame, state);
         state.selection.highlight(frame.buffer(), copyZones(state));
@@ -3401,6 +3503,52 @@ public class TuiCommand implements Runnable {
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
                                 "  Up/Down scroll  Esc close  ", Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                splits.get(1));
+    }
+
+    private void renderBtw(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var btw = state.btw;
+        final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.12);
+        final var inner = Modal.box(frame, rect, " btw ", Color.hex(palette.accent()));
+        if (inner == null) {
+            return;
+        }
+        final var lines = new ArrayList<Line>();
+        lines.add(Line.from(Span.styled("Q: " + btw.question(), Style.EMPTY.fg(Color.hex(palette.textMuted())))));
+        lines.add(Line.empty());
+        if (btw.running()) {
+            lines.add(Line.from(Span.styled("thinking...", Style.EMPTY.fg(Color.hex(palette.textMuted())))));
+        } else if (btw.error() != null) {
+            lines.add(Line.from(Span.styled("failed: " + btw.error(), Style.EMPTY.fg(Color.hex(palette.error())))));
+        } else {
+            lines.addAll(
+                    transcriptRenderer.renderRegion(btw.answer(), inner.width(), Style.EMPTY, MarkdownStyles.DEFAULTS));
+        }
+        final var splits = Layout.vertical()
+                .constraints(Constraint.fill(), Constraint.length(1))
+                .split(inner);
+        final var text = Text.from(lines.toArray(Line[]::new));
+        final var maxScroll =
+                Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
+        final var scroll = Math.clamp(btw.scroll(), 0, maxScroll);
+        if (!splits.getFirst().isEmpty()) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(text)
+                            .overflow(Overflow.CLIP)
+                            .scroll(scroll)
+                            .build(),
+                    splits.getFirst());
+        }
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(
+                                btw.running() ? "  Esc cancel" : "  Up/Down scroll  Esc close  ",
+                                Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
                 splits.get(1));
@@ -4913,6 +5061,17 @@ public class TuiCommand implements Runnable {
         private volatile int errorScroll;
         private volatile String notification;
         private volatile ToolOverlay toolOverlay;
+        private volatile BtwOverlay btw;
+
+        private record BtwOverlay(
+                long ordinal,
+                String question,
+                String answer,
+                String error,
+                boolean running,
+                int scroll,
+                AtomicBoolean cancelled) {}
+
         private final TranscriptSearch search = new TranscriptSearch();
         private volatile boolean searchOpen;
         private volatile List<String> flatRows = List.of();

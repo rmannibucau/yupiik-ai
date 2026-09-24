@@ -40,6 +40,7 @@ import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.io.IOException;
 import java.lang.reflect.Type;
@@ -270,7 +271,16 @@ class TuiCommandHeadlessTest {
                     Clock.systemUTC(),
                     new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
                     new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
-                    new ToolOutputFormat(formatMapper));
+                    new ToolOutputFormat(formatMapper),
+                    new BtwAnswerer(
+                            d.chatClient(),
+                            d.sessionStore(),
+                            new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
+                            d.configuration(),
+                            d.executor(),
+                            null,
+                            null,
+                            null));
         }
     }
 

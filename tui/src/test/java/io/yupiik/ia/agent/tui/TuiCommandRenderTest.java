@@ -43,10 +43,12 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
+import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
+import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -55,6 +57,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -81,6 +84,7 @@ class TuiCommandRenderTest {
     private Thread uiThread;
 
     private JsonMapperImpl formatMapper;
+    private final List<String> sessionAppends = new ArrayList<>();
 
     @BeforeEach
     void start() throws IOException {
@@ -290,6 +294,65 @@ class TuiCommandRenderTest {
         uiThread.join(TIMEOUT_MS);
     }
 
+    @Test
+    void btwAnswersInModalWithoutEchoOrPersistence() throws Exception {
+        llm.answer("side answer");
+        final var shellRegistry = testRegistry();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                try {
+                    Thread.sleep(300);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub"));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub"));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-btw-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        // the stub turn stays busy ~300ms: ask the side question while it runs
+        tuiRef.get().dispatch(new PasteEvent("/btw what is this"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("Q: what is this");
+        awaitText("side answer");
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("Q: what is this");
+        assertTrue(sessionAppends.isEmpty(), "btw must never write to the session store");
+        awaitTextGone("`/btw");
+
+        awaitText("hello from stub");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
     private AgentLoop stubAgentLoop() {
         return new AgentLoop() {
             @Override
@@ -355,6 +418,11 @@ class TuiCommandRenderTest {
             @Override
             public String create() {
                 return "s-render";
+            }
+
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                sessionAppends.add(String.valueOf(entry));
             }
 
             @Override
@@ -444,7 +512,16 @@ class TuiCommandRenderTest {
                 clock,
                 usageTracker,
                 new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
-                new ToolOutputFormat(formatMapper));
+                new ToolOutputFormat(formatMapper),
+                new BtwAnswerer(
+                        chatClient,
+                        sessionStore,
+                        usageTracker,
+                        configuration,
+                        new VirtualThreadExecutor(),
+                        null,
+                        null,
+                        null));
     }
 
     @Test

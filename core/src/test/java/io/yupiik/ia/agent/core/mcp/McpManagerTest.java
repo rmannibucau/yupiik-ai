@@ -217,7 +217,8 @@ class McpManagerTest {
                 base.subagents(),
                 new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT),
                 base.maxLineLength(),
-                base.resumeAliases());
+                base.resumeAliases(),
+                base.slashcommands());
     }
 
     private static JsonMapper mapper() {
