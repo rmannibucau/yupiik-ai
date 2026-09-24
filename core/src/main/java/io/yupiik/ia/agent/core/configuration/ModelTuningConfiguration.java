@@ -52,4 +52,9 @@ public record ModelTuningConfiguration(
                 defaultValue = "\"\"",
                 documentation =
                         "Optional raw JSON object merged (put-if-absent) into the payload of every request for this model, over the provider-level one. Empty is ignored.")
-        String providerSpecificOptions) {}
+        String providerSpecificOptions,
+
+        @Property(
+                documentation =
+                        "Anthropic wire dialect options (applied when the request is routed through the anthropic flavor). Unset keeps the dialect defaults: splitBlocks auto-resolves to enabled only for anthropic.com endpoints.")
+        AnthropicDialectConfiguration anthropic) {}

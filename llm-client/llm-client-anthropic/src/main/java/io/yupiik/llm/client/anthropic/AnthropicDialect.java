@@ -36,6 +36,7 @@ import io.yupiik.llm.client.spi.Streams;
 import java.net.http.HttpRequest;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -158,6 +159,9 @@ public final class AnthropicDialect extends AbstractDialect {
         }
         String system = null;
         final List<AnthropicMessage> messages = new ArrayList<>();
+        final Map<String, Object> requestExtensions = request.extensions() == null ? Map.of() : request.extensions();
+        final var promptCache = !"false".equals(requestExtensions.get("promptCache"));
+        final var splitBlocks = isSplitBlocksEnabled(requestExtensions);
         if (request.messages() != null) {
             for (final var message : request.messages()) {
                 if ("system".equals(message.role())) {
@@ -186,18 +190,53 @@ public final class AnthropicDialect extends AbstractDialect {
                     }
                     messages.add(new AnthropicMessage("assistant", content));
                 } else if ("tool".equals(message.role())) {
-                    final var extensions = message.extensions();
-                    final var isError = extensions != null && Boolean.TRUE.equals(extensions.get("is_error"));
+                    final var messageExtensions = message.extensions();
+                    final var isError =
+                            messageExtensions != null && Boolean.TRUE.equals(messageExtensions.get("is_error"));
+                    final var text = textOf(message.content());
+                    // the volatile session-state tail is split off the tool result so the cache
+                    // breakpoint sits on the tool_result block: only the tail re-reads per request
+                    final var split = splitBlocks && isVolatileTail(messageExtensions)
+                            ? text.lastIndexOf("\n\n<session-state>")
+                            : -1;
                     final var content = new ArrayList<Map<String, Object>>();
-                    content.add(Map.of(
-                            "type", "tool_result",
-                            "tool_use_id", message.toolCallId(),
-                            "content", textOf(message.content())));
+                    final var result = new java.util.LinkedHashMap<String, Object>();
+                    result.put("type", "tool_result");
+                    result.put("tool_use_id", message.toolCallId());
+                    result.put("content", split >= 0 ? text.substring(0, split) : text);
                     if (isError) {
-                        content.get(0).put("is_error", true);
+                        result.put("is_error", true);
+                    }
+                    if (promptCache && split >= 0) {
+                        result.put("cache_control", Map.of("type", "ephemeral"));
+                    }
+                    content.add(result);
+                    if (split >= 0) {
+                        content.add(Map.of("type", "text", "text", text.substring(split + 2)));
                     }
                     messages.add(new AnthropicMessage("user", content));
                 } else {
+                    final var messageExtensions = message.extensions();
+                    if (promptCache
+                            && splitBlocks
+                            && isVolatileTail(messageExtensions)
+                            && message.content() instanceof String s) {
+                        final var split = s.lastIndexOf("\n\n<session-state>");
+                        if (split >= 0) {
+                            messages.add(new AnthropicMessage(
+                                    "user",
+                                    List.of(
+                                            Map.of(
+                                                    "type",
+                                                    "text",
+                                                    "text",
+                                                    s.substring(0, split),
+                                                    "cache_control",
+                                                    Map.of("type", "ephemeral")),
+                                            Map.of("type", "text", "text", s.substring(split + 2)))));
+                            continue;
+                        }
+                    }
                     messages.add(AnthropicMessage.from(message));
                 }
             }
@@ -209,17 +248,17 @@ public final class AnthropicDialect extends AbstractDialect {
             }
         }
         final var maxTokens = request.maxTokens() == null ? 4096 : request.maxTokens();
-        final Map<String, Object> extensions = request.extensions() == null ? Map.of() : request.extensions();
         Integer topK = null;
-        if (extensions.get("top_k") instanceof Number n) {
+        if (requestExtensions.get("top_k") instanceof Number n) {
             topK = n.intValue();
         }
-        final var promptCache = !"false".equals(extensions.get("promptCache"));
-        Map<String, Object> passthrough = extensions;
-        if (extensions.containsKey("promptCache") || topK != null) {
+        Map<String, Object> passthrough = requestExtensions;
+        if (requestExtensions.containsKey("promptCache")
+                || requestExtensions.containsKey("anthropicSplitBlocks")
+                || topK != null) {
             final var stripped = new java.util.HashMap<String, Object>();
-            extensions.forEach((k, v) -> {
-                if (!"promptCache".equals(k) && !"top_k".equals(k)) {
+            requestExtensions.forEach((k, v) -> {
+                if (!"promptCache".equals(k) && !"top_k".equals(k) && !"anthropicSplitBlocks".equals(k)) {
                     stripped.put(k, v);
                 }
             });
@@ -251,6 +290,60 @@ public final class AnthropicDialect extends AbstractDialect {
             return system;
         }
         return List.of(Map.of("type", "text", "text", system, "cache_control", Map.of("type", "ephemeral")));
+    }
+
+    /** Flags the message carrying the volatile session-state tail appended by the agent loop on the wire. */
+    private static boolean isVolatileTail(final Map<String, Object> extensions) {
+        return extensions != null && Boolean.TRUE.equals(extensions.get("volatileTail"));
+    }
+
+    /**
+     * Whether the volatile-tail block split is active for this request: an explicit
+     * {@code anthropicSplitBlocks} request extension (wired from {@code tuning.anthropic.splitBlocks})
+     * wins, otherwise {@code auto} resolves from the endpoint host - the split only engages for
+     * {@code anthropic.com} endpoints (block-granular caching benefits from the second breakpoint);
+     * token-level gateway caches are better served with the tail inline.
+     */
+    private boolean isSplitBlocksEnabled(final Map<String, Object> extensions) {
+        final var value = extensions.get("anthropicSplitBlocks");
+        if (value instanceof Boolean b) {
+            return b;
+        }
+        if (value != null) {
+            final var s = String.valueOf(value);
+            if ("true".equalsIgnoreCase(s)) {
+                return true;
+            }
+            if ("false".equalsIgnoreCase(s)) {
+                return false;
+            }
+        }
+        return isAnthropicHost(provider.baseUrl());
+    }
+
+    /** {@code auto} split detection: true only for {@code anthropic.com} (or subdomain) endpoints. */
+    static boolean isAnthropicHost(final String baseUrl) {
+        if (baseUrl == null) {
+            return false;
+        }
+        var host = baseUrl.strip().toLowerCase(Locale.ROOT);
+        final var scheme = host.indexOf("://");
+        if (scheme >= 0) {
+            host = host.substring(scheme + 3);
+        }
+        final var at = host.indexOf('@');
+        if (at >= 0) {
+            host = host.substring(at + 1);
+        }
+        final var slash = host.indexOf('/');
+        if (slash >= 0) {
+            host = host.substring(0, slash);
+        }
+        final var colon = host.indexOf(':');
+        if (colon >= 0) {
+            host = host.substring(0, colon);
+        }
+        return host.equals("anthropic.com") || host.endsWith(".anthropic.com");
     }
 
     private Object parseRaw(final String raw) {

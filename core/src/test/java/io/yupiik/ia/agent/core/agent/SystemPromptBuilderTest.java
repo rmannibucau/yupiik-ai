@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -149,6 +150,27 @@ class SystemPromptBuilderTest {
     }
 
     @Test
+    void volatileSessionStateIsOutsideTheSystemPrompt() throws Exception {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString()));
+        final var todos = new io.yupiik.ia.agent.core.todo.TodoStore(
+                cfg,
+                new JsonMapperImpl(
+                        List.of(new io.yupiik.ia.agent.core.todo.TodoItem$FusionJsonCodec()), key -> Optional.empty()));
+        todos.replace(List.of(new io.yupiik.ia.agent.core.todo.TodoItem("step one", "pending")));
+        final var builder = new SystemPromptBuilder(cfg, null, todos, null, null, null, null, null);
+        final var prompt = builder.build();
+        assertFalse(prompt.contains("Current todo list"), "todos must not be part of the system prompt anymore");
+        assertFalse(prompt.contains("Date: "), "the date must not be part of the system prompt anymore");
+        final var state = builder.sessionState(null);
+        assertTrue(state.contains("Date: "), "the session state must expose the date");
+        assertTrue(
+                state.contains("Current todo list:") && state.contains("step one"),
+                "the session state must expose the current todos: " + state);
+    }
+
+    @Test
     void planModeStatesReadOnlyAndPlanDelivery() throws Exception {
         final var cfg = config(Map.of("yca.mode", "plan"));
         final var permissions = new PermissionService(cfg);
@@ -156,13 +178,16 @@ class SystemPromptBuilderTest {
         final var builder =
                 new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null, null);
         final var prompt = builder.build();
-        assertTrue(prompt.contains("PLAN mode"));
-        assertTrue(prompt.contains("must NOT modify the repository"));
-        assertFalse(prompt.contains("edit files"));
-        assertTrue(prompt.contains("Use write_todo to record the plan"));
-        assertTrue(prompt.contains("one item per concrete implementation step"));
-        assertTrue(prompt.contains("every item must keep status 'pending'"));
-        assertTrue(prompt.contains("Never mark an item 'completed' or 'in_progress' while planning"));
+        assertTrue(prompt.contains("Mode: PLAN"));
+        assertTrue(prompt.contains("Repository mutations are forbidden by default"));
+        assertTrue(prompt.contains("write_todo is the only state-changing tool allowed"));
+        assertTrue(prompt.contains("every item stays 'pending'"));
+        assertTrue(prompt.contains("statuses only advance in build mode"));
+        assertTrue(prompt.contains("ready for the user to review"));
+        // the mode constraint is a tail: the mode-neutral identity (which mentions editing) comes first
+        assertTrue(prompt.indexOf("edit files") < prompt.indexOf("Mode: PLAN"));
+        // the system prompt is deterministic now: no volatile session state inside
+        assertEquals(prompt, builder.build());
     }
 
     @Test

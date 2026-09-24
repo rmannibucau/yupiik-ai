@@ -240,6 +240,150 @@ class AnthropicDialectTest {
     }
 
     @Test
+    void volatileTailMessageSplitsIntoTwoBlocksWithSecondBreakpoint() throws Exception {
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\","
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect =
+                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.system("be concise"),
+                        new LlmMessage(
+                                "user",
+                                "prompt\n\n<session-state>\nDate: x\n</session-state>",
+                                null,
+                                null,
+                                null,
+                                java.util.Map.of("volatileTail", true))),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                java.util.Map.of("anthropicSplitBlocks", true));
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        // system breakpoint + stable prefix breakpoint, volatile tail block without one
+        assertEquals(
+                2,
+                body.split("cache_control", -1).length - 1,
+                "expected two cache breakpoints (system + stable prefix):\n" + body);
+        assertTrue(body.contains("<session-state>\\nDate: x\\n</session-state>"), body);
+        assertFalse(body.contains("volatileTail"), "the message flag must not leak to the payload:\n" + body);
+    }
+
+    @Test
+    void autoSplitBlocksStaysInlineOnGatewayHosts() throws Exception {
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\","
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect =
+                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.system("be concise"),
+                        new LlmMessage(
+                                "user",
+                                "prompt\n\n<session-state>\nDate: x\n</session-state>",
+                                null,
+                                null,
+                                null,
+                                java.util.Map.of("volatileTail", true))),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                null);
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        // auto: non-anthropic.com host -> no split, tail inline, single system breakpoint
+        assertEquals(
+                1, body.split("cache_control", -1).length - 1, "expected a single cache breakpoint (system):\n" + body);
+        assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
+    }
+
+    @Test
+    void autoSplitBlocksHostDetection() {
+        assertTrue(AnthropicDialect.isAnthropicHost("https://api.anthropic.com/v1/messages"));
+        assertTrue(AnthropicDialect.isAnthropicHost("https://anthropic.com/v1/messages"));
+        assertTrue(AnthropicDialect.isAnthropicHost("https://foo.anthropic.com"));
+        assertFalse(AnthropicDialect.isAnthropicHost("https://freeinference.org/anthropic/v1/messages"));
+        assertFalse(AnthropicDialect.isAnthropicHost("http://127.0.0.1:8643/anthropic/v1"));
+        assertFalse(AnthropicDialect.isAnthropicHost("https://anthropic.com.evil.io/v1/messages"));
+        assertFalse(AnthropicDialect.isAnthropicHost(null));
+    }
+
+    @Test
+    void anthropicSplitBlocksFalseKeepsInlineTailAndStripsTheFlag() throws Exception {
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\","
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect =
+                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.system("be concise"),
+                        new LlmMessage(
+                                "user",
+                                "prompt\n\n<session-state>\nDate: x\n</session-state>",
+                                null,
+                                null,
+                                null,
+                                java.util.Map.of("volatileTail", true))),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                java.util.Map.of("anthropicSplitBlocks", false));
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        // only the system keeps a breakpoint; the tail rides inline as a plain string
+        assertEquals(
+                1, body.split("cache_control", -1).length - 1, "expected a single cache breakpoint (system):\n" + body);
+        assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
+        assertFalse(body.contains("anthropicSplitBlocks"), "the flag must not leak to the payload:\n" + body);
+    }
+
+    @Test
     void streamEmitsTextDeltasAndEnd() throws Exception {
         final var sse = String.join(
                 "\n",

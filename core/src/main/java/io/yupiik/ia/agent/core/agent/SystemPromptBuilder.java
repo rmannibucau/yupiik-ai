@@ -37,9 +37,9 @@ public class SystemPromptBuilder {
 
     /**
      * Hard ceiling on the assembled system prompt (rules + environment + project AGENTS.md + skills
-     * + memory). It is message[0], preserved verbatim through compaction, so unbounded growth here
-     * would alone push a request over the window in a deep repository. Tail-kept with a leading
-     * marker so the durable instructions appended last (memory/agent) survive.
+     * + agent prompt). It is message[0], preserved verbatim through compaction, so unbounded growth
+     * here would alone push a request over the window in a deep repository. Tail-kept with a leading
+     * marker so the durable instructions appended last (agent prompt, PLAN mode tail) survive.
      */
     private static final int SYSTEM_PROMPT_CAP = 32_000;
 
@@ -106,36 +106,24 @@ public class SystemPromptBuilder {
      */
     public String build(final String prompt, final AgentConfiguration agent) {
         final var sb = new StringBuilder();
-        final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
-        if (plan) {
-            sb.append("You are yca, a terminal coding agent, currently in PLAN mode.\n");
-            sb.append(
-                    "You must NOT modify the repository: no file creation, edits or deletions, and no state-changing shell commands. Only read-only tools are available.\n");
-            sb.append(
-                    "Your task is to analyze the codebase and produce a detailed, concrete implementation plan: the files to touch, the steps to take, the approach and trade-offs, and any risks. Do not apply any change, do not use write or edit tools, and finish with a clear plan the user can review.\n");
-            sb.append(
-                    "Use write_todo to record the plan: one item per concrete implementation step, in execution order. write_todo is the only state-changing tool allowed in this mode.\n");
-            appendTodoGuidance(sb);
-            sb.append(
-                    "In this mode todos are the plan, not a progress report: every item must keep status 'pending'. Never mark an item 'completed' or 'in_progress' while planning - statuses are only advanced in build mode, after each step is actually executed.\n");
-            sb.append('\n');
-        } else {
-            sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
-            sb.append(
-                    "You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");
-            sb.append("Rules:\n");
-            sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
-            sb.append("- Read files before editing them; keep edits minimal and focused.\n");
-            sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
-            sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
-            sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
-            sb.append(
-                    "- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
-            sb.append(
-                    "- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n");
-            appendTodoGuidance(sb);
-            sb.append('\n');
-        }
+        // stable core: byte-identical across turns and modes so provider-side prompt caches (implicit
+        // or explicit breakpoints) keep hitting; the PLAN mode tail and the volatile session state
+        // (see {@link #sessionState}) are appended at the very end of the request instead.
+        sb.append("You are yca, a terminal coding agent. You help the user with software engineering tasks.\n");
+        sb.append(
+                "You can read, create and edit files, run shell commands and search the codebase through the provided tools.\n\n");
+        sb.append("Rules:\n");
+        sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
+        sb.append("- Read files before editing them; keep edits minimal and focused.\n");
+        sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
+        sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
+        sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
+        sb.append(
+                "- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
+        sb.append(
+                "- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n");
+        appendTodoGuidance(sb);
+        sb.append('\n');
         sb.append("You may invoke a tool only if its exact name appears in the `tools` field of this request. "
                 + "Do not invent, abbreviate, or guess tool names: any other name will be rejected. "
                 + "If the task needs a capability none of the provided tools offers, tell the user "
@@ -189,18 +177,41 @@ public class SystemPromptBuilder {
                         .append("\n</agent>\n");
             }
         }
-        // volatile session state last: everything above stays byte-stable across turns so
-        // provider-side prompt caches (implicit or explicit breakpoints) keep hitting
-        sb.append('\n').append("Session state:\n");
-        sb.append("- Date: ").append(LocalDate.now()).append('\n');
-        sb.append("- Current todo list:\n")
+        // mode tail last: only a mode switch rewrites this suffix, so every turn within a mode keeps
+        // the whole system prompt byte-stable and provider caches keep hitting
+        final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
+        if (plan) {
+            sb.append('\n');
+            sb.append(
+                    "Mode: PLAN. Repository mutations are forbidden by default: no file creation, edits or deletions, and no state-changing shell commands - write_todo is the only state-changing tool allowed.\n");
+            sb.append(
+                    "Todos are the plan, not a progress report: every item stays 'pending' - statuses only advance in build mode, once a step is actually executed.\n");
+            sb.append(
+                    "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
+        }
+        return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
+    }
+
+    /**
+     * Renders the volatile session state (date, todo list, memory section): injected on the wire at
+     * the very end of the last message of every request - never part of the system prompt - so
+     * mutating state never invalidates the cached prefix. Callers enclose it in
+     * {@code <session-state>} tags.
+     *
+     * @param prompt the current user prompt used to select relevant memories; may be null
+     * @return the rendered session state, without the enclosing tags
+     */
+    public String sessionState(final String prompt) {
+        final var sb = new StringBuilder();
+        sb.append("Date: ").append(LocalDate.now()).append('\n');
+        sb.append("Current todo list:\n")
                 .append(todoStore == null ? "(empty)" : todoStore.render())
                 .append('\n');
         final var memory = memoryStore == null ? "" : memoryStore.promptSection(prompt);
         if (!memory.isBlank()) {
             sb.append('\n').append(memory).append('\n');
         }
-        return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
+        return sb.toString();
     }
 
     /**
@@ -237,7 +248,7 @@ public class SystemPromptBuilder {
     /**
      * Keeps the assembled system prompt within {@code maxChars} characters, trimming the
      * front (the generic preamble) and keeping the tail (environment, project context, skills,
-     * agent instructions and session state) which carries the most load-bearing durable instructions.
+     * agent instructions and the PLAN mode tail) which carries the most load-bearing durable instructions.
      */
     private static String capSystemPrompt(final String prompt, final int maxChars) {
         if (prompt.length() <= maxChars) {

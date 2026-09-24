@@ -54,9 +54,20 @@ class ModelConfigurationTest {
 
     @Test
     void tuningUnsetNullableFacetsAreNull() {
-        final var tuning = new ModelTuningConfiguration("", null, null, List.of(), "");
+        final var tuning = new ModelTuningConfiguration("", null, null, List.of(), "", null);
         assertNull(tuning.outputTokens());
         assertNull(tuning.systemPromptMaxChars());
+        assertNull(tuning.anthropic());
         assertEquals(List.of(), tuning.variants());
+    }
+
+    @Test
+    void anthropicSplitBlocksDefaultsToAuto() {
+        assertNull(new AnthropicDialectConfiguration(null).explicitSplitBlocks());
+        assertNull(new AnthropicDialectConfiguration("auto").explicitSplitBlocks());
+        assertNull(new AnthropicDialectConfiguration("").explicitSplitBlocks());
+        assertEquals(Boolean.TRUE, new AnthropicDialectConfiguration("true").explicitSplitBlocks());
+        assertEquals(Boolean.FALSE, new AnthropicDialectConfiguration("false").explicitSplitBlocks());
+        assertNull(new AnthropicDialectConfiguration("whatever").explicitSplitBlocks());
     }
 }

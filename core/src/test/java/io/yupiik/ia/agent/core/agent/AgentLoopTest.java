@@ -584,7 +584,13 @@ class AgentLoopTest {
         assertEquals("t1", tools.get(0).toolCallId());
         assertEquals("done-a", tools.get(0).content());
         assertEquals("t2", tools.get(1).toolCallId());
-        assertEquals("done-b", tools.get(1).content());
+        assertTrue(
+                String.valueOf(tools.get(1).content()).startsWith("done-b"),
+                "the tool result is intact and only extended by the session-state tail: "
+                        + tools.get(1).content());
+        assertTrue(
+                String.valueOf(tools.get(1).content()).contains("<session-state>"),
+                "the refreshed session state rides the last message of the request");
     }
 
     @Test
@@ -851,7 +857,9 @@ class AgentLoopTest {
                 .filter(m -> "tool".equals(m.role()) && "t1".equals(m.toolCallId()))
                 .findFirst()
                 .orElseThrow();
-        assertEquals("old content", beforeWrite.content(), "the read result must be intact before the write lands");
+        assertTrue(
+                String.valueOf(beforeWrite.content()).startsWith("old content"),
+                "the read result must be intact before the write lands");
         final var afterWrite = requests.get(2).stream()
                 .filter(m -> "tool".equals(m.role()) && "t1".equals(m.toolCallId()))
                 .findFirst()
@@ -1034,6 +1042,27 @@ class AgentLoopTest {
     }
 
     @Test
+    void sessionStateRidesOnlyTheLastWireMessage() {
+        final var requests = new ArrayList<List<Message>>();
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("answer", "stop", false)));
+        final var client = chatClient(replies, requests);
+        loop(client, new TodoStore() {}, configuration(true)).run("my prompt", null, "s1", null, () -> false);
+        assertEquals(1, requests.size());
+        final var sent = requests.get(0);
+        assertEquals(2, sent.size(), "system + the user prompt, nothing else");
+        assertEquals("system prompt", sent.get(0).content());
+        assertEquals("user", sent.get(1).role());
+        assertTrue(
+                String.valueOf(sent.get(1).content()).startsWith("my prompt\n\n<session-state>"),
+                "the refreshed session state is appended at the very end of the last message: "
+                        + sent.get(1).content());
+        assertTrue(
+                sent.get(1).others() != null
+                        && Boolean.TRUE.equals(sent.get(1).others().get("volatileTail")),
+                "the wrapper message must be flagged volatileTail for cache breakpoint dialects");
+    }
+
+    @Test
     void resumeRerunsTheLoopWithoutAddingAnyUserMessage() {
         final var requests = new ArrayList<List<Message>>();
         final var replies = new ArrayDeque<>(List.of(new ScriptedReply("resumed answer", "stop", false)));
@@ -1052,10 +1081,19 @@ class AgentLoopTest {
         loop.resume(null, "s1", history, () -> false);
         assertEquals(1, requests.size());
         final var sent = requests.get(0);
-        assertEquals(3, sent.size(), "system + history verbatim, no extra user message");
+        assertEquals(4, sent.size(), "system + history verbatim + wire-only session-state user message");
         assertEquals("system", sent.get(0).role());
         assertEquals("original question", sent.get(1).content());
         assertEquals("partial answer", sent.get(2).content());
+        assertEquals("user", sent.get(3).role());
+        assertTrue(
+                String.valueOf(sent.get(3).content()).startsWith("<session-state>"),
+                "the trailing wire message only carries the refreshed session state: "
+                        + sent.get(3).content());
+        assertTrue(
+                sent.get(3).others() != null
+                        && Boolean.TRUE.equals(sent.get(3).others().get("volatileTail")),
+                "the session-state message must be flagged volatileTail for dialects using cache breakpoints");
         assertTrue(
                 appended.stream().noneMatch(e -> "user".equals(e.role())),
                 "resume must not persist any new input (only the assistant reply is appended)");
@@ -1079,7 +1117,10 @@ class AgentLoopTest {
         assertEquals(2, requests.size(), "tool round then final answer carrying the injected prompt");
         final var injected = requests.get(1);
         assertEquals("user", injected.get(injected.size() - 1).role());
-        assertEquals("follow up!", injected.get(injected.size() - 1).content());
+        assertTrue(
+                String.valueOf(injected.get(injected.size() - 1).content()).startsWith("follow up!\n\n<session-state>"),
+                "the queued prompt carries the refreshed session state at its end: "
+                        + injected.get(injected.size() - 1).content());
         assertTrue(
                 events.stream().anyMatch(candidate -> candidate instanceof AgentEvent.PromptIntegrated),
                 "the queued prompt must surface as a PromptIntegrated event");

@@ -66,6 +66,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 
@@ -127,6 +128,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     private volatile CompletableFuture<Void> readyFuture;
     private final ConcurrentLinkedQueue<PersistJob> persistQueue = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean persistScheduled = new AtomicBoolean();
+    private final ReentrantLock refreshLock = new ReentrantLock();
     private volatile WatchService watchService;
     private volatile Thread watchThread;
     private final AtomicBoolean watching = new AtomicBoolean();
@@ -651,6 +653,20 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (parser == null) {
             return;
         }
+        // the whole read-modify-write is serialized: the watcher emits MODIFY events from its own
+        // thread, and an async refresh interleaving with a synchronous delete-refresh could
+        // otherwise resurrect the symbols of a file deleted in between (its fingerprint was
+        // captured before the deletion and its persist can land after the delete-refresh one)
+        refreshLock.lock();
+        try {
+            refreshFileLocked(absolute, rel, parser);
+        } finally {
+            refreshLock.unlock();
+        }
+    }
+
+    /** Caller holds {@code refreshLock}; the fingerprint is (re-)read inside the critical section. */
+    private void refreshFileLocked(final Path absolute, final String rel, final GraphParser parser) {
         final var fp = fingerprint(absolute);
         // snapshot the mtime together with the content hash so the sidecar can never record an mtime
         // newer than the indexed content (see patch())

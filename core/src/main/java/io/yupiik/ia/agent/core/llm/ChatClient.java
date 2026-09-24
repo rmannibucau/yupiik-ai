@@ -586,6 +586,13 @@ public class ChatClient implements AutoCloseable {
         final var tuning = providerManager.tuning(provider, model);
         final var tuningOptions = providerManager.tuningOptions(tuning);
         deepMergePutIfAbsent(others, tuningOptions);
+        final var explicitSplitBlocks =
+                effectiveFlavor() == ApiFlavor.ANTHROPIC && tuning != null && tuning.anthropic() != null
+                        ? tuning.anthropic().explicitSplitBlocks()
+                        : null;
+        if (explicitSplitBlocks != null) {
+            others.put("anthropicSplitBlocks", explicitSplitBlocks);
+        }
         final var variant = selectedVariant(provider, model);
         if (variant != null && variant.extra() != null && variant.extra().startsWith("{")) {
             deepMergePutIfAbsent(others, parseRaw(variant.extra()));

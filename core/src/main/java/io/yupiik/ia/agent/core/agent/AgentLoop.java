@@ -330,7 +330,7 @@ public class AgentLoop {
         }
 
         try {
-            return loop(sessionId, messages, cancelled, queuedPrompt);
+            return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt);
         } catch (final IOException e) {
             emit(error(e.getMessage()));
             return null;
@@ -471,6 +471,7 @@ public class AgentLoop {
     private String loop(
             final String sessionId,
             final List<Message> messages,
+            final String prompt,
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt)
             throws IOException, InterruptedException {
@@ -541,8 +542,20 @@ public class AgentLoop {
                 consecutiveCompactions = 0;
             }
 
-            final var request =
-                    new ChatCompletionRequest(model, messages, null, null, null, tools, "auto", null, null, null);
+            // wire-only view: the volatile session state is appended at the very end of the last
+            // message so it never mutates a single byte of the cached prefix; the working list
+            // stays raw for persistence, compaction and memory extraction
+            final var request = new ChatCompletionRequest(
+                    model,
+                    wireMessages(sessionId, messages, prompt),
+                    null,
+                    null,
+                    null,
+                    tools,
+                    "auto",
+                    null,
+                    null,
+                    null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final var finishReason = new String[] {null};
             final Message assistant;
@@ -644,6 +657,42 @@ public class AgentLoop {
         }
         emitTurnMetrics(null, turnStartNanos);
         return null;
+    }
+
+    /**
+     * Wire-only view of the working messages: the volatile session state (date, todos, memory and
+     * the compaction snapshot) is appended at the very end of the last message - or as its own
+     * trailing user message when the conversation does not end on a user/tool message - so
+     * per-request freshness never mutates a byte of the cached prefix. The working list itself stays
+     * raw: persistence, compaction and memory extraction keep seeing the pristine conversation.
+     */
+    private List<Message> wireMessages(final String sessionId, final List<Message> messages, final String prompt) {
+        final var state = "<session-state>\n"
+                + systemPromptBuilder.sessionState(prompt)
+                + snapshotBlock(sessionId)
+                + "</session-state>";
+        final var wire = new ArrayList<Message>(messages.size() + 1);
+        wire.addAll(messages);
+        final var last = wire.isEmpty() ? null : wire.get(wire.size() - 1);
+        if (last != null
+                && ("user".equals(last.role()) || "tool".equals(last.role()))
+                && last.content() instanceof String content) {
+            final var others =
+                    last.others() == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(last.others());
+            others.put("volatileTail", true);
+            wire.set(
+                    wire.size() - 1,
+                    new Message(
+                            last.role(),
+                            content + "\n\n" + state,
+                            last.name(),
+                            last.toolCalls(),
+                            last.toolCallId(),
+                            others));
+        } else {
+            wire.add(new Message("user", state, null, null, null, Map.of("volatileTail", true)));
+        }
+        return wire;
     }
 
     private void emitTurnMetrics(final String content, final long turnStartNanos) {
