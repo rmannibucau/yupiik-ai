@@ -64,16 +64,20 @@ public final class Spinner {
             int i = 0;
             while (running.get()) {
                 final var seconds = (System.nanoTime() - startNanos) / 1_000_000_000.0;
-                lock.lock();
-                try {
-                    out.print('\r'
-                            + String.valueOf(frames[i++ % frames.length])
-                            + ' '
-                            + label
-                            + (seconds >= 1 ? String.format(" %.1fs", seconds) : ""));
-                    out.flush();
-                } finally {
-                    lock.unlock();
+                // tryLock: while a real output write holds the render lock the frame is
+                // dropped instead of queueing behind the write and landing on a
+                // half-drawn line - the spinner is simply ignored while output flows
+                if (lock.tryLock()) {
+                    try {
+                        out.print('\r'
+                                + String.valueOf(frames[i++ % frames.length])
+                                + ' '
+                                + label
+                                + (seconds >= 1 ? String.format(" %.1fs", seconds) : ""));
+                        out.flush();
+                    } finally {
+                        lock.unlock();
+                    }
                 }
                 try {
                     Thread.sleep(frameIntervalMillis);

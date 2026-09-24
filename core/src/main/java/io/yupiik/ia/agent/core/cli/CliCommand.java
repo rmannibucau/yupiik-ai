@@ -55,8 +55,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -64,7 +66,6 @@ import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.Function;
 
 /**
  * Interactive plain-terminal REPL for yca. Requires only a terminal
@@ -113,6 +114,7 @@ public class CliCommand implements Runnable {
     private String sessionId;
     private String activeAgent = "";
     private Path contextPath;
+    private final CliPromptTemplate promptTemplate;
     private final AtomicBoolean cleaned = new AtomicBoolean();
 
     public CliCommand(
@@ -133,6 +135,7 @@ public class CliCommand implements Runnable {
             final ShellRegistry shellRegistry,
             final ConversationCoordinator coordinator,
             final ModelStyleService modelStyleService,
+            final CliPromptTemplate promptTemplate,
             final Prompt prompt,
             final Clock clock,
             final CodingAgentConfiguration configuration) {
@@ -152,6 +155,7 @@ public class CliCommand implements Runnable {
         this.shellRegistry = shellRegistry;
         this.coordinator = coordinator;
         this.modelStyleService = modelStyleService;
+        this.promptTemplate = promptTemplate;
         this.prompt = prompt;
         this.clock = clock;
         this.interruptor = new InterruptCoordinator(clock);
@@ -327,69 +331,49 @@ public class CliCommand implements Runnable {
     /**
      * Context-rich prompt line: reveals the agent mode (critical for a code
      * writing agent - plan vs build), the active model and the effective
-     * permission posture (ask / auto / yolo / all). When ANSI color is enabled
-     * the mode and the permission badge are colour-coded so the safety state is
-     * readable at a glance; otherwise they fall back to plain text.
+     * permission posture (ask / auto / yolo / all). The rendering delegates to
+     * the configurable handlebars template ({@code yca.prompt.template}) which
+     * colors the mode and the permission badge when ANSI color is enabled and
+     * falls back to plain text otherwise.
      */
     private String promptLine() {
         final var mode = permissionService.mode().name().toLowerCase(Locale.ROOT);
         final var info = agentSessionService.permissionsInfo();
-        final var permissionLabel = permissionLabel(info.permitAll(), info.permissionMode());
-        final var sb = new StringBuilder("yca");
-        if (colorizer.isEnabled()) {
-            sb.append('[').append(modeColor(mode));
-            final var model = chatClient.model();
-            if (model != null && !model.isBlank()) {
-                sb.append(MarkdownColorizer.dim("@")).append(styledModel(model));
-            }
-            sb.append(']');
-            if (permissionLabel != null) {
-                sb.append(' ')
-                        .append(permissionColor(info.permitAll(), info.permissionMode())
-                                .apply(permissionLine(permissionLabel)));
-            }
-        } else {
-            sb.append('[').append(mode);
-            final var model = chatClient.model();
-            if (model != null && !model.isBlank()) {
-                sb.append('·').append(model);
-            }
-            sb.append(']');
-            if (permissionLabel != null) {
-                sb.append(' ').append(permissionLine(permissionLabel));
-            }
-        }
-        return sb.append("> ").toString();
+        final var usage = frontend.stats().lastUsage();
+        final var model = chatClient.model();
+        final var modelData = new LinkedHashMap<String, Object>();
+        modelData.put("name", model);
+        modelData.put("contextPercentage", usage == null ? 0 : (int) Math.round(usage.contextPercent()));
+        modelData.put("contextTokens", usage == null ? 0 : usage.estimatedContextTokens());
+        modelData.put("contextWindow", usageTracker == null ? 0 : usageTracker.contextWindow());
+
+        final var data = new LinkedHashMap<String, Object>();
+        data.put("mode", mode);
+        data.put("modelName", model);
+        data.put("permission", permissionLabel(info.permitAll(), info.permissionMode()));
+        data.put("agent", activeAgent);
+        data.put("model", modelData);
+        data.put("prune", configuration.pruning().thresholdPercent());
+        data.put("compact", configuration.compaction().thresholdPercent());
+        data.put("color", colorizer.isEnabled());
+        data.put("colors", promptColors(model));
+        return promptTemplate.render(data);
     }
 
-    private String modeColor(final String mode) {
-        if (mode.equals("plan")) {
-            return MarkdownColorizer.accent(mode);
+    private Map<String, String> promptColors(final String model) {
+        if (!colorizer.isEnabled()) {
+            return Map.of();
         }
-        return MarkdownColorizer.success(mode);
+        final var colors = new LinkedHashMap<>(configuration.prompt().colors());
+        colors.put(
+                "model",
+                modelStyleService.resolve(chatClient.currentProvider(), model).ansiPrefix());
+        return colors;
     }
 
     private String styledModel(final String model) {
         final var style = modelStyleService.resolve(chatClient.currentProvider(), model);
         return style.ansiPrefix() + model + "\u001b[0m";
-    }
-
-    private Function<String, String> permissionColor(final boolean permitAll, final PermissionMode mode) {
-        if (permitAll) {
-            return MarkdownColorizer::error;
-        }
-        if (mode == null) {
-            return MarkdownColorizer::status;
-        }
-        return switch (mode) {
-            case YOLO -> MarkdownColorizer::error;
-            case AUTO_EDIT -> MarkdownColorizer::warning;
-            default -> MarkdownColorizer::status;
-        };
-    }
-
-    private static String permissionLine(final String label) {
-        return "(" + label + ")";
     }
 
     private String permissionLabel(final boolean permitAll, final PermissionMode mode) {

@@ -47,6 +47,10 @@
       <artifactId>fusion-httpclient</artifactId>
     </dependency>
     <dependency>
+      <groupId>io.yupiik.fusion</groupId>
+      <artifactId>fusion-handlebars</artifactId>
+    </dependency>
+    <dependency>
       <groupId>io.yupiik.llm</groupId>
       <artifactId>llm-client-api</artifactId>
       <version>${project.version}</version>

@@ -124,7 +124,10 @@ public record CodingAgentConfiguration(
         List<String> resumeAliases,
 
         @Property(documentation = "Slash command tunables (e.g. side questions).")
-        SlashCommandConfiguration slashcommands) {
+        SlashCommandConfiguration slashcommands,
+
+        @Property(documentation = "Interactive prompt line rendering (CLI REPL).")
+        PromptTemplateConfiguration prompt) {
 
     /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
     public boolean isResumeAlias(final String input) {

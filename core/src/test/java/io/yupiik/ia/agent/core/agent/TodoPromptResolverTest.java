@@ -45,6 +45,30 @@ class TodoPromptResolverTest {
     }
 
     @Test
+    void everyFamilyBlockTellsToConsultTheListAtTurnStart() {
+        assertTrue(
+                resolver.resolve("auto", "https://mystery.example/v1")
+                        .contains("Consult the todo list in the <session-state> block at the"),
+                "the OpenAI block must order consulting the list at turn start");
+        assertTrue(
+                resolver.resolve("auto", "https://api.anthropic.com/v1/messages")
+                        .contains("Consult the todo list in the <session-state> block at the"),
+                "the Anthropic block must order consulting the list at turn start");
+        assertTrue(
+                resolver.resolve("auto", "https://generativelanguage.googleapis.com/v1")
+                        .contains("Consult the todo list in the <session-state> block at the"),
+                "the Gemini block must order consulting the list at turn start");
+        for (final var url : java.util.List.of(
+                "https://mystery.example/v1",
+                "https://api.anthropic.com/v1/messages",
+                "https://generativelanguage.googleapis.com/v1")) {
+            assertTrue(
+                    resolver.resolve("auto", url).contains("pending items are your queue."),
+                    "every family block must close on the queue directive");
+        }
+    }
+
+    @Test
     void nullModeDefaultsToAuto() {
         final var resolved = resolver.resolve(null, "https://mystery.example/v1");
         assertTrue(resolved.contains("Do not batch up several todos"));

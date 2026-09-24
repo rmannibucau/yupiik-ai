@@ -15,6 +15,9 @@
  */
 package io.yupiik.ia.agent.core.llm;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
+
+@JsonModel
 public enum ApiFlavor {
     AUTO,
     COMPLETIONS,

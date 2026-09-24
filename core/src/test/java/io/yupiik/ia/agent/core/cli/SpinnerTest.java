@@ -84,6 +84,25 @@ class SpinnerTest {
         assertFalse(stream.awaitFrame(250, TimeUnit.MILLISECONDS), "a stale frame was written after stop() returned");
     }
 
+    @Test
+    void framesAreSkippedWhileTheRenderLockIsHeld() throws InterruptedException {
+        final var stream = new RecordingStream();
+        final var lock = new ReentrantLock();
+        final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, lock, 5);
+        lock.lock();
+        try {
+            spinner.start("thinking");
+            // several frame intervals elapse while the lock is held: output owns
+            // the terminal, frames must be dropped instead of queueing behind it
+            Thread.sleep(60);
+            assertEquals(0, stream.size(), "a frame was written while the render lock was held");
+        } finally {
+            lock.unlock();
+        }
+        assertTrue(stream.awaitFrame(), "no frame after the render lock was released");
+        spinner.stop();
+    }
+
     /**
      * Records rendered bytes and signals each write through a latch so tests await real frames instead of sleeping.
      */

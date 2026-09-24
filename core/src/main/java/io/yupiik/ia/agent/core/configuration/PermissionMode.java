@@ -15,9 +15,11 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
 import java.util.Locale;
 
+@JsonModel
 public enum PermissionMode {
     ASK,
     AUTO_EDIT,

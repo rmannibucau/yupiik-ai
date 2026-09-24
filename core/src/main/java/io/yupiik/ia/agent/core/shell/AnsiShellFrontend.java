@@ -60,7 +60,20 @@ public class AnsiShellFrontend implements ShellFrontend {
      * can still stream after {@link #endTurn()}; they must not (re)start the spinner. */
     private volatile boolean turnActive;
 
+    /**
+     * Serializes the spinner lifecycle (start/stop/turn flag flips) between the
+     * event threads: {@link #beginSpinner(String)} check-then-act and
+     * {@link #endTurn()} used to race, letting a spinner started right after the
+     * final stop run forever past the turn. Distinct from {@link #renderLock}:
+     * {@link Spinner#stop()} joins the animation worker which needs
+     * {@code renderLock} for its frames, so the two locks must never nest.
+     */
+    private final ReentrantLock spinnerLock = new ReentrantLock();
+
     private final ArrayDeque<AgentEvent> pendingEvents = new ArrayDeque<>();
+    /** Guards {@link #pendingEvents}, {@link #suspended} and the suspension bookkeeping flags. */
+    private final ReentrantLock pendingLock = new ReentrantLock();
+
     private boolean suspended;
     /** Whether the thinking widget was active when output got suspended: restart it on resume. */
     private boolean resumeThinking;
@@ -131,7 +144,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     public void status(final String message) {
         stopSpinner();
         ensureStderrNewline();
-        System.err.println(MarkdownColorizer.status(symbols.infoMarker() + " " + message));
+        printlnErr(MarkdownColorizer.status(symbols.infoMarker() + " " + message));
     }
 
     @Override
@@ -144,7 +157,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                     case INFO -> symbols.infoMarker();
                 };
         ensureStderrNewline();
-        System.err.println(MarkdownColorizer.status(marker + " " + message));
+        printlnErr(MarkdownColorizer.status(marker + " " + message));
     }
 
     @Override
@@ -171,7 +184,7 @@ public class AnsiShellFrontend implements ShellFrontend {
     public void error(final String message) {
         stopSpinner();
         ensureStderrNewline();
-        System.err.println(MarkdownColorizer.error("[error] " + message));
+        printlnErr(MarkdownColorizer.error("[error] " + message));
     }
 
     @Override
@@ -190,10 +203,13 @@ public class AnsiShellFrontend implements ShellFrontend {
      * and thinking output bury them.
      */
     public void suspendOutput() {
-        synchronized (pendingEvents) {
+        pendingLock.lock();
+        try {
             suspended = true;
-            resumeThinking = spinner != null || thinkingRoundOpen;
+            resumeThinking = thinkingRoundOpen || spinnerRunning();
             pendingInteractionSeparation = true;
+        } finally {
+            pendingLock.unlock();
         }
         ensureStderrNewline();
         stopSpinner();
@@ -203,16 +219,26 @@ public class AnsiShellFrontend implements ShellFrontend {
     public void resumeOutput() {
         final List<AgentEvent> queued;
         final boolean turnEnded;
-        synchronized (pendingEvents) {
+        final boolean separate;
+        pendingLock.lock();
+        try {
             queued = List.copyOf(pendingEvents);
             pendingEvents.clear();
             suspended = false;
             turnEnded = queued.stream().anyMatch(AgentEvent.TurnDone.class::isInstance);
-        }
-        if (tty && pendingInteractionSeparation) {
+            separate = pendingInteractionSeparation;
             pendingInteractionSeparation = false;
-            System.out.println();
-            System.out.flush();
+        } finally {
+            pendingLock.unlock();
+        }
+        if (tty && separate) {
+            renderLock.lock();
+            try {
+                System.out.println();
+                System.out.flush();
+            } finally {
+                renderLock.unlock();
+            }
         }
         queued.forEach(this::onEvent);
         // Restart the thinking spinner only when the turn is still genuinely
@@ -221,7 +247,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         // drawn next prompt once the interaction finished.
         if (resumeThinking) {
             resumeThinking = false;
-            if (!showThinking && !turnEnded && turnActive && spinner == null) {
+            if (!showThinking && !turnEnded && turnActive) {
                 beginSpinner("thinking");
             }
         }
@@ -251,7 +277,12 @@ public class AnsiShellFrontend implements ShellFrontend {
         thinkingRoundOpen = false;
         stderrNeedsNewline = false;
         stopSpinner();
-        turnActive = true;
+        spinnerLock.lock();
+        try {
+            turnActive = true;
+        } finally {
+            spinnerLock.unlock();
+        }
         if (!showThinking) {
             beginSpinner("thinking");
         }
@@ -263,8 +294,18 @@ public class AnsiShellFrontend implements ShellFrontend {
      */
     @Override
     public void endTurn() {
+        // Flip the turn flag BEFORE stopping: the flag write and any racing
+        // beginSpinner are serialized by spinnerLock, so a spinner started by
+        // a late event thread either fails the turnActive check or is seen and
+        // stopped by the stopSpinner call below. Stopping first (previous
+        // order) let a spinner started in between spin forever past the turn.
+        spinnerLock.lock();
+        try {
+            turnActive = false;
+        } finally {
+            spinnerLock.unlock();
+        }
         stopSpinner();
-        turnActive = false;
         print(textBuffer.flush());
         System.out.flush();
         System.err.flush();
@@ -272,11 +313,14 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     @Override
     public void onEvent(final AgentEvent event) {
-        synchronized (pendingEvents) {
+        pendingLock.lock();
+        try {
             if (suspended) {
                 pendingEvents.add(event);
                 return;
             }
+        } finally {
+            pendingLock.unlock();
         }
         final var prefix = subagentPrefix(event);
         if (event instanceof AgentEvent.TextDelta(String delta, String subagentId, String subagentName)) {
@@ -290,12 +334,11 @@ public class AnsiShellFrontend implements ShellFrontend {
             if (showThinking) {
                 if (!thinkingRoundOpen) {
                     thinkingRoundOpen = true;
-                    System.err.println(MarkdownColorizer.thinking(prefix + "thinking..."));
+                    printlnErr(MarkdownColorizer.thinking(prefix + "thinking..."));
                 }
                 stopSpinner();
-                System.err.print(MarkdownColorizer.thinking(prefix + delta));
+                printErr(MarkdownColorizer.thinking(prefix + delta));
                 stderrNeedsNewline = !delta.endsWith("\n");
-                System.err.flush();
             } else {
                 beginSpinner(prefix + "thinking");
             }
@@ -307,9 +350,13 @@ public class AnsiShellFrontend implements ShellFrontend {
         } else if (event instanceof final AgentEvent.ToolStream t) {
             toolStreamed = true;
             if (showToolOutput.shown() && verbosity == CliVerbosity.RAW) {
-                System.err.print(prefix + (t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n"));
+                // streamed tool output replaces the spinner: frames and fragments
+                // share the stderr line and would interleave, so output wins
+                stopSpinner();
+                printErr(prefix + (t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n"));
             } else if (showToolOutput.shown() && verbosity == CliVerbosity.VERBOSE) {
-                System.err.print(MarkdownColorizer.dim(prefix + t.fragment()));
+                stopSpinner();
+                printErr(MarkdownColorizer.dim(prefix + t.fragment()));
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
             stats.incToolsRun();
@@ -324,8 +371,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                 instanceof AgentEvent.Compacted(String kind, String mode, String subagentId, String subagentName)) {
             stopSpinner();
             ensureStderrNewline();
-            System.err.println(MarkdownColorizer.status(prefix + symbols.infoMarker() + " context " + kind
-                    + " applied (" + mode.toLowerCase(Locale.ROOT) + ")"));
+            printlnErr(MarkdownColorizer.status(prefix + symbols.infoMarker() + " context " + kind + " applied ("
+                    + mode.toLowerCase(Locale.ROOT) + ")"));
         } else if (event
                 instanceof
                 AgentEvent.Notice(
@@ -413,45 +460,56 @@ public class AnsiShellFrontend implements ShellFrontend {
         if (verbosity == CliVerbosity.RAW) {
             if (!collapsed) {
                 ensureStderrNewline();
-                System.err.println(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
+                printlnErr(MarkdownColorizer.status(prefix + "[tool] " + t.name() + " " + t.args()));
             }
             return;
         }
-        ensureStderrNewline();
-        System.err.println(
-                MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+        // the whole card is one render unit: frames skipped on tryLock cannot
+        // draw between its lines once the spinner was stopped by the caller
+        renderLock.lock();
+        try {
+            ensureStderrNewline();
+            System.err.println(
+                    MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+        } finally {
+            renderLock.unlock();
+        }
         if (verbosity == CliVerbosity.COMPACT && !collapsed && t.name().equals("bash")) {
             beginSpinner(prefix + "running " + presenter.summarize(t.name(), t.args()));
         }
     }
 
     private void onToolFinished(final AgentEvent.ToolFinished t) {
-        stopSpinner();
-        ensureStderrNewline();
         final var prefix = subagentPrefix(t);
         final var indent = "  ";
-        if (verbosity == CliVerbosity.RAW) {
-            if (!t.success() && t.output() != null && !t.output().isBlank()) {
-                System.err.println(MarkdownColorizer.error(prefix + t.output()));
+        renderLock.lock();
+        try {
+            ensureStderrNewline();
+            if (verbosity == CliVerbosity.RAW) {
+                if (!t.success() && t.output() != null && !t.output().isBlank()) {
+                    System.err.println(MarkdownColorizer.error(prefix + t.output()));
+                }
+                return;
             }
-            return;
-        }
-        final var result = presenter.result(t.name(), t.output(), t.success());
-        System.err.println(MarkdownColorizer.dim(prefix + indent + symbols.resultPrefix())
-                + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
-        if (verbosity == CliVerbosity.VERBOSE) {
-            // show the full result for tools that did not stream their output live (e.g. bash streams,
-            // most other tools only surface their output through ToolFinished)
-            if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
-                for (final var line : t.output().stripTrailing().split("\n")) {
-                    System.err.println(MarkdownColorizer.dim(prefix + indent + line));
+            final var result = presenter.result(t.name(), t.output(), t.success());
+            System.err.println(MarkdownColorizer.dim(prefix + indent + symbols.resultPrefix())
+                    + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
+            if (verbosity == CliVerbosity.VERBOSE) {
+                // show the full result for tools that did not stream their output live (e.g. bash streams,
+                // most other tools only surface their output through ToolFinished)
+                if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
+                    for (final var line : t.output().stripTrailing().split("\n")) {
+                        System.err.println(MarkdownColorizer.dim(prefix + indent + line));
+                    }
                 }
             }
-        }
-        if (verbosity == CliVerbosity.COMPACT) {
-            for (final var line : presenter.diff(t.name(), null, DIFF_MAX_LINES)) {
-                System.err.println(prefix + indent + colorizeDiff(line));
+            if (verbosity == CliVerbosity.COMPACT) {
+                for (final var line : presenter.diff(t.name(), null, DIFF_MAX_LINES)) {
+                    System.err.println(prefix + indent + colorizeDiff(line));
+                }
             }
+        } finally {
+            renderLock.unlock();
         }
     }
 
@@ -495,31 +553,54 @@ public class AnsiShellFrontend implements ShellFrontend {
     }
 
     /**
-     * Starts the spinner when none is running; a thinking stream can call this
-     * once per token, so reusing the active spinner avoids leaking one thread
-     * (and one elapsed timer) per delta.
+     * Whether a spinner is currently armed, read under {@link #spinnerLock}
+     * so callers observe a consistent lifecycle state.
      */
     boolean spinnerRunning() {
-        return spinner != null;
+        spinnerLock.lock();
+        try {
+            return spinner != null;
+        } finally {
+            spinnerLock.unlock();
+        }
     }
 
     /**
      * Starts the spinner when none is running; a thinking stream can call this
      * once per token, so reusing the active spinner avoids leaking one thread
-     * (and one elapsed timer) per delta.
+     * (and one elapsed timer) per delta. Atomic with {@link #stopSpinner()}
+     * and the {@code turnActive} flips so a spinner can never be armed after
+     * the turn ended.
      */
     private void beginSpinner(final String label) {
-        if (!tty || !turnActive || spinner != null) {
+        if (!tty) {
             return;
         }
-        spinner = new Spinner(symbols, System.err, tty, renderLock);
-        spinner.start(label);
+        spinnerLock.lock();
+        try {
+            if (!turnActive || spinner != null) {
+                return;
+            }
+            spinner = new Spinner(symbols, System.err, tty, renderLock);
+            spinner.start(label);
+        } finally {
+            spinnerLock.unlock();
+        }
     }
 
     private void stopSpinner() {
-        if (spinner != null) {
-            spinner.stop();
+        final Spinner current;
+        spinnerLock.lock();
+        try {
+            current = spinner;
             spinner = null;
+        } finally {
+            spinnerLock.unlock();
+        }
+        if (current != null) {
+            // join + erase outside spinnerLock: stop() waits for the animation
+            // worker, whose frames need renderLock - never nest the two locks
+            current.stop();
         }
     }
 
@@ -530,13 +611,41 @@ public class AnsiShellFrontend implements ShellFrontend {
      */
     private void ensureStderrNewline() {
         if (stderrNeedsNewline) {
-            System.err.println();
+            printlnErr("");
             stderrNeedsNewline = false;
         }
     }
 
+    /** Renders on stdout under {@link #renderLock}: spinner frames are dropped for the whole write. */
     private void print(final String text) {
-        System.out.print(text);
-        System.out.flush();
+        renderLock.lock();
+        try {
+            System.out.print(text);
+            System.out.flush();
+        } finally {
+            renderLock.unlock();
+        }
+    }
+
+    /** Renders on stderr under {@link #renderLock}: spinner frames are dropped for the whole write. */
+    private void printErr(final String text) {
+        renderLock.lock();
+        try {
+            System.err.print(text);
+            System.err.flush();
+        } finally {
+            renderLock.unlock();
+        }
+    }
+
+    /** Renders a line on stderr under {@link #renderLock}: spinner frames are dropped for the whole write. */
+    private void printlnErr(final String text) {
+        renderLock.lock();
+        try {
+            System.err.println(text);
+            System.err.flush();
+        } finally {
+            renderLock.unlock();
+        }
     }
 }

@@ -27,6 +27,7 @@ import io.yupiik.fusion.framework.api.lifecycle.Stop;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.ia.agent.core.cli.PromptHandlebarsHelper;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import java.io.IOException;
@@ -72,7 +73,33 @@ public class CodingAgentDocumentationGenerator implements Runnable {
                 .start()) {
             writeTools(container);
             writeSlashCommands(container);
+            writePromptHelpers(container);
         }
+    }
+
+    private void writePromptHelpers(final RuntimeContainer container) {
+        final var helpers = container
+                .lookups(
+                        PromptHandlebarsHelper.class,
+                        it -> it.stream()
+                                .map(Instance::instance)
+                                .sorted(Comparator.comparing(PromptHandlebarsHelper::name))
+                                .toList())
+                .instance();
+        if (helpers.isEmpty()) {
+            return;
+        }
+        final var sb = new StringBuilder();
+        for (final var helper : helpers) {
+            sb.append("`{{").append(helper.name()).append("}}`::\n");
+            sb.append("  ")
+                    .append(
+                            helper.description() == null || helper.description().isBlank()
+                                    ? "No description."
+                                    : helper.description())
+                    .append("\n\n");
+        }
+        writePartial("prompt-helpers.adoc", sb.toString());
     }
 
     private void writeTools(final RuntimeContainer container) {

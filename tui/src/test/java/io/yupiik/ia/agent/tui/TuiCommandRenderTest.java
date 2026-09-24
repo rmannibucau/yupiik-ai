@@ -1078,18 +1078,32 @@ class TuiCommandRenderTest {
         uiThread.start();
         awaitTui();
         awaitText("yca coding agent");
-        // PLAN is the default mode: the global gutter (screen column 0) is the thin bar
+        // the default permissions state is "all": the gutter (screen column 0) stays thin
         awaitNoRowStartingWith("┃");
+        // the sidebar model line is a plain labeled row; the mode sits in its own row below
+        awaitText("model test-model");
+        awaitText("permissions all ⚠");
+
+        // leave the permissions-all state so the actual plan/build mode is shown textually
+        tuiRef.get().dispatch(new PasteEvent("/permissions none"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("mode plan");
+        final var col = columnOfLineContaining("mode plan") + 5; // skip the muted "mode " label
+        final var row = rowOf("mode plan");
+        final var rgb = backend.fg(col, row).map(c -> c.toRgb()).orElse(null);
+        assertTrue(
+                rgb != null && rgb.r() == 0xf5 && rgb.g() == 0xa7 && rgb.b() == 0x42,
+                "expected the plan mode value to be painted in the warning (plan) color, fg=" + backend.fg(col, row));
 
         tuiRef.get().dispatch(new PasteEvent("/mode build"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-        awaitText("build");
         awaitRowStartingWith("┃"); // heavy bar on the prompt + global gutters
+        awaitText("mode build");
 
         tuiRef.get().dispatch(new PasteEvent("/mode plan"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-        awaitText("plan");
         awaitNoRowStartingWith("┃");
+        awaitText("mode plan");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);

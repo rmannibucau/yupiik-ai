@@ -55,7 +55,8 @@ public class TodoPromptResolver {
             It is critical that you mark a todo as completed as soon as the task it describes is actually done,
             including any verification. Do not batch up several todos before marking them completed, and keep
             exactly one todo in_progress while work remains. If a step turns out to be unnecessary, mark it
-            cancelled instead of leaving it pending.""";
+            cancelled instead of leaving it pending. Consult the todo list in the <session-state> block at the
+            start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String ANTHROPIC = """
             Task Management:
@@ -64,13 +65,17 @@ public class TodoPromptResolver {
             EXTREMELY helpful for planning, and for breaking down larger complex tasks into smaller steps; if you
             do not use it when planning you may forget to do important tasks - and that is unacceptable.
             It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up
-            multiple tasks before marking them as completed, and work through the whole list to completion.""";
+            multiple tasks before marking them as completed, and work through the whole list to completion.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before
+            ending a turn: pending items are your queue.""";
 
     private static final String GEMINI = """
             Task Management:
             Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress
             as you start it and completed as soon as it is really done; keep a single in_progress item and do not
-            batch completion updates. Prefer writing a todo when the request involves several distinct steps.""";
+            batch completion updates. Prefer writing a todo when the request involves several distinct steps.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before
+            ending a turn: pending items are your queue.""";
 
     private static final List<Family> FAMILIES = List.of(
             new Family("anthropic", List.of("anthropic", "claude"), ANTHROPIC),

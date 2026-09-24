@@ -2378,6 +2378,8 @@ public class TuiCommand implements Runnable {
         if (branch != null) {
             text.add(Line.from(Span.styled("branch ", label), Span.styled(ellipsize(branch, width - 7), value)));
         }
+        text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
+        // the mode row follows the session id so it stays right after the entry block
         text.add(Line.from(
                 Span.styled(permissionService.isPermitAll() ? "permissions all " : "mode ", label),
                 Span.styled(
@@ -2385,7 +2387,6 @@ public class TuiCommand implements Runnable {
                                 ? "⚠"
                                 : permissionService.mode().name().toLowerCase(Locale.ROOT),
                         Style.EMPTY.fg(modeColor()))));
-        text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
         text.add(Line.from(Span.styled("servers ", label)));
         for (final var status : mcpManager.serverStatuses()) {
             final var dotColor =
@@ -3281,9 +3282,9 @@ public class TuiCommand implements Runnable {
         final var activeVariant = chatClient.variant();
         final var variantSuffix =
                 activeVariant == null || activeVariant.isBlank() ? " (default)" : " [" + activeVariant + "]";
-        parts.add(Span.styled("model " + activeModel + variantSuffix + "  ", modelNameStyle()));
+        parts.add(Span.styled(modeWord() + " ", Style.EMPTY.fg(modeColor())));
+        parts.add(Span.styled(activeModel + variantSuffix + "  ", modelNameStyle()));
         parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
-        parts.add(Span.styled(modeName(), Style.EMPTY.fg(modeColor())));
         // narrow terminals have no sidebar: keep the essential context numbers in the strip
         if (narrow) {
             parts.add(Span.styled("  ctx " + state.model.contextPercent() + "%", muted));
@@ -4477,6 +4478,11 @@ public class TuiCommand implements Runnable {
             return "all";
         }
         return permissionService.mode().name().toLowerCase(Locale.ROOT);
+    }
+
+    /** Mode word shown in the status strip; "all ⚠" when permissions are open. */
+    private String modeWord() {
+        return modeName() + (permissionService.isPermitAll() ? " ⚠" : "");
     }
 
     private Color modeColor() {

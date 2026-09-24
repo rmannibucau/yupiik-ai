@@ -30,6 +30,8 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -82,17 +84,32 @@ class AnsiShellFrontendTest {
             final boolean tty,
             final boolean showThinking,
             final ToolOutputVisibility showToolOutput) {
-        if (jsonMapper == null) {
-            jsonMapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
-        }
         return new AnsiShellFrontend(
                 colorizer,
                 new Symbols(false),
-                new ToolPresenter(jsonMapper),
+                new ToolPresenter(mapper()),
                 CliVerbosity.COMPACT,
                 tty,
                 showThinking,
                 showToolOutput);
+    }
+
+    private AnsiShellFrontend frontend(final CliVerbosity verbosity, final boolean tty, final boolean showThinking) {
+        return new AnsiShellFrontend(
+                new MarkdownColorizer(false),
+                new Symbols(false),
+                new ToolPresenter(mapper()),
+                verbosity,
+                tty,
+                showThinking,
+                ToolOutputVisibility.SHOWN);
+    }
+
+    private JsonMapperImpl mapper() {
+        if (jsonMapper == null) {
+            jsonMapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+        }
+        return jsonMapper;
     }
 
     @Test
@@ -309,6 +326,73 @@ class AnsiShellFrontendTest {
         assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
         assertFalse(frontend.spinnerRunning());
+    }
+
+    @Test
+    void toolStreamStopsTheSpinnerInsteadOfInterleaving() {
+        final var frontend = frontend(CliVerbosity.VERBOSE, true, false);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+
+        // streamed tool output owns the terminal line: the spinner must be gone
+        // rather than animating frames between the output fragments
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "second fragment"));
+        assertFalse(frontend.spinnerRunning(), "spinner restarted between stream fragments");
+
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
+    }
+
+    @Test
+    void rawToolStreamStopsTheSpinnerInsteadOfInterleaving() {
+        final var frontend = frontend(CliVerbosity.RAW, true, false);
+        frontend.beginTurn();
+        assertTrue(frontend.spinnerRunning());
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line\n"));
+        frontend.endTurn();
+        assertFalse(frontend.spinnerRunning());
+    }
+
+    /**
+     * Regression test for the forever-spinner: event threads (subagents, bash
+     * stream workers) can race the turn teardown. The spinner lifecycle and the
+     * {@code turnActive} flip are serialized by the frontend, so whichever side
+     * wins, no spinner may survive {@code endTurn()}.
+     */
+    @Test
+    void racingEventsCannotLeaveTheSpinnerRunningAfterEndTurn() throws InterruptedException {
+        final var frontend = frontend(true, false, ToolOutputVisibility.COLLAPSED);
+        for (int i = 0; i < 200; i++) {
+            frontend.beginTurn();
+            final var barrier = new CyclicBarrier(2);
+            final var racing = Thread.ofVirtual().start(() -> {
+                try {
+                    barrier.await();
+                } catch (final Exception e) {
+                    return;
+                }
+                // a background actor emitting while the turn ends: each tool
+                // finish stops then re-arms the spinner (hidden thinking),
+                // probing the teardown window on every single event
+                for (int j = 0; j < 50; j++) {
+                    frontend.onEvent(new AgentEvent.ToolFinished("bash", "done " + j, true));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("late thought " + j));
+                }
+            });
+            try {
+                barrier.await();
+            } catch (final BrokenBarrierException e) {
+                // the racing thread died before the rendezvous: endTurn still cleans up
+            }
+            frontend.endTurn();
+            racing.join();
+            assertFalse(frontend.spinnerRunning(), "iteration " + i + " left the spinner running after the turn");
+        }
     }
 
     @Test

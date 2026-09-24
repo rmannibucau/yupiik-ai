@@ -165,9 +165,26 @@ class SystemPromptBuilderTest {
         assertFalse(prompt.contains("Date: "), "the date must not be part of the system prompt anymore");
         final var state = builder.sessionState(null);
         assertTrue(state.contains("Date: "), "the session state must expose the date");
+        assertFalse(state.contains("Mode:"), "without a permission service there is no mode to report");
         assertTrue(
                 state.contains("Current todo list:") && state.contains("step one"),
                 "the session state must expose the current todos: " + state);
+    }
+
+    @Test
+    void sessionStateReportsTheCurrentMode() throws Exception {
+        final var cfg = config(Map.of("yca.mode", "plan"));
+        final var permissions = new PermissionService(cfg);
+        permissions.setMode(AgentMode.PLAN);
+        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, null, null, null, null);
+        assertTrue(
+                builder.sessionState(null).contains("Mode: PLAN"), "plan mode must be reported in the volatile tail");
+
+        permissions.setMode(AgentMode.BUILD);
+        final var state = builder.sessionState(null);
+        assertTrue(
+                state.contains("Mode: BUILD"),
+                "build mode must be reported in the volatile tail, switching from plan: " + state);
     }
 
     @Test
@@ -326,6 +343,24 @@ class SystemPromptBuilderTest {
         final var builder = builder(cfg, todoResolver(), providerManager(cfg));
         final var prompt = builder.build();
         assertFalse(prompt.contains("<todo-guidance>"), "false must disable the guidance appendix");
+    }
+
+    @Test
+    void systemPromptTeachesReadingTheTodoQueue() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(
+                prompt.contains("Each request ends with a <session-state> block carrying the current todo list"),
+                "the rules must point at the session-state tail as the todo carrier");
+        assertTrue(
+                prompt.contains("pending items are the task queue - continue with them unless the user redirects"),
+                "the rules must order to follow pending items");
+        assertTrue(
+                prompt.contains("Keep the list accurate with write_todo as work progresses"),
+                "the rules must order to keep statuses accurate");
     }
 
     @Test

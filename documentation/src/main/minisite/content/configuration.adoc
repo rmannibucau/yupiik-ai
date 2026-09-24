@@ -88,6 +88,13 @@ An agent is selected on `run` with `--agent <name>`, in the TUI with
 `/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt with
 `@<name> `.
 
+== Prompt template
+
+The interactive CLI prompt line (`yca.prompt.template`) is rendered from a
+Handlebars template. Empty falls back to the built-in prompt. Placeholders,
+helpers, coloring and example templates are covered in
+xref:features/prompt.adoc[Prompt templates].
+
 == JSON Schema
 
 The full JSON-Schema of `configuration.json` (all `yca.*` options, the TUI

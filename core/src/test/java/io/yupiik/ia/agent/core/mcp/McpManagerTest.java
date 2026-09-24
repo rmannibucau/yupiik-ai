@@ -218,7 +218,8 @@ class McpManagerTest {
                 new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT),
                 base.maxLineLength(),
                 base.resumeAliases(),
-                base.slashcommands());
+                base.slashcommands(),
+                base.prompt());
     }
 
     private static JsonMapper mapper() {

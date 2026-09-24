@@ -116,6 +116,8 @@ public class SystemPromptBuilder {
         sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
         sb.append("- Read files before editing them; keep edits minimal and focused.\n");
         sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
+        sb.append(
+                "- Each request ends with a <session-state> block carrying the current todo list, mode, date and memory. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
         sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
         sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
         sb.append(
@@ -193,10 +195,12 @@ public class SystemPromptBuilder {
     }
 
     /**
-     * Renders the volatile session state (date, todo list, memory section): injected on the wire at
-     * the very end of the last message of every request - never part of the system prompt - so
-     * mutating state never invalidates the cached prefix. Callers enclose it in
-     * {@code <session-state>} tags.
+     * Renders the volatile session state (mode, date, todo list, memory section): injected on the
+     * wire at the very end of the last message of every request - never part of the system prompt -
+     * so mutating state never invalidates the cached prefix. The mode line is the authoritative
+     * per-request signal: it is re-rendered fresh regardless of how the mode was reached (slash
+     * command, startup flag or session restore), so the model never has to infer it from stale
+     * conversation artifacts. Callers enclose it in {@code <session-state>} tags.
      *
      * @param prompt the current user prompt used to select relevant memories; may be null
      * @return the rendered session state, without the enclosing tags
@@ -204,6 +208,9 @@ public class SystemPromptBuilder {
     public String sessionState(final String prompt) {
         final var sb = new StringBuilder();
         sb.append("Date: ").append(LocalDate.now()).append('\n');
+        if (permissionService != null) {
+            sb.append("Mode: ").append(permissionService.mode().name()).append('\n');
+        }
         sb.append("Current todo list:\n")
                 .append(todoStore == null ? "(empty)" : todoStore.render())
                 .append('\n');

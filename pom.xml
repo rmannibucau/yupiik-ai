@@ -16,7 +16,7 @@
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>25</maven.compiler.release>
-    <fusion.version>1.1.0</fusion.version>
+    <fusion.version>1.1.1-SNAPSHOT</fusion.version>
     <tamboui.version>0.4.0</tamboui.version>
     <jline.version>3.25.1</jline.version>
     <junit.version>6.0.2</junit.version>
@@ -58,6 +58,11 @@
       <dependency>
         <groupId>io.yupiik.fusion</groupId>
         <artifactId>fusion-documentation</artifactId>
+        <version>${fusion.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.yupiik.fusion</groupId>
+        <artifactId>fusion-handlebars</artifactId>
         <version>${fusion.version}</version>
       </dependency>
       <dependency>
