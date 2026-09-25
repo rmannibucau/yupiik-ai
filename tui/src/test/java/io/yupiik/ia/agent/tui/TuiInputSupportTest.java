@@ -69,4 +69,21 @@ class TuiInputSupportTest {
         assertEquals(123, TuiInputSupport.firstLine("x".repeat(500)).length());
         assertTrue(TuiInputSupport.firstLine("x".repeat(500)).endsWith("..."));
     }
+
+    @Test
+    void columnAtDisplayWidthMapsCellsToCharIndex() {
+        assertEquals(0, TuiInputSupport.columnAtDisplayWidth("abc", 0));
+        assertEquals(1, TuiInputSupport.columnAtDisplayWidth("abc", 1));
+        assertEquals(2, TuiInputSupport.columnAtDisplayWidth("abc", 2));
+        assertEquals(3, TuiInputSupport.columnAtDisplayWidth("abc", 10)); // past the end -> length
+        assertEquals(0, TuiInputSupport.columnAtDisplayWidth("", 5));
+        assertEquals(0, TuiInputSupport.columnAtDisplayWidth("abc", -1));
+        assertEquals(0, TuiInputSupport.columnAtDisplayWidth(null, 2));
+        // "中" is 2 cells wide: both its cells map to its start (a caret cannot
+        // sit inside a wide char)
+        assertEquals(1, TuiInputSupport.columnAtDisplayWidth("a中b", 1));
+        assertEquals(1, TuiInputSupport.columnAtDisplayWidth("a中b", 2));
+        assertEquals(2, TuiInputSupport.columnAtDisplayWidth("a中b", 3));
+        assertEquals(3, TuiInputSupport.columnAtDisplayWidth("a中b", 4));
+    }
 }

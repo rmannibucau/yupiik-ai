@@ -27,6 +27,10 @@ import java.time.Duration;
 @ApplicationScoped
 public class TuiRunnerFactory {
     public TuiRunner create(final TuiCommand.TuiConf conf) throws Exception {
+        return create(conf, false);
+    }
+
+    public TuiRunner create(final TuiCommand.TuiConf conf, final boolean hideCursor) throws Exception {
         return TuiRunner.create(TuiConfig.builder()
                 .mouseCapture(true)
                 // bracketed paste (ESC[?2004h): ctrl+shift+v / middle-click pastes arrive as a
@@ -34,6 +38,7 @@ public class TuiRunnerFactory {
                 .bracketedPaste(true)
                 .tickRate(Duration.ofMillis(100))
                 .bindings(conf.bindings().toBindings())
+                .hideCursor(hideCursor)
                 .build());
     }
 }

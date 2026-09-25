@@ -17,21 +17,19 @@ package io.yupiik.ia.agent.core.session;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
-import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
-import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
-import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -53,48 +51,36 @@ import java.util.TreeMap;
 @ApplicationScoped
 public class AgentSessionService {
 
-    private final PermissionService permissionService;
     private final ChatClient chatClient;
     private final McpManager mcpManager;
     private final AgentProvider agentProvider;
     private final SessionStore sessionStore;
-    private final ContextManager contextManager;
-    private final SystemPromptBuilder systemPromptBuilder;
     private final MemoryStore memoryStore;
     private final StructuralCodeGraph structuralCodeGraph;
     private final PlanFileService planFileService;
     private final PlanTodoSeeder planTodoSeeder;
-    private final TodoStore todoStore;
     private final CodingAgentConfiguration configuration;
     private final SnapshotStore snapshotStore;
 
     public AgentSessionService(
-            final PermissionService permissionService,
             final ChatClient chatClient,
             final McpManager mcpManager,
             final AgentProvider agentProvider,
             final SessionStore sessionStore,
-            final ContextManager contextManager,
-            final SystemPromptBuilder systemPromptBuilder,
             final MemoryStore memoryStore,
             final StructuralCodeGraph structuralCodeGraph,
             final PlanFileService planFileService,
             final PlanTodoSeeder planTodoSeeder,
-            final TodoStore todoStore,
             final CodingAgentConfiguration configuration,
             final SnapshotStore snapshotStore) {
-        this.permissionService = permissionService;
         this.chatClient = chatClient;
         this.mcpManager = mcpManager;
         this.agentProvider = agentProvider;
         this.sessionStore = sessionStore;
-        this.contextManager = contextManager;
-        this.systemPromptBuilder = systemPromptBuilder;
         this.memoryStore = memoryStore;
         this.structuralCodeGraph = structuralCodeGraph;
         this.planFileService = planFileService;
         this.planTodoSeeder = planTodoSeeder;
-        this.todoStore = todoStore;
         this.configuration = configuration;
         this.snapshotStore = snapshotStore;
     }
@@ -163,16 +149,17 @@ public class AgentSessionService {
 
     /**
      * Switches the agent working mode and, when entering {@code BUILD} mode,
-     * attempts to seed the todo list from the last assistant plan.
+     * attempts to seed the todo list from the last assistant plan. The mode and
+     * the todo list belong to the session owning {@code runtime}.
      */
-    public ModeChange setMode(final String arg, final String sessionId) {
+    public ModeChange setMode(final String arg, final String sessionId, final SessionRuntime runtime) {
         final var mode = AgentMode.fromConfigurationString(arg);
-        permissionService.setMode(mode);
+        runtime.permissions().setMode(mode);
         String seedMessage = null;
         String seedError = null;
         if (mode == AgentMode.BUILD) {
             try {
-                seedMessage = switch (planTodoSeeder.seedFromLastAssistant(sessionId)) {
+                seedMessage = switch (planTodoSeeder.seedFromLastAssistant(sessionId, runtime.todos())) {
                     case ALREADY_POPULATED -> "todos already present, nothing to seed";
                     case NO_PLAN -> "no plan found to seed todos from";
                     case DERIVATION_FAILED -> "found a plan but could not derive todos from it";
@@ -187,25 +174,27 @@ public class AgentSessionService {
     }
 
     /**
-     * Sets the tool permission level. Returns {@code true} for "allow all",
-     * {@code false} for "ask for approval", and {@code null} for an invalid
-     * argument (the caller should show the usage hint).
+     * Sets the tool permission level of the session owning {@code runtime}.
+     * Returns {@code true} for "allow all", {@code false} for "ask for
+     * approval", and {@code null} for an invalid argument (the caller should
+     * show the usage hint).
      */
-    public Boolean setPermissions(final String arg) {
+    public Boolean setPermissions(final String arg, final SessionRuntime runtime) {
+        final var permissions = runtime.permissions();
         final var v = arg == null ? "" : arg.strip();
         if (v.equals("all") || v.equals("unsafe")) {
-            permissionService.setPermitAll(true);
+            permissions.setPermitAll(true);
             return true;
         }
         if (v.equals("none") || v.equals("safe")) {
-            permissionService.setPermitAll(false);
-            permissionService.setPermissionMode(PermissionMode.ASK);
+            permissions.setPermitAll(false);
+            permissions.setPermissionMode(PermissionMode.ASK);
             return false;
         }
         if (PermissionMode.isValue(v)) {
-            permissionService.setPermitAll(false);
+            permissions.setPermitAll(false);
             final var resolved = PermissionMode.fromConfigurationString(v);
-            permissionService.setPermissionMode(resolved);
+            permissions.setPermissionMode(resolved);
             return resolved != PermissionMode.ASK;
         }
         return null;
@@ -215,25 +204,28 @@ public class AgentSessionService {
             boolean permitAll, AgentMode agentMode, PermissionMode permissionMode, List<String> sessionGrants) {}
 
     /**
-     * Returns the current permission state for the {@code /permissions show} command.
-     * Session grants are explicitly session-scoped (in-memory, lost on restart).
+     * Returns the permission state of the session owning {@code runtime} for
+     * the {@code /permissions show} command. Session grants are explicitly
+     * session-scoped (in-memory, lost on restart).
      */
-    public PermissionsInfo permissionsInfo() {
+    public PermissionsInfo permissionsInfo(final SessionRuntime runtime) {
+        final var permissions = runtime.permissions();
         return new PermissionsInfo(
-                permissionService.isPermitAll(),
-                permissionService.mode(),
-                permissionService.permissionMode(),
-                permissionService.sessionGrants());
+                permissions.isPermitAll(),
+                permissions.mode(),
+                permissions.permissionMode(),
+                permissions.sessionGrants());
     }
 
     /**
-     * Sets the chat model, stripping an optional leading {@code $} prefix.
-     * Returns the effective model name.
+     * Sets the model of one session, stripping an optional leading {@code $} prefix.
+     * Returns the effective model name. The selection lands in the passed
+     * {@link ChatSettings} (owned by the shell/tab), never in the shared client.
      */
-    public String setModel(final String arg) {
+    public String setModel(final String arg, final ChatSettings settings) {
         final var model = arg.strip();
         final var effective = model.startsWith("$") ? model.substring(1) : model;
-        chatClient.setModel(effective);
+        settings.setModel(effective);
         return effective;
     }
 
@@ -264,7 +256,7 @@ public class AgentSessionService {
      * session messages. The frontend decides how to format and how much of
      * each message to show.
      */
-    public ContextDump context(final String sessionId) {
+    public ContextDump context(final String sessionId, final SessionRuntime runtime) {
         final var messages = sessionStore.load(sessionId);
         final var toolNamesByCallId = Message.toolNames(messages);
         final var lines = new ArrayList<ContextMessage>(messages.size());
@@ -273,7 +265,7 @@ public class AgentSessionService {
             lines.add(new ContextMessage(
                     message.role(), firstLine(content), content, Message.toolName(message, toolNamesByCallId)));
         }
-        return new ContextDump(systemPromptBuilder.build(), sessionId, lines);
+        return new ContextDump(runtime.systemPromptBuilder().build(), sessionId, lines);
     }
 
     public record CompactionApplied(boolean applied, String message, String error) {}
@@ -283,22 +275,23 @@ public class AgentSessionService {
      * compact when empty, and reports a fallback/error when the summarizer
      * could not run (so the frontend never shows a false success).
      */
-    public CompactionApplied compact(final String sessionId) {
-        return compact(sessionId, false);
+    public CompactionApplied compact(final String sessionId, final SessionRuntime runtime) {
+        return compact(sessionId, false, runtime);
     }
 
     /**
      * Compacts the context window of a persisted session. {@code force} bypasses the
-     * within-budget guard so compaction runs even below the thresholds. Returns nothing
-     * to compact when empty, and reports a fallback/error when the summarizer could not
-     * run (so the frontend never shows a false success).
+     * within-budget guard so compaction runs even below the thresholds. The budget comes
+     * from the session's own context manager. Returns nothing to compact when empty, and
+     * reports a fallback/error when the summarizer could not run (so the frontend never
+     * shows a false success).
      */
-    public CompactionApplied compact(final String sessionId, final boolean force) {
+    public CompactionApplied compact(final String sessionId, final boolean force, final SessionRuntime runtime) {
         final var history = sessionStore.load(sessionId);
         if (history.isEmpty()) {
             return new CompactionApplied(false, "nothing to compact", null);
         }
-        final var result = contextManager.compact(history, force);
+        final var result = runtime.contextManager().compact(history, force);
         if (!result.changed()) {
             return new CompactionApplied(false, "context already within budget", null);
         }
@@ -359,11 +352,13 @@ public class AgentSessionService {
 
     /**
      * Exports the current plan (plan mode only) to a file, returning the path
-     * and the exact content written. The {@code error} member is set when the
-     * export cannot happen.
+     * and the exact content written. The mode and the todo list are read from
+     * the session owning {@code runtime}. The {@code error} member is set when
+     * the export cannot happen.
      */
-    public PlanExport exportPlan(final String sessionId, final String arg, final String titleFallback) {
-        if (permissionService.mode() != AgentMode.PLAN) {
+    public PlanExport exportPlan(
+            final String sessionId, final String arg, final String titleFallback, final SessionRuntime runtime) {
+        if (runtime.permissions().mode() != AgentMode.PLAN) {
             return new PlanExport(null, null, "editplan is only available in plan mode (run /mode plan)");
         }
         final var plan = planTodoSeeder.plan(sessionId);
@@ -376,7 +371,7 @@ public class AgentSessionService {
                         titleFallback == null ? "" : titleFallback,
                         sessionId)
                 : Path.of(arg).toAbsolutePath();
-        final var content = planFileService.render(plan, todoStore.all());
+        final var content = planFileService.render(plan, runtime.todos().all());
         try {
             Files.createDirectories(path.getParent() == null ? Path.of(".") : path.getParent());
             Files.writeString(path, content);
@@ -393,7 +388,8 @@ public class AgentSessionService {
      * and todos are applied to the session. Returns the resulting status
      * message, or {@code changed=false} when the file was not modified.
      */
-    public PlanReload reloadPlan(final String sessionId, final Path path, final String original) {
+    public PlanReload reloadPlan(
+            final String sessionId, final Path path, final String original, final SessionRuntime runtime) {
         if (!Files.isRegularFile(path)) {
             return new PlanReload(false, null, "plan file not found: " + path);
         }
@@ -407,7 +403,7 @@ public class AgentSessionService {
             return new PlanReload(false, "no changes in the plan (nothing to reload)", null);
         }
         final var parsed = planFileService.parse(edited);
-        final var applied = planFileService.reload(sessionId, parsed);
+        final var applied = planFileService.reload(sessionId, parsed, runtime.todos());
         return new PlanReload(true, applied, null);
     }
 

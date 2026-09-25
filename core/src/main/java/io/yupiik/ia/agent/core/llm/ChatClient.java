@@ -65,7 +65,7 @@ import java.util.logging.Logger;
  * ({@link LlmClientResilienceWrapper}).
  *
  * <p>Keeps the historical public API ({@link #chat}, {@link #stream}, {@link #models}, {@link #model},
- * {@link #setModel}, {@link #setProvider}, {@link #flavor}, {@link #providerId}) and owns the concerns
+ * {@link ChatSettings}, {@link #flavor} and {@link #providerId}) and owns the concerns
  * the library must not know about: model/provider resolution, provider-specific option merging, the
  * per-request output budget and the AUTO flavor detection and responses-to-completions fallback.</p>
  */
@@ -86,13 +86,9 @@ public class ChatClient implements AutoCloseable {
     private final Set<String> budgetLogged = ConcurrentHashMap.newKeySet();
     private final RoutingLlmClient routing;
     private volatile ApiFlavor resolved = ApiFlavor.AUTO;
-    private volatile String modelOverride;
-    private volatile String variantOverride;
     private volatile ModelsResponse cachedModels;
-    private volatile SamplingOverride samplingOverride;
     private volatile ProviderConfiguration targetProvider;
     private volatile boolean structuredOutputUnsupported = false;
-    private volatile Consumer<PauseEvent> pauses = event -> {};
 
     public ChatClient(
             final CodingAgentConfiguration configuration,
@@ -160,7 +156,7 @@ public class ChatClient implements AutoCloseable {
                         true,
                         configuration.llm().retryAfterMaxWaitMs(),
                         1.0d),
-                this::onLibraryPause);
+                null);
     }
 
     protected ChatClient() {
@@ -268,18 +264,27 @@ public class ChatClient implements AutoCloseable {
         };
     }
 
-    private void onLibraryPause(final io.yupiik.llm.client.PauseEvent event) {
+    /**
+     * Translate a library pause into the core {@link PauseEvent} and hand it to the per-call listener
+     * (see {@link #chat(ChatCompletionRequest, ChatSettings, Consumer, BooleanSupplier)}). The listener
+     * travels with the call so concurrent sessions each get their own notices instead of fighting over
+     * a single process-wide slot.
+     */
+    private void onLibraryPause(final io.yupiik.llm.client.PauseEvent event, final Consumer<PauseEvent> target) {
+        if (target == null) {
+            return;
+        }
         try {
             if (event.reason() != null && event.reason().startsWith("concurrency limit")) {
-                pauses.accept(PauseEvent.retry(event.reason(), 0));
+                target.accept(PauseEvent.retry(event.reason(), 0));
             } else if (event.attempt() <= 0) {
-                pauses.accept(PauseEvent.throttle(
+                target.accept(PauseEvent.throttle(
                         "Rate limit reached, waiting ~" + (event.waitMs() / 1000) + "s", event.waitMs()));
             } else {
                 final var max = configuration.llm().retriesMaxAttempts();
                 final var summary = failureSummary(event.reason());
                 final var detail = summary.isEmpty() ? "" : " (" + summary + ")";
-                pauses.accept(PauseEvent.retry(
+                target.accept(PauseEvent.retry(
                         "LLM call failed" + detail + ", retrying in ~" + (event.waitMs() / 1000) + "s (attempt "
                                 + (event.attempt() + 1) + "/" + max + ")",
                         event.waitMs()));
@@ -322,8 +327,17 @@ public class ChatClient implements AutoCloseable {
                 : (value.length() <= 120 ? value : value.substring(0, 117) + "...");
     }
 
+    /** The configured model of the active provider (no per-session override applied). */
     public String model() {
-        final var override = modelOverride;
+        return model(null);
+    }
+
+    /**
+     * The effective model for a session: its explicit override when set, else the active
+     * provider's model. {@code settings} is the per-session {@link ChatSettings}, may be null.
+     */
+    public String model(final ChatSettings settings) {
+        final var override = settings == null ? null : settings.model();
         if (override != null && !override.isBlank()) {
             return override;
         }
@@ -331,20 +345,14 @@ public class ChatClient implements AutoCloseable {
         return current == null || current.model() == null ? "" : current.model();
     }
 
-    public void setModel(final String model) {
-        this.modelOverride = model == null || model.isBlank() ? null : model;
-        this.samplingOverride = null;
-        this.cachedModels = null;
-    }
-
     /** The currently selected variant name, or null when none is forced (implicit family defaults apply). */
     public String variant() {
-        return variantOverride;
+        return null;
     }
 
-    /** Select a named runtime variant in-memory (session only, never persisted). Blank clears the selection. */
-    public void setVariant(final String variant) {
-        this.variantOverride = variant == null || variant.isBlank() ? null : variant;
+    /** The variant selected by a session, or null when none is forced. */
+    public String variant(final ChatSettings settings) {
+        return settings == null ? null : settings.variant();
     }
 
     /**
@@ -352,25 +360,26 @@ public class ChatClient implements AutoCloseable {
      * null when none are set.
      */
     public SamplingOverride sampling() {
-        return samplingOverride;
+        return null;
     }
 
-    /**
-     * Replace the in-memory sampling overrides. A null clears them all. Each field of the override
-     * distinguishes "unset" (absent), a concrete value, or {@link Setting#none()} to force-omit the
-     * field from the wire payload and bypass the variant and implicit tuner defaults.
-     */
-    public void setSampling(final SamplingOverride override) {
-        this.samplingOverride = override == null || override.isEmpty() ? null : override;
+    /** The sampling overrides of a session, or null when none are set. */
+    public SamplingOverride sampling(final ChatSettings settings) {
+        return settings == null ? null : settings.sampling();
     }
 
     /** Variants available for the current model, provider-level or per-model, else the implicit tuner presets. */
     public List<ModelVariantConfiguration> variants() {
+        return variants((ChatSettings) null);
+    }
+
+    /** Variants available for the session's current model. */
+    public List<ModelVariantConfiguration> variants(final ChatSettings settings) {
         final var provider = target();
         if (provider == null) {
             return List.of();
         }
-        String model = modelOverride;
+        var model = settings == null ? null : settings.model();
         if (model == null || model.isBlank()) {
             model = provider.model();
         }
@@ -400,9 +409,19 @@ public class ChatClient implements AutoCloseable {
      * surfaces as null so callers know it would not be sent; a forced value surfaces as that value.
      */
     public ModelVariantConfiguration implicitVariant() {
+        return implicitVariant((ChatSettings) null);
+    }
+
+    /**
+     * The effective implicit "default" variant for the session's current model, i.e. the sampling values the
+     * tuner would apply when no named variant and no override is set, or null when the model has no
+     * implicit defaults. The trio respects the session's override: a width-omitted field (none)
+     * surfaces as null so callers know it would not be sent; a forced value surfaces as that value.
+     */
+    public ModelVariantConfiguration implicitVariant(final ChatSettings settings) {
         final var provider = target();
         final var providerId = provider == null ? null : provider.id();
-        String model = modelOverride;
+        var model = settings == null ? null : settings.model();
         if (model == null || model.isBlank()) {
             model = provider == null ? null : provider.model();
         }
@@ -412,7 +431,7 @@ public class ChatClient implements AutoCloseable {
         Double temperature = DefaultModelTuner.temperature(model, providerId);
         Double topP = DefaultModelTuner.topP(model, providerId);
         Double topK = DefaultModelTuner.topK(model, providerId);
-        final var sampling = this.samplingOverride;
+        final var sampling = sampling(settings);
         if (sampling != null) {
             final var t = sampling.get(SamplingField.TEMPERATURE);
             if (t != null) {
@@ -456,19 +475,11 @@ public class ChatClient implements AutoCloseable {
 
     public void setProvider(final String id) {
         providerManager.setProvider(id);
-        this.modelOverride = null;
-        this.variantOverride = null;
-        this.samplingOverride = null;
         this.resolved = ApiFlavor.AUTO;
         this.structuredOutputUnsupported = false;
         this.targetProvider = null;
         this.cachedModels = null;
         this.dialectClients.clear();
-    }
-
-    /** Registers a listener notified whenever the resilience layer delays a request (throttle or retry backoff). */
-    public void setPauseListener(final Consumer<PauseEvent> listener) {
-        this.pauses = listener == null ? event -> {} : listener;
     }
 
     public String providerId() {
@@ -543,8 +554,8 @@ public class ChatClient implements AutoCloseable {
         return t == null ? providerManager.current() : t;
     }
 
-    private String resolveModel() throws IOException {
-        final var override = modelOverride;
+    private String resolveModel(final ChatSettings settings) throws IOException {
+        final var override = settings == null ? null : settings.model();
         final var ref = override != null && !override.isBlank()
                 ? override
                 : providerManager.current().model();
@@ -560,8 +571,9 @@ public class ChatClient implements AutoCloseable {
         return model.trim();
     }
 
-    private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
-        return withPromotedExtras(applyModelDefaults(request));
+    private ChatCompletionRequest useModel(final ChatCompletionRequest request, final ChatSettings settings)
+            throws IOException {
+        return withPromotedExtras(applyModelDefaults(request, settings));
     }
 
     /**
@@ -571,8 +583,9 @@ public class ChatClient implements AutoCloseable {
      * value wins, then the selected variant, then the implicit family default; nothing is forced.
      * The provider routing is resolved here so the variant and defaults are those of the target model.
      */
-    private ChatCompletionRequest applyModelDefaults(final ChatCompletionRequest request) throws IOException {
-        final var model = resolveModel();
+    private ChatCompletionRequest applyModelDefaults(final ChatCompletionRequest request, final ChatSettings settings)
+            throws IOException {
+        final var model = resolveModel(settings);
         final var provider = target();
         final var providerId = provider == null ? null : provider.id();
         final var others = new LinkedHashMap<String, Object>();
@@ -593,7 +606,7 @@ public class ChatClient implements AutoCloseable {
         if (explicitSplitBlocks != null) {
             others.put("anthropicSplitBlocks", explicitSplitBlocks);
         }
-        final var variant = selectedVariant(provider, model);
+        final var variant = selectedVariant(provider, model, settings);
         if (variant != null && variant.extra() != null && variant.extra().startsWith("{")) {
             deepMergePutIfAbsent(others, parseRaw(variant.extra()));
         }
@@ -607,7 +620,8 @@ public class ChatClient implements AutoCloseable {
                 variant == null ? null : variant::temperature,
                 DefaultModelTuner::temperature,
                 model,
-                providerId);
+                providerId,
+                settings);
         final var topP = resolveSampling(
                 SamplingField.TOP_P,
                 request.topP(),
@@ -617,7 +631,8 @@ public class ChatClient implements AutoCloseable {
                 variant == null ? null : variant::topP,
                 DefaultModelTuner::topP,
                 model,
-                providerId);
+                providerId,
+                settings);
         final var topK = resolveSampling(
                 SamplingField.TOP_K,
                 null,
@@ -627,7 +642,8 @@ public class ChatClient implements AutoCloseable {
                 variant == null ? null : variant::topK,
                 DefaultModelTuner::topK,
                 model,
-                providerId);
+                providerId,
+                settings);
         if (topK != null) {
             others.put("top_k", topK);
         }
@@ -682,8 +698,10 @@ public class ChatClient implements AutoCloseable {
             final Supplier<Double> variantValue,
             final BiFunction<String, String, Double> tuner,
             final String model,
-            final String providerId) {
-        final var overridden = samplingOverride == null ? null : samplingOverride.get(field);
+            final String providerId,
+            final ChatSettings settings) {
+        final var sampling = sampling(settings);
+        final var overridden = sampling == null ? null : sampling.get(field);
         if (overridden != null && overridden.isEmpty()) {
             // none: force-omit, so the server default applies; drop any request/raw value
             if (wireKey != null) {
@@ -824,8 +842,9 @@ public class ChatClient implements AutoCloseable {
     }
 
     /** The named variant requested via {@code /model}, validated against the configured variants, else null. */
-    private ModelVariantConfiguration selectedVariant(final ProviderConfiguration provider, final String model) {
-        final var selected = variantOverride;
+    private ModelVariantConfiguration selectedVariant(
+            final ProviderConfiguration provider, final String model, final ChatSettings settings) {
+        final var selected = settings == null ? null : settings.variant();
         if (selected == null || selected.isBlank()) {
             return null;
         }
@@ -1097,7 +1116,22 @@ public class ChatClient implements AutoCloseable {
 
     public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return doWithFallback(useModel(request), cancelled, false, null);
+        return chat(request, null, cancelled);
+    }
+
+    public ChatResult chat(
+            final ChatCompletionRequest request, final ChatSettings settings, final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
+        return chat(request, settings, null, cancelled);
+    }
+
+    public ChatResult chat(
+            final ChatCompletionRequest request,
+            final ChatSettings settings,
+            final Consumer<PauseEvent> pauseListener,
+            final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
+        return doWithFallback(useModel(request, settings), pauseListener, cancelled, false, null);
     }
 
     /**
@@ -1118,7 +1152,16 @@ public class ChatClient implements AutoCloseable {
     public StructuredResult chatStructured(
             final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
             throws IOException, InterruptedException {
-        final var model = resolveModel();
+        return chatStructured(request, null, schemaName, schema);
+    }
+
+    public StructuredResult chatStructured(
+            final ChatCompletionRequest request,
+            final ChatSettings settings,
+            final String schemaName,
+            final Map<String, Object> schema)
+            throws IOException, InterruptedException {
+        final var model = resolveModel(settings);
         final var flavor = effectiveFlavor();
         final var base = new LinkedHashMap<String, Object>();
         if (request.others() != null) {
@@ -1147,22 +1190,26 @@ public class ChatClient implements AutoCloseable {
                 request.reasoningEffort(),
                 withStructuredField(base, flavor, schemaName, schema));
         if (structuredOutputUnsupported) {
-            return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
+            return new StructuredResult(
+                    chatInternal(withPromotedExtras(applyModelDefaults(plainReq, settings))), false);
         }
         try {
-            return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(structuredReq))), true);
+            return new StructuredResult(
+                    chatInternal(withPromotedExtras(applyModelDefaults(structuredReq, settings))), true);
         } catch (final IOException first) {
             if (!isStatus400(first)) {
                 throw first;
             }
             try {
-                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
+                return new StructuredResult(
+                        chatInternal(withPromotedExtras(applyModelDefaults(plainReq, settings))), false);
             } catch (final IOException second) {
                 if (!isStatus400(second)) {
                     throw second;
                 }
                 structuredOutputUnsupported = true;
-                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
+                return new StructuredResult(
+                        chatInternal(withPromotedExtras(applyModelDefaults(plainReq, settings))), false);
             }
         }
     }
@@ -1212,7 +1259,7 @@ public class ChatClient implements AutoCloseable {
 
     /** Route a request through the current flavor, reusing the shared dispatch logic. */
     private ChatResult chatInternal(final ChatCompletionRequest request) throws IOException, InterruptedException {
-        return doWithFallback(request, () -> false, false, null);
+        return doWithFallback(request, null, () -> false, false, null);
     }
 
     public Message stream(final ChatCompletionRequest request, final Consumer<LlmStreamEvent> onDelta)
@@ -1225,42 +1272,59 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        final var model = resolveModel();
-        final var effective = applyModelDefaults(new ChatCompletionRequest(
-                model,
-                request.messages(),
-                request.temperature(),
-                request.topP(),
-                true,
-                request.tools(),
-                request.toolChoice(),
-                request.maxTokens(),
-                request.reasoningEffort(),
-                request.others()));
-        return doWithFallback(withPromotedExtras(effective), cancelled, true, onDelta);
+        return stream(request, null, null, onDelta, cancelled);
+    }
+
+    public Message stream(
+            final ChatCompletionRequest request,
+            final ChatSettings settings,
+            final Consumer<PauseEvent> pauseListener,
+            final Consumer<LlmStreamEvent> onDelta,
+            final BooleanSupplier cancelled)
+            throws IOException, InterruptedException {
+        final var model = resolveModel(settings);
+        final var effective = applyModelDefaults(
+                new ChatCompletionRequest(
+                        model,
+                        request.messages(),
+                        request.temperature(),
+                        request.topP(),
+                        true,
+                        request.tools(),
+                        request.toolChoice(),
+                        request.maxTokens(),
+                        request.reasoningEffort(),
+                        request.others()),
+                settings);
+        return doWithFallback(withPromotedExtras(effective), pauseListener, cancelled, true, onDelta);
     }
 
     @SuppressWarnings("unchecked")
     private <A> A doWithFallback(
             final ChatCompletionRequest request,
+            final Consumer<PauseEvent> pauseListener,
             final BooleanSupplier cancelled,
             final boolean stream,
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
         final var effective = applyOutputBudget(request, flavorForRouting());
+        final Consumer<io.yupiik.llm.client.PauseEvent> libraryListener =
+                pauseListener == null ? null : event -> onLibraryPause(event, pauseListener);
         try {
             if (stream) {
-                final var publisher = LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled));
+                final var publisher =
+                        LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled, libraryListener));
                 return (A) LlmWire.pump(publisher, onDeltaSafe, cancelled);
             }
-            return (A) LlmWire.toChatResult(LlmWire.join(routing.chat(LlmWire.toLlmRequest(effective), cancelled)));
+            return (A) LlmWire.toChatResult(
+                    LlmWire.join(routing.chat(LlmWire.toLlmRequest(effective), cancelled, libraryListener)));
         } catch (final DialectNotSupportedException e) {
             if (resolved != ApiFlavor.AUTO) {
                 throw e; // explicitly configured flavor: surface the incompatibility
             }
             resolved = ApiFlavor.COMPLETIONS; // AUTO probed the responses route first: fall back
-            return doWithFallback(request, cancelled, stream, onDelta);
+            return doWithFallback(request, pauseListener, cancelled, stream, onDelta);
         }
     }
 

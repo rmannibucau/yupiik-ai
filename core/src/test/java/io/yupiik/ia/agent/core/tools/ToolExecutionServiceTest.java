@@ -34,10 +34,15 @@ class ToolExecutionServiceTest {
     @TempDir
     Path storageHome;
 
-    private ToolExecutionService service(final List<String> reports) {
-        final var configuration = config("10");
+    /** The status reporter is per-session: it now travels in the tool context, not the service. */
+    private ToolContext context(final List<String> reports) {
         final var reporter = new StatusReporter();
         reporter.setSink(reports::add);
+        return new ToolContext("s1", null, null, null, null, null, reporter, null, null);
+    }
+
+    private ToolExecutionService service() {
+        final var configuration = config("10");
         return new ToolExecutionService(
                 configuration,
                 new Emitter() {
@@ -46,8 +51,7 @@ class ToolExecutionServiceTest {
                         // no-op
                     }
                 },
-                List.of(new GenericOutputProcessor(configuration)),
-                reporter);
+                List.of(new GenericOutputProcessor(configuration)));
     }
 
     private CodingAgentConfiguration config(final String genericMaxLines) {
@@ -88,7 +92,7 @@ class ToolExecutionServiceTest {
     void nonBashToolsAreNotReprocessed() {
         final var output = "line\n".repeat(50);
         final var reports = new ArrayList<String>();
-        final var result = service(reports).execute(tool("read_file", output), Map.of());
+        final var result = service().execute(tool("read_file", output), Map.of(), context(reports));
         assertEquals(output, result.output(), "read_file output must not be re-truncated by processors");
         assertTrue(reports.isEmpty(), reports.toString());
     }
@@ -98,7 +102,7 @@ class ToolExecutionServiceTest {
         // 1 trailing whitespace char trimmed over a 100-char line: ~1% reduction, below the 10% floor
         final var output = "x".repeat(100) + " ";
         final var reports = new ArrayList<String>();
-        final var result = service(reports).execute(tool("bash", output), Map.of("command", "cat big.txt"));
+        final var result = service().execute(tool("bash", output), Map.of("command", "cat big.txt"), context(reports));
         assertEquals(output, result.output(), "sub-threshold reductions must keep the original output");
         assertTrue(reports.isEmpty(), reports.toString());
     }
@@ -111,7 +115,8 @@ class ToolExecutionServiceTest {
             sb.append("   \n");
         }
         final var reports = new ArrayList<String>();
-        final var result = service(reports).execute(tool("bash", sb.toString()), Map.of("command", "cat big.txt"));
+        final var result =
+                service().execute(tool("bash", sb.toString()), Map.of("command", "cat big.txt"), context(reports));
         assertTrue(result.output().length() < sb.length() / 2, result.output());
         assertTrue(result.output().contains("kept line 0"), result.output());
         assertFalse(result.output().contains("   \n"), "blank runs must be compacted");

@@ -94,37 +94,88 @@ public class DefaultPromptImpl implements LinedPrompt {
     }
 
     /**
-     * Sole reader of {@code stdin} once started: it routes each line to a
-     * pending interaction waiter first, then to a pending turn waiter, and only
-     * falls back to buffering the line for the next turn read. The turn backlog
-     * is what lets type-ahead survive the small windows where no read is armed.
+     * Full-duplex routing state machine behind the queuing prompt: it decides
+     * which line of {@code stdin} goes to which reader. It is thread-free:
+     * {@link QueuePump} feeds lines in via {@link #dispatch(String)} while the
+     * readers register waiters through {@link #awaitTurn()} /
+     * {@link #awaitInteraction()}, and {@code turnBacklog} is what lets
+     * type-ahead survive the small windows where no read is armed.
      */
-    private static final class QueuePump {
-        private final BufferedReader reader;
+    static final class QueueRouter {
         private final Object lock = new Object();
         private final ArrayDeque<CompletableFuture<Optional<String>>> turnWaiters = new ArrayDeque<>();
         private final ArrayDeque<CompletableFuture<Optional<String>>> interactionWaiters = new ArrayDeque<>();
         private final ArrayDeque<String> turnBacklog = new ArrayDeque<>();
         private boolean eof;
 
-        private QueuePump(final BufferedReader reader) {
-            this.reader = reader;
-            Thread.ofVirtual().name("yca-cli-stdin").start(this::pumpLoop);
+        /**
+         * Registers an interaction waiter without blocking; the returned future
+         * is completed by the next dispatched line (or {@code Optional.empty()}
+         * on EOF).
+         */
+        CompletableFuture<Optional<String>> armInteraction() {
+            return arm(interactionWaiters);
         }
 
-        private void pumpLoop() {
-            try {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    dispatch(line);
-                }
-                dispatch(null);
-            } catch (final Exception e) {
-                dispatch(null);
+        /**
+         * Registers a turn waiter without blocking or consumes a type-ahead
+         * line; the returned future is completed by the next dispatched line,
+         * a backlogged line, or {@code Optional.empty()} on EOF.
+         */
+        CompletableFuture<Optional<String>> armTurn() {
+            return arm(turnWaiters);
+        }
+
+        Optional<String> awaitTurn() {
+            return await(arm(turnWaiters));
+        }
+
+        Optional<String> awaitInteraction() {
+            return await(arm(interactionWaiters));
+        }
+
+        Optional<String> pollTurn() {
+            synchronized (lock) {
+                return turnBacklog.isEmpty() ? Optional.empty() : Optional.ofNullable(turnBacklog.pollFirst());
             }
         }
 
-        private void dispatch(final String line) {
+        void wakeAll() {
+            ArrayDeque<CompletableFuture<Optional<String>>> all;
+            synchronized (lock) {
+                all = new ArrayDeque<>(interactionWaiters);
+                all.addAll(turnWaiters);
+                interactionWaiters.clear();
+                turnWaiters.clear();
+            }
+            all.forEach(waiter -> waiter.complete(Optional.empty()));
+        }
+
+        private CompletableFuture<Optional<String>> arm(final ArrayDeque<CompletableFuture<Optional<String>>> waiters) {
+            final var future = new CompletableFuture<Optional<String>>();
+            synchronized (lock) {
+                // backlog, eof and registration must be decided atomically: if the
+                // pump drains the stream between two separate checks, a turn read
+                // could see eof while the backlog still holds the typed lines.
+                if (waiters == turnWaiters && !turnBacklog.isEmpty()) {
+                    future.complete(Optional.of(turnBacklog.pollFirst()));
+                    return future;
+                }
+                if (eof) {
+                    future.complete(Optional.empty());
+                    return future;
+                }
+                waiters.addLast(future);
+            }
+            return future;
+        }
+
+        /**
+         * Routes one stdin line (or {@code null} for EOF): the interaction lane
+         * wins over the turn lane, and lines nobody wants yet are buffered for
+         * the next turn read.
+         */
+        void dispatch(final String line) {
             final var end = line == null;
             CompletableFuture<Optional<String>> target = null;
             ArrayDeque<CompletableFuture<Optional<String>>> all = null;
@@ -152,30 +203,6 @@ public class DefaultPromptImpl implements LinedPrompt {
             }
         }
 
-        private Optional<String> awaitTurn() {
-            return await(turnWaiters);
-        }
-
-        private Optional<String> awaitInteraction() {
-            return await(interactionWaiters);
-        }
-
-        private Optional<String> await(final ArrayDeque<CompletableFuture<Optional<String>>> waiters) {
-            synchronized (lock) {
-                if (!turnBacklog.isEmpty() && waiters == turnWaiters) {
-                    return Optional.ofNullable(turnBacklog.pollFirst());
-                }
-            }
-            final var future = new CompletableFuture<Optional<String>>();
-            synchronized (lock) {
-                if (eof) {
-                    return Optional.empty();
-                }
-                waiters.addLast(future);
-            }
-            return await(future);
-        }
-
         private static Optional<String> await(final CompletableFuture<Optional<String>> future) {
             while (true) {
                 try {
@@ -190,22 +217,48 @@ public class DefaultPromptImpl implements LinedPrompt {
                 }
             }
         }
+    }
 
-        private Optional<String> pollTurn() {
-            synchronized (lock) {
-                return turnBacklog.isEmpty() ? Optional.empty() : Optional.ofNullable(turnBacklog.pollFirst());
+    /**
+     * Sole reader of {@code stdin} once started: it hands each line to
+     * {@link QueueRouter#dispatch(String)} while the pending reads are waiting.
+     */
+    private static final class QueuePump {
+        private final BufferedReader reader;
+        private final QueueRouter router;
+
+        private QueuePump(final BufferedReader reader) {
+            this.reader = reader;
+            this.router = new QueueRouter();
+            Thread.ofVirtual().name("yca-cli-stdin").start(this::pumpLoop);
+        }
+
+        private void pumpLoop() {
+            try {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    router.dispatch(line);
+                }
+                router.dispatch(null);
+            } catch (final Exception e) {
+                router.dispatch(null);
             }
         }
 
+        private Optional<String> awaitTurn() {
+            return router.awaitTurn();
+        }
+
+        private Optional<String> awaitInteraction() {
+            return router.awaitInteraction();
+        }
+
+        private Optional<String> pollTurn() {
+            return router.pollTurn();
+        }
+
         private void wakeAll() {
-            ArrayDeque<CompletableFuture<Optional<String>>> all;
-            synchronized (lock) {
-                all = new ArrayDeque<>(interactionWaiters);
-                all.addAll(turnWaiters);
-                interactionWaiters.clear();
-                turnWaiters.clear();
-            }
-            all.forEach(waiter -> waiter.complete(Optional.empty()));
+            router.wakeAll();
         }
     }
 }

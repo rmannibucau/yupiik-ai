@@ -23,10 +23,10 @@ import io.yupiik.ia.agent.core.agent.SubagentRunner;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
-import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.List;
 import java.util.Map;
@@ -37,7 +37,6 @@ public class SpawnSubagentTool implements EmbeddedTool {
     private final SubagentRunner subagentRunner;
     private final SessionStore sessionStore;
     private final SnapshotStore snapshotStore;
-    private final TodoStore todoStore;
     private final CodingAgentConfiguration configuration;
 
     public SpawnSubagentTool(
@@ -45,13 +44,11 @@ public class SpawnSubagentTool implements EmbeddedTool {
             final SubagentRunner subagentRunner,
             final SessionStore sessionStore,
             final SnapshotStore snapshotStore,
-            final TodoStore todoStore,
             final CodingAgentConfiguration configuration) {
         this.subagentRegistry = subagentRegistry;
         this.subagentRunner = subagentRunner;
         this.sessionStore = sessionStore;
         this.snapshotStore = snapshotStore;
-        this.todoStore = todoStore;
         this.configuration = configuration;
     }
 
@@ -60,7 +57,6 @@ public class SpawnSubagentTool implements EmbeddedTool {
         this.subagentRunner = null;
         this.sessionStore = null;
         this.snapshotStore = null;
-        this.todoStore = null;
         this.configuration = null;
     }
 
@@ -99,6 +95,20 @@ public class SpawnSubagentTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return ToolResult.error("spawn_subagent requires an active session context.");
+    }
+
+    /**
+     * The sub-agent inherits the spawning session: its parent todo store and
+     * parent session id come from the context so a sub-agent spawned in tab B
+     * never sees tab A's state.
+     */
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var parentTodos = context != null ? context.todos() : null;
+        if (parentTodos == null) {
+            return ToolResult.error("spawn_subagent requires an active session todo list.");
+        }
         if (!subagentRegistry.enabled()) {
             return ToolResult.error("Sub-agents are disabled (yca.subagents.enabled=false or concurrency limit is 0).");
         }
@@ -126,7 +136,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 : List.of();
 
         // TODO: pass allowedTools to subagentRunner to filter tool registry
-        subagentRunner.runAsync(state, sessionStore, snapshotStore, todoStore, () -> false);
+        subagentRunner.runAsync(state, sessionStore, snapshotStore, parentTodos, context, () -> false);
 
         final var displayName = state.name() != null ? state.name() : state.id();
         return ToolResult.ok("Sub-agent started: " + displayName + " (task: " + task + ")");

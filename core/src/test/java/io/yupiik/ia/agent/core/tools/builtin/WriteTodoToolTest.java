@@ -22,8 +22,10 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoItem$FusionJsonCodec;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
@@ -50,15 +52,22 @@ class WriteTodoToolTest {
         return service;
     }
 
+    /** The tool is stateless: the session's todo list and permissions arrive through the context. */
+    private ToolContext context(final TodoStore todos, final PermissionService permissions) {
+        return new ToolContext("s1", null, null, permissions, null, todos, null, null, null);
+    }
+
     @Test
     void planModeRejectsNewlyCompletedTodo() {
         final var store = todoStore();
-        final var tool = new WriteTodoTool(store, permissions(AgentMode.PLAN));
-        final var result = tool.execute(Map.of(
-                "todos",
-                List.of(
-                        Map.of("content", "step 1", "status", "completed"),
-                        Map.of("content", "step 2", "status", "pending"))));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "completed"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("must be 'pending'"), result.output());
         assertTrue(store.all().isEmpty(), "rejected update must not touch the store");
@@ -66,8 +75,11 @@ class WriteTodoToolTest {
 
     @Test
     void planModeRejectsNewlyInProgressTodo() {
-        final var tool = new WriteTodoTool(todoStore(), permissions(AgentMode.PLAN));
-        final var result = tool.execute(Map.of("todos", List.of(Map.of("content", "step 1", "status", "in_progress"))));
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "in_progress"))),
+                context(store, permissions(AgentMode.PLAN)));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("PLAN mode"), result.output());
     }
@@ -75,12 +87,14 @@ class WriteTodoToolTest {
     @Test
     void planModeAllowsAllPendingPlan() {
         final var store = todoStore();
-        final var tool = new WriteTodoTool(store, permissions(AgentMode.PLAN));
-        final var result = tool.execute(Map.of(
-                "todos",
-                List.of(
-                        Map.of("content", "step 1", "status", "pending"),
-                        Map.of("content", "step 2", "status", "pending"))));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "pending"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
         assertTrue(result.success(), result.output());
         assertTrue(store.render().contains("[ ] step 1"), store.render());
     }
@@ -88,13 +102,15 @@ class WriteTodoToolTest {
     @Test
     void planModeToleratesItemsAlreadyAdvancedInBuildMode() {
         final var store = todoStore();
-        store.replace(List.of(new io.yupiik.ia.agent.core.todo.TodoItem("step 1", "completed")));
-        final var tool = new WriteTodoTool(store, permissions(AgentMode.PLAN));
-        final var result = tool.execute(Map.of(
-                "todos",
-                List.of(
-                        Map.of("content", "step 1", "status", "completed"),
-                        Map.of("content", "step 2", "status", "pending"))));
+        store.replace(List.of(new TodoItem("step 1", "completed")));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "completed"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
         assertTrue(result.success(), result.output());
         assertTrue(store.render().contains("[x] step 1"), store.render());
     }
@@ -102,17 +118,28 @@ class WriteTodoToolTest {
     @Test
     void buildModeAcceptsCompletedTodos() {
         final var store = todoStore();
-        final var tool = new WriteTodoTool(store, permissions(AgentMode.BUILD));
-        final var result = tool.execute(Map.of("todos", List.of(Map.of("content", "step 1", "status", "completed"))));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "completed"))),
+                context(store, permissions(AgentMode.BUILD)));
         assertTrue(result.success(), result.output());
         assertTrue(store.render().contains("[x] step 1"), store.render());
     }
 
     @Test
     void rejectsStringTodosWithCleanError() {
-        final var tool = new WriteTodoTool(todoStore(), permissions(AgentMode.BUILD));
-        final var result = tool.execute(Map.of("todos", "not an array"));
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(Map.of("todos", "not an array"), context(store, permissions(AgentMode.BUILD)));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("got String"), result.output());
+    }
+
+    @Test
+    void withoutSessionContextTheToolFailsCleanly() {
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(Map.of("todos", List.of(Map.of("content", "step 1", "status", "pending"))));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains("session"), result.output());
     }
 }

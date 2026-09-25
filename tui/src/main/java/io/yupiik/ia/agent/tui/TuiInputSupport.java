@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import dev.tamboui.text.CharWidth;
 import java.util.List;
 
 /**
@@ -75,6 +76,30 @@ public final class TuiInputSupport {
             i--;
         }
         return i + 1;
+    }
+
+    /**
+     * Character index (relative to the fragment) at the given display column: the
+     * boundary of the char whose start cell is nearest to (but not past) {@code x}.
+     * A click on the second cell of a wide (2-cell) char lands on that char's
+     * start; a column past the fragment end maps to the fragment length.
+     */
+    public static int columnAtDisplayWidth(final String fragment, final int x) {
+        if (fragment == null || fragment.isEmpty() || x <= 0) {
+            return 0;
+        }
+        var width = 0;
+        var index = 0;
+        while (index < fragment.length()) {
+            final var codePoint = fragment.codePointAt(index);
+            final var charWidth = CharWidth.of(codePoint);
+            if (width + charWidth > x) {
+                return index;
+            }
+            width += charWidth;
+            index += Character.charCount(codePoint);
+        }
+        return fragment.length();
     }
 
     public static String firstLine(final String text) {

@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 /**
@@ -61,10 +62,32 @@ public final class RoutingLlmClient implements LlmClient {
         return clientSelector.apply(request).chat(request, cancelled);
     }
 
+    /**
+     * Chat with a pause listener scoped to this call, forwarded to the selected
+     * {@link DialectLlmClient} when it supports it (a plain {@link LlmClient} target just ignores
+     * it). Lets concurrent callers each observe only their own throttles/backoffs.
+     */
+    public CompletionStage<LlmResponse> chat(
+            final LlmRequest request, final BooleanSupplier cancelled, final Consumer<PauseEvent> listener) {
+        final var client = clientSelector.apply(request);
+        return client instanceof final DialectLlmClient dialect
+                ? dialect.chat(request, cancelled, listener)
+                : client.chat(request, cancelled);
+    }
+
     @Override
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final LlmRequest request, final BooleanSupplier cancelled) {
         return clientSelector.apply(request).stream(request, cancelled);
+    }
+
+    /** Stream with a pause listener scoped to this call (see {@link #chat(LlmRequest, BooleanSupplier, Consumer)}). */
+    public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
+            final LlmRequest request, final BooleanSupplier cancelled, final Consumer<PauseEvent> listener) {
+        final var client = clientSelector.apply(request);
+        return client instanceof final DialectLlmClient dialect
+                ? dialect.stream(request, cancelled, listener)
+                : client.stream(request, cancelled);
     }
 
     @Override

@@ -87,14 +87,26 @@ class SpinnerTest {
     @Test
     void framesAreSkippedWhileTheRenderLockIsHeld() throws InterruptedException {
         final var stream = new RecordingStream();
-        final var lock = new ReentrantLock();
+        // tryLock is only ever invoked by the spinner worker, so each call proves a
+        // frame attempt was made: the test waits for a real attempt instead of sleeping
+        final var attempts = new CountDownLatch(1);
+        final var lock = new ReentrantLock() {
+            @Override
+            public boolean tryLock() {
+                final var acquired = super.tryLock();
+                attempts.countDown();
+                return acquired;
+            }
+        };
         final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, lock, 5);
         lock.lock();
         try {
             spinner.start("thinking");
-            // several frame intervals elapse while the lock is held: output owns
-            // the terminal, frames must be dropped instead of queueing behind it
-            Thread.sleep(60);
+            // output owns the terminal: the worker's tryLock fails and the frame is
+            // dropped instead of queueing behind the write and landing on a half-drawn line
+            assertTrue(
+                    attempts.await(5, TimeUnit.SECONDS),
+                    "spinner worker never attempted a frame while the render lock was held");
             assertEquals(0, stream.size(), "a frame was written while the render lock was held");
         } finally {
             lock.unlock();

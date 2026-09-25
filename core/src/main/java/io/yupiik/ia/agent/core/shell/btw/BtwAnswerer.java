@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -54,7 +55,6 @@ public class BtwAnswerer {
 
     private final ChatClient chatClient;
     private final SessionStore sessionStore;
-    private final UsageTracker usageTracker;
     private final CodingAgentConfiguration configuration;
     private final VirtualThreadExecutor executor;
     private final JsonMapper mapper;
@@ -62,11 +62,11 @@ public class BtwAnswerer {
     private final Clock clock;
     private final Deque<BtwExchange> exchanges = new ConcurrentLinkedDeque<>();
     private volatile ChatClient dedicatedClient;
+    private volatile ChatSettings dedicatedSettings;
 
     public BtwAnswerer(
             final ChatClient chatClient,
             final SessionStore sessionStore,
-            final UsageTracker usageTracker,
             final CodingAgentConfiguration configuration,
             final VirtualThreadExecutor executor,
             final JsonMapper mapper,
@@ -74,7 +74,6 @@ public class BtwAnswerer {
             final Clock clock) {
         this.chatClient = chatClient;
         this.sessionStore = sessionStore;
-        this.usageTracker = usageTracker;
         this.configuration = configuration;
         this.executor = executor;
         this.mapper = mapper;
@@ -84,11 +83,12 @@ public class BtwAnswerer {
 
     public record BtwExchange(String question, String answer) {}
 
-    public CompletionStage<String> ask(final String question, final String sessionId, final BooleanSupplier cancelled) {
+    public CompletionStage<String> ask(
+            final String question, final String sessionId, final UsageTracker usage, final BooleanSupplier cancelled) {
         final var future = new CompletableFuture<String>();
         executor.execute(() -> {
             try {
-                future.complete(doAsk(question, sessionId, cancelled));
+                future.complete(doAsk(question, sessionId, usage, cancelled));
             } catch (final IOException e) {
                 future.completeExceptionally(e);
             } catch (final InterruptedException e) {
@@ -101,7 +101,8 @@ public class BtwAnswerer {
         return future;
     }
 
-    String doAsk(final String question, final String sessionId, final BooleanSupplier cancelled)
+    String doAsk(
+            final String question, final String sessionId, final UsageTracker usage, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
         final var conf = configuration();
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
@@ -110,12 +111,16 @@ public class BtwAnswerer {
         messages.addAll(bounded);
         messages.add(Message.user(userPrompt(conf, question)));
         final var model = conf.model() == null || conf.model().isBlank() ? null : conf.model();
-        final var res = client(model)
+        final var target = client(model);
+        final var res = target.client()
                 .chat(
                         new ChatCompletionRequest(
                                 null, messages, null, null, false, null, null, conf.maxTokens(), null, null),
+                        target.settings(),
                         cancelled);
-        usageTracker.recordAuxiliary(res.usage());
+        if (usage != null) {
+            usage.recordAuxiliary(res.usage());
+        }
         final var content = res.message() == null ? null : res.message().content();
         final var answer = content == null ? "" : String.valueOf(content);
         if (answer.isBlank()) {
@@ -125,21 +130,26 @@ public class BtwAnswerer {
         return answer;
     }
 
-    private ChatClient client(final String model) {
+    /** The client to use plus the settings riding the call: the shared one with no override, or a dedicated one. */
+    private record Target(ChatClient client, ChatSettings settings) {}
+
+    private Target client(final String model) {
         if (model == null) {
-            return chatClient;
+            return new Target(chatClient, null);
         }
         final var dedicated = dedicatedClient;
         if (dedicated != null) {
-            return dedicated;
+            return new Target(dedicated, dedicatedSettings);
         }
         synchronized (this) {
             if (dedicatedClient == null) {
                 final var created = new ChatClient(configuration, mapper, providerManager, clock);
-                created.setModel(model);
+                final var settings = new ChatSettings();
+                settings.setModel(model);
                 dedicatedClient = created;
+                dedicatedSettings = settings;
             }
-            return dedicatedClient;
+            return new Target(dedicatedClient, dedicatedSettings);
         }
     }
 

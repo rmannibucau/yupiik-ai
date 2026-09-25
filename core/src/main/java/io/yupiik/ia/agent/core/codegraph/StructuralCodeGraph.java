@@ -104,7 +104,9 @@ public class StructuralCodeGraph implements AutoCloseable {
     private final CodingAgentConfiguration configuration;
     private final List<GraphParser> parsers;
     private final JsonMapper mapper;
-    private final StatusReporter statusReporter;
+    /** Background re-index notices have no session sink and are dropped when no turn is running. */
+    private final StatusReporter statusReporter = new StatusReporter();
+
     private final ChatClient chatClient;
     private final Path storeRoot;
     private final Path indexFile;
@@ -137,14 +139,12 @@ public class StructuralCodeGraph implements AutoCloseable {
             final CodingAgentConfiguration configuration,
             final List<GraphParser> parsers,
             final JsonMapper mapper,
-            final StatusReporter statusReporter,
             final ChatClient chatClient,
             final ProviderManager providerManager,
             final Clock clock) {
         this.configuration = configuration;
         this.parsers = parsers.stream().filter(GraphParser::available).toList();
         this.mapper = mapper;
-        this.statusReporter = statusReporter;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         this.clock = clock;
@@ -179,7 +179,6 @@ public class StructuralCodeGraph implements AutoCloseable {
         this.configuration = null;
         this.parsers = null;
         this.mapper = null;
-        this.statusReporter = null;
         this.chatClient = null;
         this.providerManager = null;
         this.projectDir = null;

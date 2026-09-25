@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
@@ -139,8 +140,53 @@ class HttpMcpClientTest {
                 10,
                 mapper(),
                 httpClient());
-        final var error = assertThrows(IOException.class, failing::initialize);
+        final var error = assertThrows(McpHttpException.class, failing::initialize);
+        assertEquals(500, error.statusCode());
         assertEquals(true, error.getMessage().contains("500"));
+    }
+
+    @Test
+    void httpErrorExposesStatusAndRetryAfter() throws Exception {
+        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/mcp", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("retry-after", "120");
+            respond(exchange, 429, "{\"error\":\"rate limited\"}", "application/json");
+        });
+        server.start();
+        final var failing = new HttpMcpClient(
+                "test",
+                "http://localhost:" + server.getAddress().getPort() + "/mcp",
+                "key",
+                List.of(),
+                10,
+                mapper(),
+                httpClient());
+        final var error = assertThrows(McpHttpException.class, failing::initialize);
+        assertEquals(429, error.statusCode());
+        assertEquals("{\"error\":\"rate limited\"}", error.body());
+        assertEquals(120_000L, error.retryAfterMillis().longValue());
+    }
+
+    @Test
+    void httpErrorWithoutRetryAfterHasNoHint() throws Exception {
+        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/mcp", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            respond(exchange, 404, "gone", "text/plain");
+        });
+        server.start();
+        final var failing = new HttpMcpClient(
+                "test",
+                "http://localhost:" + server.getAddress().getPort() + "/mcp",
+                "key",
+                List.of(),
+                10,
+                mapper(),
+                httpClient());
+        final var error = assertThrows(McpHttpException.class, failing::initialize);
+        assertEquals(404, error.statusCode());
+        assertNull(error.retryAfterMillis());
     }
 
     @Test

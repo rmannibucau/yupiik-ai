@@ -42,9 +42,10 @@ class TurnRunnerTest {
         final var frontend = new RecordingFrontend();
         final var session = new ShellSession();
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
-        final var runner = new TurnRunner(loop, noIndexing(), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor());
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(
+                        loop,
                         env,
                         "s1",
                         "coder",
@@ -65,9 +66,9 @@ class TurnRunnerTest {
     void nullPromptResumesInsteadOfRunning() {
         final var loop = new RecordingLoop();
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
-        final var runner = new TurnRunner(loop, noIndexing(), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor());
 
-        runner.submit(new TurnRunner.TurnRequest(env, "s1", null, null, List::of, () -> false))
+        runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, null, List::of, () -> false))
                 .toCompletableFuture()
                 .join();
 
@@ -81,10 +82,10 @@ class TurnRunnerTest {
         final var session = new ShellSession();
         final var seenBusy = new AtomicBoolean(false);
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null);
-        final var runner = new TurnRunner(loop, noIndexing(), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor());
         loop.onRun = () -> seenBusy.set(session.busy());
 
-        runner.submit(new TurnRunner.TurnRequest(env, "s1", null, "go", List::of, () -> false))
+        runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "go", List::of, () -> false))
                 .toCompletableFuture()
                 .join();
 
@@ -96,9 +97,9 @@ class TurnRunnerTest {
     void declinedConfirmSkipsTheTurnAndReturnsFalse() throws Exception {
         final var loop = new RecordingLoop();
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(false), new ShellSession(), null);
-        final var runner = new TurnRunner(loop, indexing(3), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(indexing(3), new VirtualThreadExecutor());
 
-        final var ran = runner.submit(new TurnRunner.TurnRequest(env, "s1", null, "hi", List::of, () -> false))
+        final var ran = runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "hi", List::of, () -> false))
                 .toCompletableFuture()
                 .join();
 

@@ -31,11 +31,11 @@ class ConversationTranscriptTest {
     void foldsTurnEventsIntoTranscript() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ThinkingDelta("let me"));
-        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}"));
-        t.onEvent(new AgentEvent.ToolStream("read_file", "body"));
-        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true));
-        t.onEvent(new AgentEvent.TurnDone("answer"));
+        t.onEvent(new AgentEvent.ThinkingDelta("let me", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("read_file", "body", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true, "s1"));
+        t.onEvent(new AgentEvent.TurnDone("answer", "s1"));
 
         final var md = t.transcript().toString();
         assertTrue(md.contains("**You**\n\nhi"));
@@ -52,8 +52,8 @@ class ConversationTranscriptTest {
     @Test
     void failedToolIsRecordedAsBlockquote() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{}"));
-        t.onEvent(new AgentEvent.ToolFinished("bash", "boom\nsecond", false));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "boom\nsecond", false, "s1"));
 
         final var md = t.transcript().toString();
         assertTrue(md.contains("> tool `bash` failed: boom"));
@@ -62,8 +62,8 @@ class ConversationTranscriptTest {
     @Test
     void textResetFlushesThinkingInsteadOfDroppingIt() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply"));
-        t.onEvent(new AgentEvent.TextReset());
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply", "s1"));
+        t.onEvent(new AgentEvent.TextReset("s1"));
         assertEquals("", t.thinking().toString());
         assertTrue(t.transcript()
                 .toString()
@@ -74,7 +74,7 @@ class ConversationTranscriptTest {
     @Test
     void thinkTagAtTurnDoneBecomesThoughtRegion() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnDone("<think>\nstep one\nstep two\n</think>\n\nThe answer"));
+        t.onEvent(new AgentEvent.TurnDone("<think>\nstep one\nstep two\n</think>\n\nThe answer", "s1"));
         final var transcript = t.transcript().toString();
         assertTrue(transcript.contains(ConversationTranscript.THOUGHT_BEGIN));
         assertTrue(transcript.contains("**Thinking**\n\nstep one\nstep two"));
@@ -90,7 +90,7 @@ class ConversationTranscriptTest {
     void thinkTagStreamsLiveOnThoughtPanel() {
         final var t = new ConversationTranscript();
         t.startUserTurn("go");
-        t.onEvent(new AgentEvent.TextDelta("<think>\nreasoning line\n</think>\n\ndrafting"));
+        t.onEvent(new AgentEvent.TextDelta("<think>\nreasoning line\n</think>\n\ndrafting", "s1"));
         // live reasoning is classified into the thinking buffer, visible text into pending
         assertTrue(
                 t.thinking().toString().contains("reasoning line"), t.thinking().toString());
@@ -101,7 +101,7 @@ class ConversationTranscriptTest {
     @Test
     void fencedThinkTagUntouched() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnDone("```text\n<think>not a thought</think>\n```\n\nok"));
+        t.onEvent(new AgentEvent.TurnDone("```text\n<think>not a thought</think>\n```\n\nok", "s1"));
         final var transcript = t.transcript().toString();
         assertFalse(transcript.contains(ConversationTranscript.THOUGHT_BEGIN), transcript);
         assertTrue(transcript.contains("<think>not a thought</think>"));
@@ -120,8 +120,8 @@ class ConversationTranscriptTest {
     @Test
     void firstAnswerDeltaFlushesThinkingAboveAnswer() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply"));
-        t.onEvent(new AgentEvent.TextDelta("answer part"));
+        t.onEvent(new AgentEvent.ThinkingDelta("reasoning deeply", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("answer part", "s1"));
         assertEquals("", t.thinking().toString());
         assertEquals("answer part", t.pending().toString());
         assertTrue(t.transcript()
@@ -133,8 +133,8 @@ class ConversationTranscriptTest {
     @Test
     void errorKeepsThinkingVisibleAboveTheErrorLine() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.ThinkingDelta("why it broke"));
-        t.onEvent(new AgentEvent.Error("kaput"));
+        t.onEvent(new AgentEvent.ThinkingDelta("why it broke", "s1"));
+        t.onEvent(new AgentEvent.Error("kaput", "s1"));
         assertEquals("", t.thinking().toString());
         assertFalse(t.busy());
         final var transcript = t.transcript().toString();
@@ -149,8 +149,8 @@ class ConversationTranscriptTest {
     void runningToolBlockIsWrappedInToolMarkers() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}"));
-        t.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains(ConversationTranscript.TOOL_BEGIN));
@@ -165,10 +165,10 @@ class ConversationTranscriptTest {
     @Test
     void turnMetricsKeepDurationAndResetClearsIt() {
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500));
+        t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, "s1"));
         assertEquals(3, t.turnLlmCalls());
         assertEquals(1500, t.turnDurationMs());
-        t.onEvent(new AgentEvent.ThinkingDelta("thought"));
+        t.onEvent(new AgentEvent.ThinkingDelta("thought", "s1"));
         assertEquals("thought", t.thinkingText());
         assertEquals(7, t.thinkingLength());
 
@@ -180,14 +180,14 @@ class ConversationTranscriptTest {
     @Test
     void statusNoticeAndUsageAreTracked() {
         final var t = new ConversationTranscript();
-        t.onEvent(AgentEvent.Notice.warn("careful"));
+        t.onEvent(AgentEvent.Notice.warn("careful", "s1"));
         assertEquals("careful", t.status());
         assertTrue(t.transcript().toString().contains("> ⚠ warning: careful"));
 
-        t.onEvent(new AgentEvent.Status("working"));
+        t.onEvent(new AgentEvent.Status("working", "s1"));
         assertEquals("working", t.status());
 
-        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4));
+        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, "s1"));
         assertEquals(42, t.estimatedContext());
         assertEquals(12, t.contextPercent());
     }
@@ -272,8 +272,8 @@ class ConversationTranscriptTest {
     void resetClearsEverything() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.TextDelta("streaming"));
-        t.onEvent(new AgentEvent.UsageUpdated(null, 10, 5.0));
+        t.onEvent(new AgentEvent.TextDelta("streaming", "s1"));
+        t.onEvent(new AgentEvent.UsageUpdated(null, 10, 5.0, "s1"));
         t.reset();
 
         assertEquals("", t.transcript().toString());
@@ -288,8 +288,8 @@ class ConversationTranscriptTest {
     void queuedPromptIntegratesIntoRunningTurn() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ThinkingDelta("thought"));
-        t.onEvent(new AgentEvent.PromptIntegrated("follow up"));
+        t.onEvent(new AgentEvent.ThinkingDelta("thought", "s1"));
+        t.onEvent(new AgentEvent.PromptIntegrated("follow up", "s1"));
 
         assertTrue(t.busy(), "the turn must stay busy while a queued prompt runs");
         assertEquals("queued prompt integrated", t.status());
@@ -299,7 +299,7 @@ class ConversationTranscriptTest {
         assertTrue(md.contains("**You**\n\nfollow up"), "queued prompt must be folded under a You block: " + md);
         assertTrue(md.indexOf("thought") < md.indexOf("**You**\n\nfollow up"));
 
-        t.onEvent(new AgentEvent.TurnDone("answer"));
+        t.onEvent(new AgentEvent.TurnDone("answer", "s1"));
         assertFalse(t.busy());
     }
 }

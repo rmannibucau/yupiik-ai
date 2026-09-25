@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -35,12 +36,13 @@ import org.junit.jupiter.api.Test;
 
 class AskUserToolTest {
     private JsonMapperImpl mapper;
+    private UserFeedbackService feedback;
     private AskUserTool tool;
 
     @BeforeEach
     void setUp() {
         mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
-        final UserFeedbackService feedback = new UserFeedbackService() {
+        feedback = new UserFeedbackService() {
             @Override
             public Map<String, Object> ask(final List<Question> questions) {
                 final Map<String, Object> answers = new HashMap<>();
@@ -50,7 +52,11 @@ class AskUserToolTest {
                 return answers;
             }
         };
-        tool = new AskUserTool(feedback, mapper);
+        tool = new AskUserTool(mapper);
+    }
+
+    private ToolContext context() {
+        return new ToolContext("s1", null, null, null, feedback, null, null, null, null);
     }
 
     @AfterEach
@@ -84,7 +90,7 @@ class AskUserToolTest {
         questions.add(q1);
         args.put("questions", questions);
 
-        final ToolResult result = tool.execute(args);
+        final ToolResult result = tool.execute(args, context());
         assertNotNull(result);
         assertTrue(result.success());
     }
@@ -113,7 +119,7 @@ class AskUserToolTest {
         questions.add(q1);
         args.put("questions", questions);
 
-        final ToolResult result = tool.execute(args);
+        final ToolResult result = tool.execute(args, context());
         assertNotNull(result);
         assertTrue(result.success());
     }
@@ -138,7 +144,7 @@ class AskUserToolTest {
         questions.add(q1);
         args.put("questions", questions);
 
-        final ToolResult result = tool.execute(args);
+        final ToolResult result = tool.execute(args, context());
         assertNotNull(result);
         assertTrue(result.success());
     }
@@ -162,7 +168,7 @@ class AskUserToolTest {
         questions.add(q1);
         args.put("questions", questions);
 
-        final ToolResult result = tool.execute(args);
+        final ToolResult result = tool.execute(args, context());
         assertNotNull(result);
         assertTrue(result.success());
     }
@@ -206,21 +212,21 @@ class AskUserToolTest {
 
         args.put("questions", questions);
 
-        final ToolResult result = tool.execute(args);
+        final ToolResult result = tool.execute(args, context());
         assertNotNull(result);
         assertTrue(result.success());
     }
 
     @Test
     void executeReturnsErrorForEmptyQuestions() {
-        final ToolResult result = tool.execute(Map.of("questions", List.of()));
+        final ToolResult result = tool.execute(Map.of("questions", List.of()), context());
         assertFalse(result.success());
         assertEquals("questions must be a non empty array of {id, prompt, options, multiple}", result.output());
     }
 
     @Test
     void executeReturnsErrorForInvalidQuestion() {
-        final ToolResult result = tool.execute(Map.of("questions", List.of("not an object")));
+        final ToolResult result = tool.execute(Map.of("questions", List.of("not an object")), context());
         assertFalse(result.success());
         assertEquals("each question must be an object with an id and a prompt", result.output());
     }

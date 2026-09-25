@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
@@ -34,7 +33,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-@ApplicationScoped
 public class MemoryExtractor {
     private static final Logger LOGGER = Logger.getLogger(MemoryExtractor.class.getName());
     private static final long DEBOUNCE_MS = 60_000;
@@ -49,6 +47,7 @@ public class MemoryExtractor {
     private final Emitter emitter;
     private final Clock clock;
     private final UsageTracker usageTracker;
+    private final String sessionId;
 
     public MemoryExtractor(
             final ChatClient chatClient,
@@ -58,7 +57,8 @@ public class MemoryExtractor {
             final VirtualThreadExecutor executor,
             final Emitter emitter,
             final Clock clock,
-            final UsageTracker usageTracker) {
+            final UsageTracker usageTracker,
+            final String sessionId) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
@@ -67,6 +67,7 @@ public class MemoryExtractor {
         this.emitter = emitter;
         this.clock = clock;
         this.usageTracker = usageTracker;
+        this.sessionId = sessionId;
     }
 
     protected MemoryExtractor() {
@@ -78,6 +79,7 @@ public class MemoryExtractor {
         this.emitter = null;
         this.clock = null;
         this.usageTracker = null;
+        this.sessionId = null;
     }
 
     public void maybeExtract(final List<Message> messages) {
@@ -172,7 +174,7 @@ public class MemoryExtractor {
     private void notifyFailure(final String message) {
         final int failures = consecutiveFailures.incrementAndGet();
         if (failures == 1 && emitter != null) {
-            emitter.emit(AgentEvent.Notice.warn(message));
+            emitter.emit(AgentEvent.Notice.warn(message, sessionId));
         }
     }
 

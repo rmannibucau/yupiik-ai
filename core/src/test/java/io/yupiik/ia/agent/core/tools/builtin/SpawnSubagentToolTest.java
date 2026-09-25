@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -83,14 +84,14 @@ class SpawnSubagentToolTest {
 
     private SubagentRunner mockRunner(final SubagentRegistry registry) {
         return new SubagentRunner(
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, registry) {
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, registry) {
             @Override
             public void runAsync(
                     final SubagentRegistry.SubagentState state,
                     final SessionStore sessionStore,
                     final SnapshotStore snapshotStore,
                     final TodoStore todoStore,
+                    final ToolContext parentContext,
                     final BooleanSupplier cancelled) {
                 registry.complete(
                         state.id(),
@@ -133,6 +134,10 @@ class SpawnSubagentToolTest {
         };
     }
 
+    private ToolContext context(final TodoStore todos) {
+        return new ToolContext("s1", null, null, null, null, todos, null, null, null);
+    }
+
     private TodoStore noopTodoStore() {
         return new TodoStore() {
             @Override
@@ -151,9 +156,8 @@ class SpawnSubagentToolTest {
     void executeReturnsSubagentIdWhenStarted() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var tool =
-                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), noopTodoStore(), cfg);
-        final var result = tool.execute(Map.of("task", "do work"));
+        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("Sub-agent started"));
         assertTrue(result.output().contains("do work"));
@@ -163,9 +167,8 @@ class SpawnSubagentToolTest {
     void executeFailsWhenRegistryDisabled() {
         final var cfg = config(Map.of("yca.subagents.enabled", "false"));
         final var reg = registry(cfg);
-        final var tool =
-                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), noopTodoStore(), cfg);
-        final var result = tool.execute(Map.of("task", "do work"));
+        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("disabled"));
     }
@@ -174,9 +177,8 @@ class SpawnSubagentToolTest {
     void executeFailsWhenTaskMissing() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var tool =
-                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), noopTodoStore(), cfg);
-        final var result = tool.execute(Map.of());
+        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var result = tool.execute(Map.of(), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("task is required"));
     }
@@ -187,9 +189,8 @@ class SpawnSubagentToolTest {
         final var reg = registry(cfg);
         // Fill the semaphore directly
         reg.start("parent", "t1").orElseThrow();
-        final var tool =
-                new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), noopTodoStore(), cfg);
-        final var result = tool.execute(Map.of("task", "do work"));
+        final var tool = new SpawnSubagentTool(reg, mockRunner(reg), noopStore(), noopSnapshotStore(), cfg);
+        final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("maximum concurrent sub-agents reached"));
     }

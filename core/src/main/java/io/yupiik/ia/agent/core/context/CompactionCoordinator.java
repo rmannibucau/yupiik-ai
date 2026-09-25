@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
@@ -45,7 +44,6 @@ import java.util.logging.Logger;
  * cleared to a short marker when the volume still clears a minimum, so the operation never churns
  * the history for a tiny gain.
  */
-@ApplicationScoped
 public class CompactionCoordinator {
     private static final Logger LOGGER = Logger.getLogger(CompactionCoordinator.class.getName());
 
@@ -98,6 +96,7 @@ public class CompactionCoordinator {
     private final UsageTracker usageTracker;
     private final ProviderManager providerManager;
     private final Emitter emitter;
+    private final String sessionId;
     private volatile boolean warnedCompactModel;
 
     public CompactionCoordinator(
@@ -105,12 +104,14 @@ public class CompactionCoordinator {
             final ChatClient chatClient,
             final UsageTracker usageTracker,
             final ProviderManager providerManager,
-            final Emitter emitter) {
+            final Emitter emitter,
+            final String sessionId) {
         this.configuration = configuration;
         this.chatClient = chatClient;
         this.usageTracker = usageTracker;
         this.providerManager = providerManager;
         this.emitter = emitter;
+        this.sessionId = sessionId;
     }
 
     protected CompactionCoordinator() {
@@ -119,6 +120,7 @@ public class CompactionCoordinator {
         this.usageTracker = null;
         this.providerManager = null;
         this.emitter = null;
+        this.sessionId = null;
     }
 
     /**
@@ -266,7 +268,8 @@ public class CompactionCoordinator {
                 AgentEvent.Notice.Level.WARN,
                 outcome.error() == null || outcome.error().isBlank()
                         ? "Summary failed; context truncated locally."
-                        : outcome.error()));
+                        : outcome.error(),
+                sessionId));
         return new CompactionResult(keptTruncated, Mode.TRUNCATE, outcome.error());
     }
 

@@ -29,12 +29,14 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
 import io.yupiik.ia.agent.core.todo.TodoItem;
@@ -117,14 +119,15 @@ class AgentSessionServiceTest {
 
     @Test
     void permissionsParseAllNoneAndInvalid() {
-        final var service = service(new PermissionService(cfg()));
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
 
-        assertEquals(Boolean.TRUE, service.setPermissions("all"));
-        assertEquals(Boolean.TRUE, service.setPermissions("unsafe"));
-        assertEquals(Boolean.FALSE, service.setPermissions("none"));
-        assertEquals(Boolean.FALSE, service.setPermissions("safe"));
-        assertNull(service.setPermissions(""));
-        assertNull(service.setPermissions("bogus"));
+        assertEquals(Boolean.TRUE, service.setPermissions("all", runtime(permissions)));
+        assertEquals(Boolean.TRUE, service.setPermissions("unsafe", runtime(permissions)));
+        assertEquals(Boolean.FALSE, service.setPermissions("none", runtime(permissions)));
+        assertEquals(Boolean.FALSE, service.setPermissions("safe", runtime(permissions)));
+        assertNull(service.setPermissions("", runtime(permissions)));
+        assertNull(service.setPermissions("bogus", runtime(permissions)));
     }
 
     @Test
@@ -132,9 +135,9 @@ class AgentSessionServiceTest {
         final var permissions = new PermissionService(cfg());
         final var service = service(permissions);
 
-        assertEquals(Boolean.TRUE, service.setPermissions("all"));
+        assertEquals(Boolean.TRUE, service.setPermissions("all", runtime(permissions)));
         assertTrue(permissions.isPermitAll());
-        assertEquals(Boolean.FALSE, service.setPermissions("none"));
+        assertEquals(Boolean.FALSE, service.setPermissions("none", runtime(permissions)));
         assertFalse(permissions.isPermitAll());
     }
 
@@ -143,18 +146,18 @@ class AgentSessionServiceTest {
         final var permissions = new PermissionService(cfg());
         final var service = service(permissions);
 
-        assertEquals(Boolean.TRUE, service.setPermissions("yolo"));
+        assertEquals(Boolean.TRUE, service.setPermissions("yolo", runtime(permissions)));
         assertFalse(permissions.isPermitAll());
         assertEquals(PermissionMode.YOLO, permissions.permissionMode());
 
-        assertEquals(Boolean.TRUE, service.setPermissions("auto_edit"));
+        assertEquals(Boolean.TRUE, service.setPermissions("auto_edit", runtime(permissions)));
         assertFalse(permissions.isPermitAll());
         assertEquals(PermissionMode.AUTO_EDIT, permissions.permissionMode());
 
-        assertEquals(Boolean.FALSE, service.setPermissions("ask"));
+        assertEquals(Boolean.FALSE, service.setPermissions("ask", runtime(permissions)));
         assertFalse(permissions.isPermitAll());
         assertEquals(PermissionMode.ASK, permissions.permissionMode());
-        assertNull(service.setPermissions("bogus"));
+        assertNull(service.setPermissions("bogus", runtime(permissions)));
     }
 
     @Test
@@ -164,7 +167,7 @@ class AgentSessionServiceTest {
         permissions.grantSession("bash", Map.of("command", "mvn install"));
         final var service = service(permissions);
 
-        final var info = service.permissionsInfo();
+        final var info = service.permissionsInfo(runtime(permissions));
         assertTrue(info.permitAll());
         assertFalse(info.sessionGrants().isEmpty());
         assertTrue(info.sessionGrants().stream().anyMatch(g -> g.contains("|bash:mvn")));
@@ -174,9 +177,10 @@ class AgentSessionServiceTest {
     void setModelStripsDollarPrefix() {
         final var client = chatClient();
         final var service = service(client);
+        final var settings = new ChatSettings();
 
-        assertEquals("my-model", service.setModel("$my-model"));
-        assertEquals("my-model", client.model());
+        assertEquals("my-model", service.setModel("$my-model", settings));
+        assertEquals("my-model", settings.model());
     }
 
     @Test
@@ -223,7 +227,7 @@ class AgentSessionServiceTest {
         permissions.setMode(AgentMode.BUILD);
         final var service = service(permissions);
 
-        final var export = service.exportPlan("s1", "", "plan");
+        final var export = service.exportPlan("s1", "", "plan", runtime(permissions, null, null));
 
         assertNotNull(export.error());
         assertTrue(export.error().contains("plan mode"));
@@ -239,9 +243,9 @@ class AgentSessionServiceTest {
                 return null;
             }
         };
-        final var service = service(permissions, seeder, new PlanFileService(null, null), null, cfg());
+        final var service = service(seeder, new PlanFileService(null), cfg());
 
-        final var export = service.exportPlan("s1", "", "plan");
+        final var export = service.exportPlan("s1", "", "plan", runtime(permissions, null, null));
 
         assertNotNull(export.error());
         assertTrue(export.error().contains("no plan"));
@@ -258,7 +262,7 @@ class AgentSessionServiceTest {
                 return "the plan content";
             }
         };
-        final var fileService = new PlanFileService(null, null) {
+        final var fileService = new PlanFileService(null) {
             @Override
             public Path defaultPath(final Path storageHome, final String title, final String sessionId) {
                 return storageHome.resolve(title + ".plan.md");
@@ -276,9 +280,9 @@ class AgentSessionServiceTest {
                 return List.of(new TodoItem("task one", "pending"));
             }
         };
-        final var service = service(permissions, seeder, fileService, todoStore, config);
+        final var service = service(seeder, fileService, config);
 
-        final var export = service.exportPlan("s1", "", "my title");
+        final var export = service.exportPlan("s1", "", "my title", runtime(permissions, todoStore, null));
 
         assertNull(export.error());
         assertNotNull(export.path());
@@ -292,26 +296,27 @@ class AgentSessionServiceTest {
         final var dir = Files.createTempDirectory("agent-session-test");
         final var planPath = dir.resolve("plan.md");
         Files.writeString(planPath, "same content");
-        final var fileService = new PlanFileService(null, null) {
+        final var fileService = new PlanFileService(null) {
             @Override
             public PlanFileService.PlanFile parse(final String content) {
                 return new PlanFileService.PlanFile(content, List.of(new TodoItem("a task", "pending")));
             }
 
             @Override
-            public String reload(final String sessionId, final PlanFileService.PlanFile parsed) {
+            public String reload(
+                    final String sessionId, final PlanFileService.PlanFile parsed, final TodoStore todoStore) {
                 return "plan reloaded with " + parsed.todos().size() + " tasks";
             }
         };
         final var service = service(fileService, cfg(dir.toString(), null));
 
-        final var unchanged = service.reloadPlan("s1", planPath, "same content");
+        final var unchanged = service.reloadPlan("s1", planPath, "same content", runtime(new PermissionService(cfg())));
         assertFalse(unchanged.changed());
         assertNull(unchanged.error());
         assertEquals("no changes in the plan (nothing to reload)", unchanged.message());
 
         Files.writeString(planPath, "edited content");
-        final var changed = service.reloadPlan("s1", planPath, "same content");
+        final var changed = service.reloadPlan("s1", planPath, "same content", runtime(new PermissionService(cfg())));
         assertTrue(changed.changed());
         assertNull(changed.error());
         assertEquals("plan reloaded with 1 tasks", changed.message());
@@ -319,9 +324,10 @@ class AgentSessionServiceTest {
 
     @Test
     void reloadPlanMissingFileReportsError() {
-        final var service = service(new PlanFileService(null, null), cfg());
+        final var service = service(new PlanFileService(null), cfg());
 
-        final var reload = service.reloadPlan("s1", Path.of("/no/such/plan.md"), "original");
+        final var reload = service.reloadPlan(
+                "s1", Path.of("/no/such/plan.md"), "original", runtime(new PermissionService(cfg())));
 
         assertNotNull(reload.error());
         assertTrue(reload.error().contains("plan file not found"));
@@ -367,7 +373,7 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        final var dump = service.context("s1");
+        final var dump = service.context("s1", runtime(new PermissionService(cfg()), null, promptBuilder()));
 
         assertEquals(3, dump.messages().size());
         assertNull(dump.messages().get(0).toolName());
@@ -389,7 +395,7 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        final var dump = service.context("s1");
+        final var dump = service.context("s1", runtime(new PermissionService(cfg()), null, promptBuilder()));
 
         assertEquals("grep", dump.messages().get(1).toolName());
     }
@@ -404,7 +410,7 @@ class AgentSessionServiceTest {
         };
         final var service = service(store);
 
-        final var result = service.compact("s1");
+        final var result = service.compact("s1", runtime(new PermissionService(cfg()), null, null));
         assertNotNull(result);
         assertFalse(result.applied());
         assertEquals("nothing to compact", result.message());
@@ -486,86 +492,60 @@ class AgentSessionServiceTest {
     }
 
     private static AgentSessionService service(final PermissionService permissions) {
-        return new AgentSessionService(
-                permissions, null, null, null, null, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(null, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final McpManager mcpManager) {
-        return new AgentSessionService(
-                null, null, mcpManager, null, null, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(null, mcpManager, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final ChatClient chatClient) {
-        return new AgentSessionService(
-                null, chatClient, null, null, null, null, null, null, null, null, null, null, cfg(), null);
+        return new AgentSessionService(chatClient, null, null, null, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(
             final AgentProvider agentProvider, final CodingAgentConfiguration config) {
-        return new AgentSessionService(
-                null, null, null, agentProvider, null, null, null, null, null, null, null, null, config, null);
+        return new AgentSessionService(null, null, agentProvider, null, null, null, null, null, config, null);
     }
 
     private static AgentSessionService service(final SessionStore store) {
-        return new AgentSessionService(
-                null,
-                null,
-                null,
-                null,
-                store,
-                null,
-                new SystemPromptBuilder() {
-                    @Override
-                    public String build() {
-                        return "<system>";
-                    }
-                },
-                null,
-                null,
-                null,
-                null,
-                null,
-                cfg(),
-                null);
+        return new AgentSessionService(null, null, null, store, null, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final MemoryStore memoryStore) {
-        return new AgentSessionService(
-                null, null, null, null, null, null, null, memoryStore, null, null, null, null, cfg(), null);
+        return new AgentSessionService(null, null, null, null, memoryStore, null, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(final StructuralCodeGraph graph) {
-        return new AgentSessionService(
-                null, null, null, null, null, null, null, null, graph, null, null, null, cfg(), null);
+        return new AgentSessionService(null, null, null, null, null, graph, null, null, cfg(), null);
     }
 
     private static AgentSessionService service(
             final PlanFileService planFileService, final CodingAgentConfiguration config) {
-        return new AgentSessionService(
-                null, null, null, null, null, null, null, null, null, planFileService, null, null, config, null);
+        return new AgentSessionService(null, null, null, null, null, null, planFileService, null, config, null);
     }
 
     private static AgentSessionService service(
-            final PermissionService permissions,
-            final PlanTodoSeeder seeder,
-            final PlanFileService planFileService,
-            final TodoStore todoStore,
-            final CodingAgentConfiguration config) {
-        return new AgentSessionService(
-                permissions,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                planFileService,
-                seeder,
-                todoStore,
-                config,
-                null);
+            final PlanTodoSeeder seeder, final PlanFileService planFileService, final CodingAgentConfiguration config) {
+        return new AgentSessionService(null, null, null, null, null, null, planFileService, seeder, config, null);
+    }
+
+    private static SessionRuntime runtime(final PermissionService permissions) {
+        return new SessionRuntime(null, permissions, null, null, null, null, null, null);
+    }
+
+    private static SessionRuntime runtime(
+            final PermissionService permissions, final TodoStore todos, final SystemPromptBuilder promptBuilder) {
+        return new SessionRuntime(null, permissions, null, null, todos, null, null, promptBuilder);
+    }
+
+    private static SystemPromptBuilder promptBuilder() {
+        return new SystemPromptBuilder() {
+            @Override
+            public String build() {
+                return "<system>";
+            }
+        };
     }
 
     private static CodingAgentConfiguration cfg() {
@@ -602,19 +582,7 @@ class AgentSessionServiceTest {
     }
 
     private static ChatClient chatClient() {
-        return new ChatClient() {
-            private String model;
-
-            @Override
-            public void setModel(final String model) {
-                this.model = model;
-            }
-
-            @Override
-            public String model() {
-                return model;
-            }
-        };
+        return new ChatClient() {};
     }
 
     private static EmbeddedTool tool(final String name, final String description) {

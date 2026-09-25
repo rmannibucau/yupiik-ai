@@ -45,7 +45,7 @@ public enum PermissionMode {
         }
         return switch (strip(value)) {
             case "auto_edit", "autoedit" -> AUTO_EDIT;
-            case "yolo" -> YOLO;
+            case "yolo", "all" -> YOLO;
             default -> ASK;
         };
     }

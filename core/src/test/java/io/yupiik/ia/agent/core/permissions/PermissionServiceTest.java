@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -36,22 +37,56 @@ class PermissionServiceTest {
     Path storageHome;
 
     private PermissionService service(final PermissionMode mode, final List<String> allow, final List<String> deny) {
-        return service(mode, allow, deny, List.of());
+        return service(mode, allow, deny, Map.of());
     }
 
     private PermissionService service(
-            final PermissionMode mode, final List<String> allow, final List<String> deny, final List<String> planBash) {
-        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
-                "yca.storageHome", storageHome.toString(),
-                "yca.permissions.mode", mode.name().toLowerCase(Locale.ROOT),
-                "yca.permissions.allow", String.join(",", allow),
-                "yca.permissions.deny", String.join(",", deny),
-                "yca.permissions.planBash", String.join(",", planBash)));
+            final PermissionMode mode,
+            final List<String> allow,
+            final List<String> deny,
+            final Map<String, String> extra) {
+        final var props = new HashMap<String, String>();
+        props.put("yca.storageHome", storageHome.toString());
+        props.put("yca.permissions.mode", mode.name().toLowerCase(Locale.ROOT));
+        props.put("yca.permissions.allow", String.join(",", allow));
+        props.put("yca.permissions.deny", String.join(",", deny));
+        props.putAll(extra);
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(props);
         final var service = new PermissionService(configuration);
         // these build-mode behaviour tests rely on a BUILD baseline; plan mode is
         // exercised explicitly via setMode(AgentMode.PLAN) in dedicated tests
         service.setMode(AgentMode.BUILD);
         return service;
+    }
+
+    /** Encodes `yca.permissions.bash.rules` entries with the same mode for plan and default (default inherits plan). */
+    private static Map<String, String> rules(final PermissionMode plan, final String... commandStarts) {
+        final var props = new HashMap<String, String>();
+        props.put("yca.permissions.bash.rules.length", String.valueOf(commandStarts.length));
+        for (var i = 0; i < commandStarts.length; i++) {
+            final var prefix = "yca.permissions.bash.rules." + i;
+            props.put(prefix + ".matcher.commandStart.options", commandStarts[i]);
+            if (plan != null) {
+                props.put(prefix + ".plan", plan.name().toLowerCase(Locale.ROOT));
+            }
+        }
+        return props;
+    }
+
+    /** A single rule with dedicated exclude options, eg. `sed` rejecting `-i`. */
+    private static Map<String, String> ruleWithExcludes(
+            final PermissionMode plan, final String commandStart, final String... excludedOptions) {
+        final var props = new HashMap<String, String>();
+        props.put("yca.permissions.bash.rules.length", "1");
+        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", commandStart);
+        props.put("yca.permissions.bash.rules.0.matcher.excludeOptions.length", String.valueOf(excludedOptions.length));
+        for (var i = 0; i < excludedOptions.length; i++) {
+            props.put("yca.permissions.bash.rules.0.matcher.excludeOptions." + i + ".options", excludedOptions[i]);
+        }
+        if (plan != null) {
+            props.put("yca.permissions.bash.rules.0.plan", plan.name().toLowerCase(Locale.ROOT));
+        }
+        return props;
     }
 
     @Test
@@ -119,6 +154,9 @@ class PermissionServiceTest {
         assertTrue(PermissionMode.isValue("auto_edit"));
         assertTrue(PermissionMode.isValue("autoedit"));
         assertTrue(PermissionMode.isValue("yolo"));
+        // `all` is accepted as a yolo alias in configuration (rule modes and yca.permissions.mode)
+        assertTrue(PermissionMode.isValue("all"));
+        assertEquals(PermissionMode.YOLO, PermissionMode.fromConfigurationString("all"));
         assertFalse(PermissionMode.isValue(""));
         assertFalse(PermissionMode.isValue(null));
         assertFalse(PermissionMode.isValue("bogus"));
@@ -213,7 +251,8 @@ class PermissionServiceTest {
 
     @Test
     void planModeAllowsAndBlocksBashByPrefix() {
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("git status", "ls"));
+        final var service =
+                service(PermissionMode.ASK, List.of(), List.of(), rules(PermissionMode.YOLO, "git status", "ls"));
         service.setMode(AgentMode.PLAN);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status --short"))
                 .allowed());
@@ -228,7 +267,10 @@ class PermissionServiceTest {
     @Test
     void planModeBashSegmentsCompoundCommands() {
         final var service = service(
-                PermissionMode.ASK, List.of(), List.of(), List.of("git status", "git diff", "ls", "grep", "cat"));
+                PermissionMode.ASK,
+                List.of(),
+                List.of(),
+                rules(PermissionMode.YOLO, "git status", "git diff", "ls", "grep", "cat"));
         service.setMode(AgentMode.PLAN);
         // cd prefix is tolerated, every other segment must be allowlisted
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cd core && grep -n foo pom.xml"))
@@ -246,7 +288,8 @@ class PermissionServiceTest {
 
     @Test
     void planModeBashRejectsRedirectionAndSubstitution() {
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("grep", "echo", "git diff"));
+        final var service = service(
+                PermissionMode.ASK, List.of(), List.of(), rules(PermissionMode.YOLO, "grep", "echo", "git diff"));
         service.setMode(AgentMode.PLAN);
         assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "grep foo bar > out.txt"))
                 .allowed());
@@ -263,7 +306,7 @@ class PermissionServiceTest {
 
     @Test
     void planModeBashToleratesEnvPrefixes() {
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("grep"));
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), rules(PermissionMode.YOLO, "grep"));
         service.setMode(AgentMode.PLAN);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "LC_ALL=C grep foo bar"))
                 .allowed());
@@ -274,7 +317,8 @@ class PermissionServiceTest {
 
     @Test
     void planModeBashAllowsReadOnlySedButNotInPlace() {
-        final var service = service(PermissionMode.ASK, List.of(), List.of(), List.of("sed -n"));
+        final var service =
+                service(PermissionMode.ASK, List.of(), List.of(), ruleWithExcludes(PermissionMode.YOLO, "sed", "-i"));
         service.setMode(AgentMode.PLAN);
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "sed -n 1,30p pom.xml"))
                 .allowed());
@@ -340,6 +384,181 @@ class PermissionServiceTest {
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
                 .allowed());
         assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn test"))
+                .allowed());
+    }
+
+    // ------------------------------------------------------------------
+    // bash rules (yca.permissions.bash.rules)
+    // ------------------------------------------------------------------
+
+    @Test
+    void buildModeAutoAllowsReadOnlyBashByDefaultRules() {
+        // no gate: every assertion below would fail if the command was routed to the approval flow
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status --short --branch"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "ls -la"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "cat pom.xml"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "grep -n foo pom.xml"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "sed -n 1,30p pom.xml"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git log 2>&1 | head -5"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "git push"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+    }
+
+    @Test
+    void readOnlyCompoundCommandsAreSilentlyAllowed() {
+        // the exact validation example from the design: 7 segments, all read-only
+        final var command = "test -f ~/.m2/settings.xml && echo \"settings.xml exists\" || echo \"no settings.xml\""
+                + "; ls ~/.m2 2>/dev/null | head -20; java -version 2>&1 | head -2";
+        final var build = service(PermissionMode.ASK, List.of(), List.of());
+        assertTrue(build.check("bash", ToolCategory.BASH, Map.of("command", command))
+                .allowed());
+        final var plan = service(PermissionMode.ASK, List.of(), List.of());
+        plan.setMode(AgentMode.PLAN);
+        assertTrue(plan.check("bash", ToolCategory.BASH, Map.of("command", command))
+                .allowed());
+    }
+
+    @Test
+    void bareJavaIsNotAutoAllowed() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "java -version"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "java -help"))
+                .allowed());
+        // bare java can execute arbitrary code (-jar, -cp, MainClass): it must ask
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "java -jar app.jar"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "java MainClass"))
+                .allowed());
+    }
+
+    @Test
+    void ruleDefaultOverridesPlan() {
+        // docker run: plan asks (no gate -> denied), build mode default=all allows silently
+        final var props = new HashMap<String, String>();
+        props.put("yca.permissions.bash.rules.length", "1");
+        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
+        props.put("yca.permissions.bash.rules.0.plan", "ask");
+        props.put("yca.permissions.bash.rules.0.default", "all");
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
+                .allowed());
+        service.setMode(AgentMode.PLAN);
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
+                .allowed());
+    }
+
+    @Test
+    void ruleDefaultInheritsPlan() {
+        // no `default` key: build mode inherits the plan value (all)
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), rules(PermissionMode.YOLO, "git status"));
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status --short"))
+                .allowed());
+    }
+
+    @Test
+    void rulePlanFallsBackToDefaultWhenPlanAbsent() {
+        // no `plan` key: plan mode resolves through `default`
+        final var props = new HashMap<String, String>();
+        props.put("yca.permissions.bash.rules.length", "1");
+        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
+        props.put("yca.permissions.bash.rules.0.default", "all");
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+        service.setMode(AgentMode.PLAN);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
+                .allowed());
+    }
+
+    @Test
+    void ruleAskConsultsGateInBothModes() {
+        final var props = new HashMap<String, String>();
+        props.put("yca.permissions.bash.rules.length", "1");
+        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
+        props.put("yca.permissions.bash.rules.0.plan", "ask");
+        for (final var agentMode : List.of(AgentMode.BUILD, AgentMode.PLAN)) {
+            final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+            service.setMode(agentMode);
+            final AtomicReference<String> asked = new AtomicReference<>();
+            service.setGate((title, detail, tool, args) -> {
+                asked.set(title);
+                return ApprovalGate.Result.ALLOW_ONCE;
+            });
+            assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
+                    .allowed());
+            assertTrue(
+                    asked.get() != null && asked.get().contains("docker run"),
+                    "an ask rule must route " + agentMode + " mode to the gate");
+        }
+    }
+
+    @Test
+    void denyListBeatsBashRules() {
+        // rm is denied by configuration even inside an otherwise allowed compound command
+        final var service = service(PermissionMode.ASK, List.of(), List.of("rm *"));
+        final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "git status && rm -rf /"));
+        assertFalse(decision.allowed());
+        assertTrue(decision.reason().contains("denied by configuration"));
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "rm -rf /"))
+                .allowed());
+        // the rules still allow the harmless part
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status"))
+                .allowed());
+    }
+
+    @Test
+    void denyListSupportsBashDecoratedPatterns() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of("bash:ls *"));
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "ls -la"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git status"))
+                .allowed());
+    }
+
+    @Test
+    void allowListCommandPatternsApplyPerSegment() {
+        final var service = service(PermissionMode.ASK, List.of("mvn *"), List.of());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn clean install"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn clean && mvn install"))
+                .allowed());
+        // a segment not matching the allow patterns makes the whole command ask again
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn clean && rm -rf /"))
+                .allowed());
+    }
+
+    @Test
+    void sessionGrantUsesMatchedRuleCommandStart() {
+        final var props = new HashMap<String, String>();
+        props.put("yca.permissions.bash.rules.length", "1");
+        props.put("yca.permissions.bash.rules.0.matcher.commandStart.options", "docker run");
+        props.put("yca.permissions.bash.rules.0.plan", "ask");
+        final var service = service(PermissionMode.ASK, List.of(), List.of(), props);
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_SESSION);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx"))
+                .allowed());
+        assertTrue(
+                service.sessionGrants().stream().anyMatch(g -> g.endsWith("|bash:docker run")),
+                "the grant must be keyed by the rule commandStart, not the first word");
+
+        // the fine grained grant unlocks docker run commands without consulting the gate...
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run -p 80:80 nginx"))
+                .allowed());
+        // ...but not other docker commands nor compound commands
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "docker ps"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx && ls"))
                 .allowed());
     }
 }

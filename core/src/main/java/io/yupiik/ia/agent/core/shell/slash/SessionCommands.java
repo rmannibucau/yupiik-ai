@@ -133,7 +133,8 @@ public class SessionCommands implements SlashCommandSet {
     }
 
     private ShellOutcome context(final String arg, final ShellEnv env) {
-        final var dump = agentSessionService.context(env.session().sessionId());
+        final var dump = agentSessionService.context(
+                env.session().sessionId(), env.session().runtime());
         final var sb = new StringBuilder();
         sb.append("**System prompt**\n\n```text\n").append(dump.systemPrompt()).append("\n```\n");
         sb.append("\n**Session ")

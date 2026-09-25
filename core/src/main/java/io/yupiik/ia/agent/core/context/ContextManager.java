@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.context;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.List;
@@ -25,7 +24,6 @@ import java.util.List;
  * {@link CompactionCoordinator}. The coordinator owns the retry/degrade logic
  * and honest-result reporting so compaction never fails silently.
  */
-@ApplicationScoped
 public class ContextManager {
     private final CodingAgentConfiguration configuration;
     private final UsageTracker usageTracker;

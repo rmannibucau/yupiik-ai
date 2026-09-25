@@ -20,14 +20,12 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
-import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
-import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.RunShellFrontend;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
@@ -54,26 +52,20 @@ public class RunCommand implements Runnable {
     private static final Logger LOGGER = Logger.getLogger(RunCommand.class.getName());
 
     private final RunConf conf;
-    private final AgentLoop agentLoop;
     private final ShellRegistry shellRegistry;
-    private final PermissionService permissionService;
-    private final UserFeedbackService userFeedbackService;
+    private final SessionRuntimeFactory sessionRuntimeFactory;
     private final SessionStore sessionStore;
     private final AgentProvider agentProvider;
 
     public RunCommand(
             final RunConf conf,
-            final AgentLoop agentLoop,
             final ShellRegistry shellRegistry,
-            final PermissionService permissionService,
-            final UserFeedbackService userFeedbackService,
+            final SessionRuntimeFactory sessionRuntimeFactory,
             final SessionStore sessionStore,
             final AgentProvider agentProvider) {
         this.conf = conf;
-        this.agentLoop = agentLoop;
         this.shellRegistry = shellRegistry;
-        this.permissionService = permissionService;
-        this.userFeedbackService = userFeedbackService;
+        this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.sessionStore = sessionStore;
         this.agentProvider = agentProvider;
     }
@@ -163,34 +155,35 @@ public class RunCommand implements Runnable {
                 }
             }
         };
-        final var shellEnv = new ShellEnv(frontend, null, new ShellSession(), null);
+        final var shellSession = new ShellSession().sessionId(sessionId);
+        final var runtime = sessionRuntimeFactory.create(sessionId);
+        shellSession.runtime(runtime);
+        final var shellEnv = new ShellEnv(frontend, null, shellSession, null);
         shellRegistry.register(shellEnv);
+        final var permissions = runtime.permissions();
         if (conf.mode() != null && !conf.mode().isBlank()) {
-            permissionService.setMode(AgentMode.fromConfigurationString(conf.mode()));
+            permissions.setMode(AgentMode.fromConfigurationString(conf.mode()));
         }
-        permissionService.setGate((title, detail, tool, args) -> {
+        permissions.setGate((title, detail, tool, args) -> {
             LOGGER.severe(() -> "denied: " + title + " requires an approval in headless mode (" + detail
                     + "); set yca.permissions.mode=yolo to auto allow.");
             return ApprovalGate.Result.DENY;
         });
-        userFeedbackService.setGate(questions -> {
+        runtime.feedback().setGate(questions -> {
             LOGGER.warning(
                     "ask_user is not available in headless mode; provide the required input in your prompt and retry.");
             return null;
         });
-        permissionService.setPermitAll(conf.permitAll());
+        permissions.setPermitAll(conf.permitAll());
         final var agentName = conf.agent() == null || conf.agent().isBlank() ? null : conf.agent();
         if (agentName != null && agentProvider.byName(agentName) == null) {
             throw new IllegalArgumentException("Unknown agent: " + agentName + " (configure one under yca.agents)");
         }
         try {
-            agentLoop.run(conf.prompt(), agentName, sessionId, null, installCancelHandler(userCancelled));
+            runtime.loop().run(conf.prompt(), agentName, sessionId, null, installCancelHandler(userCancelled));
         } finally {
             System.out.flush();
             shellRegistry.unregister(shellEnv);
-            permissionService.setGate(null);
-            permissionService.setPermitAll(false);
-            userFeedbackService.setGate(null);
             detailLog.close();
             writeMetrics(metrics, started);
         }

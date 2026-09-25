@@ -19,47 +19,79 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Single hub between the agent event bus and the active shell. A command
- * registers its {@link ShellEnv} when it starts and unregisters it when it
- * stops; while active, agent events are forwarded to its frontend.
- * Registration and unregistration are broadcast on the event bus so stateful
- * observers (conversation transcript, stats, ...) can reset themselves -
- * this replaces the per-command sink wiring previously done through
- * a per-shell event sink.
+ * Single hub between the agent event bus and the running shells. Each command
+ * registers its {@link ShellEnv} for the session it drives and unregisters it
+ * when it stops. Agent events are routed strictly by their {@code sessionId} -
+ * every producer tags its events - so several sessions can run concurrently in
+ * one process (one tab each) without their streams crossing. An untagged event
+ * or one for an unknown session is dropped defensively: there is no implicit
+ * fallback shell. Registration and unregistration are broadcast on the event
+ * bus so stateful observers can reset themselves.
  */
 @ApplicationScoped
 public class ShellRegistry {
     private final Emitter emitter;
-    private volatile ShellEnv active;
+    private final Map<String, ShellEnv> shellsBySession = new ConcurrentHashMap<>();
 
     public ShellRegistry(final Emitter emitter) {
         this.emitter = emitter;
     }
 
-    /** @return the active shell or {@code null} when no shell runs. */
-    public ShellEnv active() {
-        return active;
+    /**
+     * @return the shell owning {@code sessionId}, or {@code null} when this
+     *         session has no running shell.
+     */
+    public ShellEnv active(final String sessionId) {
+        return sessionId == null ? null : shellsBySession.get(sessionId);
     }
 
-    public void register(final ShellEnv env) {
-        active = env;
+    /** @return the shell owning {@code sessionId} - same strict lookup as {@link #active(String)}. */
+    public ShellEnv resolve(final String sessionId) {
+        return active(sessionId);
+    }
+
+    public void register(final String sessionId, final ShellEnv env) {
+        if (sessionId == null) {
+            throw new IllegalArgumentException("a shell must be registered under its session id");
+        }
+        shellsBySession.put(sessionId, env);
         emitter.emit(new ShellRegistered(env));
     }
 
-    public void unregister(final ShellEnv env) {
-        if (active == env) {
-            active = null;
+    public void register(final ShellEnv env) {
+        register(sessionIdOf(env), env);
+    }
+
+    public void unregister(final String sessionId, final ShellEnv env) {
+        if (sessionId != null && shellsBySession.remove(sessionId, env)) {
             emitter.emit(new ShellUnregistered(env));
         }
     }
 
-    /** Forwards agent events to the active shell frontend, no-op when idle. */
+    public void unregister(final ShellEnv env) {
+        unregister(sessionIdOf(env), env);
+    }
+
+    /** The sessions currently driven by a shell. */
+    public Collection<String> sessions() {
+        return List.copyOf(shellsBySession.keySet());
+    }
+
+    /** Forwards an agent event to the shell owning its session, no-op when unknown or untagged. */
     public void onEvent(@OnEvent final AgentEvent event) {
-        final var env = active;
+        final var env = active(event.sessionId());
         if (env != null) {
             env.frontend().onEvent(event);
         }
+    }
+
+    private static String sessionIdOf(final ShellEnv env) {
+        return env == null || env.session() == null ? null : env.session().sessionId();
     }
 }

@@ -129,7 +129,8 @@ public class ConfigCommands implements SlashCommandSet {
         if (env.session().busy()) {
             return ShellOutcome.status("cannot switch mode while busy");
         }
-        final var result = agentSessionService.setMode(arg, env.session().sessionId());
+        final var result = agentSessionService.setMode(
+                arg, env.session().sessionId(), env.session().runtime());
         final var sb = new StringBuilder(result.message());
         if (result.seedMessage() != null) {
             sb.append('\n').append(result.seedMessage());
@@ -144,7 +145,7 @@ public class ConfigCommands implements SlashCommandSet {
         if (arg.isBlank()) {
             return modelWizard(env);
         }
-        return CompletableFuture.completedStage(applyModelArg(arg));
+        return CompletableFuture.completedStage(applyModelArg(arg, env));
     }
 
     private CompletionStage<ShellOutcome> modelWizard(final ShellEnv env) {
@@ -159,7 +160,8 @@ public class ConfigCommands implements SlashCommandSet {
         }
         return env.io().pick("model", ids).thenCompose(selected -> {
             if (selected.isEmpty()) {
-                return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(chatClient.model())));
+                return CompletableFuture.completedStage(ShellOutcome.status(
+                        modelStatus(chatClient.model(env.session().chatSettings()), env)));
             }
             return pickVariant(env, selected.get());
         });
@@ -173,27 +175,28 @@ public class ConfigCommands implements SlashCommandSet {
      * beyond the implicit default (one option or fewer) the step is skipped entirely.
      */
     private CompletionStage<ShellOutcome> pickVariant(final ShellEnv env, final String model) {
+        final var settings = env.session().chatSettings();
         final var options = new ArrayList<String>();
         options.add("default");
         chatClient.variants(model).forEach(v -> options.add(v.name()));
-        agentSessionService.setModel(model);
+        agentSessionService.setModel(model, settings);
         if (options.size() <= 1) {
-            chatClient.setVariant(null);
-            chatClient.setSampling(null);
-            return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(model)));
+            settings.setVariant(null);
+            settings.setSampling(null);
+            return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(model, env)));
         }
         return env.io().pick("variant", options).thenApply(selected -> {
             if (selected.isEmpty()) {
                 return ShellOutcome.status("model wizard cancelled");
             }
             if ("default".equals(selected.get())) {
-                chatClient.setVariant(null);
-                chatClient.setSampling(null);
+                settings.setVariant(null);
+                settings.setSampling(null);
             } else {
-                chatClient.setVariant(selected.get());
-                chatClient.setSampling(null);
+                settings.setVariant(selected.get());
+                settings.setSampling(null);
             }
-            return ShellOutcome.status(modelStatus(model));
+            return ShellOutcome.status(modelStatus(model, env));
         });
     }
 
@@ -205,7 +208,8 @@ public class ConfigCommands implements SlashCommandSet {
      * current ones); a sampling value may be a decimal or {@code none}/{@code -}/{@code null} to force-omit
      * the field from the payload and bypass the variant and implicit tuner defaults.
      */
-    private ShellOutcome applyModelArg(final String arg) {
+    private ShellOutcome applyModelArg(final String arg, final ShellEnv env) {
+        final var settings = env.session().chatSettings();
         final var upserts = new LinkedHashMap<String, String>();
         final var positional = new ArrayList<String>();
         for (final var token : arg.strip().split("\\s+")) {
@@ -216,14 +220,14 @@ public class ConfigCommands implements SlashCommandSet {
                 positional.add(token);
             }
         }
-        final var model = positional.isEmpty() ? chatClient.model() : positional.get(0);
+        final var model = positional.isEmpty() ? chatClient.model(settings) : positional.get(0);
         final String variant;
         if (positional.size() > 1) {
             variant = positional.get(1);
         } else if (upserts.isEmpty()) {
             variant = null;
         } else {
-            variant = chatClient.variant();
+            variant = chatClient.variant(settings);
         }
         // positional order is fixed: model, variant, temperature, topK, topP
         if (positional.size() >= 3) {
@@ -235,10 +239,10 @@ public class ConfigCommands implements SlashCommandSet {
         if (positional.size() >= 5) {
             upserts.putIfAbsent("top_p", positional.get(4));
         }
-        agentSessionService.setModel(model);
-        chatClient.setVariant(variant);
-        chatClient.setSampling(upserts.isEmpty() ? null : parseSampling(upserts));
-        return ShellOutcome.status(modelStatus(model));
+        agentSessionService.setModel(model, settings);
+        settings.setVariant(variant);
+        settings.setSampling(upserts.isEmpty() ? null : parseSampling(upserts));
+        return ShellOutcome.status(modelStatus(model, env));
     }
 
     private ChatClient.SamplingOverride parseSampling(final Map<String, String> upserts) {
@@ -285,9 +289,10 @@ public class ConfigCommands implements SlashCommandSet {
     }
 
     /** Render the model status line: active model, sampling overrides, implicit default variant and explicit variants. */
-    private String modelStatus(final String model) {
+    private String modelStatus(final String model, final ShellEnv env) {
+        final var settings = env.session().chatSettings();
         final var sb = new StringBuilder("model: ").append(model);
-        final var sampling = chatClient.sampling();
+        final var sampling = chatClient.sampling(settings);
         if (sampling != null && !sampling.isEmpty()) {
             sb.append(" [sampling ");
             final var fields = new ArrayList<String>();
@@ -297,10 +302,10 @@ public class ConfigCommands implements SlashCommandSet {
             sb.append(String.join(", ", fields));
             sb.append(']');
         }
-        final var variant = chatClient.variant();
+        final var variant = chatClient.variant(settings);
         final boolean namedVariant = variant != null && !variant.isBlank();
         sb.append(" [variant ").append(namedVariant ? variant : "default").append(']');
-        final var implicit = chatClient.implicitVariant();
+        final var implicit = chatClient.implicitVariant(settings);
         if (implicit != null) {
             sb.append(" - default");
             final var fields = new ArrayList<String>();
@@ -317,7 +322,7 @@ public class ConfigCommands implements SlashCommandSet {
                 sb.append("(").append(String.join(", ", fields)).append(')');
             }
         }
-        final var variants = chatClient.variants();
+        final var variants = chatClient.variants(settings);
         final var activeVariant = namedVariant ? variant : "default";
         if (!variants.isEmpty()) {
             sb.append(" - variants: ");
@@ -410,7 +415,7 @@ public class ConfigCommands implements SlashCommandSet {
     private ShellOutcome permissions(final String arg, final ShellEnv env) {
         final var value = arg == null ? "" : arg.strip();
         if (value.equals("show") || value.equals("list")) {
-            final var info = agentSessionService.permissionsInfo();
+            final var info = agentSessionService.permissionsInfo(env.session().runtime());
             final var sb = new StringBuilder("**permissions status (session-scoped)**\n\n");
             sb.append("- permit all: ").append(info.permitAll() ? "on" : "off").append('\n');
             sb.append("- agent mode: ")
@@ -431,7 +436,8 @@ public class ConfigCommands implements SlashCommandSet {
             }
             return ShellOutcome.transcript(sb.toString());
         }
-        final var permitAll = agentSessionService.setPermissions(value);
+        final var permitAll =
+                agentSessionService.setPermissions(value, env.session().runtime());
         if (permitAll == null) {
             return ShellOutcome.status("invalid /permissions value '" + value + "'; expected one of: "
                     + String.join("|", PermissionMode.VALUES) + "|all|none|show");

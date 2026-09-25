@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -77,6 +78,11 @@ public class BashTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var command = arg(args, "command");
         if (command == null || command.isBlank()) {
             return ToolResult.error("command is required");
@@ -94,7 +100,8 @@ public class BashTool implements EmbeddedTool {
         } catch (final IOException e) {
             return ToolResult.error("Cannot start command: " + e.getMessage());
         }
-        emitter.emit(new AgentEvent.ToolStream("bash", "$ " + command));
+        emitter.emit(new AgentEvent.ToolStream(
+                "bash", "$ " + command, context.sessionId(), context.subagentId(), context.subagentName()));
         final var out = new StringBuilder();
         final var streamed = new java.util.concurrent.atomic.AtomicInteger();
         final var reader = new Thread(() -> {
@@ -108,7 +115,8 @@ public class BashTool implements EmbeddedTool {
                         }
                     }
                     if (streamed.incrementAndGet() <= 500 && emitter != null) {
-                        emitter.emit(new AgentEvent.ToolStream("bash", line));
+                        emitter.emit(new AgentEvent.ToolStream(
+                                "bash", line, context.sessionId(), context.subagentId(), context.subagentName()));
                     }
                 }
             } catch (final IOException e) {

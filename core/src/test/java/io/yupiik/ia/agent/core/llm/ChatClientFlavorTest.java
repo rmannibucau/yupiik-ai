@@ -395,11 +395,14 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.top_p", "0.9"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.top_k", "40")));
         client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
-        assertEquals(1, client.variants().size());
-        client.setVariant("balanced");
+        final var settings = new ChatSettings();
+        assertEquals(1, client.variants(settings).size());
+        settings.setVariant("balanced");
 
-        assertEquals("hello there", client.chat(request()).message().content());
-        assertEquals("balanced", client.variant());
+        assertEquals(
+                "hello there",
+                client.chat(request(), settings, () -> false).message().content());
+        assertEquals("balanced", client.variant(settings));
         final var body = bodies.getLast();
         assertEquals(1, occurrences(body, "\"temperature\":0.7"), body);
         assertEquals(1, occurrences(body, "\"top_p\":0.9"), body);
@@ -413,16 +416,19 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
         client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
-        client.setVariant("missing");
-        assertEquals("hello there", client.chat(request()).message().content());
-        assertEquals("missing", client.variant());
+        final var settings = new ChatSettings();
+        settings.setVariant("missing");
+        assertEquals(
+                "hello there",
+                client.chat(request(), settings, () -> false).message().content());
+        assertEquals("missing", client.variant(settings));
         final var body = bodies.getLast();
         // no configured variant was applied and the model has no implicit default
         assertTrue(!body.contains("\"temperature\""), body);
     }
 
     @Test
-    void setProviderResetsTheSelectedVariant() throws Exception {
+    void setProviderKeepsThePerSessionVariantSelection() throws Exception {
         final var cfg = configuration(Map.ofEntries(
                 Map.entry("yca.provider.providers.length", "2"),
                 Map.entry("yca.provider.providers.1.id", "other"),
@@ -435,22 +441,29 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced")));
         client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
-        client.setVariant("balanced");
-        assertEquals("balanced", client.variant());
+        final var settings = new ChatSettings();
+        settings.setVariant("balanced");
+        assertEquals("balanced", client.variant(settings));
         client.setProvider("other");
-        assertNull(client.variant());
+        assertEquals(
+                "balanced",
+                client.variant(settings),
+                "a provider change must not touch the selection owned by a session");
     }
 
     @Test
     void inMemorySamplingOverrideSetsTemperatureTopPAndTopK() throws Exception {
         client = new ChatClient(
                 configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
-        client.setSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
+        final var settings = new ChatSettings();
+        settings.setSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
                 ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.3d),
                 ChatClient.SamplingField.TOP_P, java.util.Optional.of(0.85d),
                 ChatClient.SamplingField.TOP_K, java.util.Optional.of(32d))));
 
-        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(
+                "hello there",
+                client.chat(request(), settings, () -> false).message().content());
         final var body = bodies.getLast();
         assertEquals(1, occurrences(body, "\"temperature\":0.3"), body);
         assertEquals(1, occurrences(body, "\"top_p\":0.85"), body);
@@ -464,11 +477,14 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
         client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
-        client.setVariant("balanced");
-        client.setSampling(ChatClient.SamplingOverride.of(
+        final var settings = new ChatSettings();
+        settings.setVariant("balanced");
+        settings.setSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.empty())));
 
-        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals(
+                "hello there",
+                client.chat(request(), settings, () -> false).message().content());
         final var body = bodies.getLast();
         assertTrue(!body.contains("\"temperature\""), body);
     }
@@ -477,28 +493,30 @@ class ChatClientFlavorTest {
     void implicitVariantReflectsInlineSamplingOverrides() throws Exception {
         client = new ChatClient(
                 configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
-        client.setSampling(ChatClient.SamplingOverride.of(
+        final var settings = new ChatSettings();
+        settings.setSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.25d))));
 
-        final var implicit = client.implicitVariant();
+        final var implicit = client.implicitVariant(settings);
         // test-model has no implicit default; the explicit override surfaces through it
         if (implicit != null) {
             assertEquals(0.25, implicit.temperature(), 0.0);
         }
-        assertNotNull(client.sampling());
+        assertNotNull(client.sampling(settings));
         client.setProvider("default");
-        assertNull(client.sampling(), "provider change must clear in-memory sampling overrides");
+        assertNotNull(client.sampling(settings), "provider change must not clear a session's sampling overrides");
     }
 
     @Test
     void setModelClearsInMemorySamplingOverrides() throws Exception {
         client = new ChatClient(
                 configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
-        client.setSampling(ChatClient.SamplingOverride.of(
+        final var settings = new ChatSettings();
+        settings.setSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TOP_K, java.util.Optional.of(16d))));
-        assertNotNull(client.sampling());
-        client.setModel("other-model");
-        assertNull(client.sampling(), "model change must clear in-memory sampling overrides");
+        assertNotNull(client.sampling(settings));
+        settings.setModel("other-model");
+        assertNull(client.sampling(settings), "model change must clear the session's sampling overrides");
     }
 
     @Test

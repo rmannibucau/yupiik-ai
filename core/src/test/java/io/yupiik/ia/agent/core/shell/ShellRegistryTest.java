@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -27,58 +28,109 @@ import org.junit.jupiter.api.Test;
 
 class ShellRegistryTest {
     @Test
-    void registersAndForwardsEventsToActiveFrontend() {
+    void registersAndForwardsEventsToTheOwningFrontend() {
         final var frontend = new RecordingFrontend();
         final var registry = new ShellRegistry(collecting(null));
-        final var env = new ShellEnv(frontend, null, new ShellSession(), new ConversationTranscript());
+        final var env = env(frontend, "s1");
 
-        assertNull(registry.active());
+        assertNull(registry.active("s1"));
         registry.register(env);
 
-        assertSame(env, registry.active());
-        registry.onEvent(new AgentEvent.Status("working"));
-        registry.onEvent(AgentEvent.Notice.warn("careful"));
-        registry.onEvent(new AgentEvent.Error("boom"));
+        assertSame(env, registry.active("s1"));
+        registry.onEvent(new AgentEvent.Status("working", "s1"));
+        registry.onEvent(new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "careful", null, "s1", null, null));
+        registry.onEvent(new AgentEvent.Error("boom", "s1"));
 
         assertEquals(List.of("status:working", "notice:WARN:careful", "error:boom"), frontend.calls);
+    }
+
+    @Test
+    void untaggedEventsAreDroppedAndNullIdsRejected() {
+        final var frontend = new RecordingFrontend();
+        final var registry = new ShellRegistry(collecting(null));
+        final var env = env(frontend, "s1");
+
+        registry.register(env);
+        registry.onEvent(new AgentEvent.Status("working", null, null, null));
+
+        assertEquals(List.of(), frontend.calls);
+        assertThrows(IllegalArgumentException.class, () -> registry.register(env(frontend, null)));
+    }
+
+    @Test
+    void concurrentSessionsReceiveOnlyTheirOwnEvents() {
+        final var first = new RecordingFrontend();
+        final var second = new RecordingFrontend();
+        final var registry = new ShellRegistry(collecting(null));
+
+        registry.register(env(first, "s1"));
+        registry.register(env(second, "s2"));
+
+        registry.onEvent(new AgentEvent.Status("first working", "s1"));
+        registry.onEvent(new AgentEvent.Status("second working", "s2"));
+        registry.onEvent(new AgentEvent.TextDelta("hello", "s2", null, null));
+        registry.onEvent(new AgentEvent.TextDelta("ignored", "s3", null, null));
+
+        assertEquals(List.of("status:first working"), first.calls);
+        assertEquals(List.of("status:second working", "transcript:hello"), second.calls);
+        assertEquals(List.of("s1", "s2"), registry.sessions().stream().sorted().toList());
     }
 
     @Test
     void unregisteredStopsForwarding() {
         final var frontend = new RecordingFrontend();
         final var registry = new ShellRegistry(collecting(null));
-        final var env = new ShellEnv(frontend, null, new ShellSession(), new ConversationTranscript());
+        final var env = env(frontend, "s1");
 
         registry.register(env);
         registry.unregister(env);
-        registry.onEvent(new AgentEvent.Status("ignored"));
+        registry.onEvent(new AgentEvent.Status("ignored", "s1"));
 
         assertEquals(List.of(), frontend.calls);
-        assertNull(registry.active());
+        assertNull(registry.active("s1"));
+    }
+
+    @Test
+    void closingOneSessionKeepsTheOtherLive() {
+        final var first = new RecordingFrontend();
+        final var second = new RecordingFrontend();
+        final var registry = new ShellRegistry(collecting(null));
+        final var firstEnv = env(first, "s1");
+        registry.register(firstEnv);
+        registry.register(env(second, "s2"));
+
+        registry.unregister(firstEnv);
+        registry.onEvent(new AgentEvent.Status("still working", "s2"));
+
+        assertEquals(List.of(), first.calls);
+        assertEquals(List.of("status:still working"), second.calls);
     }
 
     @Test
     void foreignUnregisterIsIgnored() {
         final var registry = new ShellRegistry(collecting(null));
-        final var env = new ShellEnv(new RecordingFrontend(), null, new ShellSession(), new ConversationTranscript());
+        final var env = env(new RecordingFrontend(), "s1");
         registry.register(env);
 
-        registry.unregister(
-                new ShellEnv(new RecordingFrontend(), null, new ShellSession(), new ConversationTranscript()));
+        registry.unregister(env(new RecordingFrontend(), "s1"));
 
-        assertSame(env, registry.active());
+        assertSame(env, registry.active("s1"));
     }
 
     @Test
     void lifecycleEventsAreBroadcast() {
         final var events = new ArrayList<>();
         final var registry = new ShellRegistry(collecting(events));
-        final var env = new ShellEnv(new RecordingFrontend(), null, new ShellSession(), new ConversationTranscript());
+        final var env = env(new RecordingFrontend(), "s1");
 
         registry.register(env);
         registry.unregister(env);
 
         assertEquals(List.of(new ShellRegistered(env), new ShellUnregistered(env)), events);
+    }
+
+    private static ShellEnv env(final ShellFrontend frontend, final String sessionId) {
+        return new ShellEnv(frontend, null, new ShellSession().sessionId(sessionId), new ConversationTranscript());
     }
 
     private static Emitter collecting(final List<Object> into) {
@@ -113,6 +165,16 @@ class ShellRegistryTest {
         @Override
         public void error(final String message) {
             calls.add("error:" + message);
+        }
+
+        @Override
+        public void onEvent(final AgentEvent event) {
+            if (event instanceof AgentEvent.TextDelta(var delta, var sessionId, var subagentId, var subagentName)) {
+                // like the real frontends, stream text deltas through the transcript
+                transcript(delta);
+            } else {
+                ShellFrontend.super.onEvent(event);
+            }
         }
 
         @Override

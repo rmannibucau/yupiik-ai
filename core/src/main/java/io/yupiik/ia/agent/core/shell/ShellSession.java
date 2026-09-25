@@ -17,11 +17,13 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 
 /**
  * Mutable per-run state shared by all shells: the session coordinates and
  * rendering toggles slash commands change. One instance lives for the
- * duration of a shell execution and is carried by {@link ShellEnv}.
+ * duration of a shell execution (a TUI tab, the CLI session) and is carried by
+ * {@link ShellEnv}.
  */
 public class ShellSession {
     private String sessionId;
@@ -30,6 +32,29 @@ public class ShellSession {
     private volatile ToolOutputVisibility showToolOutput = ToolOutputVisibility.COLLAPSED;
     private volatile boolean busy;
     private MetricsConfiguration metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT);
+    private SessionRuntime runtime;
+
+    /**
+     * This shell's session services (permissions, feedback, todos, usage, status, agent loop
+     * and model selection), created by {@link SessionRuntimeFactory} and wired by reference:
+     * concurrent tabs keep independent state over the shared process services.
+     */
+    public SessionRuntime runtime() {
+        return runtime;
+    }
+
+    public ShellSession runtime(final SessionRuntime runtime) {
+        this.runtime = runtime;
+        return this;
+    }
+
+    /**
+     * Per-shell model selection, owned by the session's {@link SessionRuntime}
+     * (so the agent loop actually runs with it). Null until the runtime is wired.
+     */
+    public ChatSettings chatSettings() {
+        return runtime != null ? runtime.chatSettings() : null;
+    }
 
     /**
      * {@code true} while an agent turn is running; commands that must not run

@@ -21,7 +21,6 @@ import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
-import io.yupiik.ia.agent.core.todo.TodoStore;
 import java.util.List;
 
 /**
@@ -35,11 +34,9 @@ public class InspectCommands implements SlashCommandSet {
     }
 
     private final AgentSessionService agentSessionService;
-    private final TodoStore todoStore;
 
-    public InspectCommands(final AgentSessionService agentSessionService, final TodoStore todoStore) {
+    public InspectCommands(final AgentSessionService agentSessionService) {
         this.agentSessionService = agentSessionService;
-        this.todoStore = todoStore;
     }
 
     @Override
@@ -99,6 +96,6 @@ public class InspectCommands implements SlashCommandSet {
     }
 
     private ShellOutcome todos(final String arg, final ShellEnv env) {
-        return ShellOutcome.transcript(todoStore.render());
+        return ShellOutcome.transcript(env.session().runtime().todos().render());
     }
 }

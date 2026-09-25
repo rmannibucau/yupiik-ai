@@ -115,10 +115,10 @@ class AnsiShellFrontendTest {
     @Test
     void suspensionBuffersEventsAndResumeReplaysThem() {
         final var frontend = frontend(false, true);
-        final var interrupt = new AgentEvent.Status("mid-gate status");
+        final var interrupt = new AgentEvent.Status("mid-gate status", "s1");
 
         frontend.suspendOutput();
-        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden", "s1"));
         frontend.onEvent(interrupt);
         assertEquals("", out.toString());
         assertEquals("", err.toString());
@@ -127,7 +127,7 @@ class AnsiShellFrontendTest {
         assertTrue(out.toString().isEmpty());
         assertTrue(err.toString().contains("mid-gate status"));
 
-        frontend.onEvent(new AgentEvent.Status("after"));
+        frontend.onEvent(new AgentEvent.Status("after", "s1"));
         assertTrue(err.toString().contains("after"));
     }
 
@@ -137,7 +137,7 @@ class AnsiShellFrontendTest {
         frontend.beginTurn();
 
         // a thought delta with no trailing newline leaves an open line
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("reasoning"));
 
         // suspending for an interaction must terminate that line so the stdout card
@@ -148,7 +148,7 @@ class AnsiShellFrontendTest {
                 "open thought line must terminate on suspend: " + err);
 
         // events buffered while suspended stay silent until resume
-        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("hidden", "s1"));
         assertEquals("", out.toString(StandardCharsets.UTF_8));
 
         frontend.resumeOutput();
@@ -189,7 +189,7 @@ class AnsiShellFrontendTest {
         // the freshly drawn prompt once the answer is ready).
         frontend.suspendOutput();
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.TurnDone("answer"));
+        frontend.onEvent(new AgentEvent.TurnDone("answer", "s1"));
         frontend.resumeOutput();
         assertFalse(frontend.spinnerRunning(), "spinner must stay off after a buffered TurnDone");
 
@@ -205,11 +205,11 @@ class AnsiShellFrontendTest {
     void streamsAnswerToStdoutAndCountsTools() {
         final var frontend = frontend(false, false);
 
-        frontend.onEvent(new AgentEvent.TextDelta("hel"));
-        frontend.onEvent(new AgentEvent.TextDelta("lo"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read_file", "{}"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "out", true));
-        frontend.onEvent(new AgentEvent.TurnDone("hello"));
+        frontend.onEvent(new AgentEvent.TextDelta("hel", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("lo", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "out", true, "s1"));
+        frontend.onEvent(new AgentEvent.TurnDone("hello", "s1"));
         frontend.endTurn();
 
         assertEquals("hello\n", out.toString(StandardCharsets.UTF_8));
@@ -220,8 +220,8 @@ class AnsiShellFrontendTest {
     void hiddenThinkingTriggersActivityOnly() {
         final var frontend = frontend(false, false);
 
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
-        frontend.onEvent(new AgentEvent.UsageUpdated(null, 100, 5.0));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
+        frontend.onEvent(new AgentEvent.UsageUpdated(null, 100, 5.0, "s1"));
 
         assertTrue(err.toString(StandardCharsets.UTF_8).isEmpty());
         assertEquals(100, frontend.stats().lastUsage().estimatedContextTokens());
@@ -272,12 +272,12 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(true, true, true);
         frontend.beginTurn();
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
         assertTrue(err.toString().contains("reasoning"));
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1"));
         assertTrue(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
         assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
     }
@@ -304,13 +304,13 @@ class AnsiShellFrontendTest {
         // ...then a background subagent (emitting on the shared bus) sends its own
         // thinking/tool deltas and finally its completion; none of those must re-arm
         // the spinner now that the turn is over, otherwise it would spin forever
-        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent pondering", "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent pondering", null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning(), "late thinking delta must not restart the spinner");
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning(), "late tool start must not restart the spinner");
-        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent ponder again", "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("subagent ponder again", null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.TurnDone("subagent answer", "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.TurnDone("subagent answer", null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning());
     }
 
@@ -322,7 +322,7 @@ class AnsiShellFrontendTest {
 
         // the actor completes (main answer streamed, then TurnDone): the spinner must
         // already be gone before endTurn, so no dangling spin is ever visible at the prompt
-        frontend.onEvent(new AgentEvent.TurnDone("answer"));
+        frontend.onEvent(new AgentEvent.TurnDone("answer", "s1"));
         assertFalse(frontend.spinnerRunning());
         frontend.endTurn();
         assertFalse(frontend.spinnerRunning());
@@ -336,10 +336,10 @@ class AnsiShellFrontendTest {
 
         // streamed tool output owns the terminal line: the spinner must be gone
         // rather than animating frames between the output fragments
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
         assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line"));
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "second fragment"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "second fragment", "s1"));
         assertFalse(frontend.spinnerRunning(), "spinner restarted between stream fragments");
 
         frontend.endTurn();
@@ -351,7 +351,7 @@ class AnsiShellFrontendTest {
         final var frontend = frontend(CliVerbosity.RAW, true, false);
         frontend.beginTurn();
         assertTrue(frontend.spinnerRunning());
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
         assertFalse(frontend.spinnerRunning(), "streamed output must stop the spinner");
         assertTrue(err.toString(StandardCharsets.UTF_8).contains("streamed line\n"));
         frontend.endTurn();
@@ -380,8 +380,8 @@ class AnsiShellFrontendTest {
                 // finish stops then re-arms the spinner (hidden thinking),
                 // probing the teardown window on every single event
                 for (int j = 0; j < 50; j++) {
-                    frontend.onEvent(new AgentEvent.ToolFinished("bash", "done " + j, true));
-                    frontend.onEvent(new AgentEvent.ThinkingDelta("late thought " + j));
+                    frontend.onEvent(new AgentEvent.ToolFinished("bash", "done " + j, true, "s1"));
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("late thought " + j, "s1"));
                 }
             });
             try {
@@ -401,9 +401,9 @@ class AnsiShellFrontendTest {
         frontend.beginTurn();
 
         // a thought delta that does not end with a newline
-        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
         // a following tool line must not be glued onto the thought line
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", "s1"));
 
         final var stderr = err.toString(StandardCharsets.UTF_8);
         // the thought delta is ANSI-wrapped (\u001b[38;5;240m...\u001b[0m); the guard must

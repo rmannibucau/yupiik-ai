@@ -57,8 +57,8 @@ class CliCommandTest {
     void verbosePrintsFullOutputForNonStreamedTool() throws Exception {
         final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN);
 
-        dispatcher.accept(new AgentEvent.ToolStarted("read_file", "{}"));
-        dispatcher.accept(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
+        dispatcher.accept(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
+        dispatcher.accept(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, "s1"));
 
         final var stderr = err.toString(StandardCharsets.UTF_8);
         assertTrue(stderr.contains("line1"), "verbose should show the full non-streamed output:\n" + stderr);
@@ -69,9 +69,9 @@ class CliCommandTest {
     void verboseDoesNotReprintStreamedToolOutput() throws Exception {
         final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN);
 
-        dispatcher.accept(new AgentEvent.ToolStarted("bash", "{}"));
-        dispatcher.accept(new AgentEvent.ToolStream("bash", "streamed line"));
-        dispatcher.accept(new AgentEvent.ToolFinished("bash", "streamed line", true));
+        dispatcher.accept(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        dispatcher.accept(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
+        dispatcher.accept(new AgentEvent.ToolFinished("bash", "streamed line", true, "s1"));
 
         final var stderr = err.toString(StandardCharsets.UTF_8);
         // streamed output must be printed live but not re-printed from ToolFinished.output

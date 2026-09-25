@@ -61,19 +61,15 @@ public class ToolRegistry {
                 .findFirst()
                 .map(CodeResolveTool.class::cast)
                 .orElse(null);
-        if (resolve == null) {
-            return all.stream()
-                    .map(t -> Tool.function(t.name(), t.description(), t.schema()))
-                    .toList();
-        }
-        final var usable = resolve.usable();
-        return all.stream()
-                .filter(t -> {
-                    if (usable) {
+        final var stream = resolve == null
+                ? all.stream()
+                : all.stream().filter(t -> {
+                    if (resolve.usable()) {
                         return !CodeResolveTool.prunedRichToolNames().contains(t.name());
                     }
                     return !CodeResolveTool.prunedRichToolNames().contains(t.name()) && !(t instanceof CodeResolveTool);
-                })
+                });
+        return stream.filter(EmbeddedTool::usable)
                 .map(t -> Tool.function(t.name(), t.description(), t.schema()))
                 .toList();
     }
@@ -81,6 +77,9 @@ public class ToolRegistry {
     public String describe() {
         final var sb = new StringBuilder();
         for (final var t : tools()) {
+            if (!t.usable()) {
+                continue;
+            }
             sb.append("- ")
                     .append(t.name())
                     .append(": ")

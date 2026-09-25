@@ -39,34 +39,28 @@ public class PlanTodoSeeder {
     private static final int MAX_PLAN_CHARS = 8_000;
 
     private final ChatClient chatClient;
-    private final TodoStore todoStore;
     private final SessionStore sessionStore;
     private final JsonMapper mapper;
 
-    public PlanTodoSeeder(
-            final ChatClient chatClient,
-            final TodoStore todoStore,
-            final SessionStore sessionStore,
-            final JsonMapper mapper) {
+    public PlanTodoSeeder(final ChatClient chatClient, final SessionStore sessionStore, final JsonMapper mapper) {
         this.chatClient = chatClient;
-        this.todoStore = todoStore;
         this.sessionStore = sessionStore;
         this.mapper = mapper;
     }
 
     protected PlanTodoSeeder() {
         this.chatClient = null;
-        this.todoStore = null;
         this.sessionStore = null;
         this.mapper = null;
     }
 
     /**
+     * @param todoStore the session's own todo list (one per tab)
      * @return the outcome of trying to seed the todo list from the last assistant
      * plan, so callers can surface an accurate status message.
      */
-    public SeedResult seedFromLastAssistant(final String sessionId) {
-        if (!todoStore.all().isEmpty()) {
+    public SeedResult seedFromLastAssistant(final String sessionId, final TodoStore todoStore) {
+        if (todoStore == null || !todoStore.all().isEmpty()) {
             return SeedResult.ALREADY_POPULATED;
         }
         final var plan = lastAssistantContent(sessionId);
@@ -166,7 +160,7 @@ public class PlanTodoSeeder {
                 return null;
             }
             final var out = new ArrayList<TodoItem>();
-            for (final var t : todoStore.from(raw)) {
+            for (final var t : TodoStore.from(raw)) {
                 if (t.isValid()) {
                     out.add(t);
                 }
@@ -194,7 +188,7 @@ public class PlanTodoSeeder {
                 return null;
             }
             final var out = new ArrayList<TodoItem>();
-            for (final var t : todoStore.from(raw)) {
+            for (final var t : TodoStore.from(raw)) {
                 if (t.isValid()) {
                     out.add(t);
                 }

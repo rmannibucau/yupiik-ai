@@ -20,7 +20,7 @@
     <tamboui.version>0.4.0</tamboui.version>
     <jline.version>3.25.1</jline.version>
     <junit.version>6.0.2</junit.version>
-    <yupiik-tools.version>1.2.16</yupiik-tools.version>
+    <yupiik-tools.version>1.2.17-SNAPSHOT</yupiik-tools.version>
   </properties>
 
   <dependencyManagement>

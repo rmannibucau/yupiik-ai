@@ -32,6 +32,7 @@ import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
@@ -47,6 +48,7 @@ import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -262,10 +264,11 @@ class AgentLoopTest {
     }
 
     @Test
-    void resiliencePausesAreSurfacedAndListenerResetAfterTheTurn() {
+    void resiliencePausesAreSurfacedAndTheListenerNeverLeaksToTheNextTurn() {
         final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", true)));
         final var client = chatClient(replies, new ArrayList<>());
-        final var result = loop(client, null, configuration(true)).run("do it", null, "s1", null, () -> false);
+        final var agentLoop = loop(client, null, configuration(true));
+        final var result = agentLoop.run("do it", null, "s1", null, () -> false);
 
         assertEquals("done", result);
         assertTrue(
@@ -279,7 +282,20 @@ class AgentLoopTest {
                         .anyMatch(e ->
                                 e instanceof AgentEvent.Status s && s.message().contains("Rate limit")),
                 "throttle pauses must surface as a status");
-        assertNull(pauseListenerReference.get(), "the pause listener must be cleared after the turn");
+
+        // each call carries its own listener, so a later turn on the same loop can never re-fire the previous one
+        final var pausesAfterFirstTurn = pauseEvents();
+        replies.add(new ScriptedReply("again", "stop", false));
+        agentLoop.run("do it again", null, "s2", null, () -> false);
+
+        assertEquals(pausesAfterFirstTurn, pauseEvents(), "a later turn must not replay the previous pauses");
+    }
+
+    private long pauseEvents() {
+        return events.stream()
+                .filter(e -> (e instanceof AgentEvent.Notice n && n.message().contains("retrying"))
+                        || (e instanceof AgentEvent.Status s && s.message().contains("Rate limit")))
+                .count();
     }
 
     @Test
@@ -525,6 +541,8 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
                 if (calls.incrementAndGet() == 1) {
@@ -534,9 +552,6 @@ class AgentLoopTest {
                 onDelta.accept(new End("stop", null));
                 return Message.assistant("all done", null);
             }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {}
         };
         final var result = loop(client, null, configuration(true), manager, store, view)
                 .run("do it", null, "s1", null, () -> false);
@@ -712,6 +727,8 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
                 requests.add(List.copyOf(request.messages()));
@@ -728,9 +745,6 @@ class AgentLoopTest {
                 onDelta.accept(new End("stop", null));
                 return Message.assistant("gave up looping", null);
             }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {}
         };
         final var registry = new ToolRegistry(null) {
             @Override
@@ -809,6 +823,8 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
                 requests.add(List.copyOf(request.messages()));
@@ -836,9 +852,6 @@ class AgentLoopTest {
                     }
                 };
             }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {}
         };
         final var result = loop(
                         client,
@@ -878,6 +891,8 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
                 requests.add(List.copyOf(request.messages()));
@@ -894,9 +909,6 @@ class AgentLoopTest {
                 onDelta.accept(new End("stop", null));
                 return Message.assistant("written", null);
             }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {}
         };
         final var history = List.of(
                 Message.user("show me the file"),
@@ -1035,8 +1047,9 @@ class AgentLoopTest {
     private ToolExecutionService directExecutions() {
         return new ToolExecutionService() {
             @Override
-            public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
-                return tool.execute(args);
+            public ToolResult execute(
+                    final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
+                return tool.execute(args, context);
             }
         };
     }
@@ -1167,6 +1180,8 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
                 requests.add(List.copyOf(request.messages()));
@@ -1176,9 +1191,6 @@ class AgentLoopTest {
                 onDelta.accept(new End("stop", null));
                 return Message.assistant("all done", null);
             }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {}
         };
     }
 
@@ -1366,18 +1378,20 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled)
                     throws IOException {
+                pauseListenerReference.set(pauseListener);
                 final var reply = replies.poll();
                 if (reply == null) {
                     throw new IllegalStateException("no scripted reply left");
                 }
                 requests.add(List.copyOf(request.messages()));
-                final var listener = pauseListenerReference.get();
-                if (listener != null && reply.firePauses()) {
-                    listener.accept(PauseEvent.retry("LLM call failed, retrying in ~2s (attempt 2)", 2000));
-                    listener.accept(PauseEvent.throttle("Rate limit reached, waiting ~5s", 5000));
+                if (pauseListener != null && reply.firePauses()) {
+                    pauseListener.accept(PauseEvent.retry("LLM call failed, retrying in ~2s (attempt 2)", 2000));
+                    pauseListener.accept(PauseEvent.throttle("Rate limit reached, waiting ~5s", 5000));
                 }
                 if (reply.error() != null) {
                     throw reply.error();
@@ -1392,11 +1406,6 @@ class AgentLoopTest {
                     onDelta.accept(new End(reply.finishReason(), null));
                 }
                 return reply.toMessage();
-            }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {
-                pauseListenerReference.set(listener);
             }
         };
     }

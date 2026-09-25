@@ -100,8 +100,23 @@ public final class LlmClientResilienceWrapper {
      */
     public CompletionStage<LlmResponse> chat(
             final Dialect dialect, final LlmRequest request, final BooleanSupplier cancelled) {
-        return acquire()
-                .thenCompose(_ -> attempt(dialect, request, cancelled))
+        return chat(dialect, request, cancelled, null);
+    }
+
+    /**
+     * Run a non-streaming completion with a pause listener scoped to this call only: throttle,
+     * concurrency-cap and retry-backoff notifications go to {@code listener} instead of the
+     * process-wide one. Falls back to the constructor listener when {@code listener} is {@code null}.
+     * This is how concurrent callers (several tabs/sessions) each see only their own pauses.
+     */
+    public CompletionStage<LlmResponse> chat(
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener) {
+        final var pause = listener == null ? pauseListener : listener;
+        return acquire(pause)
+                .thenCompose(_ -> attempt(dialect, request, cancelled, pause))
                 .whenComplete((result, error) -> release());
     }
 
@@ -115,7 +130,20 @@ public final class LlmClientResilienceWrapper {
      */
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final Dialect dialect, final LlmRequest request, final BooleanSupplier cancelled) {
-        return acquire().thenCompose(_unused -> {
+        return stream(dialect, request, cancelled, null);
+    }
+
+    /**
+     * Stream a completion with a pause listener scoped to this call only (see
+     * {@link #chat(Dialect, LlmRequest, BooleanSupplier, Consumer)}).
+     */
+    public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener) {
+        final var pause = listener == null ? pauseListener : listener;
+        return acquire(pause).thenCompose(_unused -> {
             final var setup = dialect.stream(request, cancelled);
             setup.whenComplete((pub, error) -> {
                 if (error != null) {
@@ -133,7 +161,8 @@ public final class LlmClientResilienceWrapper {
      * @return the listed models.
      */
     public CompletionStage<LlmModels> models(final Dialect dialect) {
-        return acquire().thenCompose(_unused -> dialect.models().whenComplete((result, error) -> release()));
+        return acquire(pauseListener)
+                .thenCompose(_unused -> dialect.models().whenComplete((result, error) -> release()));
     }
 
     private void release() {
@@ -143,10 +172,13 @@ public final class LlmClientResilienceWrapper {
     }
 
     private CompletionStage<LlmResponse> attempt(
-            final Dialect dialect, final LlmRequest request, final BooleanSupplier cancelled) {
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener) {
         final var result = new CompletableFuture<LlmResponse>();
         try {
-            retry(dialect, request, cancelled, 1).whenComplete((response, error) -> {
+            retry(dialect, request, cancelled, 1, listener).whenComplete((response, error) -> {
                 if (error != null) {
                     result.completeExceptionally(unwrap(error));
                 } else {
@@ -160,7 +192,11 @@ public final class LlmClientResilienceWrapper {
     }
 
     private CompletionStage<LlmResponse> retry(
-            final Dialect dialect, final LlmRequest request, final BooleanSupplier cancelled, final int attempt) {
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final int attempt,
+            final Consumer<PauseEvent> listener) {
         final var result = new CompletableFuture<LlmResponse>();
         final var future = dialect.chat(request, cancelled);
         future.whenComplete((response, error) -> {
@@ -174,8 +210,8 @@ public final class LlmClientResilienceWrapper {
                         retry = attempt < config.retriesMaxAttempts() && retryable(cause);
                     }
                     if (retry) {
-                        concurrencyLimitDetected(cause);
-                        retryAfter(attempt, cause, dialect, request, cancelled)
+                        concurrencyLimitDetected(cause, listener);
+                        retryAfter(attempt, cause, dialect, request, cancelled, listener)
                                 .whenComplete((r, e) -> completeInto(result, r, e));
                     } else {
                         result.completeExceptionally(cause);
@@ -223,7 +259,8 @@ public final class LlmClientResilienceWrapper {
             final Throwable lastError,
             final Dialect dialect,
             final LlmRequest request,
-            final BooleanSupplier cancelled) {
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener) {
         final var result = new CompletableFuture<LlmResponse>();
         final var jitter = (long) (ThreadLocalRandom.current().nextDouble(0.5d, 1.0d)
                 * config.retriesBaseDelayMs()
@@ -243,11 +280,11 @@ public final class LlmClientResilienceWrapper {
             }
         }
         final var reason = lastError.getMessage() + " -> wait " + (waitMs / 1000) + "s (" + waitReason + ")";
-        if (pauseListener != null) {
-            pauseListener.accept(new PauseEvent(attempt, reason, waitMs));
+        if (listener != null) {
+            listener.accept(new PauseEvent(attempt, reason, waitMs));
         }
         CompletableFuture.delayedExecutor(Math.max(1L, (long) (waitMs * config.waitScale())), TimeUnit.MILLISECONDS)
-                .execute(() -> retry(dialect, request, cancelled, attempt + 1)
+                .execute(() -> retry(dialect, request, cancelled, attempt + 1, listener)
                         .whenComplete((r, e) -> completeInto(result, r, e)));
         return result;
     }
@@ -341,7 +378,7 @@ public final class LlmClientResilienceWrapper {
         return null;
     }
 
-    private void concurrencyLimitDetected(final Throwable error) {
+    private void concurrencyLimitDetected(final Throwable error, final Consumer<PauseEvent> listener) {
         final Integer limit = concurrencyLimit(error);
         if (limit == null || limit <= 0) {
             return;
@@ -358,8 +395,8 @@ public final class LlmClientResilienceWrapper {
             adaptedConcurrency = Math.max(1, limit);
             adaptedUntilMs = System.currentTimeMillis() + CONCURRENCY_LIMIT_RELAX_MS;
         }
-        if (pauseListener != null) {
-            pauseListener.accept(new PauseEvent(
+        if (listener != null) {
+            listener.accept(new PauseEvent(
                     0, "concurrency limit " + limit + " detected for this provider, capping concurrent requests", 0));
         }
     }
@@ -390,9 +427,9 @@ public final class LlmClientResilienceWrapper {
     }
 
     /** Throttle (token bucket) then acquire the concurrency permit; both interruptible. */
-    private CompletionStage<Void> acquire() {
+    private CompletionStage<Void> acquire(final Consumer<PauseEvent> listener) {
         try {
-            throttle(null);
+            throttle(null, listener);
             relaxAdaptedConcurrency();
             if (semaphore != null) {
                 semaphore.acquire();
@@ -404,7 +441,8 @@ public final class LlmClientResilienceWrapper {
         }
     }
 
-    private void throttle(final BooleanSupplier cancelled) throws InterruptedException {
+    private void throttle(final BooleanSupplier cancelled, final Consumer<PauseEvent> listener)
+            throws InterruptedException {
         final var perMinute = config.rateLimitRequestsPerMinute();
         if (perMinute <= 0) {
             return;
@@ -426,8 +464,8 @@ public final class LlmClientResilienceWrapper {
             if (cancelled != null && cancelled.getAsBoolean()) {
                 throw new InterruptedException("cancelled");
             }
-            if (pauseListener != null) {
-                pauseListener.accept(new PauseEvent(0, "throttle", Math.max(1, waitMs)));
+            if (listener != null) {
+                listener.accept(new PauseEvent(0, "throttle", Math.max(1, waitMs)));
             }
             sleepInterruptibly(Math.max(1, waitMs), cancelled);
         }

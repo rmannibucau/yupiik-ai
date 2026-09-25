@@ -18,10 +18,10 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.question.Question;
-import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayList;
 import java.util.List;
@@ -29,16 +29,13 @@ import java.util.Map;
 
 @ApplicationScoped
 public class AskUserTool implements EmbeddedTool {
-    private final UserFeedbackService userFeedbackService;
     private final JsonMapper mapper;
 
-    public AskUserTool(final UserFeedbackService userFeedbackService, final JsonMapper mapper) {
-        this.userFeedbackService = userFeedbackService;
+    public AskUserTool(final JsonMapper mapper) {
         this.mapper = mapper;
     }
 
     protected AskUserTool() {
-        this.userFeedbackService = null;
         this.mapper = null;
     }
 
@@ -89,6 +86,20 @@ public class AskUserTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return ToolResult.error("ask_user requires an active session context.");
+    }
+
+    /**
+     * The questions are routed through the asking session's feedback service
+     * (passed explicitly in the context) so the prompt renders in the tab that
+     * started the turn, never in another concurrently running session.
+     */
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var service = context != null ? context.feedback() : null;
+        if (service == null) {
+            return ToolResult.error("ask_user requires an active session feedback gate.");
+        }
         final var raw = args.get("questions");
         if (!(raw instanceof final List<?> list) || list.isEmpty()) {
             return ToolResult.error("questions must be a non empty array of {id, prompt, options, multiple}");
@@ -125,7 +136,7 @@ public class AskUserTool implements EmbeddedTool {
             final var multiple = Boolean.TRUE.equals(map.get("multiple"));
             questions.add(new Question(id, prompt, options, multiple));
         }
-        final var answers = userFeedbackService.ask(questions);
+        final var answers = service.ask(questions);
         if (answers == null) {
             return ToolResult.error("ask_user is not available in headless mode (no interactive gate).");
         }

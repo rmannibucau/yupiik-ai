@@ -136,4 +136,11 @@ public record TuiConfiguration(
         List<String> pricing,
 
         @Property(documentation = "Conversation transcript retention settings.")
-        TuiTranscriptConfiguration transcript) {}
+        TuiTranscriptConfiguration transcript,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Hide the terminal hardware cursor while the TUI runs: only the in-app drawn caret is shown "
+                                + "on the prompt. Disable to keep the terminal cursor visible next to the drawn one.")
+        boolean hideCursor) {}

@@ -72,10 +72,25 @@ public final class DialectLlmClient implements LlmClient {
         return helper.chat(delegate, request, cancelled);
     }
 
+    /**
+     * Chat with a pause listener scoped to this call: throttle, concurrency-cap and retry-backoff
+     * notifications go to {@code listener} instead of the shared one.
+     */
+    public CompletionStage<LlmResponse> chat(
+            final LlmRequest request, final BooleanSupplier cancelled, final Consumer<PauseEvent> listener) {
+        return helper.chat(delegate, request, cancelled, listener);
+    }
+
     @Override
     public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
             final LlmRequest request, final BooleanSupplier cancelled) {
         return helper.stream(delegate, request, cancelled);
+    }
+
+    /** Stream with a pause listener scoped to this call (see {@link #chat(LlmRequest, BooleanSupplier, Consumer)}). */
+    public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
+            final LlmRequest request, final BooleanSupplier cancelled, final Consumer<PauseEvent> listener) {
+        return helper.stream(delegate, request, cancelled, listener);
     }
 
     @Override

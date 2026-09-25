@@ -1,0 +1,447 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.permissions;
+
+import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.BashPermissionsConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * Compiles the {@code yca.permissions.bash.rules} configuration into fast matchers and evaluates
+ * bash commands against them.
+ *
+ * <p>The command is split into segments on {@code &&}, {@code ||}, {@code ;}, {@code |}, single {@code &}
+ * and newlines with a quote aware tokenizer (line continuations and pipelines spanning several lines are
+ * supported). Every segment must match a rule resolving to {@code all}/{@code yolo} for the active agent
+ * mode for the whole command to be auto-allowed; redirections, command substitutions and excluded options
+ * (eg. {@code sed -i}) make the segment fall back to the normal ask/gate flow.</p>
+ */
+public final class BashRules {
+
+    /** Result of a command evaluation: whether the command is auto-allowed and its arity-style prefix. */
+    public record Evaluation(boolean allowed, String prefix) {}
+
+    private BashRules() {
+        // no-op
+    }
+
+    public static Compiled compile(final BashPermissionsConfiguration configuration) {
+        if (configuration == null
+                || configuration.rules() == null
+                || configuration.rules().isEmpty()) {
+            return new Compiled(List.of());
+        }
+        final var rules = new ArrayList<CompiledRule>();
+        for (final CommandPermissionConfiguration rule : configuration.rules()) {
+            if (rule == null || rule.matcher() == null || rule.matcher().commandStart() == null) {
+                continue;
+            }
+            final var commandStart = rule.matcher().commandStart().normalizedOptions();
+            if (commandStart.isEmpty()) {
+                continue;
+            }
+            rules.add(new CompiledRule(
+                    commandStart, compileExcludes(rule.matcher().excludeOptions()), rule.plan(), rule.defaultMode()));
+        }
+        return new Compiled(rules);
+    }
+
+    private static Excludes compileExcludes(final List<CommandOptionsConfiguration> excludeOptions) {
+        final var exact = new HashSet<String>();
+        final var longOptions = new ArrayList<String>();
+        final var sequences = new ArrayList<List<String>>();
+        if (excludeOptions != null) {
+            for (final CommandOptionsConfiguration unit : excludeOptions) {
+                if (unit == null) {
+                    continue;
+                }
+                final var options = unit.normalizedOptions();
+                if (options.isEmpty()) {
+                    continue;
+                }
+                if (options.size() == 1) {
+                    final var option = options.get(0);
+                    if (option.startsWith("--")) {
+                        longOptions.add(option);
+                    } else {
+                        exact.add(option);
+                    }
+                } else {
+                    sequences.add(options);
+                }
+            }
+        }
+        return new Excludes(exact, longOptions, sequences);
+    }
+
+    public static final class Compiled {
+        private static final Set<String> TOLERATED_REDIRECTS = Set.of("2>/dev/null", ">/dev/null", "2>&1");
+
+        private final List<CompiledRule> rules;
+
+        private Compiled(final List<CompiledRule> rules) {
+            this.rules = rules;
+        }
+
+        /**
+         * @param agentMode the active agent mode, selecting the {@code plan} or {@code default} value of each rule.
+         * @param command the raw bash command.
+         * @return whether every segment of the command is auto-allowed by a rule resolving to {@code all}/{@code yolo},
+         * plus the arity-style command prefix (matched rule {@code commandStart}) used to key session grants.
+         */
+        public Evaluation evaluate(final AgentMode agentMode, final String command) {
+            if (command == null || command.isBlank()) {
+                return new Evaluation(true, null);
+            }
+            final var segments = tokenize(command);
+            var allowed = true;
+            var matchedSegments = 0;
+            var matchedStart = (String) null;
+            for (final var segment : segments) {
+                final var decision = evaluateSegment(segment, agentMode);
+                if (!decision.allowed()) {
+                    allowed = false;
+                }
+                if (decision.matchedStart() != null) {
+                    matchedSegments++;
+                    if (matchedStart == null) {
+                        matchedStart = decision.matchedStart();
+                    }
+                }
+            }
+            // the fine grained prefix is only meaningful for plain single segment commands: a compound
+            // command approved once must not silently unlock its other segments
+            return new Evaluation(allowed, segments.size() == 1 && matchedSegments == 1 ? matchedStart : null);
+        }
+
+        /** Command segments (quote aware, operators stripped) as normalized text, for allow/deny pattern matching. */
+        public List<String> segments(final String command) {
+            if (command == null || command.isBlank()) {
+                return List.of();
+            }
+            final var segments = new ArrayList<String>();
+            for (final var segment : tokenize(command)) {
+                final var sb = new StringBuilder();
+                for (final var token : segment.tokens()) {
+                    if (sb.length() > 0) {
+                        sb.append(' ');
+                    }
+                    sb.append(token.text());
+                }
+                if (sb.length() > 0) {
+                    segments.add(sb.toString());
+                }
+            }
+            return segments;
+        }
+
+        private record SegmentDecision(boolean allowed, String matchedStart) {}
+
+        private SegmentDecision evaluateSegment(final Segment segment, final AgentMode agentMode) {
+            final var effective = new ArrayList<Token>(segment.tokens().size());
+            for (final var token : segment.tokens()) {
+                if (!TOLERATED_REDIRECTS.contains(token.text())) {
+                    effective.add(token);
+                }
+            }
+            // remaining redirections (>, <) and command substitutions ($(), backticks) are never auto-allowed
+            for (final var token : effective) {
+                if (token.redirect() || token.substitution()) {
+                    return new SegmentDecision(false, null);
+                }
+            }
+            var i = 0;
+            while (i < effective.size() && isEnvAssignment(effective.get(i).text())) {
+                i++;
+            }
+            if (i >= effective.size()) {
+                return new SegmentDecision(true, null); // pure env assignments
+            }
+            if ("cd".equals(effective.get(i).text())) {
+                return new SegmentDecision(true, null); // directory change has no repository side effect
+            }
+            final var tokens = new ArrayList<String>(effective.size() - i);
+            for (var j = i; j < effective.size(); j++) {
+                tokens.add(effective.get(j).text());
+            }
+            var allowed = false;
+            var bestStart = (String) null;
+            var bestLength = 0;
+            for (final var rule : rules) {
+                if (rule.matches(tokens)) {
+                    if (bestStart == null || rule.commandStart().size() > bestLength) {
+                        bestStart = String.join(" ", rule.commandStart());
+                        bestLength = rule.commandStart().size();
+                    }
+                    if (rule.resolve(agentMode) == PermissionMode.YOLO) {
+                        allowed = true;
+                    }
+                }
+            }
+            return new SegmentDecision(allowed, bestStart);
+        }
+
+        // ------------------------------------------------------------------
+        // quote aware tokenizer with operator segmentation
+        // ------------------------------------------------------------------
+
+        private record Token(String text, boolean redirect, boolean substitution) {}
+
+        private record Segment(List<Token> tokens) {}
+
+        private static final class TokenBuilder {
+            private final StringBuilder text = new StringBuilder();
+            private boolean started;
+            private boolean redirect;
+            private boolean substitution;
+
+            void append(final char c) {
+                text.append(c);
+                started = true;
+            }
+
+            void markRedirect() {
+                redirect = true;
+                started = true;
+            }
+
+            void markSubstitution() {
+                substitution = true;
+                started = true;
+            }
+
+            boolean endsWithRedirect() {
+                return text.length() > 0
+                        && (text.charAt(text.length() - 1) == '>' || text.charAt(text.length() - 1) == '<');
+            }
+
+            Token build() {
+                final var token = new Token(text.toString(), redirect, substitution);
+                reset();
+                return token;
+            }
+
+            void reset() {
+                text.setLength(0);
+                started = false;
+                redirect = false;
+                substitution = false;
+            }
+        }
+
+        private static List<Segment> tokenize(final String raw) {
+            final var segments = new ArrayList<Segment>();
+            var tokens = new ArrayList<Token>();
+            final var builder = new TokenBuilder();
+            var continuation = false; // the previous separator (|, ||, &&) expects the command to continue
+            final var length = raw.length();
+            for (var i = 0; i < length; i++) {
+                final var c = raw.charAt(i);
+                if (c == ' ' || c == '\t' || c == '\r') {
+                    if (builder.started) {
+                        tokens.add(builder.build());
+                    }
+                    continue;
+                }
+                if (c == '\n') {
+                    if (continuation && tokens.isEmpty() && !builder.started) {
+                        continue; // the pipeline continues on the next line
+                    }
+                    if (builder.started) {
+                        tokens.add(builder.build());
+                    }
+                    if (!tokens.isEmpty()) {
+                        segments.add(new Segment(tokens));
+                        tokens = new ArrayList<>();
+                    }
+                    continuation = false;
+                    continue;
+                }
+                if (c == ';' || c == '&' || c == '|') {
+                    if (c == '&' && builder.endsWithRedirect()) {
+                        builder.append(c); // fd manipulation such as 2>&1 stays part of the redirect token
+                        builder.markRedirect();
+                        continue;
+                    }
+                    if (builder.started) {
+                        tokens.add(builder.build());
+                    }
+                    if (!tokens.isEmpty()) {
+                        segments.add(new Segment(tokens));
+                        tokens = new ArrayList<>();
+                    }
+                    if (c == '|') {
+                        continuation = true;
+                    } else if (c == '&' && i + 1 < length && raw.charAt(i + 1) == '&') {
+                        i++;
+                        continuation = true;
+                    } else {
+                        continuation = false;
+                    }
+                    continue;
+                }
+                if (c == '\'') { // literal until the closing quote
+                    for (i = i + 1; i < length && raw.charAt(i) != '\''; i++) {
+                        builder.append(raw.charAt(i));
+                    }
+                    continue;
+                }
+                if (c == '"') { // $() and backticks are live, backslash escapes
+                    for (i = i + 1; i < length && raw.charAt(i) != '"'; i++) {
+                        final var d = raw.charAt(i);
+                        if (d == '\\' && i + 1 < length && raw.charAt(i + 1) != '\n') {
+                            builder.append(raw.charAt(++i));
+                            continue;
+                        }
+                        if (d == '`' || (d == '$' && i + 1 < length && raw.charAt(i + 1) == '(')) {
+                            builder.markSubstitution();
+                        }
+                        builder.append(d);
+                    }
+                    continue;
+                }
+                if (c == '\\') {
+                    if (i + 1 < length) {
+                        final var next = raw.charAt(i + 1);
+                        if (next == '\n') {
+                            i++; // consume the newline too: the line continues without a separator
+                            continue;
+                        }
+                        builder.append(next);
+                        i++;
+                    }
+                    continue;
+                }
+                if (c == '>' || c == '<') {
+                    builder.append(c);
+                    builder.markRedirect();
+                    continue;
+                }
+                if (c == '$') {
+                    if (i + 1 < length && raw.charAt(i + 1) == '(') {
+                        builder.markSubstitution();
+                        builder.append('$');
+                        builder.append('(');
+                        i++;
+                    } else {
+                        builder.append(c);
+                    }
+                    continue;
+                }
+                if (c == '`') {
+                    builder.markSubstitution();
+                    builder.append(c);
+                    continue;
+                }
+                builder.append(c);
+            }
+            if (builder.started) {
+                tokens.add(builder.build());
+            }
+            if (!tokens.isEmpty()) {
+                segments.add(new Segment(tokens));
+            }
+            return segments;
+        }
+
+        private static boolean isEnvAssignment(final String token) {
+            if (token.isEmpty() || !Character.isLetterOrDigit(token.charAt(0)) && token.charAt(0) != '_') {
+                return false;
+            }
+            for (var i = 0; i < token.length(); i++) {
+                final var c = token.charAt(i);
+                if (c == '=') {
+                    return i > 0 && (Character.isLetterOrDigit(token.charAt(i - 1)) || token.charAt(i - 1) == '_');
+                }
+                if (!Character.isLetterOrDigit(c) && c != '_' && c != '.') {
+                    return false;
+                }
+            }
+            return false;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // compiled rule model
+    // ------------------------------------------------------------------
+
+    private record Excludes(Set<String> exact, List<String> longOptions, List<List<String>> sequences) {
+
+        boolean anyMatch(final List<String> tokens) {
+            for (final var token : tokens) {
+                if (exact.contains(token)) {
+                    return true;
+                }
+                for (final var option : longOptions) {
+                    if (token.equals(option) || token.startsWith(option + "=")) {
+                        return true;
+                    }
+                }
+            }
+            for (final var sequence : sequences) {
+                if (containsConsecutive(tokens, sequence)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private record CompiledRule(
+            List<String> commandStart, Excludes excludes, PermissionMode plan, PermissionMode defaultMode) {
+
+        PermissionMode resolve(final AgentMode agentMode) {
+            if (agentMode == AgentMode.PLAN) {
+                return plan != null ? plan : defaultMode;
+            }
+            return defaultMode != null ? defaultMode : plan;
+        }
+
+        boolean matches(final List<String> tokens) {
+            if (commandStart.size() > tokens.size()) {
+                return false;
+            }
+            for (var i = 0; i < commandStart.size(); i++) {
+                if (!commandStart.get(i).equals(tokens.get(i))) {
+                    return false;
+                }
+            }
+            return !excludes.anyMatch(tokens);
+        }
+    }
+
+    private static boolean containsConsecutive(final List<String> tokens, final List<String> sequence) {
+        for (var i = 0; i + sequence.size() <= tokens.size(); i++) {
+            var matches = true;
+            for (var j = 0; j < sequence.size(); j++) {
+                if (!sequence.get(j).equals(tokens.get(i + j))) {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches) {
+                return true;
+            }
+        }
+        return false;
+    }
+}

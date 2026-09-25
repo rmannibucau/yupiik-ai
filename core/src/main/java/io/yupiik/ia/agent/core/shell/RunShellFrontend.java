@@ -118,12 +118,16 @@ public class RunShellFrontend implements ShellFrontend {
                         var level,
                         String message,
                         var finishReason,
+                        String sessionId,
                         String subagentId,
                         String subagentName)) {
             notice(level, prefix + message);
-        } else if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof
+                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
             status(prefix + message);
-        } else if (event instanceof AgentEvent.Error(String message, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
             error(prefix + message);
         }
     }
@@ -147,31 +151,31 @@ public class RunShellFrontend implements ShellFrontend {
     private String subagentPrefix(final AgentEvent event) {
         String subagentId = null;
         String subagentName = null;
-        if (event instanceof AgentEvent.TextDelta(var _, String id, String name)) {
+        if (event instanceof AgentEvent.TextDelta(var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ThinkingDelta(var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ThinkingDelta(var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolStream(var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ToolStream(var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolFinished(var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ToolFinished(var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Compacted(var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Status(var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Status(var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Error(var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Error(var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
         }

@@ -192,7 +192,7 @@ models, providerSpecificOptions),
 `compaction` (thresholdPercent, enabled), `pruning` (thresholdPercent,
 keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
 (disabled processors and tools, matched loosely - `mvn`, `./mvnw`,
-`git.exe` and `git` all match the git/maven processors), `permissions` (mode, allow, deny, planBash), `sessions`
+`git.exe` and `git` all match the git/maven processors), `permissions` (mode, allow, deny, bash rules), `sessions`
 (retentionDays, compressDays), `mode` (plan by default, or build), `skills` (enabled),
 `mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir), `agents`
 (name, prompt - inline text or a file path). The
@@ -217,13 +217,21 @@ and retrying", and retries the turn before falling back to an error.
 
 Each MCP server entry accepts a `readonly` list of tool names that stay
 available (read-only) in `plan` mode; `"*"` makes every tool of that server
-read-only. In `plan` mode only the `READ`/`AGENT` tools, these read-only MCP
-tools, and `bash` commands starting with one of the `permissions.planBash`
-prefixes (defaults to read-only commands like `git status`, `git diff`,
-`ls`, `cat`, `grep`...) are allowed - everything else is denied. `build` mode
-(full access, respecting the `permissions` allow/deny lists) is opt-in: switch
-to it with `/mode build`, set `yca.mode=build`, or pass `--yca-run-mode build`
-for `run`.
+read-only. `bash` commands are matched against `permissions.bash.rules` in
+both modes: the defaults silently allow read-only commands (`git status`,
+`git diff`, `ls`, `cat`, `grep`, `sed -n`, `java -version`...) and prompt for
+the rest. Each rule targets a command start (`matcher.commandStart.options`,
+token-wise so `git diff` does not match `git difftool`), optional
+`matcher.excludeOptions` carve out write forms (`sed` is allowed, `sed -i` is
+not), and per mode `plan`/`default` values (`ask`, `auto_edit` or `yolo`/`all`)
+let a command behave differently in each mode - `default` inherits `plan` when
+omitted. In `plan` mode the `READ`/`AGENT` tools, these read-only MCP tools
+and the plan-resolved bash rules run without prompting; everything else
+follows the `ask`/`auto_edit`/`yolo` permission mode (denied without an
+interactive gate). `build` mode (full access, respecting the `permissions`
+allow/deny lists and the default-resolved bash rules) is opt-in: switch to it
+with `/mode build`, set `yca.mode=build`, or pass `--yca-run-mode build` for
+`run`.
 
 ## Structural code graph
 

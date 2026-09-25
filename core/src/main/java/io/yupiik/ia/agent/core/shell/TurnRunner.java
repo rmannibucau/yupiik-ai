@@ -31,25 +31,22 @@ import java.util.function.Supplier;
  * through {@link ShellIO#confirm}, history loading, begin/end turn
  * notifications, busy tracking and the agent loop invocation. Shells only
  * build a {@link TurnRequest} and chain on the returned stage - CLI joins it,
- * TUI chains it on the UI thread.
+ * TUI chains it on the UI thread. The loop to run is carried by the request
+ * (not injected): each session owns its own {@link AgentLoop} so concurrent
+ * tabs keep their per-turn state, permissions and metrics apart.
  */
 @ApplicationScoped
 public class TurnRunner {
-    private final AgentLoop agentLoop;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final VirtualThreadExecutor executor;
 
     public TurnRunner(
-            final AgentLoop agentLoop,
-            final MavenRepositoryKnowledgeService mavenKnowledgeService,
-            final VirtualThreadExecutor executor) {
-        this.agentLoop = agentLoop;
+            final MavenRepositoryKnowledgeService mavenKnowledgeService, final VirtualThreadExecutor executor) {
         this.mavenKnowledgeService = mavenKnowledgeService;
         this.executor = executor;
     }
 
     protected TurnRunner() {
-        this.agentLoop = null;
         this.mavenKnowledgeService = null;
         this.executor = null;
     }
@@ -63,6 +60,7 @@ public class TurnRunner {
      *                     new one; the shell owns the queue backing it.
      */
     public record TurnRequest(
+            AgentLoop loop,
             ShellEnv env,
             String sessionId,
             String agentName,
@@ -72,13 +70,14 @@ public class TurnRunner {
             Supplier<String> queuedPrompt) {
 
         public TurnRequest(
+                final AgentLoop loop,
                 final ShellEnv env,
                 final String sessionId,
                 final String agentName,
                 final String prompt,
                 final Supplier<List<Message>> history,
                 final BooleanSupplier cancelled) {
-            this(env, sessionId, agentName, prompt, history, cancelled, null);
+            this(loop, env, sessionId, agentName, prompt, history, cancelled, null);
         }
     }
 
@@ -103,6 +102,7 @@ public class TurnRunner {
 
     private CompletionStage<Boolean> execute(final TurnRequest request) {
         final var env = request.env();
+        final var loop = request.loop();
         final var history = request.history().get();
         env.frontend().beginTurn();
         env.session().busy(true);
@@ -110,14 +110,14 @@ public class TurnRunner {
         executor.execute(() -> {
             try {
                 if (request.prompt() == null) {
-                    agentLoop.resume(
+                    loop.resume(
                             request.agentName(),
                             request.sessionId(),
                             history,
                             request.cancelled(),
                             request.queuedPrompt());
                 } else {
-                    agentLoop.run(
+                    loop.run(
                             request.prompt(),
                             request.agentName(),
                             request.sessionId(),

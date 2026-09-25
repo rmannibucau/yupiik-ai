@@ -29,7 +29,6 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -63,7 +62,6 @@ class StructuralCodeGraphTest {
                 config,
                 List.of(new JavaGraphParser()),
                 mapper,
-                new StatusReporter(),
                 chatClient(config, mapper),
                 providerManager(config, mapper),
                 Clock.systemUTC());

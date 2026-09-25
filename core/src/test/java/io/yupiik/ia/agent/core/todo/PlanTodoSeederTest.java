@@ -59,7 +59,7 @@ class PlanTodoSeederTest {
                 "[{\"content\": \"extract service\", \"status\": \"pending\"}, "
                         + "{\"content\": \"add tests\", \"status\": \"pending\"}]");
 
-        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
         final var all = todos.all();
         assertEquals(2, all.size());
         assertEquals("extract service", all.get(0).content());
@@ -77,7 +77,7 @@ class PlanTodoSeederTest {
         todos.replace(List.of(new TodoItem("existing", "pending")));
         final var seeder = seeder(todos, sessions, "[{\"content\": \"x\", \"status\": \"pending\"}]");
 
-        assertSame(PlanTodoSeeder.SeedResult.ALREADY_POPULATED, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.ALREADY_POPULATED, seeder.seedFromLastAssistant(id, todos));
         assertEquals(1, todos.all().size());
         assertEquals("existing", todos.all().get(0).content());
     }
@@ -91,7 +91,7 @@ class PlanTodoSeederTest {
         final var todos = newTodoStore();
         final var seeder = seeder(todos, sessions, "[{\"content\": \"x\", \"status\": \"pending\"}]");
 
-        assertSame(PlanTodoSeeder.SeedResult.NO_PLAN, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.NO_PLAN, seeder.seedFromLastAssistant(id, todos));
         assertTrue(todos.all().isEmpty());
     }
 
@@ -104,7 +104,7 @@ class PlanTodoSeederTest {
         final var todos = newTodoStore();
         final var seeder = seeder(todos, sessions, "sorry, I cannot answer that");
 
-        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id, todos));
         assertTrue(todos.all().isEmpty());
     }
 
@@ -117,7 +117,7 @@ class PlanTodoSeederTest {
         final var todos = newTodoStore();
         final var seeder = seeder(todos, sessions, "{\"steps\":[]}");
 
-        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.NO_ACTIONABLE_STEPS, seeder.seedFromLastAssistant(id, todos));
         assertTrue(todos.all().isEmpty());
     }
 
@@ -128,9 +128,9 @@ class PlanTodoSeederTest {
         sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
 
         final var todos = newTodoStore();
-        final var seeder = new PlanTodoSeeder(new FailingChatClient(), todos, sessions, mapper());
+        final var seeder = new PlanTodoSeeder(new FailingChatClient(), sessions, mapper());
 
-        assertSame(PlanTodoSeeder.SeedResult.DERIVATION_FAILED, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.DERIVATION_FAILED, seeder.seedFromLastAssistant(id, todos));
         assertTrue(todos.all().isEmpty());
     }
 
@@ -148,13 +148,13 @@ class PlanTodoSeederTest {
                         + "{\"content\": \"\", \"status\": \"pending\"}, "
                         + "{\"content\": \"bad status\", \"status\": \"later\"}]");
 
-        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id));
+        assertSame(PlanTodoSeeder.SeedResult.SEEDED, seeder.seedFromLastAssistant(id, todos));
         assertEquals(1, todos.all().size());
         assertEquals("ok", todos.all().get(0).content());
     }
 
     private PlanTodoSeeder seeder(final TodoStore todos, final SessionStore sessions, final String llmResponse) {
-        return new PlanTodoSeeder(new StubChatClient(llmResponse), todos, sessions, mapper());
+        return new PlanTodoSeeder(new StubChatClient(llmResponse), sessions, mapper());
     }
 
     private TodoStore newTodoStore() {

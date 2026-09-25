@@ -15,8 +15,8 @@
  */
 package io.yupiik.ia.agent.core.permissions;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.BashPermissionsConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -27,7 +27,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-@ApplicationScoped
 public class PermissionService {
     private final CodingAgentConfiguration configuration;
     private volatile ApprovalGate gate;
@@ -35,6 +34,7 @@ public class PermissionService {
     private volatile AgentMode mode;
     private volatile PermissionMode permissionMode;
     private volatile boolean permitAll;
+    private volatile RulesCache rulesCache;
 
     public PermissionService(final CodingAgentConfiguration configuration) {
         this.configuration = configuration;
@@ -125,28 +125,47 @@ public class PermissionService {
         if (permitAll) {
             return Decision.allow();
         }
-        if (mode() == AgentMode.PLAN) {
-            if (category == ToolCategory.READ || category == ToolCategory.AGENT) {
-                return Decision.allow();
+        final var command =
+                category == ToolCategory.BASH && args.get("command") instanceof final String c && !c.isBlank()
+                        ? c
+                        : null;
+        // the deny list is authoritative in every mode, including for bash commands
+        // where the patterns are matched segment by segment
+        if (permissions != null) {
+            if (permissions.isDenied(toolName)) {
+                return Decision.deny("tool " + toolName + " is denied by configuration");
             }
-            if (readOnly) {
-                return Decision.allow();
+            if (command != null) {
+                for (final var segment : compiledBashRules().segments(command)) {
+                    if (permissions.isDenied(segment) || permissions.isDenied(toolName + ':' + segment)) {
+                        return Decision.deny("command is denied by configuration: " + segment);
+                    }
+                }
             }
-            if (category == ToolCategory.BASH
-                    && args.get("command") instanceof final String command
-                    && permissions.isPlanBash(command)) {
-                return Decision.allow();
-            }
-            // plan mode stays read-only for what is auto-allowed above, but a
-            // state-changing tool is not silently refused: it falls through to the
-            // normal enforcement (deny/allow lists, session grants, permission mode
-            // and, in ask mode, the interactive approval gate) so the user can choose.
         }
-        if (permissions.isDenied(toolName)) {
-            return Decision.deny("tool " + toolName + " is denied by configuration");
-        }
-        if (permissions.isAllowed(toolName)) {
+        if (mode() == AgentMode.PLAN && (category == ToolCategory.READ || category == ToolCategory.AGENT || readOnly)) {
             return Decision.allow();
+        }
+        if (permissions != null) {
+            if (permissions.isAllowed(toolName)) {
+                return Decision.allow();
+            }
+            if (command != null) {
+                // command level allow patterns apply per segment: every segment must be allowed
+                final var segments = compiledBashRules().segments(command);
+                if (!segments.isEmpty()) {
+                    var allAllowed = true;
+                    for (final var segment : segments) {
+                        if (!permissions.isAllowed(segment) && !permissions.isAllowed(toolName + ':' + segment)) {
+                            allAllowed = false;
+                            break;
+                        }
+                    }
+                    if (allAllowed) {
+                        return Decision.allow();
+                    }
+                }
+            }
         }
         if (category == ToolCategory.READ || category == ToolCategory.AGENT) {
             return Decision.allow();
@@ -154,11 +173,18 @@ public class PermissionService {
         if (matchesSessionGrant(toolName, args)) {
             return Decision.allow();
         }
-        final var mode = permissionMode();
-        if (mode == PermissionMode.YOLO) {
+        final var permission = permissionMode();
+        if (permission == PermissionMode.YOLO) {
             return Decision.allow();
         }
-        if (mode == PermissionMode.AUTO_EDIT && category == ToolCategory.EDIT) {
+        if (command != null) {
+            // bash rules (yca.permissions.bash.rules) silently allow recognized read-only
+            // command families for the active agent mode
+            if (compiledBashRules().evaluate(mode(), command).allowed()) {
+                return Decision.allow();
+            }
+        }
+        if (permission == PermissionMode.AUTO_EDIT && category == ToolCategory.EDIT) {
             return Decision.allow();
         }
         return approve(toolName, args);
@@ -182,12 +208,27 @@ public class PermissionService {
     }
 
     private String grantKey(final String toolName, final Map<String, Object> args) {
-        return projectDir() + "|" + toolName + ":" + prefixOf(args);
+        return projectDir() + "|" + toolName + ":" + commandPrefixOf(args);
+    }
+
+    private record RulesCache(BashPermissionsConfiguration source, BashRules.Compiled compiled) {}
+
+    /** Lazily compiled {@code yca.permissions.bash.rules}, refreshed if the underlying configuration changes. */
+    private BashRules.Compiled compiledBashRules() {
+        final var permissions = configuration.permissions();
+        final var bash = permissions != null ? permissions.bash() : null;
+        final var cache = rulesCache;
+        if (cache != null && cache.source() == bash) {
+            return cache.compiled();
+        }
+        final var compiled = BashRules.compile(bash);
+        rulesCache = new RulesCache(bash, compiled);
+        return compiled;
     }
 
     private boolean matchesSessionGrant(final String toolName, final Map<String, Object> args) {
         final var project = projectDir();
-        final var requestedPrefix = prefixOf(args);
+        final var requestedPrefix = commandPrefixOf(args);
         for (final var grant : sessionGrants) {
             // format: <project>|<tool>:<prefix>
             final var sep = grant.indexOf('|');
@@ -218,6 +259,21 @@ public class PermissionService {
             return path;
         }
         return "";
+    }
+
+    /**
+     * Command prefix used to key session grants. Bash commands matched by a {@code yca.permissions.bash.rules}
+     * entry use the rule {@code commandStart} tokens (opencode arity style: approving {@code docker run x}
+     * grants {@code docker run}, not {@code docker}); anything else falls back to the first word.
+     */
+    private String commandPrefixOf(final Map<String, Object> args) {
+        if (args.get("command") instanceof final String command) {
+            final var prefix = compiledBashRules().evaluate(mode(), command).prefix();
+            if (prefix != null) {
+                return prefix;
+            }
+        }
+        return prefixOf(args);
     }
 
     private String projectDir() {

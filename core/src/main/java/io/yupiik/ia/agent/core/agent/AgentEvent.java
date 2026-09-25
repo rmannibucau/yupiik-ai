@@ -17,10 +17,26 @@ package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.llm.Usage;
 
+/**
+ * Events emitted on the global bus by the agent loops. Every event is tagged
+ * with the {@code sessionId} of the session (tab) that owns the turn plus the
+ * subagent coordinates when the turn runs inside a subagent: this is what lets
+ * {@code ShellRegistry} route a given event stream to the right shell when
+ * several sessions run concurrently in the same process. Producers must always
+ * set the session id - there is no implicit fallback - so convenience
+ * constructors take it explicitly.
+ */
 public sealed interface AgentEvent {
-    record TextDelta(String delta, String subagentId, String subagentName) implements AgentEvent {
-        public TextDelta(String delta) {
-            this(delta, null, null);
+    /**
+     * @return the session (tab) that owns the turn this event belongs to. Always
+     *         set by the producers: the registry routes strictly on it and drops
+     *         events without a session.
+     */
+    String sessionId();
+
+    record TextDelta(String delta, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public TextDelta(String delta, String sessionId) {
+            this(delta, sessionId, null, null);
         }
     }
 
@@ -28,58 +44,63 @@ public sealed interface AgentEvent {
      * The streaming buffers must be discarded: the interrupted stream is retried from scratch and
      * the fragments received before the failure would otherwise duplicate the retried reply prefix.
      */
-    record TextReset(String subagentId, String subagentName) implements AgentEvent {
-        public TextReset() {
-            this(null, null);
+    record TextReset(String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public TextReset(String sessionId) {
+            this(sessionId, null, null);
         }
     }
 
-    record ThinkingDelta(String delta, String subagentId, String subagentName) implements AgentEvent {
-        public ThinkingDelta(String delta) {
-            this(delta, null, null);
+    record ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public ThinkingDelta(String delta, String sessionId) {
+            this(delta, sessionId, null, null);
         }
     }
 
-    record ToolStarted(String name, String args, String subagentId, String subagentName) implements AgentEvent {
-        public ToolStarted(String name, String args) {
-            this(name, args, null, null);
-        }
-    }
-
-    record ToolFinished(String name, String output, boolean success, String subagentId, String subagentName)
+    record ToolStarted(String name, String args, String sessionId, String subagentId, String subagentName)
             implements AgentEvent {
-        public ToolFinished(String name, String output, boolean success) {
-            this(name, output, success, null, null);
+        public ToolStarted(String name, String args, String sessionId) {
+            this(name, args, sessionId, null, null);
         }
     }
 
-    record ToolStream(String name, String fragment, String subagentId, String subagentName) implements AgentEvent {
-        public ToolStream(String name, String fragment) {
-            this(name, fragment, null, null);
+    record ToolFinished(
+            String name, String output, boolean success, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {
+        public ToolFinished(String name, String output, boolean success, String sessionId) {
+            this(name, output, success, sessionId, null, null);
+        }
+    }
+
+    record ToolStream(String name, String fragment, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {
+        public ToolStream(String name, String fragment, String sessionId) {
+            this(name, fragment, sessionId, null, null);
         }
     }
 
     record UsageUpdated(
-            Usage usage, int estimatedContextTokens, double contextPercent, String subagentId, String subagentName)
+            Usage usage,
+            int estimatedContextTokens,
+            double contextPercent,
+            String sessionId,
+            String subagentId,
+            String subagentName)
             implements AgentEvent {
-        public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent) {
-            this(usage, estimatedContextTokens, contextPercent, null, null);
+        public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent, String sessionId) {
+            this(usage, estimatedContextTokens, contextPercent, sessionId, null, null);
         }
     }
 
-    record Compacted(String kind, String mode, String subagentId, String subagentName) implements AgentEvent {
-        public Compacted(String kind) {
-            this(kind, "SUMMARY", null, null);
-        }
-
-        public Compacted(String kind, String mode) {
-            this(kind, mode, null, null);
+    record Compacted(String kind, String mode, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {
+        public Compacted(String kind, String mode, String sessionId) {
+            this(kind, mode, sessionId, null, null);
         }
     }
 
-    record Status(String message, String subagentId, String subagentName) implements AgentEvent {
-        public Status(String message) {
-            this(message, null, null);
+    record Status(String message, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public Status(String message, final String sessionId) {
+            this(message, sessionId, null, null);
         }
     }
 
@@ -89,7 +110,8 @@ public sealed interface AgentEvent {
      * status bar) so feedback survives and is understandable in all cases,
      * including failures that would otherwise be silent.
      */
-    record Notice(Level level, String message, String finishReason, String subagentId, String subagentName)
+    record Notice(
+            Level level, String message, String finishReason, String sessionId, String subagentId, String subagentName)
             implements AgentEvent {
 
         public enum Level {
@@ -98,36 +120,36 @@ public sealed interface AgentEvent {
             ERROR
         }
 
-        public Notice(final Level level, final String message) {
-            this(level, message, null, null, null);
+        public Notice(final Level level, final String message, final String sessionId) {
+            this(level, message, null, sessionId, null, null);
         }
 
-        public Notice(final Level level, final String message, final String finishReason) {
-            this(level, message, finishReason, null, null);
+        public Notice(final Level level, final String message, final String finishReason, final String sessionId) {
+            this(level, message, finishReason, sessionId, null, null);
         }
 
-        public static Notice info(final String message) {
-            return new Notice(Level.INFO, message);
+        public static Notice info(final String message, final String sessionId) {
+            return new Notice(Level.INFO, message, sessionId);
         }
 
-        public static Notice warn(final String message) {
-            return new Notice(Level.WARN, message);
+        public static Notice warn(final String message, final String sessionId) {
+            return new Notice(Level.WARN, message, sessionId);
         }
 
-        public static Notice error(final String message) {
-            return new Notice(Level.ERROR, message);
-        }
-    }
-
-    record TurnDone(String content, String subagentId, String subagentName) implements AgentEvent {
-        public TurnDone(String content) {
-            this(content, null, null);
+        public static Notice error(final String message, final String sessionId) {
+            return new Notice(Level.ERROR, message, sessionId);
         }
     }
 
-    record Error(String message, String subagentId, String subagentName) implements AgentEvent {
-        public Error(String message) {
-            this(message, null, null);
+    record TurnDone(String content, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public TurnDone(String content, final String sessionId) {
+            this(content, sessionId, null, null);
+        }
+    }
+
+    record Error(String message, String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public Error(String message, final String sessionId) {
+            this(message, sessionId, null, null);
         }
     }
 
@@ -135,9 +157,10 @@ public sealed interface AgentEvent {
      * A queued prompt was injected into the running turn before it completed, so
      * the user does not have to wait for the current turn to finish.
      */
-    record PromptIntegrated(String text, String subagentId, String subagentName) implements AgentEvent {
-        public PromptIntegrated(String text) {
-            this(text, null, null);
+    record PromptIntegrated(String text, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {
+        public PromptIntegrated(String text, String sessionId) {
+            this(text, sessionId, null, null);
         }
     }
 
@@ -158,6 +181,7 @@ public sealed interface AgentEvent {
             long toolDurationWallMs,
             int toolsRun,
             long turnDurationMs,
+            String sessionId,
             String subagentId,
             String subagentName)
             implements AgentEvent {
@@ -168,7 +192,8 @@ public sealed interface AgentEvent {
                 long toolDurationSumMs,
                 long toolDurationWallMs,
                 int toolsRun,
-                long turnDurationMs) {
+                long turnDurationMs,
+                String sessionId) {
             this(
                     llmCalls,
                     thinkingDurationMs,
@@ -176,6 +201,7 @@ public sealed interface AgentEvent {
                     toolDurationWallMs,
                     toolsRun,
                     turnDurationMs,
+                    sessionId,
                     null,
                     null);
         }
@@ -194,12 +220,14 @@ public sealed interface AgentEvent {
             long durationMs,
             long wallDurationMs,
             boolean parallelBatch,
+            String sessionId,
             String subagentId,
             String subagentName)
             implements AgentEvent {
 
-        public ToolTimingEvent(String toolName, long durationMs, long wallDurationMs, boolean parallelBatch) {
-            this(toolName, durationMs, wallDurationMs, parallelBatch, null, null);
+        public ToolTimingEvent(
+                String toolName, long durationMs, long wallDurationMs, boolean parallelBatch, String sessionId) {
+            this(toolName, durationMs, wallDurationMs, parallelBatch, sessionId, null, null);
         }
     }
 }

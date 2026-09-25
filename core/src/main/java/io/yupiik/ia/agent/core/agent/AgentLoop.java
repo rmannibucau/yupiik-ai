@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
@@ -27,11 +26,13 @@ import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
@@ -40,6 +41,7 @@ import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -61,11 +63,11 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-@ApplicationScoped
 public class AgentLoop {
     private static final Logger LOGGER = Logger.getLogger(AgentLoop.class.getName());
 
@@ -108,8 +110,35 @@ public class AgentLoop {
     private final SnapshotStore snapshotStore;
     private final TodoStore todoStore;
     private final VirtualThreadExecutor executor;
+    private final UserFeedbackService userFeedbackService;
     private final String subagentId;
     private final String subagentName;
+    /**
+     * Session this loop instance belongs to. Events are tagged with it so the
+     * shell registry can route each stream to the tab that owns it. A loop
+     * created without a session (CLI, legacy wiring) falls back to the
+     * sessionId passed to run/resume.
+     */
+    private final String sessionId;
+    /**
+     * Effective session for the current turn. Equal to {@link #sessionId} for
+     * per-session instances; for legacy shared instances (CLI) it is set from
+     * the run argument. Event helpers tag with this value.
+     */
+    private volatile String currentSessionId;
+    /**
+     * Per-session model selection (model/variant/sampling). Explicitly passed to every
+     * {@link ChatClient} call made by this loop's turns so concurrent tabs never share
+     * a selection. Plain holder - no scope, no thread-local.
+     */
+    private final ChatSettings chatSettings = new ChatSettings();
+    /**
+     * Per-turn pause listener surfacing provider throttles and retry backoffs to the owning
+     * tab. It is handed to each {@link ChatClient} call instead of being installed globally:
+     * without it the UI would only show a spinner while the resilience layer can silently
+     * wait up to minutes between attempts.
+     */
+    private volatile Consumer<PauseEvent> pauseListener;
 
     // Per-turn metrics tracking (reset at start of each doRun)
     private int turnLlmCalls;
@@ -166,6 +195,8 @@ public class AgentLoop {
                 todoStore,
                 executor,
                 null,
+                null,
+                null,
                 null);
     }
 
@@ -193,6 +224,67 @@ public class AgentLoop {
             final VirtualThreadExecutor executor,
             final String subagentId,
             final String subagentName) {
+        this(
+                chatClient,
+                toolRegistry,
+                toolExecutionService,
+                configuration,
+                permissionService,
+                usageTracker,
+                contextManager,
+                contextView,
+                sessionStore,
+                systemPromptBuilder,
+                memoryExtractor,
+                statusReporter,
+                emitter,
+                mapper,
+                structuralCodeGraph,
+                providerManager,
+                agentProvider,
+                clock,
+                snapshotStore,
+                todoStore,
+                executor,
+                null,
+                subagentId,
+                subagentName,
+                null);
+    }
+
+    /**
+     * Full wiring for a session (tab) instance: the per-session services
+     * ({@code permissionService}, {@code usageTracker}, {@code statusReporter},
+     * {@code todoStore}, {@code userFeedbackService}) belong to exactly one
+     * session and the loop tags every event it emits with {@code sessionId} so
+     * the shell registry routes the stream to the owning tab.
+     */
+    public AgentLoop(
+            final ChatClient chatClient,
+            final ToolRegistry toolRegistry,
+            final ToolExecutionService toolExecutionService,
+            final CodingAgentConfiguration configuration,
+            final PermissionService permissionService,
+            final UsageTracker usageTracker,
+            final ContextManager contextManager,
+            final ContextView contextView,
+            final SessionStore sessionStore,
+            final SystemPromptBuilder systemPromptBuilder,
+            final MemoryExtractor memoryExtractor,
+            final StatusReporter statusReporter,
+            final Emitter emitter,
+            final JsonMapper mapper,
+            final StructuralCodeGraph structuralCodeGraph,
+            final ProviderManager providerManager,
+            final AgentProvider agentProvider,
+            final Clock clock,
+            final SnapshotStore snapshotStore,
+            final TodoStore todoStore,
+            final VirtualThreadExecutor executor,
+            final String sessionId,
+            final String subagentId,
+            final String subagentName,
+            final UserFeedbackService userFeedbackService) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -214,8 +306,10 @@ public class AgentLoop {
         this.snapshotStore = snapshotStore;
         this.todoStore = todoStore;
         this.executor = executor;
+        this.sessionId = sessionId;
         this.subagentId = subagentId;
         this.subagentName = subagentName;
+        this.userFeedbackService = userFeedbackService;
     }
 
     protected AgentLoop() {
@@ -240,8 +334,19 @@ public class AgentLoop {
         this.snapshotStore = null;
         this.todoStore = null;
         this.executor = null;
+        this.sessionId = null;
         this.subagentId = null;
         this.subagentName = null;
+        this.userFeedbackService = null;
+    }
+
+    /**
+     * This loop's per-session model selection. The session runtime hands it to the slash
+     * commands and the UI so {@code /model}, {@code /variant} and the sampling overrides
+     * mutate only this tab.
+     */
+    public ChatSettings chatSettings() {
+        return chatSettings;
     }
 
     public String run(
@@ -305,6 +410,7 @@ public class AgentLoop {
             final List<Message> history,
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt) {
+        currentSessionId = sessionId == null || sessionId.isBlank() ? this.sessionId : sessionId;
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
                 ? null
                 : agentProvider.byName(agentName);
@@ -320,14 +426,12 @@ public class AgentLoop {
             sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", userMessage, null, null));
         }
         statusReporter.setSink(message -> emitter.emit(status(message)));
-        if (chatClient != null) {
-            // surface provider throttles and retry backoffs: without this the UI only shows a
-            // spinner while the resilience layer can silently wait up to minutes between attempts
-            chatClient.setPauseListener(pause -> emit(
-                    pause.kind() == PauseEvent.Pause.THROTTLE
-                            ? status(pause.message())
-                            : notice(AgentEvent.Notice.Level.INFO, pause.message())));
-        }
+        // surface provider throttles and retry backoffs: without this the UI only shows a
+        // spinner while the resilience layer can silently wait up to minutes between attempts
+        pauseListener = pause -> emit(
+                pause.kind() == PauseEvent.Pause.THROTTLE
+                        ? status(pause.message())
+                        : notice(AgentEvent.Notice.Level.INFO, pause.message()));
 
         try {
             return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt);
@@ -343,9 +447,7 @@ public class AgentLoop {
             emit(error("unexpected failure: " + e));
             return null;
         } finally {
-            if (chatClient != null) {
-                chatClient.setPauseListener(null);
-            }
+            pauseListener = null;
             statusReporter.setSink(null);
             memoryExtractor.maybeExtract(messages);
         }
@@ -379,69 +481,89 @@ public class AgentLoop {
         emitter.emit(event);
     }
 
-    // Event helpers that include subagent info
+    /**
+     * The context handed to every tool of this turn: it carries this session's
+     * own feedback gate, todo list and status reporter so a tool asking a
+     * question or writing a todo always touches the state of the tab that
+     * started the turn, never another concurrent session's.
+     */
+    private ToolContext toolContext() {
+        return new ToolContext(
+                currentSessionId,
+                subagentId,
+                subagentName,
+                permissionService,
+                userFeedbackService,
+                todoStore,
+                statusReporter,
+                usageTracker,
+                contextView);
+    }
+
+    // Event helpers that include the session and subagent info
     private AgentEvent.TextDelta textDelta(final String delta) {
-        return new AgentEvent.TextDelta(delta, subagentId, subagentName);
+        return new AgentEvent.TextDelta(delta, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.TextReset textReset() {
-        return new AgentEvent.TextReset(subagentId, subagentName);
+        return new AgentEvent.TextReset(currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.ThinkingDelta thinkingDelta(final String delta) {
-        return new AgentEvent.ThinkingDelta(delta, subagentId, subagentName);
+        return new AgentEvent.ThinkingDelta(delta, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.ToolStarted toolStarted(final String name, final String args) {
-        return new AgentEvent.ToolStarted(name, args, subagentId, subagentName);
+        return new AgentEvent.ToolStarted(name, args, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.ToolFinished toolFinished(final String name, final String output, final boolean success) {
-        return new AgentEvent.ToolFinished(name, output, success, subagentId, subagentName);
+        return new AgentEvent.ToolFinished(name, output, success, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.ToolStream toolStream(final String name, final String fragment) {
-        return new AgentEvent.ToolStream(name, fragment, subagentId, subagentName);
+        return new AgentEvent.ToolStream(name, fragment, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.UsageUpdated usageUpdated(
             final io.yupiik.ia.agent.core.llm.Usage usage,
             final int estimatedContextTokens,
             final double contextPercent) {
-        return new AgentEvent.UsageUpdated(usage, estimatedContextTokens, contextPercent, subagentId, subagentName);
+        return new AgentEvent.UsageUpdated(
+                usage, estimatedContextTokens, contextPercent, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Compacted compacted(final String kind, final String mode) {
-        return new AgentEvent.Compacted(kind, mode, subagentId, subagentName);
+        return new AgentEvent.Compacted(kind, mode, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Compacted compacted(final String kind) {
-        return new AgentEvent.Compacted(kind, "SUMMARY", subagentId, subagentName);
+        return new AgentEvent.Compacted(kind, "SUMMARY", currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Status status(final String message) {
-        return new AgentEvent.Status(message, subagentId, subagentName);
+        return new AgentEvent.Status(message, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Notice notice(final AgentEvent.Notice.Level level, final String message) {
-        return new AgentEvent.Notice(level, message, null, subagentId, subagentName);
+        return new AgentEvent.Notice(level, message, null, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Notice notice(
             final AgentEvent.Notice.Level level, final String message, final String finishReason) {
-        return new AgentEvent.Notice(level, message, finishReason, subagentId, subagentName);
+        return new AgentEvent.Notice(level, message, finishReason, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.TurnDone turnDone(final String content) {
-        return new AgentEvent.TurnDone(content, subagentId, subagentName);
+        return new AgentEvent.TurnDone(content, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Error error(final String message) {
-        return new AgentEvent.Error(message, subagentId, subagentName);
+        return new AgentEvent.Error(message, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.PromptIntegrated promptIntegrated(final String text) {
-        return new AgentEvent.PromptIntegrated(text, subagentId, subagentName);
+        return new AgentEvent.PromptIntegrated(text, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.TurnMetrics turnMetrics(
@@ -458,6 +580,7 @@ public class AgentLoop {
                 toolDurationWallMs,
                 toolsRun,
                 turnDurationMs,
+                currentSessionId,
                 subagentId,
                 subagentName);
     }
@@ -465,7 +588,7 @@ public class AgentLoop {
     private AgentEvent.ToolTimingEvent toolTimingEvent(
             final String toolName, final long durationMs, final long wallDurationMs, final boolean parallelBatch) {
         return new AgentEvent.ToolTimingEvent(
-                toolName, durationMs, wallDurationMs, parallelBatch, subagentId, subagentName);
+                toolName, durationMs, wallDurationMs, parallelBatch, currentSessionId, subagentId, subagentName);
     }
 
     private String loop(
@@ -822,7 +945,8 @@ public class AgentLoop {
                 throw new IOException("Cancelled");
             }
             try {
-                return chatClient.stream(request, delta -> dispatch(delta, usage, finishReason), cancelled);
+                return chatClient.stream(
+                        request, chatSettings, pauseListener, delta -> dispatch(delta, usage, finishReason), cancelled);
             } catch (final MidStreamFailureException e) {
                 last = e;
                 if (attempt >= maxAttempts) {
@@ -890,7 +1014,10 @@ public class AgentLoop {
                 AgentEvent.Notice.Level.WARN,
                 "model ended its turn (finish_reason=" + finishReason + ") with " + pending + '/' + todos.size()
                         + " todos still pending - send 'continue' to resume, or review why it stopped",
-                finishReason);
+                finishReason,
+                currentSessionId,
+                subagentId,
+                subagentName);
     }
 
     /**
@@ -1218,7 +1345,7 @@ public class AgentLoop {
             return new ToolOutcome(call.id(), name, denial, false, false);
         }
         final var toolStartNanos = System.nanoTime();
-        final ToolResult result = toolExecutionService.execute(tool, args);
+        final ToolResult result = toolExecutionService.execute(tool, args, toolContext());
         final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
         emit(toolFinished(name, result.output(), result.success()));
         return new ToolOutcome(

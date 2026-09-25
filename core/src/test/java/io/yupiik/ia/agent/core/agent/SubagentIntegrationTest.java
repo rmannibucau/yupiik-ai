@@ -29,12 +29,11 @@ import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
-import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -43,6 +42,7 @@ import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -180,8 +180,9 @@ class SubagentIntegrationTest {
     private ToolExecutionService directExecutions() {
         return new ToolExecutionService() {
             @Override
-            public ToolResult execute(final EmbeddedTool tool, final Map<String, Object> args) {
-                return tool.execute(args);
+            public ToolResult execute(
+                    final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
+                return tool.execute(args, context);
             }
         };
     }
@@ -312,6 +313,8 @@ class SubagentIntegrationTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled)
                     throws IOException {
@@ -331,9 +334,6 @@ class SubagentIntegrationTest {
                 }
                 return reply.toMessage();
             }
-
-            @Override
-            public void setPauseListener(final Consumer<PauseEvent> listener) {}
         };
     }
 
@@ -413,18 +413,15 @@ class SubagentIntegrationTest {
                     delegate.toolRegistry,
                     delegate.toolExecutionService,
                     delegate.configuration,
-                    delegate.permissionService,
-                    delegate.usageTracker,
-                    delegate.contextManager,
-                    delegate.contextView,
-                    delegate.systemPromptBuilder,
-                    delegate.memoryExtractor,
-                    delegate.statusReporter,
+                    delegate.contextWindowCache,
+                    delegate.memoryStore,
                     delegate.emitter,
                     delegate.mapper,
                     delegate.structuralCodeGraph,
                     delegate.providerManager,
                     delegate.agentProvider,
+                    delegate.todoPromptResolver,
+                    delegate.mavenRepositoryKnowledge,
                     delegate.clock,
                     delegate.executor,
                     delegate.subagentRegistry);
@@ -436,10 +433,11 @@ class SubagentIntegrationTest {
                 final SessionStore sessionStore,
                 final SnapshotStore snapshotStore,
                 final TodoStore todoStore,
+                final ToolContext parentContext,
                 final BooleanSupplier cancelled) {
             lastState = state;
             startLatch.countDown();
-            super.runAsync(state, sessionStore, snapshotStore, todoStore, cancelled);
+            super.runAsync(state, sessionStore, snapshotStore, todoStore, parentContext, cancelled);
         }
 
         void awaitStart() throws InterruptedException {
@@ -514,16 +512,8 @@ class SubagentIntegrationTest {
                 registry,
                 directExecutions(),
                 cfg,
-                new PermissionService(cfg),
-                mockUsageTracker,
-                mockContextManager,
                 null,
-                mockPromptBuilder(),
-                new io.yupiik.ia.agent.core.agent.MemoryExtractor() {
-                    @Override
-                    public void maybeExtract(final List<Message> messages) {}
-                },
-                new StatusReporter(),
+                null,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
@@ -542,7 +532,14 @@ class SubagentIntegrationTest {
                     public ResolvedModel resolveDefault() {
                         return new ResolvedModel(null, "test-model");
                     }
+
+                    @Override
+                    public ProviderConfiguration current() {
+                        return null;
+                    }
                 },
+                null,
+                new TodoPromptResolver(),
                 null,
                 Clock.systemUTC(),
                 new VirtualThreadExecutor(),

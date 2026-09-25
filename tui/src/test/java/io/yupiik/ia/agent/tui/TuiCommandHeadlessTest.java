@@ -38,6 +38,7 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
@@ -161,12 +162,12 @@ class TuiCommandHeadlessTest {
     void wiresTheFullBeanGraph() {
         try (final var cmd = container.lookup(TuiCommand.class);
                 final var run = container.lookup(RunCommand.class);
-                final var model = container.lookup(TuiTranscriptModel.class);
+                final var runtimeFactory = container.lookup(io.yupiik.ia.agent.core.shell.SessionRuntimeFactory.class);
                 final var completer = container.lookup(io.yupiik.ia.agent.tui.prompt.SlashCommandCompleter.class);
                 final var factory = container.lookup(TuiRunnerFactory.class)) {
             assertNotNull(cmd.instance());
             assertNotNull(run.instance());
-            assertNotNull(model.instance());
+            assertNotNull(runtimeFactory.instance());
             assertNotNull(completer.instance());
             assertNotNull(factory.instance());
         }
@@ -244,17 +245,15 @@ class TuiCommandHeadlessTest {
         final var tuiSlashCommands = new TuiSlashCommands();
         try (final var shellRegistry = container.lookup(ShellRegistry.class);
                 final var slashRegistry = container.lookup(SlashRegistry.class);
-                final var turnRunner = container.lookup(TurnRunner.class)) {
+                final var turnRunner = container.lookup(TurnRunner.class);
+                final var runtimeFactory = container.lookup(SessionRuntimeFactory.class)) {
             return new TuiCommand(
                     new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
                     d.tuiConfiguration(),
                     d.configuration(),
-                    d.agentLoop(),
                     shellRegistry.instance(),
-                    d.permissionService(),
-                    d.userFeedbackService(),
+                    runtimeFactory.instance(),
                     d.sessionStore(),
-                    d.todoStore(),
                     d.chatClient(),
                     d.modelStyleService(),
                     d.mcpManager(),
@@ -264,30 +263,22 @@ class TuiCommandHeadlessTest {
                     d.agentSessionService(),
                     new MavenRepositoryKnowledgeService(d.configuration(), null, d.executor(), null),
                     turnRunner.instance(),
-                    d.model(),
+                    d.thinkTags(),
                     headlessFactory(),
                     tuiSlashCommands,
                     slashRegistry.instance(),
                     Clock.systemUTC(),
-                    new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
                     new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                     new ToolOutputFormat(formatMapper),
                     new BtwAnswerer(
-                            d.chatClient(),
-                            d.sessionStore(),
-                            new io.yupiik.ia.agent.core.context.UsageTracker(null, null, null, Clock.systemUTC()),
-                            d.configuration(),
-                            d.executor(),
-                            null,
-                            null,
-                            null));
+                            d.chatClient(), d.sessionStore(), d.configuration(), d.executor(), null, null, null));
         }
     }
 
     private TuiRunnerFactory headlessFactory() {
         return new TuiRunnerFactory() {
             @Override
-            public TuiRunner create(final TuiCommand.TuiConf tuiConf) throws Exception {
+            public TuiRunner create(final TuiCommand.TuiConf tuiConf, final boolean hideCursor) throws Exception {
                 final var runner = TuiRunner.create(TuiConfig.builder()
                         .backend(backend)
                         .mouseCapture(false)

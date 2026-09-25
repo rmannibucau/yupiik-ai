@@ -84,12 +84,12 @@ class RunShellFrontendTest {
     void answerStreamsOnStdoutAndEventsAreLogged() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED);
 
-        frontend.onEvent(new AgentEvent.TextDelta("hel"));
-        frontend.onEvent(new AgentEvent.TextDelta("lo"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read_file", "{}"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "out", true));
-        frontend.onEvent(new AgentEvent.Status("working"));
-        frontend.onEvent(new AgentEvent.Error("boom"));
+        frontend.onEvent(new AgentEvent.TextDelta("hel", "s1"));
+        frontend.onEvent(new AgentEvent.TextDelta("lo", "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "out", true, "s1"));
+        frontend.onEvent(new AgentEvent.Status("working", "s1"));
+        frontend.onEvent(new AgentEvent.Error("boom", "s1"));
 
         assertEquals("hello", out.toString(StandardCharsets.UTF_8));
         final var joined = String.join("\n", logs);
@@ -103,7 +103,7 @@ class RunShellFrontendTest {
     void toolOutputPrintsOnceWhenNotStreamedAndEnabled() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN);
 
-        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
+        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, "s1"));
 
         assertEquals(1, logs.size());
         assertTrue(logs.get(0).contains("line1\nline2"), logs.get(0));
@@ -113,8 +113,8 @@ class RunShellFrontendTest {
     void streamedToolOutputIsNotReprinted() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN);
 
-        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true));
+        frontend.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true, "s1"));
 
         assertEquals(1, logs.size());
         assertTrue(logs.get(0).contains("streamed line"), logs.get(0));
@@ -124,8 +124,8 @@ class RunShellFrontendTest {
     void failuresAndNoticesUseTheRightLevels() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.COLLAPSED);
 
-        frontend.onEvent(new AgentEvent.ToolFinished("bash", "oops", false));
-        frontend.onEvent(AgentEvent.Notice.warn("careful"));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "oops", false, "s1"));
+        frontend.onEvent(AgentEvent.Notice.warn("careful", "s1"));
 
         final var joined = String.join("\n", logs);
         assertTrue(joined.contains("WARNING tool failed: bash"), joined);
@@ -136,7 +136,7 @@ class RunShellFrontendTest {
     void thinkingStreamStaysRawOnStderrWhenEnabled() {
         final var frontend = new RunShellFrontend(true, ToolOutputVisibility.COLLAPSED);
 
-        frontend.onEvent(new AgentEvent.ThinkingDelta("thinking..."));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("thinking...", "s1"));
 
         assertEquals("thinking...", err.toString(StandardCharsets.UTF_8));
     }

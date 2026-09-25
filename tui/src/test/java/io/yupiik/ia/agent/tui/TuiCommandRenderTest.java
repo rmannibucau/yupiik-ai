@@ -45,6 +45,8 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
@@ -59,6 +61,8 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
@@ -113,6 +117,10 @@ class TuiCommandRenderTest {
         llm.close();
     }
 
+    private static String sid(final ShellRegistry registry) {
+        return registry.sessions().iterator().next();
+    }
+
     @Test
     void rendersSidebarAndAnswer() throws Exception {
         final var shellRegistry = testRegistry();
@@ -124,8 +132,8 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub"));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub"));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
                 return "ok";
             }
 
@@ -207,7 +215,11 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.active().frontend().onEvent(new AgentEvent.Status("MARKER" + "x".repeat(300) + "TAIL"));
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Status("MARKER" + "x".repeat(300) + "TAIL", sessionId));
 
         awaitText("ⓘ");
         awaitText("MARKER");
@@ -261,7 +273,7 @@ class TuiCommandRenderTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.TurnDone("some answer"));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("some answer", sessionId));
                 return "ok";
             }
 
@@ -298,6 +310,10 @@ class TuiCommandRenderTest {
     void btwAnswersInModalWithoutEchoOrPersistence() throws Exception {
         llm.answer("side answer");
         final var shellRegistry = testRegistry();
+        // the stub turn parks on releaseTurn once it signaled turnStarted, so the
+        // /btw modal is exercised over a deterministically-live turn instead of a sleep
+        final var turnStarted = new CountDownLatch(1);
+        final var releaseTurn = new CountDownLatch(1);
         final var agentLoop = new AgentLoop() {
             @Override
             public String run(
@@ -307,12 +323,13 @@ class TuiCommandRenderTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 try {
-                    Thread.sleep(300);
+                    turnStarted.countDown();
+                    releaseTurn.await();
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub"));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub"));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
                 return "ok";
             }
 
@@ -336,7 +353,9 @@ class TuiCommandRenderTest {
 
         tuiRef.get().dispatch(new PasteEvent("say hi"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-        // the stub turn stays busy ~300ms: ask the side question while it runs
+        assertTrue(
+                turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
+        // the stub turn is parked on releaseTurn: ask the side question while it runs
         tuiRef.get().dispatch(new PasteEvent("/btw what is this"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("Q: what is this");
@@ -347,6 +366,7 @@ class TuiCommandRenderTest {
         assertTrue(sessionAppends.isEmpty(), "btw must never write to the session store");
         awaitTextGone("`/btw");
 
+        releaseTurn.countDown();
         awaitText("hello from stub");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
@@ -413,7 +433,7 @@ class TuiCommandRenderTest {
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
                 0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, true, "unicode", "auto", "auto",
-                List.of(), null);
+                List.of(), null, true);
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -447,7 +467,7 @@ class TuiCommandRenderTest {
                                         .build())));
         final var factory = new TuiRunnerFactory() {
             @Override
-            public TuiRunner create(final TuiCommand.TuiConf tuiConf) throws Exception {
+            public TuiRunner create(final TuiCommand.TuiConf tuiConf, final boolean hideCursor) throws Exception {
                 final var runner = TuiRunner.create(TuiConfig.builder()
                         .backend(backend)
                         .mouseCapture(false)
@@ -467,7 +487,6 @@ class TuiCommandRenderTest {
         // commands must observe the same mode for the gutter to follow /mode
         final var permissionService = new PermissionService(configuration);
         final var agentSessionService = new AgentSessionService(
-                permissionService,
                 chatClient,
                 mcpManager,
                 new AgentProvider(configuration),
@@ -476,9 +495,6 @@ class TuiCommandRenderTest {
                 null,
                 null,
                 null,
-                null,
-                null,
-                todoStore,
                 configuration,
                 null);
         final var configCommands =
@@ -487,12 +503,22 @@ class TuiCommandRenderTest {
                 conf,
                 tuiConfiguration,
                 configuration,
-                agentLoop,
                 shellRegistry,
-                permissionService,
-                new UserFeedbackService(),
+                new SessionRuntimeFactory() {
+                    @Override
+                    public SessionRuntime create(final String sessionId) {
+                        return new SessionRuntime(
+                                agentLoop,
+                                permissionService,
+                                new UserFeedbackService(),
+                                usageTracker,
+                                todoStore,
+                                new io.yupiik.ia.agent.core.runtime.StatusReporter(),
+                                null,
+                                null);
+                    }
+                },
                 sessionStore,
-                todoStore,
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
                 mcpManager,
@@ -502,26 +528,17 @@ class TuiCommandRenderTest {
                 agentSessionService,
                 new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
                 new TurnRunner(
-                        agentLoop,
                         new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
                         new VirtualThreadExecutor()),
-                new TuiTranscriptModel(new ThinkTagSplitter()),
+                new ThinkTagSplitter(),
                 factory,
                 tuiSlashCommands,
                 new SlashRegistry(List.of(tuiSlashCommands, configCommands)),
                 clock,
-                usageTracker,
                 new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                 new ToolOutputFormat(formatMapper),
                 new BtwAnswerer(
-                        chatClient,
-                        sessionStore,
-                        usageTracker,
-                        configuration,
-                        new VirtualThreadExecutor(),
-                        null,
-                        null,
-                        null));
+                        chatClient, sessionStore, configuration, new VirtualThreadExecutor(), null, null, null));
     }
 
     @Test
@@ -535,7 +552,7 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // live thinking renders inline in the conversation panel (no dedicated panel)
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering", sid(shellRegistry)));
         awaitText("pondering");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
@@ -567,8 +584,8 @@ class TuiCommandRenderTest {
         // reasoning deltas can stream while a tool is running (subagent output, parallel
         // batches): the timer must arm on the first indicator frame even though the
         // pinned footer is busy showing the tool line
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}"));
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering while building"));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering while building", sid(shellRegistry)));
         awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
 
         clock.advance(5_000);
@@ -595,19 +612,19 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first round"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first round", sid(shellRegistry)));
         awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
         clock.advance(30_000);
         awaitTextWithin("thinking... (30 s)", TIMEOUT_MS);
 
         // the turn ends while no idle frame may ever catch the reset condition: the
         // next thinking round must restart from zero, not resume the stale timer
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer"));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
         awaitText("answer");
         awaitTextGoneWithin("thinking... (30 s)", TIMEOUT_MS);
 
         clock.advance(5_000);
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("second round"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("second round", sid(shellRegistry)));
         awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
         clock.advance(2_000);
         awaitTextWithin("thinking... (2 s)", TIMEOUT_MS);
@@ -628,9 +645,9 @@ class TuiCommandRenderTest {
 
         // reasoning containing a fenced block must survive the split/highlight path and
         // render the code text inline (it used to fall through as plain prose)
-        shellRegistry.onEvent(
-                new AgentEvent.ThinkingDelta("let's inspect\n```java\npublic int x() {\n return 1;\n}\n```"));
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta(
+                "let's inspect\n```java\npublic int x() {\n return 1;\n}\n```", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
         awaitText("public int x()");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
@@ -656,7 +673,8 @@ class TuiCommandRenderTest {
                     return (BiPredicate) field.get(null);
                 }
                 """;
-        shellRegistry.onEvent(new AgentEvent.TurnDone("here is the method:\n```java\n" + code + "```"));
+        shellRegistry.onEvent(
+                new AgentEvent.TurnDone("here is the method:\n```java\n" + code + "```", sid(shellRegistry)));
 
         // the code reached rendering (not dropped) and its body indentation survived
         awaitText("public static native BiPredicate declaredType");
@@ -719,8 +737,8 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // a flushed thought region sits in the transcript
-        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("secret reasoning"));
-        shellRegistry.onEvent(new AgentEvent.TurnDone("answer"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("secret reasoning", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
         awaitText("secret reasoning");
 
         tuiRef.get().dispatch(new PasteEvent("/thinking hide"));
@@ -745,9 +763,10 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"cd /tmp && ls -la\"}"));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt"));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true));
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"cd /tmp && ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "file.txt", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "file.txt", true, sid(shellRegistry)));
         // collapsed by default: the dim one-liner carries the significant command, not the output
         awaitText("✓ bash");
         awaitText("ls -la");
@@ -780,9 +799,9 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "secret-out"));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "secret-out", true));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "secret-out", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "secret-out", true, sid(shellRegistry)));
         awaitText("✓ bash"); // collapsed default
 
         tuiRef.get().dispatch(new PasteEvent("/tool-output hide"));
@@ -809,9 +828,9 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "out-a\nout-b"));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "out-a\nout-b", true));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "out-a\nout-b", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "out-a\nout-b", true, sid(shellRegistry)));
         awaitText("✓ bash"); // condensed dim line
 
         // clicking the dim line opens the full-output modal even while blocks are hidden
@@ -837,8 +856,8 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}"));
-        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line", sid(shellRegistry)));
         awaitTextGone("streamed line"); // condensed default hides the live stream
         awaitText("tail -f log"); // dim one-liner with the significant command
         awaitText("running...");
@@ -862,7 +881,7 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500));
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry)));
         awaitText("3 LLM");
         awaitText("1.5s");
         awaitText("session: 1 LLM calls");
@@ -885,7 +904,7 @@ class TuiCommandRenderTest {
                     final BooleanSupplier cancelled) {
                 received.set(prompt);
                 shellRegistry.onEvent(
-                        new AgentEvent.TurnDone("lines:" + prompt.lines().count()));
+                        new AgentEvent.TurnDone("lines:" + prompt.lines().count(), sessionId));
                 return "ok";
             }
 
@@ -913,6 +932,92 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("lines:2"); // submitted as a single prompt
         org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void tabsRouteEventsPerSessionAndShowStatusIcons() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var lastSid = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                lastSid.set(sessionId);
+                shellRegistry.onEvent(new AgentEvent.TurnDone("ran:" + sessionId, sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop, true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tabs-routing-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // second tab becomes active on Ctrl+N - the bar appears with a close marker per tab
+        tuiRef.get().dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+        awaitTextWithin(Glyphs.of("unicode").cross() + " ", 2_000);
+
+        // a turn on tab two renders only in tab two's transcript
+        tuiRef.get().dispatch(new PasteEvent("hi tab two"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitTextWithin("ran:", 2_000);
+        final var secondSid = lastSid.get();
+
+        // switch back to tab one: tab two's transcript must not leak into it
+        // (the tab bar still shows tab two's title - "hi tab two" - on every tab, by design)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.CTRL));
+        awaitTextGone("ran:");
+
+        // an event for the background tab two is routed to its own transcript, never the visible one
+        shellRegistry.onEvent(new AgentEvent.Notice(AgentEvent.Notice.Level.INFO, "bg-for-two", secondSid));
+        awaitTextGone("bg-for-two");
+
+        // back on tab two: the background text arrived while hidden, and the bar shows the done icon
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.CTRL));
+        awaitTextWithin("bg-for-two", 2_000);
+        awaitTextWithin(" " + Glyphs.of("unicode").check() + " ", 2_000);
+        awaitTextWithin(" +", 2_000); // the trailing new-tab affordance is on the bar
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void singleTabShowsAddButtonAndCloseMarker() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-single-tab-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // with a single tab the strip still renders: the "+" affordance lets the
+        // user open a second session and each tab exposes its close marker
+        org.junit.jupiter.api.Assertions.assertTrue(
+                backend.text().contains(" +"), "single tab must show the add button, got:\n" + backend.text());
+        org.junit.jupiter.api.Assertions.assertTrue(
+                backend.text().contains(Glyphs.of("unicode").cross() + " "),
+                "tab must show the close marker, got:\n" + backend.text());
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -997,6 +1102,116 @@ class TuiCommandRenderTest {
                 moved[0] > promptStart,
                 "cursor must sit inside the wrapped fragment, not pinned to its start; start=" + promptStart
                         + " cursor=" + moved[0]);
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void mouseClickPositionsThePromptCursor() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-mouse-click-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // type a line, bring the caret home, then click on the 3rd character cell:
+        // the caret must jump to the clicked cell, not stay at its previous spot
+        tuiRef.get().dispatch(new PasteEvent("hello"));
+        awaitText("hello");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.HOME));
+        final var promptStart = columnOfLineContaining("hello");
+        final var row = rowOf("hello");
+        awaitCursorAt(promptStart);
+
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, promptStart + 2, row));
+        final var clicked = awaitCursorAt(promptStart + 2);
+        org.junit.jupiter.api.Assertions.assertEquals(
+                row, clicked[1], "clicking the prompt must not change the prompt row");
+
+        // the caret really moved: a typed char lands at the click position
+        tuiRef.get().dispatch(KeyEvent.ofChar('X'));
+        awaitText("heXllo");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void upMovesAcrossWrappedFragmentsLikeAGuiEditor() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-wrap-up-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // 120 chars wrap onto a second visual fragment row of the prompt
+        final var longLine = "wrap".repeat(30);
+        tuiRef.get().dispatch(new PasteEvent(longLine));
+        awaitText("wrap");
+        final var promptStart = columnOfLineContaining("wrap");
+        final var firstWrapRow = rowOf("wrap");
+        final var wrappedRow = firstWrapRow + 1;
+
+        // END places the caret at the end of the wrapped fragment; the draw fix
+        // makes that caret visible on the wrapped row instead of off-screen
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.END));
+        final var endCell = awaitCursorCell();
+        org.junit.jupiter.api.Assertions.assertEquals(
+                wrappedRow, endCell[1], "END must put the caret on the wrapped fragment row");
+        org.junit.jupiter.api.Assertions.assertTrue(
+                endCell[0] > promptStart, "END must put the caret inside the wrapped fragment");
+
+        // UP moves to the previous visual fragment row, preserving the display
+        // column clamped to the fragment end (GUI-editor behavior)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.UP));
+        var upCell = backend.lastReversed();
+        while (upCell == null || upCell[1] != firstWrapRow) {
+            assertTrue(
+                    backend.awaitFrame(1_000),
+                    "no frame received while waiting for the caret to move to the previous fragment row");
+            upCell = backend.lastReversed();
+        }
+        org.junit.jupiter.api.Assertions.assertTrue(
+                upCell[0] > promptStart, "UP must keep the caret inside the previous fragment");
+
+        // the caret is really at the fragment boundary: a typed char lands there
+        tuiRef.get().dispatch(KeyEvent.ofChar('X'));
+        awaitText("Xwrap");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void mouseClickOnWideCharacterLandsOnItsStart() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-mouse-wide-char-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // "中" occupies two display cells; clicking either of them must place the
+        // caret at the wide char start (a caret cannot sit inside a wide char)
+        tuiRef.get().dispatch(new PasteEvent("a中b"));
+        awaitText("a中b");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.HOME));
+        final var promptStart = columnOfLineContaining("a中b");
+        final var row = rowOf("a中b");
+
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, promptStart + 1, row));
+        final var firstCell = awaitCursorAt(promptStart + 1);
+        org.junit.jupiter.api.Assertions.assertEquals(row, firstCell[1], "click must stay on the prompt row");
+
+        // a typed char lands before the wide char -> proves the caret sits at its start
+        tuiRef.get().dispatch(KeyEvent.ofChar('X'));
+        awaitText("aX中b");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);

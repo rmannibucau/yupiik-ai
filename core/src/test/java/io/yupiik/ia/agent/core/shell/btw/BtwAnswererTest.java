@@ -108,7 +108,6 @@ class BtwAnswererTest {
         return new BtwAnswerer(
                 client,
                 sessionStore,
-                usageTracker,
                 configuration,
                 new VirtualThreadExecutor(),
                 mapper,
@@ -182,7 +181,7 @@ class BtwAnswererTest {
     @Test
     void answersOutOfBandWithoutPersisting() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi"), Message.assistant("hello", List.of())));
-        final var answer = answerer.ask("what did I say?", "s1", () -> false)
+        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("hello there", answer);
@@ -205,7 +204,7 @@ class BtwAnswererTest {
         }
         sessionStore.replace("s1", messages);
         answerer(Map.of("yca.slashcommands.btw.maxHistoryMessages", "200"))
-                .ask("q", "s1", () -> false)
+                .ask("q", "s1", usageTracker, () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -218,9 +217,12 @@ class BtwAnswererTest {
     void replaysPriorExchangesAndHonorsRecallZero() throws Exception {
         sessionStore.replace("s1", List.of());
         final var replaying = answerer(Map.of());
-        replaying.ask("first question", "s1", () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         replaying
-                .ask("second question", "s1", () -> false)
+                .ask("first question", "s1", usageTracker, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        replaying
+                .ask("second question", "s1", usageTracker, () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -230,15 +232,19 @@ class BtwAnswererTest {
 
         bodies.clear();
         final var noRecall = answerer(Map.of("yca.slashcommands.btw.recall", "0"));
-        noRecall.ask("first question", "s1", () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
-        noRecall.ask("second question", "s1", () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        noRecall.ask("first question", "s1", usageTracker, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        noRecall.ask("second question", "s1", usageTracker, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
         assertTrue(!bodies.getLast().contains("Earlier side questions"), bodies.getLast());
     }
 
     @Test
     void modelOverrideApplies() throws Exception {
         answerer(Map.of("yca.slashcommands.btw.model", "btw-model"))
-                .ask("q", "s1", () -> false)
+                .ask("q", "s1", usageTracker, () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(bodies.getLast().contains("\"model\":\"btw-model\""), bodies.getLast());
@@ -248,7 +254,7 @@ class BtwAnswererTest {
     void emptyAnswerFails() throws Exception {
         final var error = assertThrows(
                 ExecutionException.class,
-                () -> answerer.ask("EMPTY PLEASE", "s1", () -> false)
+                () -> answerer.ask("EMPTY PLEASE", "s1", usageTracker, () -> false)
                         .toCompletableFuture()
                         .get(5, TimeUnit.SECONDS));
         assertTrue(error.getCause() instanceof IOException, String.valueOf(error.getCause()));

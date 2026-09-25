@@ -15,9 +15,6 @@
  */
 package io.yupiik.ia.agent.core.todo;
 
-import io.yupiik.fusion.framework.api.lifecycle.Start;
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.io.IOException;
@@ -27,20 +24,43 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-@ApplicationScoped
 public class TodoStore {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
+    private final String key;
     private volatile List<TodoItem> todos = List.of();
 
     public TodoStore(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
+        this(configuration, mapper, null);
+    }
+
+    /**
+     * A store persisting under a session key: each tab owns its own file
+     * ({@code todos-<key>.json}) so concurrent tabs do not share a list.
+     *
+     * @param key the session (tab) key or null for the legacy shared {@code todos.json}
+     */
+    public TodoStore(final CodingAgentConfiguration configuration, final JsonMapper mapper, final String key) {
         this.configuration = configuration;
         this.mapper = mapper;
+        this.key = sanitize(key);
     }
 
     protected TodoStore() {
         this.configuration = null;
         this.mapper = null;
+        this.key = null;
+    }
+
+    private static String sanitize(final String key) {
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+        return key.replaceAll("[^A-Za-z0-9._-]", "_");
+    }
+
+    private Path path() {
+        return Path.of(configuration.resolveStorageHome(), key == null ? "todos.json" : "todos-" + key + ".json");
     }
 
     public List<TodoItem> all() {
@@ -53,19 +73,17 @@ public class TodoStore {
         return all();
     }
 
-    public void onStart(@OnEvent final Start start) {
-        load();
-    }
-
     public synchronized void load() {
-        final var path = Path.of(configuration.resolveStorageHome(), "todos.json");
+        final var path = path();
         if (!Files.isReadable(path)) {
             return;
         }
         try {
-            final var loaded = mapper.fromString(TodoItem[].class, Files.readString(path));
-            if (loaded != null && loaded.length > 0) {
-                todos = List.of(loaded);
+            // read as a raw object graph then convert: keeps the parse independent of
+            // mapper array/list codec support, {@link #from} accepts maps or items
+            final var loaded = mapper.fromString(Object.class, Files.readString(path));
+            if (loaded instanceof final List<?> list && !list.isEmpty()) {
+                todos = List.copyOf(from(list));
             }
         } catch (final IOException | RuntimeException e) {
             // corrupted/legacy file: ignore and keep the in-memory list
@@ -74,7 +92,7 @@ public class TodoStore {
 
     private void persist() {
         try {
-            final var path = Path.of(configuration.resolveStorageHome(), "todos.json");
+            final var path = path();
             Files.createDirectories(path.getParent());
             Files.writeString(path, mapper.toString(todos));
         } catch (final IOException e) {
@@ -100,7 +118,8 @@ public class TodoStore {
         return sb.toString().stripTrailing();
     }
 
-    public List<TodoItem> from(final List<?> raw) {
+    /** Parses raw todo entries ({@link TodoItem} or maps) into todo items. */
+    public static List<TodoItem> from(final List<?> raw) {
         final var out = new ArrayList<TodoItem>();
         if (raw != null) {
             for (final var o : raw) {

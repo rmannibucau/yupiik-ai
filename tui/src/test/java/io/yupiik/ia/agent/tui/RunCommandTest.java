@@ -26,20 +26,27 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.BashPermissionsConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.PermissionsConfiguration;
+import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.RunShellFrontend;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.todo.InMemoryTodoStore;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -122,18 +129,16 @@ class RunCommandTest {
                     final BooleanSupplier cancelled) {
                 calls.add(new String[] {prompt, agentName, sessionId});
                 assertNull(history);
-                shellRegistry.onEvent(new AgentEvent.TextDelta("hel"));
-                shellRegistry.onEvent(new AgentEvent.TextDelta("lo"));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("hello"));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hel", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TextDelta("lo", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello", sessionId));
                 return "ok";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, true, "", "collapsed", "", ""),
-                agentLoop,
                 shellRegistry,
-                new PermissionService(null),
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null);
 
@@ -158,16 +163,14 @@ class RunCommandTest {
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
                 lastSessionIdUsed.set(sessionId);
-                shellRegistry.onEvent(new AgentEvent.Error("boom"));
+                shellRegistry.onEvent(new AgentEvent.Error("boom", sessionId));
                 return "ko";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "s-2", "", false, true, "", "collapsed", "", ""),
-                agentLoop,
                 shellRegistry,
-                new PermissionService(null),
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null);
 
@@ -183,7 +186,8 @@ class RunCommandTest {
         final var configuration = CodingAgentConfigurations.builder()
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
-                .permissions(new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()))
+                .permissions(new PermissionsConfiguration(
+                        PermissionMode.ASK, List.of(), List.of(), new BashPermissionsConfiguration(List.of())))
                 .build();
         final var permissions = new PermissionService(configuration);
         permissions.setMode(AgentMode.BUILD);
@@ -204,10 +208,8 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "build", "collapsed", "", ""),
-                agentLoop,
                 shellRegistry,
-                permissions,
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration));
 
@@ -223,7 +225,8 @@ class RunCommandTest {
         final var configuration = CodingAgentConfigurations.builder()
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
-                .permissions(new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()))
+                .permissions(new PermissionsConfiguration(
+                        PermissionMode.ASK, List.of(), List.of(), new BashPermissionsConfiguration(List.of())))
                 .build();
         final var permissions = new PermissionService(configuration);
         // default mode, falls back to PLAN
@@ -244,10 +247,8 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "", "collapsed", "", ""),
-                agentLoop,
                 shellRegistry,
-                permissions,
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration));
 
@@ -279,10 +280,8 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "plan", "collapsed", "", ""),
-                agentLoop,
                 shellRegistry,
-                permissions,
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration));
 
@@ -296,7 +295,8 @@ class RunCommandTest {
         final var configuration = CodingAgentConfigurations.builder()
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
-                .permissions(new PermissionsConfiguration(PermissionMode.ASK, List.of(), List.of(), List.of()))
+                .permissions(new PermissionsConfiguration(
+                        PermissionMode.ASK, List.of(), List.of(), new BashPermissionsConfiguration(List.of())))
                 .build();
         final var permissions = new PermissionService(configuration);
         final var reason = new AtomicReference<String>();
@@ -316,10 +316,8 @@ class RunCommandTest {
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "plan", "collapsed", "", ""),
-                agentLoop,
                 shellRegistry,
-                permissions,
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, permissions),
                 sessionStore(),
                 new AgentProvider(configuration));
 
@@ -344,18 +342,16 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}"));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done"));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
                 return "ok";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "", "shown", "", ""),
-                agentLoop,
                 shellRegistry,
-                new PermissionService(null),
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null);
 
@@ -376,19 +372,17 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}"));
-                shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line"));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true));
-                shellRegistry.onEvent(new AgentEvent.TurnDone("done"));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"echo hi\"}", sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "streamed line", sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "streamed line", true, sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
                 return "ok";
             }
         };
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "", false, false, "", "shown", "", ""),
-                agentLoop,
                 shellRegistry,
-                new PermissionService(null),
-                new UserFeedbackService(),
+                runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
                 null);
 
@@ -409,10 +403,8 @@ class RunCommandTest {
         final var shellRegistry = testRegistry();
         final var command = new RunCommand(
                 new RunCommand.RunConf("say hi", "", "nope", false, true, "", "collapsed", "", ""),
-                stubAgentLoop(),
                 shellRegistry,
-                new PermissionService(null),
-                new UserFeedbackService(),
+                runtimeFactory(stubAgentLoop(), new PermissionService(null)),
                 sessionStore(),
                 new AgentProvider(configuration));
 
@@ -433,6 +425,23 @@ class RunCommandTest {
                     final BooleanSupplier cancelled) {
                 lastSessionIdUsed.set(sessionId);
                 return "ok";
+            }
+        };
+    }
+
+    private static SessionRuntimeFactory runtimeFactory(final AgentLoop loop, final PermissionService permissions) {
+        return new SessionRuntimeFactory() {
+            @Override
+            public SessionRuntime create(final String sessionId) {
+                return new SessionRuntime(
+                        loop,
+                        permissions,
+                        new UserFeedbackService(),
+                        new UsageTracker(null, null, null, Clock.systemUTC()),
+                        new InMemoryTodoStore(),
+                        new StatusReporter(),
+                        null,
+                        null);
             }
         };
     }

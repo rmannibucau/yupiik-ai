@@ -32,16 +32,13 @@ import java.util.List;
 @ApplicationScoped
 public class PlanFileService {
     private final SessionStore sessionStore;
-    private final TodoStore todoStore;
 
-    public PlanFileService(final SessionStore sessionStore, final TodoStore todoStore) {
+    public PlanFileService(final SessionStore sessionStore) {
         this.sessionStore = sessionStore;
-        this.todoStore = todoStore;
     }
 
     protected PlanFileService() {
         this.sessionStore = null;
-        this.todoStore = null;
     }
 
     /**
@@ -123,7 +120,7 @@ public class PlanFileService {
      * @param parsed    parsed plan file.
      * @return a short human status string describing what was applied.
      */
-    public String reload(final String sessionId, final PlanFile parsed) {
+    public String reload(final String sessionId, final PlanFile parsed, final TodoStore todoStore) {
         final var messages = sessionStore.load(sessionId);
         final var updated = new ArrayList<Message>();
         boolean replaced = false;
@@ -140,7 +137,9 @@ public class PlanFileService {
         }
         sessionStore.replace(sessionId, updated);
         if (!parsed.todos().isEmpty()) {
-            todoStore.replace(parsed.todos());
+            if (todoStore != null) {
+                todoStore.replace(parsed.todos());
+            }
             return "plan and todos reloaded";
         }
         return "plan reloaded";

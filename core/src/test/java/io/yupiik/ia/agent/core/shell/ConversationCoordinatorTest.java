@@ -27,12 +27,12 @@ class ConversationCoordinatorTest {
     @Test
     void foldsEventsIntoTranscriptAndStats() {
         final var coordinator = new ConversationCoordinator();
-        coordinator.onEvent(new AgentEvent.ToolStarted("bash", "{}"));
-        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true));
-        final var usage = new AgentEvent.UsageUpdated(null, 11, 22.0);
+        coordinator.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
+        final var usage = new AgentEvent.UsageUpdated(null, 11, 22.0, "s1");
         coordinator.onEvent(usage);
-        coordinator.onEvent(new AgentEvent.TurnMetrics(2, 30, 40, 45, 1, 500));
-        coordinator.onEvent(new AgentEvent.TurnDone("done"));
+        coordinator.onEvent(new AgentEvent.TurnMetrics(2, 30, 40, 45, 1, 500, "s1"));
+        coordinator.onEvent(new AgentEvent.TurnDone("done", "s1"));
 
         assertTrue(coordinator.transcript().transcript().toString().contains("**Assistant**\n\ndone"));
         assertEquals(1, coordinator.stats().toolsRun());
@@ -45,8 +45,8 @@ class ConversationCoordinatorTest {
     @Test
     void shellLifecycleEventsResetState() {
         final var coordinator = new ConversationCoordinator();
-        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true));
-        coordinator.onEvent(new AgentEvent.UsageUpdated(null, 11, 22.0));
+        coordinator.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
+        coordinator.onEvent(new AgentEvent.UsageUpdated(null, 11, 22.0, "s1"));
 
         coordinator.onRegistered(new ShellRegistered(null));
 
@@ -54,7 +54,7 @@ class ConversationCoordinatorTest {
         assertEquals(0, coordinator.stats().toolsRun());
         assertNull(coordinator.stats().lastUsage());
 
-        coordinator.onEvent(new AgentEvent.TurnMetrics(1, 0, 0, 0, 0, 0));
+        coordinator.onEvent(new AgentEvent.TurnMetrics(1, 0, 0, 0, 0, 0, "s1"));
         coordinator.onUnregistered(new ShellUnregistered(null));
         assertNull(coordinator.stats().lastTurnMetrics());
     }

@@ -54,7 +54,7 @@ class TuiTranscriptModelTest {
         assertTrue(model.transcript().toString().contains("**You**\n\nqueued"));
         assertTrue(model.busy());
 
-        model.onEvent(new AgentEvent.TextDelta("more output"));
+        model.onEvent(new AgentEvent.TextDelta("more output", "s1"));
         assertEquals(42, model.anchorRow());
     }
 
@@ -71,8 +71,8 @@ class TuiTranscriptModelTest {
     @Test
     void textDeltaAccumulatesPendingAndShowsItWhileBusy() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("hel"));
-        model.onEvent(new AgentEvent.TextDelta("lo"));
+        model.onEvent(new AgentEvent.TextDelta("hel", "s1"));
+        model.onEvent(new AgentEvent.TextDelta("lo", "s1"));
         assertEquals("hello", model.pending().toString());
         assertTrue(model.markdown("|", "welcome").contains("**Assistant**\n\nhello"));
     }
@@ -80,8 +80,8 @@ class TuiTranscriptModelTest {
     @Test
     void turnDoneFlushesPendingAndClosesTurn() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("partial"));
-        model.onEvent(new AgentEvent.TurnDone("final answer"));
+        model.onEvent(new AgentEvent.TextDelta("partial", "s1"));
+        model.onEvent(new AgentEvent.TurnDone("final answer", "s1"));
         assertTrue(model.transcript().toString().contains("**Assistant**\n\nfinal answer"));
         assertEquals("", model.pending().toString());
         assertFalse(model.busy());
@@ -92,7 +92,7 @@ class TuiTranscriptModelTest {
     void thinkingDeltaRePinsScrollToLiveTail() {
         model.maxViewOffset(80);
         model.anchorRow(42);
-        model.onEvent(new AgentEvent.ThinkingDelta("pondering"));
+        model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1"));
         assertEquals(80, model.anchorRow());
     }
 
@@ -101,7 +101,7 @@ class TuiTranscriptModelTest {
         model.maxViewOffset(120);
         model.anchorRow(42);
         model.userScrolled(true);
-        model.onEvent(new AgentEvent.TextDelta("more"));
+        model.onEvent(new AgentEvent.TextDelta("more", "s1"));
         assertEquals(42, model.anchorRow());
     }
 
@@ -109,7 +109,7 @@ class TuiTranscriptModelTest {
     void promptIntegratedRePinsScrollToLiveTail() {
         model.maxViewOffset(90);
         model.anchorRow(42);
-        model.onEvent(new AgentEvent.PromptIntegrated("boost"));
+        model.onEvent(new AgentEvent.PromptIntegrated("boost", "s1"));
         assertEquals(90, model.anchorRow());
     }
 
@@ -118,7 +118,7 @@ class TuiTranscriptModelTest {
         model.maxViewOffset(90);
         model.anchorRow(42);
         model.userScrolled(true);
-        model.onEvent(new AgentEvent.PromptIntegrated("boost"));
+        model.onEvent(new AgentEvent.PromptIntegrated("boost", "s1"));
         assertEquals(42, model.anchorRow());
     }
 
@@ -156,17 +156,17 @@ class TuiTranscriptModelTest {
 
     @Test
     void textResetDiscardsPendingAndThinkingBuffers() {
-        model.onEvent(new AgentEvent.TextDelta("partial"));
-        model.onEvent(new AgentEvent.ThinkingDelta("pondering"));
-        model.onEvent(new AgentEvent.TextReset());
+        model.onEvent(new AgentEvent.TextDelta("partial", "s1"));
+        model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1"));
+        model.onEvent(new AgentEvent.TextReset("s1"));
         assertEquals("", model.pending().toString());
         assertFalse(model.markdown("|", "welcome").contains("partial"));
     }
 
     @Test
     void flushThinkingWrapsThoughtBetweenMarkersOnce() {
-        model.onEvent(new AgentEvent.ThinkingDelta("let me "));
-        model.onEvent(new AgentEvent.ThinkingDelta("think"));
+        model.onEvent(new AgentEvent.ThinkingDelta("let me ", "s1"));
+        model.onEvent(new AgentEvent.ThinkingDelta("think", "s1"));
         model.flushThinking();
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.THOUGHT_BEGIN + "\n**Thinking**\n\nlet me think\n"
@@ -177,18 +177,18 @@ class TuiTranscriptModelTest {
 
     @Test
     void flushThinkingWithBlankContentWritesNothing() {
-        model.onEvent(new AgentEvent.ThinkingDelta("   "));
+        model.onEvent(new AgentEvent.ThinkingDelta("   ", "s1"));
         model.flushThinking();
         assertEquals("", model.transcript().toString());
     }
 
     @Test
     void toolStartedExtractsCommandAndResetsStream() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", "s1"));
         assertEquals("bash", model.runningTool());
         assertEquals("ls -la", model.runningToolCommand());
-        model.onEvent(new AgentEvent.ToolStream("bash", "file.txt"));
-        model.onEvent(new AgentEvent.ToolStarted("read", "{}"));
+        model.onEvent(new AgentEvent.ToolStream("bash", "file.txt", "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
         assertEquals("", model.runningToolCommand());
         final var md = model.markdown("|", "welcome");
         assertTrue(md.contains("running read`"), "expected running line in: " + md);
@@ -197,8 +197,8 @@ class TuiTranscriptModelTest {
 
     @Test
     void markdownShowsRunningToolAndStreamedOutput() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}"));
-        model.onEvent(new AgentEvent.ToolStream("bash", "out.txt"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        model.onEvent(new AgentEvent.ToolStream("bash", "out.txt", "s1"));
         final var md = model.markdown("*", "welcome");
         assertTrue(md.contains("`* running ls`"));
         assertTrue(md.contains("```text\nout.txt\n```"));
@@ -206,18 +206,18 @@ class TuiTranscriptModelTest {
 
     @Test
     void toolStreamIgnoresOtherToolsAndCapsSize() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{}"));
-        model.onEvent(new AgentEvent.ToolStream("other", "nope"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolStream("other", "nope", "s1"));
         assertEquals("", model.transcript().toString());
-        model.onEvent(new AgentEvent.ToolStream("bash", "x".repeat(2000)));
+        model.onEvent(new AgentEvent.ToolStream("bash", "x".repeat(2000), "s1"));
         assertTrue(model.markdown("|", "welcome").length() < 2200, "stream must stay capped");
     }
 
     @Test
     void toolFinishedFlushesStreamAsToolRegion() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}"));
-        model.onEvent(new AgentEvent.ToolStream("bash", "a.txt"));
-        model.onEvent(new AgentEvent.ToolFinished("bash", "", true));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        model.onEvent(new AgentEvent.ToolStream("bash", "a.txt", "s1"));
+        model.onEvent(new AgentEvent.ToolFinished("bash", "", true, "s1"));
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.TOOL_BEGIN));
         assertTrue(transcript.contains("*streaming `bash`: ls*"));
@@ -228,15 +228,15 @@ class TuiTranscriptModelTest {
 
     @Test
     void failedToolIsReported() {
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{}"));
-        model.onEvent(new AgentEvent.ToolFinished("bash", "boom\n details", false));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolFinished("bash", "boom\n details", false, "s1"));
         assertTrue(model.transcript().toString().contains("> tool `bash` failed: boom"));
     }
 
     @Test
     void nonStreamedToolSuccessFallsBackToFinishedOutput() {
-        model.onEvent(new AgentEvent.ToolStarted("read_file", "{}"));
-        model.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true));
+        model.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, "s1"));
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.TOOL_BEGIN));
         assertTrue(transcript.contains("*streaming `read_file`*"));
@@ -247,14 +247,14 @@ class TuiTranscriptModelTest {
 
     @Test
     void nonStreamedToolSuccessWithEmptyOutputWritesNothing() {
-        model.onEvent(new AgentEvent.ToolStarted("read_file", "{}"));
-        model.onEvent(new AgentEvent.ToolFinished("read_file", "", true));
+        model.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolFinished("read_file", "", true, "s1"));
         assertFalse(model.transcript().toString().contains(TuiTranscriptModel.TOOL_BEGIN));
     }
 
     @Test
     void usageUpdatedTracksTokens() {
-        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44));
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1"));
         assertEquals(0, model.promptTokens());
         assertEquals(0, model.completionTokens());
         assertEquals(42000, model.estimatedContext());
@@ -263,27 +263,27 @@ class TuiTranscriptModelTest {
 
     @Test
     void compactedUpdatesStatusAndTranscript() {
-        model.onEvent(new AgentEvent.Compacted("auto"));
+        model.onEvent(new AgentEvent.Compacted("auto", "SUMMARY", "s1"));
         assertEquals("context auto done (summary)", model.status());
         assertTrue(model.transcript().toString().contains("> context auto applied (summary)"));
     }
 
     @Test
     void noticeRendersDistinctTranscriptAndStatus() {
-        model.onEvent(AgentEvent.Notice.error("boom"));
+        model.onEvent(AgentEvent.Notice.error("boom", "s1"));
         assertTrue(model.transcript().toString().contains("> ⚠ error: boom"));
         assertEquals("error: boom", model.status());
-        model.onEvent(AgentEvent.Notice.info("all good"));
+        model.onEvent(AgentEvent.Notice.info("all good", "s1"));
         assertTrue(model.transcript().toString().contains("> ⓘ: all good"));
     }
 
     @Test
     void statusAndErrorEventsMapDirectly() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("draft"));
-        model.onEvent(new AgentEvent.Status("working"));
+        model.onEvent(new AgentEvent.TextDelta("draft", "s1"));
+        model.onEvent(new AgentEvent.Status("working", "s1"));
         assertEquals("working", model.status());
-        model.onEvent(new AgentEvent.Error("kaput"));
+        model.onEvent(new AgentEvent.Error("kaput", "s1"));
         assertTrue(model.transcript().toString().contains("> error: kaput"));
         assertFalse(model.busy());
         assertEquals("error: kaput", model.status());
@@ -367,7 +367,7 @@ class TuiTranscriptModelTest {
     @Test
     void clearConversationResetsConversationButKeepsInstance() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.Status("busy"));
+        model.onEvent(new AgentEvent.Status("busy", "s1"));
         model.clearConversation();
         assertEquals("", model.transcript().toString());
         assertEquals("", model.thinking().toString());
@@ -378,9 +378,9 @@ class TuiTranscriptModelTest {
     @Test
     void resetClearsEverything() {
         model.startUserTurn("hi");
-        model.onEvent(new AgentEvent.TextDelta("x"));
-        model.onEvent(new AgentEvent.ToolStarted("bash", "{}"));
-        model.onEvent(new AgentEvent.Status("busy"));
+        model.onEvent(new AgentEvent.TextDelta("x", "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        model.onEvent(new AgentEvent.Status("busy", "s1"));
         model.reset();
         assertFalse(model.busy());
         assertEquals("", model.status());

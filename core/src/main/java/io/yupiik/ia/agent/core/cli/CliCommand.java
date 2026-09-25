@@ -27,10 +27,8 @@ import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
-import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
@@ -38,6 +36,7 @@ import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
+import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
@@ -47,7 +46,6 @@ import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
-import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
@@ -77,16 +75,14 @@ import java.util.concurrent.locks.ReentrantLock;
 @Command(name = "cli", description = "Interactive plain-terminal yca session (REPL) with optional ANSI colors.")
 public class CliCommand implements Runnable {
     private final CliConf conf;
-    private final PermissionService permissionService;
     private final SessionLifecycle sessionLifecycle;
     private final FileSessionStore sessionStore;
-    private final TodoStore todoStore;
     private final AgentProvider agentProvider;
+    private final SessionRuntimeFactory sessionRuntimeFactory;
     private final ChatClient chatClient;
     private final ProviderManager providerManager;
     private final AgentSessionService agentSessionService;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
-    private final UsageTracker usageTracker;
     private final SlashRegistry slashRegistry;
     private final ShellRegistry shellRegistry;
     private final ConversationCoordinator coordinator;
@@ -119,12 +115,10 @@ public class CliCommand implements Runnable {
 
     public CliCommand(
             final CliConf conf,
-            final PermissionService permissionService,
             final SessionLifecycle sessionLifecycle,
             final FileSessionStore sessionStore,
-            final TodoStore todoStore,
+            final SessionRuntimeFactory sessionRuntimeFactory,
             final AgentProvider agentProvider,
-            final UsageTracker usageTracker,
             final ChatClient chatClient,
             final ProviderManager providerManager,
             final AgentSessionService agentSessionService,
@@ -140,12 +134,10 @@ public class CliCommand implements Runnable {
             final Clock clock,
             final CodingAgentConfiguration configuration) {
         this.conf = conf;
-        this.permissionService = permissionService;
         this.sessionLifecycle = sessionLifecycle;
         this.sessionStore = sessionStore;
-        this.todoStore = todoStore;
         this.agentProvider = agentProvider;
-        this.usageTracker = usageTracker;
+        this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         this.agentSessionService = agentSessionService;
@@ -252,6 +244,9 @@ public class CliCommand implements Runnable {
             println(MarkdownColorizer.error("failed to prepare context file " + contextPath + ": " + e.getMessage()));
         }
         println(MarkdownColorizer.info("session " + sessionId + " - context file: " + contextPath));
+        // the banner reads the session runtime (permission mode), wire it before printing
+        final var runtime = sessionRuntimeFactory.create(sessionId);
+        session.runtime(runtime);
         printBanner();
         if (conf.permitAll()) {
             println(MarkdownColorizer.warning(
@@ -264,7 +259,7 @@ public class CliCommand implements Runnable {
             }
             activeAgent = conf.agent();
         }
-        sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), conf.permitAll());
+        sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), conf.permitAll(), runtime);
         session.sessionId(sessionId).activeAgent(activeAgent);
         shellRegistry.register(env());
         final var shutdownHook = new Thread(this::shutdownCleanup, "yca-cli-shutdown");
@@ -291,7 +286,7 @@ public class CliCommand implements Runnable {
         }
         frontend.idle();
         shellRegistry.unregister(env());
-        sessionLifecycle.release(sessionId);
+        sessionLifecycle.release(sessionId, session.runtime());
         System.out.flush();
         System.err.flush();
         if (sessionId != null && contextPath != null && Files.exists(contextPath)) {
@@ -337,15 +332,15 @@ public class CliCommand implements Runnable {
      * falls back to plain text otherwise.
      */
     private String promptLine() {
-        final var mode = permissionService.mode().name().toLowerCase(Locale.ROOT);
-        final var info = agentSessionService.permissionsInfo();
+        final var mode = session.runtime().permissions().mode().name().toLowerCase(Locale.ROOT);
+        final var info = agentSessionService.permissionsInfo(session.runtime());
         final var usage = frontend.stats().lastUsage();
         final var model = chatClient.model();
         final var modelData = new LinkedHashMap<String, Object>();
         modelData.put("name", model);
         modelData.put("contextPercentage", usage == null ? 0 : (int) Math.round(usage.contextPercent()));
         modelData.put("contextTokens", usage == null ? 0 : usage.estimatedContextTokens());
-        modelData.put("contextWindow", usageTracker == null ? 0 : usageTracker.contextWindow());
+        modelData.put("contextWindow", session.runtime().usage().contextWindow());
 
         final var data = new LinkedHashMap<String, Object>();
         data.put("mode", mode);
@@ -394,7 +389,7 @@ public class CliCommand implements Runnable {
         final var sb = new StringBuilder();
         sb.append(MarkdownColorizer.bold(symbols.toolMarker() + "yca"))
                 .append(" · ")
-                .append(permissionService.mode().name().toLowerCase(Locale.ROOT))
+                .append(session.runtime().permissions().mode().name().toLowerCase(Locale.ROOT))
                 .append(" mode · session ")
                 .append(sessionId);
         final var model = chatClient.model();
@@ -582,10 +577,11 @@ public class CliCommand implements Runnable {
      */
     private void startTurn(final String prompt, final String agentName, final String blockedMessage) {
         cancelled.set(false);
-        final var todosBefore = todoStore.all();
+        final var todosBefore = session.runtime().todos().all();
         activeTurns.incrementAndGet();
         final var future = turnRunner
                 .submit(new TurnRunner.TurnRequest(
+                        session.runtime().loop(),
                         env(),
                         sessionId,
                         agentName,
@@ -616,7 +612,7 @@ public class CliCommand implements Runnable {
      * turn changed it; an unchanged list stays silent.
      */
     private void printTodosIfChanged(final List<TodoItem> before) {
-        final var after = todoStore.all();
+        final var after = session.runtime().todos().all();
         if (after.equals(before)) {
             return;
         }
@@ -641,13 +637,13 @@ public class CliCommand implements Runnable {
                     "~%,d tokens (%.1f%% of %,d)",
                     usage.estimatedContextTokens(),
                     usage.contextPercent(),
-                    usageTracker.contextWindow()));
+                    session.runtime().usage().contextWindow()));
             if (usage.usage() != null && usage.usage().cacheReadTokens() > 0) {
                 sb.append(String.format(
                         Locale.ROOT, " · %,d cache-read tokens", usage.usage().cacheReadTokens()));
             }
-            final var backgroundTokens =
-                    usageTracker.auxiliaryPromptTokens() + usageTracker.auxiliaryCompletionTokens();
+            final var backgroundTokens = session.runtime().usage().auxiliaryPromptTokens()
+                    + session.runtime().usage().auxiliaryCompletionTokens();
             if (backgroundTokens > 0) {
                 sb.append(String.format(Locale.ROOT, " · %,d background tokens (compaction/memory)", backgroundTokens));
             }
@@ -685,17 +681,18 @@ public class CliCommand implements Runnable {
             }
             sb.append(toolsRun).append(toolsRun == 1 ? " tool" : " tools");
         }
-        if (session.metrics().showSessionTotals() && usageTracker != null && usageTracker.requests() > 0) {
+        if (session.metrics().showSessionTotals() && session.runtime().usage().requests() > 0) {
             if (conf.showUsage() || toolsRun > 0 || (session.metrics().showPerTurn() && lastTurnMetrics != null)) {
                 sb.append(" · ");
             }
-            sb.append("session: ").append(usageTracker.requests()).append(" LLM calls");
+            sb.append("session: ").append(session.runtime().usage().requests()).append(" LLM calls");
         }
         final var elapsedMillis = (System.nanoTime() - stats.turnStartNanos()) / 1_000_000L;
         if (conf.showUsage()
                 || toolsRun > 0
                 || (session.metrics().showPerTurn() && lastTurnMetrics != null)
-                || (session.metrics().showSessionTotals() && usageTracker != null && usageTracker.requests() > 0)) {
+                || (session.metrics().showSessionTotals()
+                        && session.runtime().usage().requests() > 0)) {
             sb.append(" · ");
         }
         sb.append(String.format(Locale.ROOT, "%.1fs", elapsedMillis / 1000.0));

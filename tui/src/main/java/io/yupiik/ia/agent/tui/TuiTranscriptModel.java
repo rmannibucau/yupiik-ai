@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.tui;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
@@ -25,7 +24,6 @@ import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
  * only the scroll offset used by the renderer lives here, all conversation
  * state (transcript, streaming buffers, status, usage counters) is inherited.
  */
-@ApplicationScoped
 public class TuiTranscriptModel extends ConversationTranscript {
     /** Absolute transcript row shown at the top of the viewport, in {@code [0, maxViewOffset]}. */
     private volatile int anchorRow;

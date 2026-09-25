@@ -17,43 +17,39 @@ package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-import java.util.Locale;
+import java.util.List;
 
+/**
+ * Configuration of the websearch tool: the MCP provider fallback chain and its defaults.
+ *
+ * <p>By default all four providers are enabled anonymously, in the order EXA, PARALLEL, FIRECRAWL,
+ * TINYFISH; a search uses the first available provider and falls back to the next one on failure.
+ * An explicit list replaces the defaults entirely and an empty list
+ * ({@code yca.tools.websearch.providers.length=0}) disables the tool.</p>
+ */
 @JsonModel
 public record WebSearchConfiguration(
         @Property(
-                defaultValue = "\"exa\"",
+                defaultValue = """
+                        java.util.List.of(
+                                new WebSearchProviderConfiguration(WebSearchProvider.EXA, true, null, null, null),
+                                new WebSearchProviderConfiguration(WebSearchProvider.PARALLEL, true, null, null, null),
+                                new WebSearchProviderConfiguration(WebSearchProvider.FIRECRAWL, true, null, null, null),
+                                new WebSearchProviderConfiguration(WebSearchProvider.TINYFISH, true, null, null, null))""",
                 documentation =
-                        "Web search provider: exa or parallel. Both default to anonymously callable public MCP endpoints; an apiKey is optional.")
-        String provider,
+                        "Search providers in fallback order. Default: all four (EXA, PARALLEL, FIRECRAWL, TINYFISH), "
+                                + "anonymously. Explicit entries replace the defaults entirely; an empty list "
+                                + "(yca.tools.websearch.providers.length=0) disables the websearch tool. "
+                                + "Flat configuration format: yca.tools.websearch.providers.length=1, "
+                                + "yca.tools.websearch.providers.0.provider=EXA, "
+                                + "yca.tools.websearch.providers.0.enabled=false, ...")
+        List<WebSearchProviderConfiguration> providers,
 
         @Property(
-                defaultValue = "\"\"",
+                defaultValue = "8",
                 documentation =
-                        "Optional API key. Falls back to the EXA_API_KEY (provider=exa) or PARALLEL_API_KEY (provider=parallel) environment variable when empty.")
-        String apiKey,
-
-        @Property(defaultValue = "8", documentation = "Number of results to return.")
+                        "Number of results to request; providers without a count argument (parallel, tinyfish) ignore it.")
         int numResults,
 
-        @Property(defaultValue = "\"https://mcp.exa.ai/mcp\"", documentation = "Exa MCP endpoint URL.")
-        String exaUrl,
-
-        @Property(
-                defaultValue = "\"https://search.parallel.ai/mcp\"",
-                documentation = "Parallel search MCP endpoint URL.")
-        String parallelUrl) {
-
-    public enum Provider {
-        EXA,
-        PARALLEL;
-
-        public static Provider of(final String value) {
-            try {
-                return valueOf(value.trim().toUpperCase(Locale.ROOT));
-            } catch (final IllegalArgumentException e) {
-                return EXA;
-            }
-        }
-    }
-}
+        @Property(defaultValue = "25", documentation = "MCP request timeout in seconds, per provider call.")
+        int timeoutSeconds) {}

@@ -62,8 +62,19 @@ class SessionLifecycleTest {
     }
 
     private SessionLifecycle newLifecycle(final SessionStore store) {
-        return new SessionLifecycle(
-                store, new PermissionService(TestConfigs.codingAgent(Map.of())), new UserFeedbackService());
+        return new SessionLifecycle(store);
+    }
+
+    private SessionRuntime newRuntime() {
+        return new SessionRuntime(
+                null,
+                new PermissionService(TestConfigs.codingAgent(Map.of())),
+                new UserFeedbackService(),
+                null,
+                null,
+                null,
+                null,
+                null);
     }
 
     @Test
@@ -102,16 +113,17 @@ class SessionLifecycleTest {
         final ApprovalGate approval = (title, detail, toolName, args) -> ApprovalGate.Result.DENY;
         final FeedbackGate feedback = questions -> Map.of();
 
-        lifecycle.installGates(approval, feedback, true);
-        assertTrue(lifecycle.permissionService().isPermitAll());
+        final var runtime = newRuntime();
+        lifecycle.installGates(approval, feedback, true, runtime);
+        assertTrue(runtime.permissions().isPermitAll());
 
         final var sessionId = store.create();
         store.append(sessionId, SessionEntry.of(store.now(), "user", "hello", null, null));
         store.append(sessionId, SessionEntry.of(store.now(), "assistant", "hi there", null, null));
         assertFalse(store.isEmpty(sessionId), "precondition: session holds a real exchange");
 
-        lifecycle.release(sessionId);
+        lifecycle.release(sessionId, runtime);
         assertFalse(store.isEmpty(sessionId), "non-empty session must survive");
-        assertFalse(lifecycle.permissionService().isPermitAll());
+        assertFalse(runtime.permissions().isPermitAll());
     }
 }

@@ -17,9 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
-import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,20 +27,15 @@ import java.nio.file.Path;
  * Session plumbing shared by the shells: session id resolution from the
  * command options, context file preparation and gate installation/teardown.
  * Rendering is left to the callers; this class only mutates the services.
+ * Gates and permission state belong to the {@link SessionRuntime} of the
+ * session being wired, so concurrent tabs never share them.
  */
 @ApplicationScoped
 public class SessionLifecycle {
     private final SessionStore sessionStore;
-    private final PermissionService permissionService;
-    private final UserFeedbackService userFeedbackService;
 
-    public SessionLifecycle(
-            final SessionStore sessionStore,
-            final PermissionService permissionService,
-            final UserFeedbackService userFeedbackService) {
+    public SessionLifecycle(final SessionStore sessionStore) {
         this.sessionStore = sessionStore;
-        this.permissionService = permissionService;
-        this.userFeedbackService = userFeedbackService;
     }
 
     /**
@@ -78,30 +71,35 @@ public class SessionLifecycle {
         }
     }
 
-    /** Installs the interaction gates and applies the permit-all switch. */
+    /** Installs the interaction gates on the session runtime and applies the permit-all switch. */
     public void installGates(
-            final ApprovalGate approvalGate, final FeedbackGate feedbackGate, final boolean permitAll) {
-        permissionService.setPermitAll(permitAll);
-        permissionService.setPermissionMode(null);
-        permissionService.setGate(approvalGate);
-        userFeedbackService.setGate(feedbackGate);
+            final ApprovalGate approvalGate,
+            final FeedbackGate feedbackGate,
+            final boolean permitAll,
+            final SessionRuntime runtime) {
+        final var permissions = runtime.permissions();
+        permissions.setPermitAll(permitAll);
+        permissions.setPermissionMode(null);
+        permissions.setGate(approvalGate);
+        runtime.feedback().setGate(feedbackGate);
     }
 
     /**
-     * Removes the gates, clears the permit-all switch and deletes the session
-     * when it holds no message (so aborted runs do not leave empty files).
+     * Removes the session's gates, clears its permit-all switch and deletes the
+     * session when it holds no message (so aborted runs do not leave empty files).
+     * Other sessions keep their own gates and switches.
      */
-    public void release(final String sessionId) {
-        permissionService.setGate(null);
-        permissionService.setPermitAll(false);
-        permissionService.setPermissionMode(null);
-        userFeedbackService.setGate(null);
+    public void release(final String sessionId, final SessionRuntime runtime) {
+        if (runtime != null) {
+            final var permissions = runtime.permissions();
+            permissions.setGate(null);
+            permissions.setPermitAll(false);
+            permissions.setPermissionMode(null);
+            permissions.setMode(null);
+            runtime.feedback().setGate(null);
+        }
         if (sessionId != null && sessionStore.isEmpty(sessionId)) {
             sessionStore.delete(sessionId);
         }
-    }
-
-    PermissionService permissionService() {
-        return permissionService;
     }
 }

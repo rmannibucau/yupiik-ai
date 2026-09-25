@@ -110,8 +110,10 @@ public class MaintainCommands implements SlashCommandSet {
             return ShellOutcome.status("usage: /compact [force]");
         }
         try {
-            final var result =
-                    agentSessionService.compact(env.session().sessionId(), trimmed.equalsIgnoreCase("force"));
+            final var result = agentSessionService.compact(
+                    env.session().sessionId(),
+                    trimmed.equalsIgnoreCase("force"),
+                    env.session().runtime());
             if (result.applied() && result.error() != null) {
                 return ShellOutcome.status(result.message() + "\n" + result.error());
             }
@@ -134,7 +136,8 @@ public class MaintainCommands implements SlashCommandSet {
         if (env.session().busy()) {
             return CompletableFuture.completedStage(ShellOutcome.status("editplan is not available while busy"));
         }
-        final var export = agentSessionService.exportPlan(env.session().sessionId(), arg, "plan");
+        final var export = agentSessionService.exportPlan(
+                env.session().sessionId(), arg, "plan", env.session().runtime());
         if (export.error() != null) {
             return CompletableFuture.completedStage(ShellOutcome.error(export.error()));
         }
@@ -148,8 +151,11 @@ public class MaintainCommands implements SlashCommandSet {
             if (decision.equalsIgnoreCase("c") || decision.equalsIgnoreCase("cancel")) {
                 return ShellOutcome.status("plan edit cancelled");
             }
-            final var reload =
-                    agentSessionService.reloadPlan(env.session().sessionId(), export.path(), export.original());
+            final var reload = agentSessionService.reloadPlan(
+                    env.session().sessionId(),
+                    export.path(),
+                    export.original(),
+                    env.session().runtime());
             if (reload.error() != null) {
                 return ShellOutcome.error(reload.error());
             }

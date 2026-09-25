@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -88,7 +89,39 @@ public final class CodingAgentConfigurations {
                 map.put("yca.permissions.mode", permissions.mode().name().toLowerCase(Locale.ROOT));
                 map.put("yca.permissions.allow", String.join(",", permissions.allow()));
                 map.put("yca.permissions.deny", String.join(",", permissions.deny()));
-                map.put("yca.permissions.planBash", String.join(",", permissions.planBash()));
+                final var rules =
+                        permissions.bash() != null && permissions.bash().rules() != null
+                                ? permissions.bash().rules()
+                                : List.<CommandPermissionConfiguration>of();
+                map.put("yca.permissions.bash.rules.length", String.valueOf(rules.size()));
+                for (var i = 0; i < rules.size(); i++) {
+                    final var rule = rules.get(i);
+                    final var prefix = "yca.permissions.bash.rules." + i;
+                    if (rule != null && rule.matcher() != null && rule.matcher().commandStart() != null) {
+                        map.put(
+                                prefix + ".matcher.commandStart.options",
+                                String.join(",", rule.matcher().commandStart().options()));
+                    }
+                    if (rule != null && rule.matcher() != null && rule.matcher().excludeOptions() != null) {
+                        map.put(
+                                prefix + ".matcher.excludeOptions.length",
+                                String.valueOf(rule.matcher().excludeOptions().size()));
+                        for (var j = 0; j < rule.matcher().excludeOptions().size(); j++) {
+                            final var exclude = rule.matcher().excludeOptions().get(j);
+                            if (exclude != null && exclude.options() != null) {
+                                map.put(
+                                        prefix + ".matcher.excludeOptions." + j + ".options",
+                                        String.join(",", exclude.options()));
+                            }
+                        }
+                    }
+                    if (rule != null && rule.plan() != null) {
+                        map.put(prefix + ".plan", rule.plan().name().toLowerCase(Locale.ROOT));
+                    }
+                    if (rule != null && rule.defaultMode() != null) {
+                        map.put(prefix + ".default", rule.defaultMode().name().toLowerCase(Locale.ROOT));
+                    }
+                }
             }
             if (codeGraph != null) {
                 map.put("yca.structuralCodeGraph.enabled", String.valueOf(codeGraph.enabled()));

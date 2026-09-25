@@ -308,8 +308,14 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
             }
             final var listPrefix = "java.util.List.of(";
             if (string.startsWith(listPrefix) && string.endsWith(")")) {
-                return Optional.of(mapper.fromString(
-                        Object.class, '[' + string.substring(listPrefix.length(), string.length() - 1) + ']'));
+                try {
+                    return Optional.of(mapper.fromString(
+                            Object.class, '[' + string.substring(listPrefix.length(), string.length() - 1) + ']'));
+                } catch (final RuntimeException e) {
+                    // constructor-based defaults (eg java.util.List.of(new SomeConfiguration(...)))
+                    // are valid configuration code but not JSON literals: emit no schema default
+                    return Optional.empty();
+                }
             }
             if (property.get("enum") instanceof List<?> values && string.contains(".")) {
                 final var constant = string.substring(string.lastIndexOf('.') + 1);

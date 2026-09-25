@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -31,7 +30,6 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
-@ApplicationScoped
 public class SystemPromptBuilder {
     private static final List<String> SIBLING_CONTEXT_FILES = List.of("CLAUDE.md", "README.md");
 

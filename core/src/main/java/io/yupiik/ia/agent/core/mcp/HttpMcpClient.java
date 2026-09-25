@@ -22,9 +22,12 @@ import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 
 class HttpMcpClient implements McpClient {
@@ -174,7 +177,11 @@ class HttpMcpClient implements McpClient {
             return null;
         }
         if (response.statusCode() >= 400) {
-            throw new IOException("MCP " + name + " HTTP " + response.statusCode() + ": " + response.body());
+            throw new McpHttpException(
+                    name,
+                    response.statusCode(),
+                    response.body(),
+                    retryAfterMillis(response.headers().firstValue("retry-after")));
         }
         final var contentType = response.headers().firstValue("content-type").orElse("");
         final Object json;
@@ -220,6 +227,32 @@ class HttpMcpClient implements McpClient {
             }
         }
         return null;
+    }
+
+    private static Long retryAfterMillis(final Optional<String> retryAfter) {
+        if (retryAfter == null || retryAfter.isEmpty()) {
+            return null;
+        }
+        final var value = retryAfter.get().strip();
+        try {
+            return Math.max(0, Long.parseLong(value) * 1_000L);
+        } catch (final NumberFormatException e) {
+            // not delay-seconds: try HTTP-date forms
+            try {
+                return Math.max(0, Instant.parse(value).toEpochMilli() - System.currentTimeMillis());
+            } catch (final RuntimeException re) {
+                try {
+                    return Math.max(
+                            0,
+                            DateTimeFormatter.RFC_1123_DATE_TIME
+                                            .parse(value, Instant::from)
+                                            .toEpochMilli()
+                                    - System.currentTimeMillis());
+                } catch (final RuntimeException re2) {
+                    return null;
+                }
+            }
+        }
     }
 
     private static long numberOrMinusOne(final Object o) {

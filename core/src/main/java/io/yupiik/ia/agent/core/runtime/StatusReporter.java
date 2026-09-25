@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.runtime;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.function.Consumer;
@@ -26,7 +25,6 @@ import java.util.function.Consumer;
  * re-indexing turn), clearing one turn's sink does not drop the other's; {@code report} always
  * delivers to the most recently installed sink.
  */
-@ApplicationScoped
 public class StatusReporter {
     private final Deque<Consumer<String>> sinks = new ArrayDeque<>();
 

@@ -31,5 +31,25 @@ public interface EmbeddedTool {
         return false;
     }
 
+    /**
+     * Whether the tool is currently usable. Unusable tools are hidden from the model
+     * (wire tool list and description) but still executable with an explicit error,
+     * so a misconfiguration surfaces clearly instead of silently vanishing.
+     */
+    default boolean usable() {
+        return true;
+    }
+
     ToolResult execute(Map<String, Object> args);
+
+    /**
+     * Context-aware execution: the default implementation delegates to
+     * {@link #execute(Map)} so stateless tools need no change. Tools that touch
+     * session-scoped services (questions, todos) override this method and read
+     * them from the explicitly passed {@link ToolContext} - never from a
+     * thread-local, so concurrent sessions cannot cross-talk.
+     */
+    default ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        return execute(args);
+    }
 }

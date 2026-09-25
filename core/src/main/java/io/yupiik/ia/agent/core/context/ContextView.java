@@ -15,7 +15,6 @@
  */
 package io.yupiik.ia.agent.core.context;
 
-import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.llm.Message;
 
 /**
@@ -23,7 +22,6 @@ import io.yupiik.ia.agent.core.llm.Message;
  * every iteration, and tools (eg. {@code manage_context}) can drop a compaction/prune directive
  * that the loop applies after the current tool round. Single-turn, single-threaded by design.
  */
-@ApplicationScoped
 public class ContextView {
 
     /**

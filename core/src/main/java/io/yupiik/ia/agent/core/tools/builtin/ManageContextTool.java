@@ -19,10 +19,10 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextView;
-import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,25 +41,15 @@ public class ManageContextTool implements EmbeddedTool {
     static final double ACTION_FLOOR_PERCENT = 30.0;
 
     private final CodingAgentConfiguration configuration;
-    private final UsageTracker usageTracker;
-    private final ContextView contextView;
     private final JsonMapper mapper;
 
-    public ManageContextTool(
-            final CodingAgentConfiguration configuration,
-            final UsageTracker usageTracker,
-            final ContextView contextView,
-            final JsonMapper mapper) {
+    public ManageContextTool(final CodingAgentConfiguration configuration, final JsonMapper mapper) {
         this.configuration = configuration;
-        this.usageTracker = usageTracker;
-        this.contextView = contextView;
         this.mapper = mapper;
     }
 
     protected ManageContextTool() {
         this.configuration = null;
-        this.usageTracker = null;
-        this.contextView = null;
         this.mapper = null;
     }
 
@@ -101,6 +91,16 @@ public class ManageContextTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return ToolResult.error("manage_context requires an active session context.");
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var contextView = context.contextView();
+        final var usageTracker = context.usage();
+        if (contextView == null || usageTracker == null) {
+            return ToolResult.error("manage_context requires an active session context.");
+        }
         if (configuration == null
                 || configuration.tools() == null
                 || configuration.tools().manageContext() == null
@@ -110,15 +110,16 @@ public class ManageContextTool implements EmbeddedTool {
         final var action =
                 String.valueOf(args.getOrDefault("action", "status")).strip().toLowerCase();
         return switch (action) {
-            case "status" -> status();
-            case "compact" -> request("compact", args);
-            case "prune" -> request("prune", args);
+            case "status" -> status(contextView, usageTracker);
+            case "compact" -> request(contextView, "compact", args);
+            case "prune" -> request(contextView, "prune", args);
             default -> ToolResult.error("Unknown action \"" + action + "\": expected status, compact or prune.");
         };
     }
 
-    private ToolResult status() {
-        final var snapshot = contextView == null ? null : contextView.snapshot();
+    private ToolResult status(
+            final ContextView contextView, final io.yupiik.ia.agent.core.context.UsageTracker usageTracker) {
+        final var snapshot = contextView.snapshot();
         final var out = new LinkedHashMap<String, Object>();
         if (snapshot != null) {
             out.put("messageCount", snapshot.messageCount());
@@ -136,17 +137,14 @@ public class ManageContextTool implements EmbeddedTool {
         return new ToolResult(true, toJson(out));
     }
 
-    private ToolResult request(final String action, final Map<String, Object> args) {
-        final var snapshot = contextView == null ? null : contextView.snapshot();
+    private ToolResult request(final ContextView contextView, final String action, final Map<String, Object> args) {
+        final var snapshot = contextView.snapshot();
         if (snapshot != null && snapshot.percent() < ACTION_FLOOR_PERCENT) {
             return new ToolResult(
                     true,
                     "Refused: context usage is " + Math.round(snapshot.percent() * 10.0) / 10.0
                             + "%, below the " + (int) ACTION_FLOOR_PERCENT + "% floor - there is nothing"
                             + " meaningful to reclaim yet. Use action=status to check usage.");
-        }
-        if (contextView == null) {
-            return ToolResult.error("No live context view: context management is unavailable here.");
         }
         final var keepLast = args.get("keep_last") instanceof Number n ? n.intValue() : 0;
         final var focus = args.get("focus") instanceof String s ? s : null;

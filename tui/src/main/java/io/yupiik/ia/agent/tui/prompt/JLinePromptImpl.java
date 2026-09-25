@@ -49,12 +49,56 @@ public class JLinePromptImpl implements Prompt {
     @Override
     public Optional<String> readLine(final String prompt) throws IOException {
         try {
-            return Optional.ofNullable(reader.readLine(prompt));
+            return Optional.ofNullable(reader.readLine(escapePromptForJLine(prompt)));
         } catch (final UserInterruptException e) {
             throw new PromptInterruptException();
         } catch (final EndOfFileException e) {
             return Optional.empty();
         }
+    }
+
+    /**
+     * JLine interprets the prompt as a prompt-pattern (bash/zsh like escapes):
+     * {@code %{...%}} hidden region, {@code %N} line offset, {@code %M} message,
+     * {@code %[count]P[char]} padding and {@code %%} for a literal percent.
+     * Any other {@code %} is consumed together with its following character and
+     * never displayed - this is how the default prompt template suffix
+     * {@code %>} would silently vanish. This method doubles every {@code %}
+     * that is not part of a recognised pattern so literal percents survive
+     * while intentional patterns are left untouched.
+     */
+    static String escapePromptForJLine(final String prompt) {
+        final int length = prompt.length();
+        final StringBuilder builder = new StringBuilder(length + 8);
+        int i = 0;
+        while (i < length) {
+            final char c = prompt.charAt(i);
+            if (c != '%') {
+                builder.append(c);
+                i++;
+                continue;
+            }
+            if (i + 1 < length) {
+                final char next = prompt.charAt(i + 1);
+                if (next == '%') {
+                    builder.append("%%"); // already an escaped literal percent
+                    i += 2;
+                    continue;
+                }
+                if (isPatternStart(next)) {
+                    builder.append(c); // intentional JLine pattern, keep as-is
+                    i++;
+                    continue;
+                }
+            }
+            builder.append("%%"); // literal percent for the user
+            i++;
+        }
+        return builder.toString();
+    }
+
+    private static boolean isPatternStart(final char c) {
+        return c == '{' || c == '}' || c == 'N' || c == 'M' || c == 'P' || c == '-' || (c >= '0' && c <= '9');
     }
 
     @Override

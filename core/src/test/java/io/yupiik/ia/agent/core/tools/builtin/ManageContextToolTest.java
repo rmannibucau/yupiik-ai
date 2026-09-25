@@ -25,6 +25,7 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
 import java.util.HashMap;
@@ -37,12 +38,16 @@ import org.junit.jupiter.api.Test;
 class ManageContextToolTest {
     private final JsonMapper mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
 
+    private ToolContext context(final ContextView view) {
+        return new ToolContext("s1", null, null, null, null, null, null, tracker(), view);
+    }
+
     @Test
     void statusUsesThePublishedSnapshot() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(12, 5_000, 100_000, 80_000, 62.5, 65, 80));
-        final var tool = new ManageContextTool(config(true), tracker(), view, mapper);
-        final var result = tool.execute(Map.of("action", "status"));
+        final var tool = new ManageContextTool(config(true), mapper);
+        final var result = tool.execute(Map.of("action", "status"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"messageCount\":12"), result.output());
         assertTrue(result.output().contains("62.5"), result.output());
@@ -50,8 +55,9 @@ class ManageContextToolTest {
 
     @Test
     void statusWithoutSnapshotReportsWindowOnly() {
-        final var tool = new ManageContextTool(config(true), tracker(), new ContextView(), mapper);
-        final var result = tool.execute(Map.of());
+        final var view = new ContextView();
+        final var tool = new ManageContextTool(config(true), mapper);
+        final var result = tool.execute(Map.of(), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("contextWindow"), result.output());
         assertFalse(result.output().contains("messageCount"), result.output());
@@ -61,8 +67,8 @@ class ManageContextToolTest {
     void compactRequestBelowTheFloorIsRefused() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(4, 500, 100_000, 80_000, 10.0, 65, 80));
-        final var tool = new ManageContextTool(config(true), tracker(), view, mapper);
-        final var result = tool.execute(Map.of("action", "compact"));
+        final var tool = new ManageContextTool(config(true), mapper);
+        final var result = tool.execute(Map.of("action", "compact"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().startsWith("Refused"), result.output());
         assertNull(view.poll(), "a refused request must not queue a directive");
@@ -72,12 +78,12 @@ class ManageContextToolTest {
     void compactRequestQueuesADirective() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(40, 70_000, 100_000, 80_000, 90.0, 65, 80));
-        final var tool = new ManageContextTool(config(true), tracker(), view, mapper);
+        final var tool = new ManageContextTool(config(true), mapper);
         final var args = new LinkedHashMap<String, Object>();
         args.put("action", "compact");
         args.put("focus", "keep the migration plan");
         args.put("keep_last", 4);
-        final var result = tool.execute(args);
+        final var result = tool.execute(args, context(view));
         assertTrue(result.success(), result.output());
         assertEquals(new ContextView.Directive("compact", "keep the migration plan", 4, "manage_context"), view.poll());
     }
@@ -86,9 +92,9 @@ class ManageContextToolTest {
     void secondRequestIsRejectedWhileOneIsPending() {
         final var view = new ContextView();
         view.publish(new ContextView.Snapshot(40, 70_000, 100_000, 80_000, 90.0, 65, 80));
-        final var tool = new ManageContextTool(config(true), tracker(), view, mapper);
+        final var tool = new ManageContextTool(config(true), mapper);
         assertTrue(view.request(new ContextView.Directive("prune", null, 0, "test")));
-        final var result = tool.execute(Map.of("action", "compact"));
+        final var result = tool.execute(Map.of("action", "compact"), context(view));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("already pending"), result.output());
         assertEquals("prune", view.poll().action(), "the first queued directive must survive");
@@ -96,8 +102,9 @@ class ManageContextToolTest {
 
     @Test
     void disabledToolErrors() {
-        final var tool = new ManageContextTool(config(false), tracker(), new ContextView(), mapper);
-        final var result = tool.execute(Map.of("action", "status"));
+        final var view = new ContextView();
+        final var tool = new ManageContextTool(config(false), mapper);
+        final var result = tool.execute(Map.of("action", "status"), context(view));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("disabled"), result.output());
     }

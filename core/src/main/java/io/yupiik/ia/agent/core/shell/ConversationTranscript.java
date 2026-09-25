@@ -79,7 +79,9 @@ public class ConversationTranscript {
     private volatile long turnDurationMs;
 
     public synchronized void onEvent(final AgentEvent event) {
-        if (event instanceof AgentEvent.TextDelta(String delta, String subagentId, String subagentName)) {
+        if (event
+                instanceof
+                AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             // the answer's first delta usually arrives with no reset: flush the reasoning
             // so it stays in place, above the streaming answer
             flushThinking();
@@ -92,16 +94,24 @@ public class ConversationTranscript {
                     pending.append(segment.text());
                 }
             }
-        } else if (event instanceof AgentEvent.TextReset(String subagentId, String subagentName)) {
+        } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
             pending.setLength(0);
             inlineThink.reset();
             // keep the reasoning visible: flush instead of dropping it, the model resets
             // its output right before the final answer streams
             flushThinking();
-        } else if (event instanceof AgentEvent.ThinkingDelta(String delta, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof
+                AgentEvent.ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             thinking.append(delta);
         } else if (event
-                instanceof AgentEvent.ToolStarted(String name, String args, String subagentId, String subagentName)) {
+                instanceof
+                AgentEvent.ToolStarted(
+                        String name,
+                        String args,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
             flushThinking();
             runningTool = name;
             runningToolCommand = toolCommand(args);
@@ -109,7 +119,12 @@ public class ConversationTranscript {
             toolStartedNanos = System.nanoTime();
         } else if (event
                 instanceof
-                AgentEvent.ToolStream(String name, String fragment, String subagentId, String subagentName)) {
+                AgentEvent.ToolStream(
+                        String name,
+                        String fragment,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
             if (name.equals(runningTool)) {
                 toolStream.append(fragment).append('\n');
                 if (toolStream.length() > MAX_EMBEDDED_TOOL_CHARS) {
@@ -122,6 +137,7 @@ public class ConversationTranscript {
                         String name,
                         String output,
                         boolean success,
+                        String sessionId,
                         String subagentId,
                         String subagentName)) {
             final var running = runningTool;
@@ -172,6 +188,7 @@ public class ConversationTranscript {
                         io.yupiik.ia.agent.core.llm.Usage usage,
                         int estimatedContextTokens,
                         double percent,
+                        String sessionId,
                         String subagentId,
                         String subagentName)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
@@ -179,7 +196,13 @@ public class ConversationTranscript {
             estimatedContext = estimatedContextTokens;
             contextPercent = (int) Math.round(percent);
         } else if (event
-                instanceof AgentEvent.Compacted(String kind, String mode, String subagentId, String subagentName)) {
+                instanceof
+                AgentEvent.Compacted(
+                        String kind,
+                        String mode,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
             status = "context " + kind + " done (" + mode.toLowerCase(java.util.Locale.ROOT) + ")";
             transcript
                     .append("\n\n> context ")
@@ -193,6 +216,7 @@ public class ConversationTranscript {
                         AgentEvent.Notice.Level level,
                         String message,
                         String finishReason,
+                        String sessionId,
                         String subagentId,
                         String subagentName)) {
             final var tag =
@@ -207,9 +231,13 @@ public class ConversationTranscript {
             } else {
                 status = message;
             }
-        } else if (event instanceof AgentEvent.Status(String message, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof
+                AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
             status = message;
-        } else if (event instanceof AgentEvent.PromptIntegrated(String text, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof
+                AgentEvent.PromptIntegrated(String text, String sessionId, String subagentId, String subagentName)) {
             flushThinking();
             pending.setLength(0);
             thinking.setLength(0);
@@ -225,6 +253,7 @@ public class ConversationTranscript {
                         long toolWallMs,
                         int toolsRun,
                         long turnDurationMs,
+                        String sessionId,
                         String subagentId,
                         String subagentName)) {
             turnLlmCalls = llmCalls;
@@ -233,7 +262,9 @@ public class ConversationTranscript {
             turnToolWallMs = toolWallMs;
             turnToolsRun = toolsRun;
             this.turnDurationMs = turnDurationMs;
-        } else if (event instanceof AgentEvent.TurnDone(String content, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof
+                AgentEvent.TurnDone(String content, String sessionId, String subagentId, String subagentName)) {
             flushThinking();
             // split any inline <think> reasoning out of the final content so it renders
             // as a thought region instead of being dropped by markdown HTML handling
@@ -254,7 +285,8 @@ public class ConversationTranscript {
             inlineThink.reset();
             busy = false;
             status = "ready";
-        } else if (event instanceof AgentEvent.Error(String message, String subagentId, String subagentName)) {
+        } else if (event
+                instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
             // keep the reasoning readable even when the turn fails
             flushThinking();
             inlineThink.reset();

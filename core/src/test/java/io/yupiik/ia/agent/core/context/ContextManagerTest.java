@@ -75,7 +75,8 @@ class ContextManagerTest {
                         null,
                         new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
                         providerManager(cfg),
-                        null));
+                        null,
+                        "s1"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
@@ -105,7 +106,8 @@ class ContextManagerTest {
                         chat,
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
-                        null));
+                        null,
+                        "s1"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 5; i++) {
@@ -142,7 +144,8 @@ class ContextManagerTest {
                         chat,
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
-                        null));
+                        null,
+                        "s1"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 7; i++) {
@@ -182,7 +185,7 @@ class ContextManagerTest {
         };
         final var tracker = new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC());
         final var manager = new ContextManager(
-                cfg, tracker, new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null));
+                cfg, tracker, new CompactionCoordinator(cfg, chat, tracker, providerManager(cfg), null, "s1"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 9; i++) {
@@ -207,7 +210,8 @@ class ContextManagerTest {
                         null,
                         new UsageTracker(providerManager(cfg), null, null, Clock.systemUTC()),
                         providerManager(cfg),
-                        null));
+                        null,
+                        "s1"));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
         for (var i = 0; i < 3; i++) {
@@ -483,7 +487,8 @@ class ContextManagerTest {
                         chat,
                         new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
                         providerManager(cfg),
-                        null));
+                        null,
+                        "s1"));
     }
 
     private static ChatClient chatReturning(final String digest) {

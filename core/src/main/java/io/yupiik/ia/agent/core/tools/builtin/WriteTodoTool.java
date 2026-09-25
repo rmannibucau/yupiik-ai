@@ -17,12 +17,12 @@ package io.yupiik.ia.agent.core.tools.builtin;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
-import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.List;
 import java.util.Map;
@@ -31,17 +31,9 @@ import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class WriteTodoTool implements EmbeddedTool {
-    private final TodoStore todoStore;
-    private final PermissionService permissions;
 
-    public WriteTodoTool(final TodoStore todoStore, final PermissionService permissions) {
-        this.todoStore = todoStore;
-        this.permissions = permissions;
-    }
-
-    protected WriteTodoTool() {
-        this.todoStore = null;
-        this.permissions = null;
+    public WriteTodoTool() {
+        // no session state: the todo store and permissions are passed per call in the ToolContext
     }
 
     @Override
@@ -77,11 +69,26 @@ public class WriteTodoTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return ToolResult.error("write_todo requires an active session context.");
+    }
+
+    /**
+     * Writes into the asking session's todo list: the store and the permission
+     * mode come from the context (the tab that started the turn), so each tab
+     * keeps its own list and its own plan/build mode.
+     */
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var store = context != null ? context.todos() : null;
+        final var perms = context != null ? context.permissions() : null;
+        if (store == null) {
+            return ToolResult.error("write_todo requires an active session todo list.");
+        }
         if (!(args.get("todos") instanceof List<?> raw)) {
             return ToolResult.error(
                     "todos must be a non empty array of {content, status} (got " + typeName(args.get("todos")) + ")");
         }
-        final var todos = todoStore.from(raw);
+        final var todos = store.from(raw);
         if (todos.isEmpty()) {
             return ToolResult.error("todos must be a non empty array of {content, status}");
         }
@@ -90,14 +97,14 @@ public class WriteTodoTool implements EmbeddedTool {
                 return ToolResult.error("Invalid todo item: " + t);
             }
         }
-        if (permissions != null && permissions.mode() == AgentMode.PLAN) {
-            final var error = validatePlanStatuses(todos);
+        if (perms != null && perms.mode() == AgentMode.PLAN) {
+            final var error = validatePlanStatuses(store, todos);
             if (error != null) {
                 return ToolResult.error(error);
             }
         }
-        todoStore.replace(todos);
-        return ToolResult.ok("Todo list updated:\n" + todoStore.render());
+        store.replace(todos);
+        return ToolResult.ok("Todo list updated:\n" + store.render());
     }
 
     /**
@@ -105,8 +112,8 @@ public class WriteTodoTool implements EmbeddedTool {
      * 'pending'. Items already advanced in a previous build-mode session keep their status so a plan/build
      * mode switch never loses real progress.
      */
-    private String validatePlanStatuses(final List<TodoItem> todos) {
-        final var alreadyAdvanced = todoStore.all().stream()
+    private String validatePlanStatuses(final TodoStore store, final List<TodoItem> todos) {
+        final var alreadyAdvanced = store.all().stream()
                 .map(t -> t.status() == null || "pending".equals(t.status()) ? null : t.content() + '|' + t.status())
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
