@@ -24,6 +24,7 @@ import java.util.Optional;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
+import org.jline.utils.NonBlockingReader;
 
 /**
  * JLine backed {@link Prompt} giving the plain {@code cli} REPL full line
@@ -104,5 +105,48 @@ public class JLinePromptImpl implements Prompt {
     @Override
     public boolean editing() {
         return true;
+    }
+
+    @Override
+    public boolean isInterruptAvailable() {
+        try {
+            return reader.getTerminal() != null;
+        } catch (final RuntimeException e) {
+            return false;
+        }
+    }
+
+    /**
+     * Non-blocking standalone {@code Esc} probe for the turn-wait loop: a lone
+     * escape is an interrupt request, an escape sequence (arrow key, Alt-key)
+     * is consumed whole and ignored so it never leaks into the next line edit
+     * nor interrupts the turn.
+     */
+    @Override
+    public boolean pollInterrupt() {
+        try {
+            final var terminal = reader.getTerminal();
+            if (terminal == null) {
+                return false;
+            }
+            final var input = terminal.reader();
+            if (input.peek(0) != '\033') {
+                return false;
+            }
+            input.read(); // consume the escape; peek guaranteed it is available
+            // a continuation byte within 30ms means an escape sequence
+            final var next = input.peek(30);
+            if (next != NonBlockingReader.READ_EXPIRED && next != NonBlockingReader.EOF) {
+                int tail;
+                do {
+                    input.read();
+                    tail = input.peek(10);
+                } while (tail != NonBlockingReader.READ_EXPIRED && tail != NonBlockingReader.EOF);
+                return false;
+            }
+            return true;
+        } catch (final Exception e) {
+            return false;
+        }
     }
 }

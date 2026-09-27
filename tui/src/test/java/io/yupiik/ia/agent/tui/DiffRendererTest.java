@@ -24,7 +24,9 @@ import dev.tamboui.text.Span;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
-class DiffLinesTest {
+class DiffRendererTest {
+    private final DiffRenderer renderer = new DiffRenderer();
+
     private static String plain(final Line line) {
         final var sb = new StringBuilder();
         for (final var span : line.spans()) {
@@ -40,8 +42,8 @@ class DiffLinesTest {
                 -old line
                 +new line
                 """;
-        assertTrue(DiffLines.looksLikeDiff(diff));
-        assertFalse(DiffLines.looksLikeDiff("just some text\nwith + signs\nonly"));
+        assertTrue(renderer.looksLikeDiff(diff));
+        assertFalse(renderer.looksLikeDiff("just some text\nwith + signs\nonly"));
     }
 
     @Test
@@ -52,13 +54,13 @@ class DiffLinesTest {
                 -old
                 +new
                 """;
-        assertTrue(DiffLines.looksLikeDiff(diff));
+        assertTrue(renderer.looksLikeDiff(diff));
     }
 
     @Test
     void rejectsPlainText() {
-        assertFalse(DiffLines.looksLikeDiff("hello world"));
-        assertFalse(DiffLines.looksLikeDiff(""));
+        assertFalse(renderer.looksLikeDiff("hello world"));
+        assertFalse(renderer.looksLikeDiff(""));
     }
 
     @Test
@@ -69,8 +71,8 @@ class DiffLinesTest {
                 +b
                  context
                 """;
-        final var lines = DiffLines.render(diff, 80, PaletteTest.palette());
-        assertTrue(lines.stream().map(DiffLinesTest::plain).anyMatch(l -> l.contains("+1") && l.contains("-1")));
+        final var lines = renderer.render(diff, 80, PaletteTest.palette());
+        assertTrue(lines.stream().map(DiffRendererTest::plain).anyMatch(l -> l.contains("+1") && l.contains("-1")));
     }
 
     @Test
@@ -82,8 +84,8 @@ class DiffLinesTest {
                 -x
                 +y
                 """;
-        final var lines = DiffLines.render(diff, 80, PaletteTest.palette());
-        final var texts = lines.stream().map(DiffLinesTest::plain).toList();
+        final var lines = renderer.render(diff, 80, PaletteTest.palette());
+        final var texts = lines.stream().map(DiffRendererTest::plain).toList();
         assertTrue(texts.stream().anyMatch(l -> l.startsWith("diff --git")));
         assertTrue(texts.stream().anyMatch(l -> l.startsWith("+++ ")));
     }
@@ -95,8 +97,8 @@ class DiffLinesTest {
                 -removed content
                 +added content
                 """;
-        final var lines = DiffLines.render(diff, 80, PaletteTest.palette());
-        final var texts = lines.stream().map(DiffLinesTest::plain).toList();
+        final var lines = renderer.render(diff, 80, PaletteTest.palette());
+        final var texts = lines.stream().map(DiffRendererTest::plain).toList();
         assertTrue(texts.stream().anyMatch(l -> l.startsWith(" -") && l.contains("removed content")));
         assertTrue(texts.stream().anyMatch(l -> l.startsWith(" +") && l.contains("added content")));
     }
@@ -104,7 +106,7 @@ class DiffLinesTest {
     @Test
     void longLinesAreClipped() {
         final var diff = "@@ -1 +1 @@\n-" + "x".repeat(200) + "\n+" + "y".repeat(200);
-        final var lines = DiffLines.render(diff, 40, PaletteTest.palette());
+        final var lines = renderer.render(diff, 40, PaletteTest.palette());
         for (final var line : lines) {
             assertTrue(plain(line).length() <= 40);
         }
@@ -112,20 +114,20 @@ class DiffLinesTest {
 
     @Test
     void contextLinesUntouched() {
-        final var lines = DiffLines.render(" plain context\n", 80, PaletteTest.palette());
+        final var lines = renderer.render(" plain context\n", 80, PaletteTest.palette());
         assertEquals(
                 List.of(" plain context"),
-                lines.stream().map(DiffLinesTest::plain).toList());
+                lines.stream().map(DiffRendererTest::plain).toList());
     }
 
     @Test
     void emptyDiffRendersNothing() {
-        assertTrue(DiffLines.render("", 80, PaletteTest.palette()).isEmpty());
+        assertTrue(renderer.render("", 80, PaletteTest.palette()).isEmpty());
     }
 
     @Test
     void spanStyledContentPreserved() {
-        final var lines = DiffLines.render("+kept", 80, PaletteTest.palette());
+        final var lines = renderer.render("+kept", 80, PaletteTest.palette());
         assertEquals(1, lines.size());
         final var spans = lines.getFirst().spans();
         assertFalse(spans.isEmpty());

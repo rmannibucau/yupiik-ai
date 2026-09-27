@@ -43,12 +43,13 @@ import org.junit.jupiter.api.Test;
 class LlmClientResilienceWrapperTest {
 
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
-        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d);
+        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L);
     }
 
     private static LlmResilienceConfig config(
             final int attempts, final long baseDelayMs, final int maxConcurrent, final double waitScale) {
-        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale);
+        return new LlmResilienceConfig(
+                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale, 900_000L);
     }
 
     @Test

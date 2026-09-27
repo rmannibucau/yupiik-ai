@@ -183,16 +183,20 @@ class TuiTranscriptModelTest {
     }
 
     @Test
-    void toolStartedExtractsCommandAndResetsStream() {
+    void toolStartedKeepsParallelToolsSeparate() {
         model.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", "s1"));
         assertEquals("bash", model.runningTool());
         assertEquals("ls -la", model.runningToolCommand());
         model.onEvent(new AgentEvent.ToolStream("bash", "file.txt", "s1"));
         model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
+        // the newest pending tool drives the running label; the older parallel tool
+        // keeps its own stream (no aliasing of a single running-tool slot)
+        assertEquals("read", model.runningTool());
         assertEquals("", model.runningToolCommand());
         final var md = model.markdown("|", "welcome");
         assertTrue(md.contains("running read`"), "expected running line in: " + md);
-        assertFalse(md.contains("file.txt"), "stream must have been reset: " + md);
+        assertTrue(md.contains("running ls -la`"), "expected parallel running line in: " + md);
+        assertTrue(md.contains("file.txt"), "parallel stream must survive: " + md);
     }
 
     @Test

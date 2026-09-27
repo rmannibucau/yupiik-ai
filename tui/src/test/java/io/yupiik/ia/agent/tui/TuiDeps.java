@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
@@ -41,6 +42,7 @@ public record TuiDeps(
         TuiConfiguration tuiConfiguration,
         CodingAgentConfiguration configuration,
         SessionStore sessionStore,
+        SessionLifecycle sessionLifecycle,
         PlanFileService planFileService,
         ChatClient chatClient,
         ModelStyleService modelStyleService,

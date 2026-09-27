@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class TuiInputSupportTest {
@@ -85,5 +86,21 @@ class TuiInputSupportTest {
         assertEquals(1, TuiInputSupport.columnAtDisplayWidth("a中b", 2));
         assertEquals(2, TuiInputSupport.columnAtDisplayWidth("a中b", 3));
         assertEquals(3, TuiInputSupport.columnAtDisplayWidth("a中b", 4));
+    }
+
+    @Test
+    void wrapProseBreaksAtWidthAndKeepsNewlines() {
+        assertEquals(List.of(), TuiInputSupport.wrapProse(null, 10));
+        assertEquals(List.of(), TuiInputSupport.wrapProse("", 10));
+        assertEquals(List.of("ab"), TuiInputSupport.wrapProse("ab", 10));
+        assertEquals(List.of("one", "two"), TuiInputSupport.wrapProse("one\ntwo", 10));
+        assertEquals(List.of("", "x"), TuiInputSupport.wrapProse("\nx", 10), "blank lines are preserved");
+        // soft wrapping by words
+        assertEquals(
+                List.of("aaaa bbbb", "cccc dddd", "eeee"), TuiInputSupport.wrapProse("aaaa bbbb cccc dddd eeee", 10));
+        // a single overlong token is hard-split and never exceeds the width
+        final var token = "x".repeat(25);
+        assertTrue(TuiInputSupport.wrapProse(token, 10).stream().allMatch(l -> l.length() <= 10));
+        assertEquals(3, TuiInputSupport.wrapProse(token, 10).size());
     }
 }

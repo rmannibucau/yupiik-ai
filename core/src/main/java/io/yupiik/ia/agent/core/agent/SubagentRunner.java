@@ -143,13 +143,23 @@ public class SubagentRunner {
             final TodoStore parentTodoStore,
             final ToolContext parentContext,
             final BooleanSupplier cancelled) {
+        final var name = state.name() != null ? state.name() : state.id();
+        emitter.emit(new AgentEvent.SubagentStarted(state.task(), state.parentSessionId(), state.id(), name));
         executor.execute(() -> {
             try {
                 final var result = runSubagent(state, parentSnapshotStore, parentContext, cancelled);
                 subagentRegistry.complete(state.id(), result);
+                emitter.emit(new AgentEvent.SubagentCompleted(
+                        result.summary() != null ? result.summary() : result.error(),
+                        result.success(),
+                        state.parentSessionId(),
+                        state.id(),
+                        name));
             } catch (final Exception e) {
                 subagentRegistry.complete(
                         state.id(), SubagentRegistry.SubagentResult.error("Subagent failed: " + e.getMessage(), ""));
+                emitter.emit(new AgentEvent.SubagentCompleted(
+                        "Subagent failed: " + e.getMessage(), false, state.parentSessionId(), state.id(), name));
             }
         });
     }

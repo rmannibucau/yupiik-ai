@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.slash.SlashAction;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
@@ -35,15 +36,31 @@ import java.util.List;
 public class TuiSlashCommands implements SlashCommandSet {
     private static final String SHORTCUTS = KeymapCatalog.markdown();
 
-    private volatile ThemeSwitcher themeSwitcher;
+    private final TabManager tabManager;
 
     /** Implemented by the TUI command once the widget stack is up. */
     public interface ThemeSwitcher {
         ShellOutcome switchTheme(String arg);
     }
 
+    /** Implemented by the TUI command: opens the subagents overlay (list or one subagent detail). */
+    public interface SubagentViewer {
+        ShellOutcome open(String arg);
+    }
+
+    private volatile ThemeSwitcher themeSwitcher;
+    private volatile SubagentViewer subagentViewer;
+
+    public TuiSlashCommands(final TabManager tabManager) {
+        this.tabManager = tabManager;
+    }
+
     public void bind(final ThemeSwitcher switcher) {
         this.themeSwitcher = switcher;
+    }
+
+    public void bindSubagents(final SubagentViewer viewer) {
+        this.subagentViewer = viewer;
     }
 
     @Override
@@ -63,7 +80,39 @@ public class TuiSlashCommands implements SlashCommandSet {
                         themeAction()),
                 SlashCommand.of(
                         new SlashCommandSpec("/shortcuts", null, "show the keyboard shortcuts", SlashGroup.OTHER),
-                        SlashAction.sync((arg, env) -> ShellOutcome.transcript("\n\n" + SHORTCUTS))));
+                        SlashAction.sync((arg, env) -> ShellOutcome.transcript("\n\n" + SHORTCUTS))),
+                SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/tabs",
+                                "[index|last|+N|-N|+|-]",
+                                "list open tabs, or switch to the tab at the given index",
+                                SlashGroup.SESSION),
+                        SlashAction.sync(this::tabsOutcome)),
+                SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/subagents",
+                                "[id]",
+                                "list the session subagents, or open the transcript of the given subagent",
+                                SlashGroup.SESSION),
+                        SlashAction.sync(this::subagentsOutcome)));
+    }
+
+    private ShellOutcome subagentsOutcome(final String arg, final ShellEnv env) {
+        final var viewer = subagentViewer;
+        return viewer == null ? ShellOutcome.status("subagents overlay is not available yet") : viewer.open(arg);
+    }
+
+    private ShellOutcome tabsOutcome(final String arg, final ShellEnv env) {
+        if (arg == null || arg.isBlank()) {
+            tabManager.openList();
+            return ShellOutcome.none();
+        }
+        final var index = tabManager.resolveIndex(arg);
+        if (index < 0) {
+            return ShellOutcome.status("usage: /tabs [index|last|+N|-N|+|-]");
+        }
+        tabManager.activate(index);
+        return ShellOutcome.none();
     }
 
     private SlashAction themeAction() {

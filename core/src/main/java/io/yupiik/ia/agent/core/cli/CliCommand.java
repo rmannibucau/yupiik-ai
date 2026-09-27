@@ -61,6 +61,9 @@ import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
@@ -335,7 +338,7 @@ public class CliCommand implements Runnable {
         final var mode = session.runtime().permissions().mode().name().toLowerCase(Locale.ROOT);
         final var info = agentSessionService.permissionsInfo(session.runtime());
         final var usage = frontend.stats().lastUsage();
-        final var model = chatClient.model();
+        final var model = chatClient.model(session.chatSettings());
         final var modelData = new LinkedHashMap<String, Object>();
         modelData.put("name", model);
         modelData.put("contextPercentage", usage == null ? 0 : (int) Math.round(usage.contextPercent()));
@@ -392,7 +395,7 @@ public class CliCommand implements Runnable {
                 .append(session.runtime().permissions().mode().name().toLowerCase(Locale.ROOT))
                 .append(" mode · session ")
                 .append(sessionId);
-        final var model = chatClient.model();
+        final var model = chatClient.model(session.chatSettings());
         if (model != null && !model.isBlank()) {
             sb.append(" · ").append(colorizer.isEnabled() ? styledModel(model) : model);
         }
@@ -603,7 +606,36 @@ public class CliCommand implements Runnable {
                 .toCompletableFuture();
         inFlight = future;
         if (!queueing) {
+            awaitTurn(future);
+        }
+    }
+
+    /**
+     * Blocks until the turn completes, but for prompt backends that can detect a
+     * standalone {@code Esc} press while the turn runs (jline) it polls the
+     * prompt and interrupts the turn on Esc, keeping the REPL interruptible
+     * without a full second input lane. The plain stdin backend (ansi mode)
+     * stays fully blocking.
+     */
+    private void awaitTurn(final CompletableFuture<Boolean> future) {
+        if (!prompt.isInterruptAvailable()) {
             future.join();
+            return;
+        }
+        while (!future.isDone()) {
+            if (prompt.pollInterrupt()) {
+                onInterrupt();
+            }
+            try {
+                future.get(100, TimeUnit.MILLISECONDS);
+            } catch (final ExecutionException e) {
+                throw new CompletionException(e.getCause() == null ? e : e.getCause());
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new CompletionException(e);
+            } catch (final TimeoutException e) {
+                // keep polling for Esc and the completion
+            }
         }
     }
 

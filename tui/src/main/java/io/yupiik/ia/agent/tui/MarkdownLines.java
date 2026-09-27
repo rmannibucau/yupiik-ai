@@ -73,6 +73,8 @@ import org.commonmark.parser.Parser;
  */
 public final class MarkdownLines {
     private final Parser parser;
+    /** Stateless renderer; held as a shared instance (the render chain below is static). */
+    private static final TableRenderer TABLE_RENDERER = new TableRenderer();
 
     public MarkdownLines() {
         parser = Parser.builder()
@@ -552,97 +554,34 @@ public final class MarkdownLines {
 
     private static void renderTable(
             final TableBlock table, final Prefix prefix, final Style base, final int width, final List<Line> out) {
-        final var columns = new ArrayList<Integer>();
-        TableHead head = null;
-        final var bodyRows = new ArrayList<TableRow>();
+        List<String> headCells = null;
+        final var bodyRows = new ArrayList<List<String>>();
         for (final var block : children(table)) {
             if (block instanceof TableHead h) {
-                head = h;
                 for (final var row : children(h)) {
                     if (row instanceof TableRow r) {
-                        collectColumns(r, columns);
+                        headCells = cellsOf(r);
                     }
                 }
             } else if (block instanceof TableBody b) {
                 for (final var row : children(b)) {
                     if (row instanceof TableRow r) {
-                        bodyRows.add(r);
-                        collectColumns(r, columns);
+                        bodyRows.add(cellsOf(r));
                     }
                 }
             }
         }
-        final var avail = Math.max(1, width - widthOf(prefix.first()));
-        final var total = columns.stream().mapToInt(Integer::intValue).sum() + Math.max(0, columns.size() - 1) * 2;
-        final var scale = total <= avail ? 1.0 : (double) avail / total;
-        final var widths = new ArrayList<Integer>();
-        for (final var c : columns) {
-            widths.add(Math.max(1, (int) Math.round(c * scale)));
-        }
-        if (head != null) {
-            for (final var row : children(head)) {
-                if (row instanceof TableRow r) {
-                    emitTableRow(cellSpans(r, true, base), widths, prefix, out);
-                }
-            }
-        }
-        for (final var row : bodyRows) {
-            emitTableRow(cellSpans(row, false, base), widths, prefix, out);
-        }
+        out.addAll(TABLE_RENDERER.render(headCells, bodyRows, width, prefix.first(), prefix.cont(), base));
     }
 
-    private static void emitTableRow(
-            final List<List<Span>> cells, final List<Integer> widths, final Prefix prefix, final List<Line> out) {
-        final var spans = new ArrayList<Span>(prefix.first());
-        for (var i = 0; i < widths.size(); i++) {
-            if (!spans.isEmpty()) {
-                spans.add(Span.styled("  ", Style.EMPTY));
-            }
-            final var cell = i < cells.size() ? cells.get(i) : List.<Span>of();
-            final var w = widthOfList(cell);
-            spans.addAll(cell);
-            spans.add(Span.styled(" ".repeat(Math.max(0, widths.get(i) - w)), Style.EMPTY));
-        }
-        out.add(Line.from(spans));
-    }
-
-    private static int widthOfList(final List<Span> spans) {
-        return widthOf(spans);
-    }
-
-    private static List<List<Span>> cellSpans(final TableRow row, final boolean header, final Style base) {
-        final var out = new ArrayList<List<Span>>();
+    private static List<String> cellsOf(final TableRow row) {
+        final var out = new ArrayList<String>();
         for (final var cell : children(row)) {
             if (cell instanceof TableCell tc) {
-                final var spans = new ArrayList<Span>();
-                for (final var child : children(tc)) {
-                    if (child instanceof Text t) {
-                        spans.add(Span.styled(t.getLiteral(), header ? base.bold() : base));
-                    }
-                }
-                out.add(spans);
+                out.add(textOf(tc).strip());
             }
         }
         return out;
-    }
-
-    private static void collectColumns(final TableRow row, final List<Integer> columns) {
-        var i = 0;
-        for (final var cell : children(row)) {
-            if (cell instanceof TableCell tc) {
-                var w = 0;
-                for (final var child : children(tc)) {
-                    if (child instanceof Text t) {
-                        w += t.getLiteral().length();
-                    }
-                }
-                while (columns.size() <= i) {
-                    columns.add(0);
-                }
-                columns.set(i, Math.max(columns.get(i), w));
-                i++;
-            }
-        }
     }
 
     private static Iterable<Node> descendants(final Node root) {

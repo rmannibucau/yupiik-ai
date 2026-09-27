@@ -70,9 +70,28 @@ public class ToolOutputFormat {
         }
     };
     private final PrettyJsonMapper pretty;
+    private final JsonMapper mapper;
+    private final DiffRenderer diffRenderer = new DiffRenderer();
 
     public ToolOutputFormat(final JsonMapper mapper) {
         this.pretty = new PrettyJsonMapper(mapper);
+        this.mapper = mapper;
+    }
+
+    /**
+     * Parses a JSON tool-arguments payload into a map, or {@code null} when the
+     * payload is not valid JSON. Used by the tool detail preview to render the
+     * meaningful arguments of write/edit/patch tools instead of the raw JSON.
+     */
+    public Map<String, Object> parseArguments(final String json) {
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return mapper.fromString(Map.class, json);
+        } catch (final RuntimeException e) {
+            return null;
+        }
     }
 
     /** Default construction for tests and manual wiring; the mapper must be closed by the owner. */
@@ -103,7 +122,7 @@ public class ToolOutputFormat {
 
     private Format detectUncached(final String output) {
         try {
-            if (DiffLines.looksLikeDiff(output)) {
+            if (diffRenderer.looksLikeDiff(output)) {
                 return Format.DIFF;
             }
         } catch (final RuntimeException e) {

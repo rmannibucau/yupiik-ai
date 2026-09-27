@@ -155,7 +155,8 @@ public class ChatClient implements AutoCloseable {
                         false,
                         true,
                         configuration.llm().retryAfterMaxWaitMs(),
-                        1.0d),
+                        1.0d,
+                        configuration.llm().concurrencyAdaptationMs()),
                 null);
     }
 

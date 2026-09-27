@@ -44,4 +44,25 @@ public interface Prompt {
     default boolean editing() {
         return false;
     }
+
+    /**
+     * Whether this prompt can detect a standalone {@code Esc} press while a
+     * turn is running without blocking. Rich backends (jline) return
+     * {@code true}; the plain stdin backend cannot and stays {@code false} so
+     * the REPL keeps its blocking turn wait untouched.
+     */
+    default boolean isInterruptAvailable() {
+        return false;
+    }
+
+    /**
+     * Non-blocking probe for a standalone {@code Esc} press, consuming it when
+     * present. Escape sequences (arrows, Alt-keys) are consumed and ignored so
+     * they never leak into the next line edit.
+     *
+     * @return {@code true} after a standalone {@code Esc} was detected.
+     */
+    default boolean pollInterrupt() {
+        return false;
+    }
 }

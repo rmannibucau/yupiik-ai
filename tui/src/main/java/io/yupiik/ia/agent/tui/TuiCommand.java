@@ -53,6 +53,7 @@ import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -67,6 +68,7 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
+import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -96,6 +98,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -123,6 +126,7 @@ public class TuiCommand implements Runnable {
     private final SessionRuntimeFactory sessionRuntimeFactory;
     private final ShellRegistry shellRegistry;
     private final SessionStore sessionStore;
+    private final SessionLifecycle sessionLifecycle;
     private final ChatClient chatClient;
     private final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService;
     private final McpManager mcpManager;
@@ -130,14 +134,15 @@ public class TuiCommand implements Runnable {
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
     private final AgentSessionService agentSessionService;
+    private final SubagentRegistry subagentRegistry;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final TurnRunner turnRunner;
     private final ThinkTagSplitter thinkTags;
     private final TuiRunnerFactory tuiRunnerFactory;
+    /** Safety repaint: max idle time (ms) without a full redraw when nothing changed (0 disables it). */
+    private final long heartbeatMillis;
     /** Open tabs, one per concurrent session; index 0 is the original tab. */
-    private final List<UiState> tabs = new CopyOnWriteArrayList<>();
-
-    private volatile int activeTab;
+    private final TabManager tabManager;
     /** Header hit-areas of the rendered tab bar, one per tab (empty while the bar is hidden). */
     private final List<Rect> tabRects = new CopyOnWriteArrayList<>();
 
@@ -161,9 +166,10 @@ public class TuiCommand implements Runnable {
     private volatile long cachedGitBranchAt;
     private final TuiSlashCommands slashCommands;
     private final SlashRegistry slashRegistry;
-    private volatile UiState uiState;
-    private volatile TuiRunner uiRunner;
     private final Clock clock;
+    /** Polls the git branch off the render thread; {@code null} in render-only tests (on-demand fallback). */
+    private final GitBranchPoller gitBranchPoller;
+
     private final SyntaxHighlighter syntaxHighlighter;
     private final Glyphs glyphs;
     // single-entry render memo: when neither the transcript markdown nor the
@@ -181,6 +187,8 @@ public class TuiCommand implements Runnable {
     private final CostEstimator costEstimator;
     private final boolean persistHistory;
     private final AskUserCardRenderer askUserCardRenderer;
+    private final DiffRenderer diffRenderer = new DiffRenderer();
+    private final ToolArgsPreview toolArgsPreview;
     private final ToolOutputFormat toolOutputFormat;
     private final BtwAnswerer btwAnswerer;
     private final boolean formatToolOutput;
@@ -195,6 +203,12 @@ public class TuiCommand implements Runnable {
     /** If the render thread has not ticked for this long while an approval/feedback gate waits, fail closed. */
     private static final long RENDER_STALL_TIMEOUT_MILLIS = 5_000;
 
+    /**
+     * Fallback safety-repaint interval when no TUI configuration resolves a value (rendering-only tests).
+     * Mirrors {@code yca.tui.heartbeatMillis}; see {@link TuiConfiguration#heartbeatMillis()}.
+     */
+    private static final long DEFAULT_HEARTBEAT_RENDER_INTERVAL_MILLIS = 3_500;
+
     private static final Pattern SPLIT_COMMAND = Pattern.compile("\\s+");
 
     public TuiCommand(
@@ -204,6 +218,7 @@ public class TuiCommand implements Runnable {
             final ShellRegistry shellRegistry,
             final SessionRuntimeFactory sessionRuntimeFactory,
             final SessionStore sessionStore,
+            final SessionLifecycle sessionLifecycle,
             final ChatClient chatClient,
             final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService,
             final McpManager mcpManager,
@@ -220,13 +235,17 @@ public class TuiCommand implements Runnable {
             final Clock clock,
             final AskUserCardRenderer askUserCardRenderer,
             final ToolOutputFormat toolOutputFormat,
-            final BtwAnswerer btwAnswerer) {
+            final BtwAnswerer btwAnswerer,
+            final TabManager tabManager,
+            final SubagentRegistry subagentRegistry,
+            final ScheduledExecutorService scheduler) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
         this.configuration = configuration;
         this.shellRegistry = shellRegistry;
         this.sessionRuntimeFactory = sessionRuntimeFactory;
         this.sessionStore = sessionStore;
+        this.sessionLifecycle = sessionLifecycle;
         this.chatClient = chatClient;
         this.modelStyleService = modelStyleService;
         this.mcpManager = mcpManager;
@@ -238,14 +257,21 @@ public class TuiCommand implements Runnable {
         this.turnRunner = turnRunner;
         this.thinkTags = thinkTags;
         this.tuiRunnerFactory = tuiRunnerFactory;
+        this.heartbeatMillis = tuiConfiguration == null
+                ? DEFAULT_HEARTBEAT_RENDER_INTERVAL_MILLIS
+                : tuiConfiguration.heartbeatMillis();
         this.slashCommands = slashCommands;
         this.slashRegistry = slashRegistry;
+        this.gitBranchPoller = scheduler == null ? null : new GitBranchPoller(scheduler, this::onBranchChanged);
+        this.tabManager = tabManager;
         this.clock = clock;
         this.askUserCardRenderer = askUserCardRenderer;
         this.toolOutputFormat = toolOutputFormat;
         this.btwAnswerer = btwAnswerer;
+        this.subagentRegistry = subagentRegistry;
         this.formatToolOutput = !"off".equalsIgnoreCase(tuiConfiguration.toolOutputFormat());
         this.syntaxHighlighter = new SyntaxHighlighter().maxLineLength(configuration.maxLineLength());
+        this.toolArgsPreview = new ToolArgsPreview(toolOutputFormat, syntaxHighlighter, diffRenderer);
         this.palette = Palette.from(conf.theme(), tuiConfiguration);
         this.glyphs = Glyphs.of(tuiConfiguration.glyphs());
         this.costEstimator = CostEstimator.parse(tuiConfiguration.pricing());
@@ -279,6 +305,17 @@ public class TuiCommand implements Runnable {
 
     @RootConfiguration("tui")
     public record TuiConf(
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation = "Resume an existing session by id; a new session is created when empty.")
+            String session,
+
+            @Property(
+                    defaultValue = "\"\"",
+                    documentation =
+                            "Session context file (a yca session JSONL). Its file name provides the session id to resume or create.")
+            String context,
+
             @Property(
                     defaultValue = "io.yupiik.ia.agent.tui.KeyBindingPreset.STANDARD",
                     documentation = "Key binding preset: STANDARD, VIM, EMACS, INTELLIJ or VSCODE.")
@@ -367,11 +404,27 @@ public class TuiCommand implements Runnable {
             final var current = active();
             return current == null ? ShellOutcome.none() : themeOutcome(arg, current);
         });
+        slashCommands.bindSubagents(this::openSubagents);
+        shellRegistry.bindSubagents(subagentRegistry);
         if (persistHistory) {
             this.promptHistory.replaceWith(PromptHistory.load(historyStoragePath(), promptHistory.capacity()));
         }
         try (final var tui = tuiRunnerFactory.create(conf, tuiConfiguration.hideCursor())) {
-            newTab(tui);
+            // the manager is application-scoped: clear any state left by a previous run
+            tabManager.reset();
+            final var initialSessionId = sessionLifecycle.resolveSessionId(conf.session(), conf.context());
+            if (conf.context() != null && !conf.context().isBlank()) {
+                final var contextPath = sessionStore.path(initialSessionId);
+                try {
+                    sessionLifecycle.prepareContextFile(contextPath, conf.context());
+                } catch (final IOException e) {
+                    LOG.severe(() -> "failed to prepare context file " + contextPath + ": " + e.getMessage());
+                }
+            }
+            newTab(tui, initialSessionId);
+            if (gitBranchPoller != null) {
+                gitBranchPoller.start();
+            }
             // while the TUI owns the terminal, stderr logging would corrupt the screen:
             // route app and JLine WARNING+ records into the UI instead
             final var julFeedback = redirectLoggerToUi("io.yupiik", tui);
@@ -381,7 +434,7 @@ public class TuiCommand implements Runnable {
             } finally {
                 // quitting the app tears every tab down: interrupt each running turn, wait
                 // for the in-flight futures and release the per-session resources
-                for (final var state : List.copyOf(tabs)) {
+                for (final var state : tabManager.list()) {
                     state.interrupted = true;
                     awaitInFlight(state);
                     disposeTab(state);
@@ -395,6 +448,9 @@ public class TuiCommand implements Runnable {
                 if (persistHistory) {
                     promptHistory.save(historyStoragePath());
                 }
+                if (gitBranchPoller != null) {
+                    gitBranchPoller.close();
+                }
                 executor.shutdown();
             }
         } catch (final RuntimeException e) {
@@ -406,23 +462,15 @@ public class TuiCommand implements Runnable {
 
     /** The tab currently rendered and receiving the keyboard. */
     private UiState active() {
-        return uiState;
+        return tabManager.active();
     }
 
     private void activate(final int index) {
-        if (tabs.isEmpty()) {
-            return;
-        }
-        activeTab = Math.clamp(index, 0, tabs.size() - 1);
-        this.uiState = tabs.get(activeTab);
-        this.uiRunner = uiState.runner;
+        tabManager.activate(index);
     }
 
     private void cycleTab(final int delta) {
-        if (tabs.size() < 2) {
-            return;
-        }
-        activate(Math.floorMod(activeTab + delta, tabs.size()));
+        tabManager.cycle(delta);
     }
 
     /**
@@ -431,8 +479,18 @@ public class TuiCommand implements Runnable {
      * becomes the active one; turns of the previous tabs keep running in the background.
      */
     private UiState newTab(final TuiRunner tui) {
+        return newTab(tui, sessionStore.create());
+    }
+
+    /**
+     * Opens a new tab on an explicit session: when {@code sessionId} was passed at
+     * launch (or comes from a context file) the tab starts on that session and its
+     * persisted history is replayed into the model instead of a blank conversation,
+     * mirroring {@code /resume}. A brand-new id behaves exactly like {@link #newTab(TuiRunner)}.
+     */
+    private UiState newTab(final TuiRunner tui, final String sessionId) {
         final var state = new UiState(thinkTags, clock);
-        state.sessionId = sessionStore.create();
+        state.sessionId = sessionId;
         state.showThinking = conf.showThinking();
         state.runner = tui;
         state.session.sessionId(state.sessionId).activeAgent(state.activeAgent);
@@ -445,13 +503,19 @@ public class TuiCommand implements Runnable {
                 transcriptConf == null || transcriptConf.maxHistoryCharacters() <= 0
                         ? DEFAULT_MAX_HISTORY_CHARACTERS
                         : transcriptConf.maxHistoryCharacters());
+        state.model.replay(sessionStore.load(state.sessionId));
+        if (state.title == null || state.title.isBlank()) {
+            final var summary = sessionStore.summary(state.sessionId);
+            if (summary != null && !summary.isBlank()) {
+                state.title = TuiInputSupport.firstLine(summary);
+            }
+        }
         runtime.permissions().setGate(gate(tui, state));
         runtime.feedback().setGate(feedbackGate(tui, state));
         runtime.permissions().setPermitAll(conf.permitAll());
         state.model.status("ready");
         shellRegistry.register(env(tui, state));
-        tabs.add(state);
-        activate(tabs.size() - 1);
+        tabManager.add(state);
         return state;
     }
 
@@ -473,7 +537,7 @@ public class TuiCommand implements Runnable {
         if (state.sessionId != null && sessionStore.isEmpty(state.sessionId)) {
             sessionStore.delete(state.sessionId);
         }
-        tabs.remove(state);
+        tabManager.remove(state);
     }
 
     /**
@@ -485,11 +549,11 @@ public class TuiCommand implements Runnable {
         state.interrupted = true;
         awaitInFlight(state);
         disposeTab(state);
-        if (tabs.isEmpty()) {
+        if (tabManager.isEmpty()) {
             tui.quit();
             return true;
         }
-        activate(Math.min(activeTab, tabs.size() - 1));
+        activate(tabManager.activeTab());
         return true;
     }
 
@@ -543,6 +607,7 @@ public class TuiCommand implements Runnable {
                     if (target == null) {
                         return;
                     }
+                    target.dirty = true;
                     if (level == Level.SEVERE) {
                         modelError(target, message);
                     } else {
@@ -568,11 +633,15 @@ public class TuiCommand implements Runnable {
         return (title, detail, toolName, args) -> {
             final var latch = new CountDownLatch(1);
             final var outcome = new AtomicReference<ApprovalGate.Result>();
-            tui.runLater(() -> state.approval = new Approval(title, detail, latch, outcome));
+            tui.runLater(() -> {
+                state.dirty = true;
+                state.approval = new Approval(title, detail, latch, outcome);
+            });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
                     if (state.interrupted || renderStalled(state)) {
                         tui.runLater(() -> {
+                            state.dirty = true;
                             if (state.approval != null && state.approval.latch() == latch) {
                                 state.approval = null;
                             }
@@ -594,11 +663,15 @@ public class TuiCommand implements Runnable {
             final var latch = new CountDownLatch(1);
             final var answers = new java.util.concurrent.ConcurrentHashMap<String, Object>();
             final var answered = new AtomicBoolean(); // true => answered, false => canceled
-            tui.runLater(() -> state.feedbackPrompt = new FeedbackPrompt(questions, latch, answers, answered));
+            tui.runLater(() -> {
+                state.dirty = true;
+                state.feedbackPrompt = new FeedbackPrompt(questions, latch, answers, answered);
+            });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
                     if (state.interrupted || renderStalled(state)) {
                         tui.runLater(() -> {
+                            state.dirty = true;
                             if (state.feedbackPrompt != null && state.feedbackPrompt.latch() == latch) {
                                 state.feedbackPrompt = null;
                             }
@@ -842,15 +915,19 @@ public class TuiCommand implements Runnable {
         state.model.onEvent(event);
         if (event instanceof AgentEvent.ToolStarted started) {
             state.spinnerTick = 0;
-            state.lastToolArgs = started.args();
+            state.pendingToolArgs
+                    .computeIfAbsent(started.name(), n -> new java.util.ArrayDeque<>())
+                    .addLast(started.args());
         } else if (event instanceof AgentEvent.ToolFinished finished) {
             // the transcript just stamped this call with ordinal #toolCallCount: keep the
             // full uncapped output around so the Ctrl+O overlay can expand the truncated card
+            final var args = state.pendingToolArgs.get(finished.name());
+            final var argsValue = args == null || args.isEmpty() ? "" : args.pollFirst();
             state.toolOutputs.record(
                     state.model.toolCallCount(),
                     new ToolOutputStore.Entry(
                             finished.name(),
-                            state.lastToolArgs == null ? "" : state.lastToolArgs,
+                            argsValue == null ? "" : argsValue,
                             finished.output(),
                             !finished.success(),
                             0));
@@ -862,10 +939,40 @@ public class TuiCommand implements Runnable {
                 final var runner = state.runner;
                 if (runner != null && !state.model.busy()) {
                     final var next = state.pendingPrompts.removeFirst();
-                    runner.runLater(() -> submit(next, runner, state, false));
+                    runLater(state, () -> submit(next, state.runner, state, false));
                 }
             }
         }
+    }
+
+    /**
+     * True when a periodic tick may need a repaint even though no input event fired:
+     * every animated region (spinner, "thinking Xs" counter, tool progress, queued prompts),
+     * a live toast (its expiry changes the frame), or a pending background mutation that was
+     * posted through {@link #runLater(UiState, Runnable)} and still awaits its paint.
+     * Anything else ticks as cheaply as possible: the handler returns false and the frame
+     * is left untouched until input or a state change forces one.
+     */
+    private boolean needsTickRender(final UiState state) {
+        return state.model.runningTool() != null
+                || activeWait(state) != null
+                || state.model.thinkingLength() > 0
+                || !state.pendingPrompts.isEmpty()
+                || state.toast != null
+                || state.dirty;
+    }
+
+    /**
+     * Posts a UI mutation from a background thread and marks the tab dirty so the next tick
+     * paints it: the TamboUI runner executes the action on the render thread without an
+     * immediate redraw, the tick right after carries the paint (exactly the pre-optimization
+     * cadence, but only while a mutation is actually pending).
+     */
+    private void runLater(final UiState state, final Runnable action) {
+        state.runner.runLater(() -> {
+            state.dirty = true;
+            action.run();
+        });
     }
 
     private boolean onKey(final Event event, final TuiRunner runner, final UiState state) {
@@ -881,13 +988,23 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (event instanceof TickEvent) {
-            return true;
+            // idle heartbeat: only repaint when something could have changed since the last
+            // frame (busy/animations, a running-mutation painted via runLater, a live toast),
+            // or when the safety repaint interval expired to bound any missed update
+            return needsTickRender(state)
+                    || (heartbeatMillis > 0 && clock.millis() - state.lastRenderTick >= heartbeatMillis);
         }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
         }
+        if (tabManager.isListOpen()) {
+            return onTabsListKey(event);
+        }
         if (state.shortcutsOpen) {
             return onShortcutsKey(event, state);
+        }
+        if (state.subagentsOverlay != null) {
+            return onSubagentsKey(event, state);
         }
         if (state.searchOpen) {
             return onSearchKey(event, state);
@@ -935,9 +1052,9 @@ public class TuiCommand implements Runnable {
             if (mouse.isPress() && mouse.isLeftButton()) {
                 // tab close zones first: they are sub-rects of the tab cells
                 for (var i = 0; i < tabCloseRects.size(); i++) {
-                    if (i < tabs.size() && tabCloseRects.get(i).contains(mouse.x(), mouse.y())) {
+                    if (i < tabManager.size() && tabCloseRects.get(i).contains(mouse.x(), mouse.y())) {
                         state.selection.clear();
-                        closeTab(tabs.get(i), runner);
+                        closeTab(tabManager.get(i), runner);
                         return true;
                     }
                 }
@@ -1078,7 +1195,7 @@ public class TuiCommand implements Runnable {
         }
         if (key.hasAlt() && !key.hasCtrl() && key.character() >= '1' && key.character() <= '9') {
             final var index = Character.digit(key.character(), 10) - 1;
-            if (index < tabs.size()) {
+            if (index < tabManager.size()) {
                 activate(index);
             }
             return true;
@@ -1091,7 +1208,7 @@ public class TuiCommand implements Runnable {
             } else {
                 state.quitArmed = false;
                 // quitting interrupts every tab, not only the visible one
-                for (final var tab : List.copyOf(tabs)) {
+                for (final var tab : tabManager.list()) {
                     tab.interrupted = true;
                     awaitInFlight(tab);
                 }
@@ -1401,7 +1518,7 @@ public class TuiCommand implements Runnable {
         final var via = Clipboard.copy(text);
         final var payload = SelectionState.osc52Payload(text);
         final var copied = text.length();
-        runner.runLater(() -> {
+        runLater(state, () -> {
             try {
                 runner.backend().writeRaw(payload);
                 final var channel = via == null ? " (OSC 52)" : " via " + via;
@@ -1424,7 +1541,6 @@ public class TuiCommand implements Runnable {
     }
 
     private void submit(final String text, final TuiRunner runner, final UiState state, final boolean pinToBottom) {
-        this.uiRunner = runner;
         if (!text.regionMatches(true, 0, "/btw", 0, 4)) {
             promptHistory.add(text);
         }
@@ -1475,7 +1591,7 @@ public class TuiCommand implements Runnable {
         state.inFlight = turnRunner
                 .submit(new TurnRunner.TurnRequest(
                         state.session.runtime().loop(),
-                        env(uiRunner, state),
+                        env(state.runner, state),
                         state.sessionId,
                         agentName,
                         prompt,
@@ -1510,7 +1626,6 @@ public class TuiCommand implements Runnable {
     }
 
     private void slash(final String text, final TuiRunner runner, final UiState state) {
-        uiState = state;
         final var parts = SPLIT_COMMAND.split(text.substring(1), 2);
         if ("btw".equals(parts[0].toLowerCase(Locale.ROOT))) {
             btw(parts.length > 1 ? parts[1].strip() : "", runner, state);
@@ -1528,10 +1643,10 @@ public class TuiCommand implements Runnable {
                         .dispatch(text, env(runner, state))
                         .toCompletableFuture()
                         .join();
-                runner.runLater(() -> apply(outcome, runner, state));
+                runLater(state, () -> apply(outcome, runner, state));
             } catch (final RuntimeException e) {
                 final var cause = e.getCause() == null ? e : e.getCause();
-                runner.runLater(() -> modelError(state, "command failed: " + cause.getMessage()));
+                runLater(state, () -> modelError(state, "command failed: " + cause.getMessage()));
             }
         });
     }
@@ -1558,7 +1673,7 @@ public class TuiCommand implements Runnable {
                                 : null,
                         cancelled::get)
                 .whenComplete((answer, error) ->
-                        runner.runLater(() -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
+                        runLater(state, () -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
     }
 
     private void onBtwAnswer(
@@ -1663,37 +1778,37 @@ public class TuiCommand implements Runnable {
         return new ShellFrontend() {
             @Override
             public void onEvent(final AgentEvent event) {
-                runner.runLater(() -> TuiCommand.this.onEvent(event, state));
+                runLater(state, () -> TuiCommand.this.onEvent(event, state));
             }
 
             @Override
             public void status(final String message) {
-                runner.runLater(() -> TuiCommand.notify(state, message));
+                runLater(state, () -> TuiCommand.notify(state, message));
             }
 
             @Override
             public void notice(final AgentEvent.Notice.Level level, final String message) {
-                runner.runLater(() -> TuiCommand.notify(state, message));
+                runLater(state, () -> TuiCommand.notify(state, message));
             }
 
             @Override
             public void transcript(final String markdown) {
-                runner.runLater(() -> state.model.appendTranscript(markdown));
+                runLater(state, () -> state.model.appendTranscript(markdown));
             }
 
             @Override
             public void error(final String message) {
-                runner.runLater(() -> modelError(state, message));
+                runLater(state, () -> modelError(state, message));
             }
 
             @Override
             public void showThinking(final boolean value) {
-                runner.runLater(() -> state.showThinking = value);
+                runLater(state, () -> state.showThinking = value);
             }
 
             @Override
             public void showToolOutput(final ToolOutputVisibility value) {
-                runner.runLater(() -> state.showToolActions = value);
+                runLater(state, () -> state.showToolActions = value);
             }
 
             @Override
@@ -1733,12 +1848,14 @@ public class TuiCommand implements Runnable {
             public CompletionStage<Optional<String>> pick(final String title, final List<String> options) {
                 focus(state, runner);
                 final var future = new CompletableFuture<Optional<String>>();
-                runner.runLater(() -> openPicker(
+                runLater(
                         state,
-                        title,
-                        options,
-                        value -> future.complete(Optional.of(value)),
-                        () -> future.complete(Optional.empty())));
+                        () -> openPicker(
+                                state,
+                                title,
+                                options,
+                                value -> future.complete(Optional.of(value)),
+                                () -> future.complete(Optional.empty())));
                 return future;
             }
 
@@ -1762,9 +1879,9 @@ public class TuiCommand implements Runnable {
      * the prompt to answer it.
      */
     private void focus(final UiState state, final TuiRunner runner) {
-        final var index = tabs.indexOf(state);
-        if (index >= 0 && index != activeTab) {
-            runner.runLater(() -> activate(index));
+        final var index = tabManager.indexOf(state);
+        if (index >= 0 && index != tabManager.activeTab()) {
+            runLater(state, () -> activate(index));
         }
     }
 
@@ -1953,8 +2070,12 @@ public class TuiCommand implements Runnable {
                 }
                 if (sessionStore != null) {
                     try {
-                        final var sessions = sessionStore.list();
-                        if (sessions == null || sessions.isEmpty()) {
+                        // most recent first regardless of the store implementation
+                        final var sessions = sessionStore.list().stream()
+                                .sorted(java.util.Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
+                                        .reversed())
+                                .toList();
+                        if (sessions.isEmpty()) {
                             completionCache.sessions(List.of());
                         } else {
                             completionCache.sessions(sessions.stream()
@@ -2242,9 +2363,9 @@ public class TuiCommand implements Runnable {
         executor.execute(() -> {
             try {
                 final var ids = chatClient.models().ids();
-                runner.runLater(() -> openModelPicker(state, ids));
+                runLater(state, () -> openModelPicker(state, ids));
             } catch (final Exception e) {
-                runner.runLater(() -> modelError(state, "models failed: " + e.getMessage(), e));
+                runLater(state, () -> modelError(state, "models failed: " + e.getMessage(), e));
             }
         });
     }
@@ -2260,7 +2381,12 @@ public class TuiCommand implements Runnable {
                 ids,
                 selected -> {
                     try {
-                        state.session.chatSettings().setModel(selected);
+                        // same reset semantics as AgentSessionService.setModel: a model
+                        // change drops any stale variant/sampling override of the old model
+                        final var settings = state.session.chatSettings();
+                        settings.setModel(selected);
+                        settings.setVariant(null);
+                        settings.setSampling(null);
                         notify(state, "model: " + selected);
                         refreshCompletionCache();
                     } catch (final RuntimeException e) {
@@ -2416,12 +2542,12 @@ public class TuiCommand implements Runnable {
         executor.execute(() -> {
             try {
                 final var result = agentSessionService.resyncGraph();
-                runner.runLater(() -> {
+                runLater(state, () -> {
                     notify(state, "structural code graph resynced");
                     state.model.appendTranscript("\n\n> structural code graph: `" + result + "`\n");
                 });
             } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "resync failed: " + e.getMessage()));
+                runLater(state, () -> modelError(state, "resync failed: " + e.getMessage()));
             }
         });
     }
@@ -2435,7 +2561,7 @@ public class TuiCommand implements Runnable {
         executor.execute(() -> {
             try {
                 final var result = agentSessionService.compact(state.sessionId, state.runtime());
-                runner.runLater(() -> {
+                runLater(state, () -> {
                     notify(state, result.message());
                     if (result.applied()) {
                         if (result.error() != null) {
@@ -2448,13 +2574,14 @@ public class TuiCommand implements Runnable {
                     }
                 });
             } catch (final RuntimeException e) {
-                runner.runLater(() -> modelError(state, "compaction failed: " + e.getMessage(), e));
+                runLater(state, () -> modelError(state, "compaction failed: " + e.getMessage(), e));
             }
         });
     }
 
     private void render(final dev.tamboui.terminal.Frame frame, final UiState state) {
         state.lastRenderTick = clock.millis();
+        state.dirty = false;
         if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
             state.spinnerTick++;
         }
@@ -2544,6 +2671,12 @@ public class TuiCommand implements Runnable {
         if (state.shortcutsOpen) {
             renderShortcutsOverlay(frame, state);
         }
+        if (state.subagentsOverlay != null) {
+            renderSubagentsOverlay(frame, state);
+        }
+        if (tabManager.isListOpen()) {
+            renderTabsListOverlay(frame);
+        }
         if (state.picker != null) {
             renderPicker(frame, state);
         }
@@ -2570,9 +2703,9 @@ public class TuiCommand implements Runnable {
         state.screenGrid = SelectionState.snapshot(frame.buffer());
     }
 
-    private Style modelNameStyle() {
-        final var style = modelStyleService.resolve(
-                chatClient.currentProvider(), chatClient.model(), !"light".equalsIgnoreCase(theme));
+    private Style modelNameStyle(final String model) {
+        final var style =
+                modelStyleService.resolve(chatClient.currentProvider(), model, !"light".equalsIgnoreCase(theme));
         final var base = Style.EMPTY.fg(Color.hex(style.hex()));
         return style.bold() ? base.bold() : base;
     }
@@ -2585,7 +2718,7 @@ public class TuiCommand implements Runnable {
     private void renderTabBar(final Rect rect, final dev.tamboui.terminal.Frame frame) {
         tabRects.clear();
         tabCloseRects.clear();
-        final var open = List.copyOf(tabs);
+        final var open = tabManager.list();
         if (open.isEmpty() || rect.isEmpty()) {
             return;
         }
@@ -2597,7 +2730,7 @@ public class TuiCommand implements Runnable {
         var x = rect.x();
         for (var i = 0; i < open.size(); i++) {
             final var state = open.get(i);
-            final var selected = i == activeTab;
+            final var selected = i == tabManager.activeTab();
             // the close marker reserves its columns before the title is ellipsized, so it never truncates
             final var closeable = width >= 6;
             final var body = " " + tabStatusIcon(state) + " " + tabTitle(state) + " ";
@@ -2679,8 +2812,9 @@ public class TuiCommand implements Runnable {
                 Span.styled("yca", Style.EMPTY.fg(Color.hex(palette.accent())).bold()),
                 Span.styled(" coding agent", label)));
         text.add(Line.empty());
+        final var model = chatClient.model(state.session.chatSettings());
         text.add(Line.from(
-                Span.styled("model ", label), Span.styled(ellipsize(chatClient.model(), width - 6), modelNameStyle())));
+                Span.styled("model ", label), Span.styled(ellipsize(model, width - 6), modelNameStyle(model))));
         text.add(Line.from(
                 Span.styled("provider ", label), Span.styled(ellipsize(chatClient.providerId(), width - 9), value)));
         text.add(Line.from(
@@ -2694,19 +2828,19 @@ public class TuiCommand implements Runnable {
             text.add(Line.from(Span.styled("branch ", label), Span.styled(ellipsize(branch, width - 7), value)));
         }
         text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
-        // the mode row follows the session id so it stays right after the entry block
+        // the mode and permissions each get their own row: mode is always visible with
+        // the mode-colored value, permissions shows the approval mode (all -> red)
+        final var permissions = state.session.runtime().permissions();
         text.add(Line.from(
-                Span.styled(state.session.runtime().permissions().isPermitAll() ? "permissions all " : "mode ", label),
+                Span.styled("mode ", label),
+                Span.styled(permissions.mode().name().toLowerCase(Locale.ROOT), Style.EMPTY.fg(modeColor()))));
+        text.add(Line.from(
+                Span.styled("permissions ", label),
                 Span.styled(
-                        state.session.runtime().permissions().isPermitAll()
-                                ? "⚠"
-                                : state.session
-                                        .runtime()
-                                        .permissions()
-                                        .mode()
-                                        .name()
-                                        .toLowerCase(Locale.ROOT),
-                        Style.EMPTY.fg(modeColor()))));
+                        permissions.isPermitAll()
+                                ? "all ⚠"
+                                : permissions.permissionMode().name().toLowerCase(Locale.ROOT),
+                        permissions.isPermitAll() ? Style.EMPTY.fg(Color.hex(palette.permitAll())) : value)));
         text.add(Line.from(Span.styled("servers ", label)));
         for (final var status : mcpManager.serverStatuses()) {
             final var dotColor =
@@ -2734,8 +2868,7 @@ public class TuiCommand implements Runnable {
                     Span.styled("llm calls  ", label),
                     Span.styled(Long.toString(state.session.runtime().usage().requests()), value)));
             // optional session cost estimate, only shown when pricing is configured
-            final var cost =
-                    costEstimator.cost(chatClient.model(), state.model.promptTokens(), state.model.completionTokens());
+            final var cost = costEstimator.cost(model, state.model.promptTokens(), state.model.completionTokens());
             cost.ifPresent(c -> text.add(Line.from(
                     Span.styled("cost ~     ", label), Span.styled(String.format(Locale.ROOT, "$%.4f", c), value))));
         }
@@ -3223,7 +3356,7 @@ public class TuiCommand implements Runnable {
         if (!card.output().isBlank()) {
             lines.add(Line.empty());
             // ask_user answers read better as key: value pairs than raw JSON
-            var outputLines = toolBodyLines(card.name(), card.output(), innerW, card.isDiff());
+            var outputLines = toolBodyLines(card.name(), null, card.output(), innerW, card.isDiff(diffRenderer));
             // keep the card compact: a short inline preview, the rest lives behind
             // the "click to expand" footer / Ctrl+O overlay
             final var clipped = outputLines.size() > MAX_INLINE_TOOL_LINES;
@@ -3277,13 +3410,13 @@ public class TuiCommand implements Runnable {
         final var label = new StringBuilder();
         if (card.running()) {
             // live cards carry the raw command as name: show its significant part
-            label.append(card.keyCommand());
+            label.append(condensedCommand(card));
         } else {
             label.append(card.name());
             if (card.ordinal() >= 0) {
                 label.append(" #").append(card.ordinal());
             }
-            final var key = card.keyCommand();
+            final var key = condensedCommand(card);
             if (!key.isBlank()) {
                 label.append(" - ").append(key);
             }
@@ -3301,6 +3434,38 @@ public class TuiCommand implements Runnable {
                         (card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check()) + " ",
                         Style.EMPTY.fg(statusColor).bold()),
                 Span.styled(label.toString(), Style.EMPTY.fg(Color.hex(palette.textMuted()))));
+    }
+
+    /**
+     * The significant command of a tool card for the condensed rendering, with
+     * read/write/edit file paths shortened to their cwd-relative form so the
+     * working-directory prefix does not eat the whole line. The shortening is
+     * applied before the display clip so long absolute paths stay relative.
+     */
+    private String condensedCommand(final ToolCard card) {
+        if (!card.running()
+                && !card.failed()
+                && ("read_file".equals(card.name())
+                        || "write_file".equals(card.name())
+                        || "edit_file".equals(card.name()))) {
+            return card.keyCommand(TuiCommand::shortenToRelative);
+        }
+        return card.keyCommand();
+    }
+
+    /** Converts an absolute path under the working directory into a cwd-relative one; passthrough otherwise. */
+    private static String shortenToRelative(final String path) {
+        try {
+            final var cwd =
+                    Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+            final var candidate = Path.of(path).toAbsolutePath().normalize();
+            if (candidate.startsWith(cwd)) {
+                return cwd.relativize(candidate).toString();
+            }
+        } catch (final RuntimeException e) {
+            // not a path: keep the raw significant command
+        }
+        return path;
     }
 
     private List<Line> toolOutputLines(final String output, final int innerW, final boolean diff) {
@@ -3694,12 +3859,13 @@ public class TuiCommand implements Runnable {
         final var frameStyle = state.model.runningTool() != null ? SpinnerStyle.SQUARE_CORNERS : activeWait(state);
         final var prefix = frameStyle == null ? "" : spinnerFrame(frameStyle, state.spinnerTick) + " ";
         parts.add(Span.styled(" " + prefix + state.model.status() + "  ", Style.EMPTY.fg(statusColor)));
-        final var activeModel = ellipsize(chatClient.model(), 40);
-        final var activeVariant = chatClient.variant();
+        final var statusModel = chatClient.model(state.session.chatSettings());
+        final var activeModel = ellipsize(statusModel, 40);
+        final var activeVariant = chatClient.variant(state.session.chatSettings());
         final var variantSuffix =
                 activeVariant == null || activeVariant.isBlank() ? " (default)" : " [" + activeVariant + "]";
         parts.add(Span.styled(modeWord() + " ", Style.EMPTY.fg(modeColor())));
-        parts.add(Span.styled(activeModel + variantSuffix + "  ", modelNameStyle()));
+        parts.add(Span.styled(activeModel + variantSuffix + "  ", modelNameStyle(statusModel)));
         parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
         // narrow terminals have no sidebar: keep the essential context numbers in the strip
         if (narrow) {
@@ -3857,7 +4023,18 @@ public class TuiCommand implements Runnable {
 
     /** Key handling while the shortcuts overlay is open. */
     private boolean onShortcutsKey(final Event event, final UiState state) {
-        if (event instanceof PasteEvent || event instanceof MouseEvent) {
+        if (event instanceof final MouseEvent mouse) {
+            // wheel support: the overlay is taller than the terminal on small screens
+            if (mouse.isScroll()) {
+                if (mouse.kind() == MouseEventKind.SCROLL_UP) {
+                    state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 3);
+                } else {
+                    state.shortcutsScroll += 3;
+                }
+            }
+            return true;
+        }
+        if (event instanceof PasteEvent) {
             return true;
         }
         if (!(event instanceof final KeyEvent key)) {
@@ -3875,6 +4052,48 @@ public class TuiCommand implements Runnable {
             state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 1);
         } else if (key.isKey(KeyCode.DOWN)) {
             state.shortcutsScroll += 1;
+        }
+        return true;
+    }
+
+    /** Key handling while the "/tabs" list overlay is open. */
+    private boolean onTabsListKey(final Event event) {
+        if (event instanceof final MouseEvent mouse) {
+            // wheel support: the tab titles can overflow the overlay height
+            if (mouse.isScroll()) {
+                if (mouse.kind() == MouseEventKind.SCROLL_UP) {
+                    tabManager.listScroll(tabManager.listScroll() - 3);
+                } else {
+                    tabManager.listScroll(tabManager.listScroll() + 3);
+                }
+            }
+            return true;
+        }
+        if (event instanceof PasteEvent) {
+            return true;
+        }
+        if (!(event instanceof final KeyEvent key)) {
+            return false;
+        }
+        if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
+            tabManager.closeList();
+            return true;
+        }
+        if (key.isKey(KeyCode.PAGE_UP)) {
+            tabManager.listScroll(tabManager.listScroll() - 10);
+        } else if (key.isKey(KeyCode.PAGE_DOWN)) {
+            tabManager.listScroll(tabManager.listScroll() + 10);
+        } else if (key.isKey(KeyCode.UP)) {
+            tabManager.listScroll(tabManager.listScroll() - 1);
+        } else if (key.isKey(KeyCode.DOWN)) {
+            tabManager.listScroll(tabManager.listScroll() + 1);
+        } else if (!key.hasAlt() && !key.hasCtrl() && key.character() >= '0' && key.character() <= '9') {
+            final var index = key.character() == '0' ? 9 : Character.digit(key.character(), 10) - 1;
+            if (index < tabManager.size()) {
+                tabManager.closeList();
+                activate(index);
+            }
+            return true;
         }
         return true;
     }
@@ -3924,6 +4143,187 @@ public class TuiCommand implements Runnable {
                         .overflow(Overflow.CLIP)
                         .build(),
                 splits.get(1));
+    }
+
+    /** Modal listing every open tab with its full title; opened by "/tabs" (or an arg to switch directly). */
+    private void renderTabsListOverlay(final dev.tamboui.terminal.Frame frame) {
+        final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(10, frame.height() * 4 / 5), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.12);
+        final var inner = Modal.box(frame, rect, " tabs ", Color.hex(palette.accent()));
+        if (inner == null) {
+            return;
+        }
+        final var activeIndex = tabManager.activeTab();
+        final var accent = Style.EMPTY.fg(Color.hex(palette.accent())).bold();
+        final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var rows = new ArrayList<Line>();
+        final var open = tabManager.list();
+        for (int i = 0; i < open.size(); i++) {
+            final var tab = open.get(i);
+            final var isActive = i == activeIndex;
+            final var index = Span.styled(String.format("%2d ", i + 1), isActive ? accent : muted);
+            final var icon = Span.styled(tabStatusIcon(tab) + " ", isActive ? accent : muted);
+            final var title = Span.styled(tabTitle(tab), isActive ? accent : textStyle);
+            final var marker = isActive ? Span.styled("  (active)", accent) : Span.styled("", muted);
+            rows.add(Line.from(index, icon, title, marker));
+        }
+        if (rows.isEmpty()) {
+            rows.add(Line.from(Span.styled("no open tabs", muted)));
+        }
+        final var splits = Layout.vertical()
+                .constraints(Constraint.fill(), Constraint.length(1))
+                .split(inner);
+        final var text = Text.from(rows.toArray(Line[]::new));
+        final var maxScroll =
+                Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
+        tabManager.listScroll(Math.clamp(tabManager.listScroll(), 0, maxScroll));
+        if (!splits.getFirst().isEmpty()) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(text)
+                            .overflow(Overflow.CLIP)
+                            .scroll(tabManager.listScroll())
+                            .build(),
+                    splits.getFirst());
+        }
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(
+                                "  1-9 switch  Up/Down scroll  Esc close  ",
+                                Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                splits.get(1));
+    }
+
+    /** Opens the subagents overlay from "/subagents": no arg = the list, an id = one subagent detail. */
+    private ShellOutcome openSubagents(final String arg) {
+        final var state = active();
+        if (state == null) {
+            return ShellOutcome.none();
+        }
+        final var id = arg == null ? "" : arg.strip();
+        if (!id.isEmpty()) {
+            final var present = subagentRegistry.get(id).isPresent();
+            if (!present) {
+                return ShellOutcome.status("unknown subagent: " + id);
+            }
+        }
+        state.subagentsOverlay = id;
+        state.subagentsScroll = 0;
+        return ShellOutcome.none();
+    }
+
+    /** Key handling while the subagents overlay is open. */
+    private boolean onSubagentsKey(final Event event, final UiState state) {
+        if (event instanceof final MouseEvent mouse) {
+            if (mouse.isScroll()) {
+                state.subagentsScroll += mouse.kind() == MouseEventKind.SCROLL_UP ? -3 : 3;
+            }
+            return true;
+        }
+        if (event instanceof PasteEvent) {
+            return true;
+        }
+        if (!(event instanceof final KeyEvent key)) {
+            return false;
+        }
+        if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
+            state.subagentsOverlay = null;
+            return true;
+        }
+        if (key.isKey(KeyCode.PAGE_UP)) {
+            state.subagentsScroll -= 10;
+        } else if (key.isKey(KeyCode.PAGE_DOWN)) {
+            state.subagentsScroll += 10;
+        } else if (key.isKey(KeyCode.UP)) {
+            state.subagentsScroll -= 1;
+        } else if (key.isKey(KeyCode.DOWN)) {
+            state.subagentsScroll += 1;
+        } else if ((key.isLeft() || key.isKey(KeyCode.BACKSPACE)) && !state.subagentsOverlay.isEmpty()) {
+            state.subagentsOverlay = "";
+            state.subagentsScroll = 0;
+        }
+        return true;
+    }
+
+    /** Modal showing the session subagents; with an id, the live transcript of one of them. */
+    private void renderSubagentsOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
+        final var height = Math.min(Math.max(12, frame.height() * 4 / 5), frame.height());
+        final var rect = Modal.rect(frame, width, height, 0.12);
+        final var detail = !state.subagentsOverlay.isEmpty();
+        final var inner = Modal.box(
+                frame,
+                rect,
+                detail ? " subagents - " + state.subagentsOverlay : " subagents ",
+                Color.hex(palette.accent()));
+        if (inner == null) {
+            return;
+        }
+        final var accent = Style.EMPTY.fg(Color.hex(palette.accent())).bold();
+        final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var rows = new ArrayList<Line>();
+        if (detail) {
+            final var captured = subagentRegistry.transcriptOf(state.subagentsOverlay);
+            final var md = captured.markdown("|", "");
+            rows.addAll(transcriptRenderer.renderRegion(
+                    md.isBlank() ? "*still starting...*" : md,
+                    Math.max(1, inner.width() - 2),
+                    textStyle,
+                    MarkdownStyles.DEFAULTS));
+        } else {
+            final var active = active();
+            final var list = subagentRegistry.listAll(active == null ? null : active.sessionId);
+            if (list.isEmpty()) {
+                rows.add(Line.from(Span.styled("no subagents for this session", muted)));
+            }
+            for (final var sub : list) {
+                final var label = sub.name() != null ? sub.name() : sub.id();
+                final var status = sub.isDone() ? (sub.isCancelled() ? "cancelled" : "completed") : "running";
+                rows.add(Line.from(
+                        Span.styled(label, accent),
+                        Span.styled("  [" + status + "]", sub.isDone() ? muted : accent),
+                        Span.styled("  " + TuiInputSupport.firstLine(summarize(sub)), muted)));
+            }
+            rows.add(Line.empty());
+            rows.add(Line.from(Span.styled("  /subagents <id> to open one subagent transcript", muted)));
+        }
+        final var splits = Layout.vertical()
+                .constraints(Constraint.fill(), Constraint.length(1))
+                .split(inner);
+        final var text = Text.from(rows.toArray(Line[]::new));
+        final var maxScroll =
+                Math.max(0, text.height() - Math.max(1, splits.getFirst().height()));
+        state.subagentsScroll = Math.clamp(state.subagentsScroll, 0, maxScroll);
+        if (!splits.getFirst().isEmpty()) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(text)
+                            .overflow(Overflow.CLIP)
+                            .scroll(state.subagentsScroll)
+                            .build(),
+                    splits.getFirst());
+        }
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(
+                                "  Up/Down scroll  Esc close  ", Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                splits.get(1));
+    }
+
+    private static String summarize(final SubagentRegistry.SubagentState sub) {
+        final var result = sub.result();
+        if (result == null) {
+            return sub.task() == null ? "" : sub.task();
+        }
+        final var summary = result.summary() != null ? result.summary() : result.error();
+        return summary == null || summary.isBlank() ? (sub.task() == null ? "" : sub.task()) : summary;
     }
 
     private void renderBtw(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -4092,20 +4492,39 @@ public class TuiCommand implements Runnable {
      * ask_user answers first, then format detection (markdown/JSON/XML/YAML/diff),
      * always falling back to the historical rendering on any failure.
      */
-    private List<Line> toolBodyLines(final String name, final String output, final int width, final boolean isDiff) {
+    private List<Line> toolBodyLines(
+            final String name, final String args, final String output, final int width, final boolean isDiff) {
         if (output == null || output.isBlank()) {
             return List.of();
         }
+        final var body = renderToolBody(name, output, width, isDiff);
+        if (args == null || args.isBlank()) {
+            return body;
+        }
+        // the Ctrl+O overlay enriches the historical rendering with a structured
+        // preview of the meaningful arguments (file content / diff / patch)
+        final var preview = toolArgsPreview.preview(name, args, width, palette);
+        if (preview == null || preview.isEmpty()) {
+            return body;
+        }
+        final var all = new ArrayList<Line>(preview.size() + body.size() + 1);
+        all.addAll(preview);
+        all.add(Line.empty());
+        all.addAll(body);
+        return all;
+    }
+
+    private List<Line> renderToolBody(final String name, final String output, final int width, final boolean isDiff) {
+        final var answers = "ask_user".equals(name) ? askUserCardRenderer.render(output, palette) : null;
+        if (answers != null) {
+            return answers;
+        }
         try {
-            final var answers = "ask_user".equals(name) ? askUserCardRenderer.render(output, palette) : null;
-            if (answers != null) {
-                return answers;
-            }
             if (!formatToolOutput) {
                 return legacyBody(output, width, isDiff);
             }
             return switch (toolOutputFormat.detect(output)) {
-                case DIFF -> DiffLines.render(output, width, palette);
+                case DIFF -> diffRenderer.render(output, width, palette);
                 case JSON -> syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(output));
                 case XML -> syntaxHighlighter.highlightLines("xml", toolOutputFormat.prettyXml(output));
                 case YAML -> syntaxHighlighter.highlightLines("yaml", output);
@@ -4118,7 +4537,7 @@ public class TuiCommand implements Runnable {
     }
 
     private List<Line> legacyBody(final String output, final int width, final boolean isDiff) {
-        return isDiff ? DiffLines.render(output, width, palette) : toolOutputLines(output, width, false);
+        return isDiff ? diffRenderer.render(output, width, palette) : toolOutputLines(output, width, false);
     }
 
     private void renderToolOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -4132,7 +4551,7 @@ public class TuiCommand implements Runnable {
         if (inner == null) {
             return;
         }
-        final var body = toolBodyLines(entry.name(), entry.output(), inner.width(), false);
+        final var body = toolBodyLines(entry.name(), entry.args(), entry.output(), inner.width(), false);
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(inner);
@@ -4602,14 +5021,16 @@ public class TuiCommand implements Runnable {
             final Color muted,
             final Color accent) {
         final var visible = picker.visible();
-        picker.prepareList(rect);
         final var rows = Math.max(1, rect.height());
         final var total = visible.size();
-        for (int row = 0; row < rows; row++) {
-            final var lineRect = new Rect(rect.x(), rect.y() + row, rect.width(), 1);
-            if (row >= total) {
-                break;
-            }
+        picker.prepareList(rect);
+        // viewport: keep the selection visible, clamp to the tail, render only the window
+        final var maxScroll = Math.max(0, total - rows);
+        final var scroll = Math.min(Math.max(0, picker.selected() - rows / 2), Math.max(0, maxScroll));
+        final var from = Math.min(scroll, total);
+        final var to = Math.min(total, scroll + rows);
+        for (int row = from; row < to; row++) {
+            final var lineRect = new Rect(rect.x(), rect.y() + (row - from), rect.width(), 1);
             picker.recordItem(lineRect, visible.get(row));
             final var selected = row == picker.selected();
             final var value = visible.get(row);
@@ -4623,6 +5044,15 @@ public class TuiCommand implements Runnable {
                             .overflow(dev.tamboui.style.Overflow.CLIP)
                             .build(),
                     lineRect);
+        }
+        // scroll hint when the list overflows the window
+        if (total > rows) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(Line.from(
+                                    Span.styled("▴ " + (scroll + 1) + "/" + total + " ▾", Style.EMPTY.fg(muted)))))
+                            .build(),
+                    new Rect(rect.x() + rect.width() - 12, rect.y() + Math.max(0, rect.height() - 1), 12, 1));
         }
         if (total == 0) {
             frame.renderWidget(
@@ -4651,13 +5081,19 @@ public class TuiCommand implements Runnable {
 
     private void renderFeedbackPrompt(final dev.tamboui.terminal.Frame frame, final UiState state) {
         final var prompt = state.feedbackPrompt;
-        final var accent = Style.EMPTY.fg(Color.hex(palette.accent()));
-        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
         final var warning = Color.hex(palette.warning());
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
-        final var height =
-                Math.min(Math.max(12, 8 + prompt.questions().size() * 4), Math.max(12, frame.height() * 3 / 4));
+        final var isConfirmTab = prompt.tab() >= prompt.questions().size();
+        final var qIndex = !isConfirmTab ? prompt.tab() : 0;
+        final var fq = prompt.questions().get(qIndex);
+        // the question is word-wrapped; the modal grows to fit its rows (capped) so
+        // long questions stay fully readable instead of being clipped to one line
+        final var innerWidth = Math.max(1, width - 2);
+        final var questionLines = TuiInputSupport.wrapProse(fq.question.prompt(), innerWidth);
+        final var questionRows = Math.min(6, Math.max(1, questionLines.size()));
+        final var height = Math.min(
+                Math.max(12, 8 + prompt.questions().size() * 3 + questionRows), Math.max(12, frame.height() * 3 / 4));
         final var rect = Modal.rect(frame, width, height, 0.25);
         final var inner = Modal.box(frame, rect, " user request ", Color.hex(palette.accent()));
         if (inner == null || inner.height() < 4) {
@@ -4671,22 +5107,25 @@ public class TuiCommand implements Runnable {
         final var bodyRect = splits.get(1);
         buildTabs(frame.buffer(), prompt, tabsRect);
 
-        final var isConfirmTab = prompt.tab() >= prompt.questions().size();
-        final var qIndex = !isConfirmTab ? prompt.tab() : 0;
-        final var fq = prompt.questions().get(qIndex);
         final var content = Layout.vertical()
-                .constraints(Constraint.length(2), Constraint.fill(), Constraint.length(3))
+                .constraints(Constraint.length(questionRows), Constraint.fill(), Constraint.length(3))
                 .split(bodyRect);
-        final var promptLine = isConfirmTab
-                ? "Review your answers below, then press Enter to confirm, Backspace to go back and edit."
-                : TuiInputSupport.firstLine(fq.question.prompt());
+        final var promptLines = new ArrayList<Line>();
+        final var promptStyle =
+                isConfirmTab ? textStyle : Style.EMPTY.fg(warning).bold();
+        if (isConfirmTab) {
+            promptLines.add(Line.from(Span.styled(
+                    "Review your answers below, then press Enter to confirm, Backspace to go back and edit.",
+                    promptStyle)));
+        } else {
+            for (final var wrapped : questionLines) {
+                promptLines.add(Line.from(Span.styled(wrapped, promptStyle)));
+            }
+        }
         frame.renderWidget(
                 Paragraph.builder()
-                        .text(Text.from(Line.from(Span.styled(
-                                promptLine,
-                                isConfirmTab
-                                        ? textStyle
-                                        : Style.EMPTY.fg(warning).bold()))))
+                        .text(Text.from(promptLines.toArray(Line[]::new)))
+                        .overflow(Overflow.CLIP)
                         .build(),
                 content.get(0));
 
@@ -4761,12 +5200,29 @@ public class TuiCommand implements Runnable {
         } else {
             prompt.optionsFocus(Math.clamp(prompt.optionsFocus(), 0, opts));
         }
-        final var shown = Math.min(opts + 1, rect.height());
-        for (int row = 0; row < shown; row++) {
-            final var lineRect = new Rect(rect.x(), rect.y() + row, rect.width(), 1);
+        // windowed rendering: keep the focus visible, scroll the tail when there are
+        // more options (plus the own-answer row) than the panel can show
+        final var total = opts + 1;
+        final var rows = Math.max(1, rect.height());
+        final var maxScroll = Math.max(0, total - rows);
+        final var scroll = Math.min(Math.max(0, prompt.optionsFocus() - rows / 2), maxScroll);
+        final var from = Math.min(scroll, total);
+        final var to = Math.min(total, scroll + rows);
+        for (int row = from; row < to; row++) {
+            final var lineRect = new Rect(rect.x(), rect.y() + (row - from), rect.width(), 1);
             fq.optionRects().add(lineRect);
             final var line = Line.from(buildOptionLine(fq, row, accent, muted, textColor));
             frame.renderWidget(Paragraph.builder().text(Text.from(line)).build(), lineRect);
+        }
+        if (total > rows) {
+            frame.renderWidget(
+                    Paragraph.builder()
+                            .text(Text.from(Line.from(Span.styled(
+                                    (scroll > 0 ? "▲ " : "  ") + (scroll + 1) + "/" + total
+                                            + (scroll + rows < total ? " ▼" : "  "),
+                                    Style.EMPTY.fg(muted)))))
+                            .build(),
+                    new Rect(rect.x(), rect.y() + Math.max(0, rect.height() - 1), rect.width() / 2, 1));
         }
     }
 
@@ -4807,9 +5263,11 @@ public class TuiCommand implements Runnable {
             final dev.tamboui.terminal.Frame frame, final Rect rect, final FeedbackPrompt prompt) {
         final var lines = new ArrayList<Line>();
         for (final var fq : prompt.questions()) {
-            lines.add(Line.from(Span.styled(
-                    TuiInputSupport.firstLine(fq.question.prompt()),
-                    Style.EMPTY.fg(Color.hex(palette.accent())).bold())));
+            // the full question, word-wrapped to the panel width so long prompts stay readable
+            for (final var wrapped : TuiInputSupport.wrapProse(fq.question.prompt(), Math.max(1, rect.width()))) {
+                lines.add(Line.from(Span.styled(
+                        wrapped, Style.EMPTY.fg(Color.hex(palette.accent())).bold())));
+            }
             final var own = fq.ownAnswer().text().strip();
             final var opts = optionCount(fq);
             var any = false;
@@ -4964,38 +5422,42 @@ public class TuiCommand implements Runnable {
         return dir.startsWith(home) ? "~/" + home.relativize(dir) : dir.toString();
     }
 
+    /**
+     * Branch shown in the sidebar. When the shared scheduler runs a {@link GitBranchPoller} the value comes
+     * from its last tick (no disk access on the render thread, the poller repaints on change); otherwise the
+     * historical on-demand read with a short TTL is kept for render-only tests.
+     */
     private String gitBranch() {
+        final var poller = gitBranchPoller;
+        if (poller != null) {
+            return poller.branch();
+        }
         final var now = clock.millis();
         final var cachedAt = cachedGitBranchAt;
         if (cachedGitBranch != null && now - cachedAt < GIT_BRANCH_CACHE_TTL_MILLIS) {
             return cachedGitBranch;
         }
-        var dir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
-        while (dir != null) {
-            final var head = dir.resolve(".git").resolve("HEAD");
-            if (Files.isRegularFile(head)) {
-                try {
-                    final var content = Files.readString(head).strip();
-                    final String branch;
-                    if (content.startsWith("ref: refs/heads/")) {
-                        branch = content.substring("ref: refs/heads/".length());
-                    } else {
-                        branch = content.length() > 7 ? content.substring(0, 7) : content;
-                    }
-                    cachedGitBranch = branch;
-                    cachedGitBranchAt = now;
-                    return branch;
-                } catch (final IOException e) {
-                    cachedGitBranch = null;
-                    cachedGitBranchAt = now;
-                    return null;
-                }
-            }
-            dir = dir.getParent();
+        try {
+            final var head = GitBranchPoller.resolveHead(System.getProperty("user.dir"));
+            final var branch = head != null && Files.isRegularFile(head)
+                    ? GitBranchPoller.branchOf(Files.readString(head).strip())
+                    : null;
+            cachedGitBranch = branch;
+            cachedGitBranchAt = now;
+            return branch;
+        } catch (final IOException e) {
+            cachedGitBranch = null;
+            cachedGitBranchAt = now;
+            return null;
         }
-        cachedGitBranch = null;
-        cachedGitBranchAt = now;
-        return null;
+    }
+
+    /** Called by the branch poller (off the render thread) once the branch actually changed. */
+    private void onBranchChanged(final String branch) {
+        final var state = active();
+        if (state != null) {
+            runLater(state, () -> LOG.fine(() -> "branch changed to " + branch));
+        }
     }
 
     private static final class Approval {
@@ -5085,7 +5547,6 @@ public class TuiCommand implements Runnable {
         private final List<Rect> itemRects = new ArrayList<>();
         private final List<String> renderedValues = new ArrayList<>();
         private int selected;
-        private int scroll = -1;
 
         private PickerPrompt(
                 final String title,
@@ -5143,30 +5604,27 @@ public class TuiCommand implements Runnable {
         private void filterAppend(final char c) {
             filter.append(c);
             selected = 0;
-            scroll = -1;
         }
 
         private void filterBackspace() {
             if (filter.length() > 0) {
                 filter.deleteCharAt(filter.length() - 1);
                 selected = 0;
-                scroll = -1;
             }
         }
 
         private void filterClear() {
             filter.setLength(0);
             selected = 0;
-            scroll = -1;
         }
 
+        /** Moves the selection; the renderer keeps the selected row inside the visible window. */
         private void move(final int delta) {
             final var v = visible();
             if (v.isEmpty()) {
                 return;
             }
-            selected = Math.floorMod(selected + delta, v.size());
-            scroll = -1;
+            selected = Math.clamp(selected + delta, 0, v.size() - 1);
         }
 
         private void stroke(final KeyEvent key) {
@@ -5176,11 +5634,9 @@ public class TuiCommand implements Runnable {
                 move(1);
             } else if (key.isKey(KeyCode.HOME)) {
                 selected = 0;
-                scroll = -1;
             } else if (key.isKey(KeyCode.END)) {
                 final var v = visible();
                 selected = v.isEmpty() ? 0 : v.size() - 1;
-                scroll = -1;
             } else if (key.isKey(KeyCode.PAGE_UP)) {
                 move(-8);
             } else if (key.isKey(KeyCode.PAGE_DOWN)) {
@@ -5426,7 +5882,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private static final class UiState {
+    static final class UiState {
         private record Wait(String message, SpinnerStyle style) {}
 
         /** Full-screen expandable view of one captured tool output (Ctrl+O). */
@@ -5464,6 +5920,12 @@ public class TuiCommand implements Runnable {
         private volatile boolean turnCompleted;
 
         private volatile long lastRenderTick;
+        /**
+         * Pending background mutation awaiting its tick paint: set by {@link #runLater(UiState, Runnable)}
+         * before the action runs, cleared at the start of {@link #render}. Render-thread only.
+         */
+        private volatile boolean dirty;
+
         private volatile boolean quitArmed;
         private volatile CompletableFuture<Boolean> inFlight;
         private volatile boolean historyActive;
@@ -5517,8 +5979,14 @@ public class TuiCommand implements Runnable {
         private volatile boolean shortcutsOpen;
         private volatile int shortcutsScroll;
         private volatile Rect shortcutRect;
+        /** Subagents overlay: null when closed, the detail id when showing one subagent, empty for the list. */
+        private volatile String subagentsOverlay = null;
+
+        private volatile int subagentsScroll;
         private volatile String lastCodeBlock;
-        private volatile String lastToolArgs;
+        /** Pending tool args per name (FIFO), mirroring the core transcript's running tools. */
+        private final java.util.Map<String, java.util.ArrayDeque<String>> pendingToolArgs = new java.util.HashMap<>();
+
         private volatile long focusedToolOrdinal = -1;
         private volatile int toolNavIndex = -1;
         private volatile boolean yankArmed;
@@ -5533,7 +6001,7 @@ public class TuiCommand implements Runnable {
             toast = null;
         }
 
-        private UiState(final ThinkTagSplitter thinkTags, final Clock clock) {
+        UiState(final ThinkTagSplitter thinkTags, final Clock clock) {
             this.model = new TuiTranscriptModel(thinkTags);
             this.clock = clock;
             this.session = new ShellSession();

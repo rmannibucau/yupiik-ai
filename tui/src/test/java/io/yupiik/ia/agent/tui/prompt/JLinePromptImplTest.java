@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui.prompt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -78,6 +79,68 @@ class JLinePromptImplTest {
         assertEquals("%P10.", JLinePromptImpl.escapePromptForJLine("%P10."));
         assertEquals("%-5P", JLinePromptImpl.escapePromptForJLine("%-5P"));
         assertEquals("abc%%", JLinePromptImpl.escapePromptForJLine("abc%"));
+    }
+
+    @Test
+    void standaloneEscIsAnInterruptAndEscapeSequencesAreConsumed() {
+        // ESC alone at the end of the stream: a standalone Esc press -> interrupt
+        final var promptEsc = new JLinePromptImpl(readerWithTerminal(new ScriptedReader('\033')));
+        assertTrue(promptEsc.isInterruptAvailable());
+        assertTrue(promptEsc.pollInterrupt(), "a standalone Esc must be reported as an interrupt");
+        assertFalse(promptEsc.pollInterrupt(), "an empty stream must not interrupt");
+
+        // ESC [ A (arrow key): the whole sequence is consumed without interrupting
+        final var promptArrow = new JLinePromptImpl(readerWithTerminal(new ScriptedReader('\033', '[', 'A')));
+        assertFalse(promptArrow.pollInterrupt(), "an escape sequence must not interrupt");
+        assertFalse(promptArrow.pollInterrupt(), "the sequence must be fully consumed");
+    }
+
+    /**
+     * Deterministic in-memory {@link org.jline.utils.NonBlockingReader}: characters
+     * are served synchronously (no feeder thread), exhausted reads return
+     * {@code READ_EXPIRED} and a peek never consumes.
+     */
+    private static final class ScriptedReader extends org.jline.utils.NonBlockingReader {
+        private final int[] chars;
+        private int index;
+
+        private ScriptedReader(final int... chars) {
+            this.chars = chars;
+        }
+
+        @Override
+        protected int read(final long timeout, final boolean isPeek) {
+            if (index >= chars.length) {
+                return READ_EXPIRED;
+            }
+            final var value = chars[index];
+            if (!isPeek) {
+                index++;
+            }
+            return value;
+        }
+
+        @Override
+        public int readBuffered(final char[] buffer, final int offset, final int length, final long timeout) {
+            return -1;
+        }
+
+        @Override
+        public void close() {
+            // in-memory synchronous reader: nothing to release
+        }
+    }
+
+    /** LineReader proxy whose Terminal only serves {@code reader()}; nothing else is touched by the prompt. */
+    private LineReader readerWithTerminal(final org.jline.utils.NonBlockingReader nonBlocking) {
+        final var terminal = (org.jline.terminal.Terminal) Proxy.newProxyInstance(
+                org.jline.terminal.Terminal.class.getClassLoader(),
+                new Class<?>[] {org.jline.terminal.Terminal.class},
+                (proxy, method, args) -> method.getName().equals("reader") ? nonBlocking : null);
+        return (LineReader) Proxy.newProxyInstance(
+                LineReader.class.getClassLoader(),
+                new Class<?>[] {LineReader.class},
+                (proxy, method, args) -> method.getName().equals("getTerminal") ? terminal : null);
     }
 
     private LineReader reader(final java.util.function.Function<String, Object> onReadLine) {

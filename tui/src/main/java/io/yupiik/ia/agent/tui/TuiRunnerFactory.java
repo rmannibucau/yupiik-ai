@@ -37,6 +37,10 @@ public class TuiRunnerFactory {
                 // single PasteEvent preserving newlines instead of a keystroke burst
                 .bracketedPaste(true)
                 .tickRate(Duration.ofMillis(100))
+                // the event loop only wakes on real events after the idle poll expires;
+                // a longer timeout cuts idle wakeups without hurting input latency (events
+                // surface instantly through the non-blocking queue drain)
+                .pollTimeout(Duration.ofMillis(100))
                 .bindings(conf.bindings().toBindings())
                 .hideCursor(hideCursor)
                 .build());

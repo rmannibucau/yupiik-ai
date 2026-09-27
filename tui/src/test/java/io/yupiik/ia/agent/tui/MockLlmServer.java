@@ -76,13 +76,22 @@ public final class MockLlmServer implements AutoCloseable {
                         "application/json");
             }
         });
-        server.createContext(
-                "/v1/models",
-                exchange -> respond(
-                        exchange,
-                        200,
-                        "{\"data\":[{\"id\":\"model-a\",\"owned_by\":\"x\"},{\"id\":\"model-b\",\"owned_by\":\"y\"}]}",
-                        "application/json"));
+        server.createContext("/v1/models", exchange -> {
+            // 30 models so the /model picker overflows its window and scrolls
+            final var sb = new StringBuilder("{\"data\":[");
+            for (int i = 1; i <= 30; i++) {
+                if (i > 1) {
+                    sb.append(',');
+                }
+                sb.append("{\"id\":\"m");
+                if (i < 10) {
+                    sb.append('0');
+                }
+                sb.append(i).append("\",\"owned_by\":\"x\"}");
+            }
+            sb.append("]}");
+            respond(exchange, 200, sb.toString(), "application/json");
+        });
         server.setExecutor(executor);
         server.start();
     }

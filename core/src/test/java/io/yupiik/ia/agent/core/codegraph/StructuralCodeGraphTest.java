@@ -37,6 +37,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -50,21 +52,29 @@ class StructuralCodeGraphTest {
 
     private final List<ChatClient> chatClients = new java.util.ArrayList<>();
     private final List<StructuralCodeGraph> graphs = new java.util.ArrayList<>();
+    private final List<ScheduledExecutorService> schedulers = new java.util.ArrayList<>();
 
     @AfterEach
     void tearDown() {
         graphs.forEach(StructuralCodeGraph::close);
+        schedulers.forEach(ScheduledExecutorService::shutdownNow);
         chatClients.forEach(ChatClient::close);
     }
 
     private StructuralCodeGraph newGraph(final CodingAgentConfiguration config, final JsonMapper mapper) {
+        schedulers.add(Executors.newSingleThreadScheduledExecutor(r -> {
+            final var t = new Thread(r, "yca-graph-test");
+            t.setDaemon(true);
+            return t;
+        }));
         final var graph = new StructuralCodeGraph(
                 config,
                 List.of(new JavaGraphParser()),
                 mapper,
                 chatClient(config, mapper),
                 providerManager(config, mapper),
-                Clock.systemUTC());
+                Clock.systemUTC(),
+                schedulers.get(schedulers.size() - 1));
         graphs.add(graph);
         return graph;
     }

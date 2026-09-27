@@ -22,6 +22,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import org.junit.jupiter.api.Test;
 
 class ToolCardTest {
+    private final DiffRenderer diffRenderer = new DiffRenderer();
+
     @Test
     void parsesSuccessCard() {
         final var card = ToolCard.parse("*streaming `bash`: ls -la* (123 ms)\n\n```text\nfile1\nfile2\n```");
@@ -111,13 +113,13 @@ class ToolCardTest {
     void detectsDiff() {
         final var card = ToolCard.parse(
                 "*streaming `apply_patch`* (9 ms)\n\n```text\n--- a/File.java\n+++ b/File.java\n@@ -1,3 +1,4 @@\n-old\n+new\n context\n```");
-        assertTrue(card.isDiff());
+        assertTrue(card.isDiff(diffRenderer));
     }
 
     @Test
     void doesNotDetectPlainOutputAsDiff() {
         final var card = ToolCard.parse("*streaming `bash`* (7 ms)\n\n```text\nhello world\nfoo bar\n```");
-        assertFalse(card.isDiff());
+        assertFalse(card.isDiff(diffRenderer));
     }
 
     @Test

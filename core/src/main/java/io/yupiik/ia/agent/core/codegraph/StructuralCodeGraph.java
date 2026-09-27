@@ -59,7 +59,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -119,8 +118,8 @@ public class StructuralCodeGraph implements AutoCloseable {
     private final List<FileIgnore.Rule> ignoreRules;
     private final boolean configNoRefresh;
     private final long refreshAwaitMs;
-    private final ExecutorService refreshExecutor;
-    private final ScheduledExecutorService persistScheduler;
+    private final ScheduledExecutorService scheduler;
+    private final boolean ownsScheduler;
     private final AtomicLong refreshPending = new AtomicLong();
     private volatile long latestRefreshJob;
     private volatile GraphStore graph;
@@ -141,7 +140,8 @@ public class StructuralCodeGraph implements AutoCloseable {
             final JsonMapper mapper,
             final ChatClient chatClient,
             final ProviderManager providerManager,
-            final Clock clock) {
+            final Clock clock,
+            final ScheduledExecutorService scheduler) {
         this.configuration = configuration;
         this.parsers = parsers.stream().filter(GraphParser::available).toList();
         this.mapper = mapper;
@@ -159,16 +159,8 @@ public class StructuralCodeGraph implements AutoCloseable {
         this.ignoreRules = FileIgnore.of(projectDir, scg.effectiveIgnoreGlobs()).rules();
         this.configNoRefresh = scg.noRefresh();
         this.refreshAwaitMs = 3000L; // bound for ensureRefreshedReady() when a background refresh is pending
-        this.refreshExecutor = Executors.newSingleThreadExecutor(r -> {
-            final var t = new Thread(r, "yca-graph-refresher");
-            t.setDaemon(true);
-            return t;
-        });
-        this.persistScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            final var t = new Thread(r, "yca-graph-persist");
-            t.setDaemon(true);
-            return t;
-        });
+        this.scheduler = scheduler;
+        this.ownsScheduler = false;
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
         this.docEnricher = new DocEnricher(configuration, chatClient, docWriter, mapper, storeRoot, providerManager);
         this.docWriter.enrichment(docEnricher);
@@ -189,26 +181,14 @@ public class StructuralCodeGraph implements AutoCloseable {
         this.ignoreRules = null;
         this.configNoRefresh = true;
         this.refreshAwaitMs = 0;
-        this.refreshExecutor = testRefreshExecutor();
-        this.persistScheduler = testPersistScheduler();
+        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            final var t = new Thread(r, "yca-graph-test");
+            t.setDaemon(true);
+            return t;
+        });
+        this.ownsScheduler = true;
         this.docWriter = null;
         this.docEnricher = null;
-    }
-
-    private static ExecutorService testRefreshExecutor() {
-        return Executors.newSingleThreadExecutor(r -> {
-            final var t = new Thread(r, "yca-graph-refresher-test");
-            t.setDaemon(true);
-            return t;
-        });
-    }
-
-    private static ScheduledExecutorService testPersistScheduler() {
-        return Executors.newSingleThreadScheduledExecutor(r -> {
-            final var t = new Thread(r, "yca-graph-persist-test");
-            t.setDaemon(true);
-            return t;
-        });
     }
 
     private record PersistJob(GraphStore store, Map<String, Long> mtimes) {}
@@ -231,11 +211,8 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (docEnricher != null) {
             docEnricher.close();
         }
-        if (refreshExecutor != null) {
-            refreshExecutor.shutdownNow();
-        }
-        if (persistScheduler != null) {
-            persistScheduler.shutdownNow();
+        if (ownsScheduler && scheduler != null) {
+            scheduler.shutdownNow();
         }
         stopWatchService();
         flushPersist();
@@ -300,7 +277,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 if (Files.isRegularFile(absolute) && absolute.toString().endsWith(".java")) {
                     final var rel = rel(absolute);
                     if (!isIgnored(rel, absolute)) {
-                        refreshExecutor.execute(() -> refreshFile(absolute));
+                        scheduler.execute(() -> refreshFile(absolute));
                     }
                 }
             }
@@ -344,7 +321,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (!readyStarted.compareAndSet(false, true)) {
             return;
         }
-        readyFuture = CompletableFuture.runAsync(this::ensureReadyNow, refreshExecutor);
+        readyFuture = CompletableFuture.runAsync(this::ensureReadyNow, scheduler);
     }
 
     /**
@@ -597,7 +574,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
         refreshPending.incrementAndGet();
         final var job = ++latestRefreshJob;
-        refreshExecutor.execute(() -> {
+        scheduler.execute(() -> {
             try {
                 refreshFileNow(absolute);
             } finally {
@@ -1150,7 +1127,7 @@ public class StructuralCodeGraph implements AutoCloseable {
 
     private void schedulePersist() {
         if (persistScheduled.compareAndSet(false, true)) {
-            persistScheduler.schedule(this::drainPersistQueue, 500, TimeUnit.MILLISECONDS);
+            scheduler.schedule(this::drainPersistQueue, 500, TimeUnit.MILLISECONDS);
         }
     }
 

@@ -302,4 +302,82 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.TurnDone("answer", "s1"));
         assertFalse(t.busy());
     }
+
+    @Test
+    void parallelToolsEachKeepTheirOwnStreamAndCommand() {
+        final var t = new ConversationTranscript();
+        // two parallel read-only tools interleave their starts and streams
+        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("read_file", "content-of-a", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("grep", "{\"command\":\"grep -r x\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("grep", "match-line", "s1"));
+        // A finishes first: its card must carry A's command and A's stream only
+        t.onEvent(new AgentEvent.ToolFinished("read_file", "content-of-a", true, "s1"));
+        final var mdAfterA = t.transcript().toString();
+        assertTrue(mdAfterA.contains("*streaming `read_file`: a.txt*"), mdAfterA);
+        assertTrue(mdAfterA.contains("content-of-a"), mdAfterA);
+        assertFalse(mdAfterA.contains("match-line"), "B's stream must not leak into A's card: " + mdAfterA);
+        // B finishes: its own card with its own content, ordinal strictly after A's
+        t.onEvent(new AgentEvent.ToolFinished("grep", "match-line", true, "s1"));
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("*streaming `grep`: grep -r x*"), md);
+        assertTrue(md.contains("match-line"), md);
+        assertEquals(2, t.toolCallCount(), "one ordinal per finished call, in finish order");
+        final var iA = md.indexOf("read_file");
+        final var iB = md.indexOf("grep");
+        assertTrue(iA < iB, "cards must follow finish order: " + md);
+    }
+
+    @Test
+    void subagentStreamsNeverPolluteTheParentTranscript() {
+        final var t = new ConversationTranscript();
+        // subagent-tagged events are dropped from a parent transcript...
+        t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child"));
+        assertEquals("", t.transcript().toString());
+        assertEquals("", t.pending().toString());
+        assertEquals("", t.thinking().toString());
+        // ...while the lifecycle markers are still folded in
+        t.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.SubagentCompleted("done", true, "s1", "sub-1", "child"));
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("> subagent `child` started: do the thing"), md);
+        assertTrue(md.contains("> subagent `child` completed: done"), md);
+        assertFalse(md.contains("child reasoning"), md);
+        assertFalse(md.contains("child answer"), md);
+        assertFalse(md.contains("bash"), md);
+    }
+
+    @Test
+    void captureTranscriptFoldsSubagentStreams() {
+        final var t = new ConversationTranscript(true);
+        t.startUserTurn("go");
+        t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child"));
+        final var md = t.markdown("|", "");
+        assertTrue(md.contains("child reasoning"), md);
+        assertTrue(md.contains("child answer"), md);
+        assertTrue(md.contains("out"), md);
+    }
+
+    @Test
+    void retryableErrorClearsFromStatusOnNextProgress() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.Notice(AgentEvent.Notice.Level.ERROR, "LLM request failed (429) retry-after=1", "s1"));
+        assertTrue(t.status().startsWith("error:"), t.status());
+        t.onEvent(new AgentEvent.TextDelta("recovered", "s1"));
+        assertFalse(t.status().startsWith("error:"), "a successful retry must clear the stale error: " + t.status());
+    }
+
+    @Test
+    void fatalErrorSurvivesTurnProgress() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.Error("kaput", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("still streaming", "s1"));
+        assertEquals("error: kaput", t.status(), "non-retryable errors stay until acknowledged");
+    }
 }

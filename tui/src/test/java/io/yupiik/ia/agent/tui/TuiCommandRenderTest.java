@@ -30,6 +30,7 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
@@ -45,6 +46,7 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
@@ -161,6 +163,27 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("hello from stub");
         awaitText("ready");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void sidebarReflectsModelChangedViaSlashCommand() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-model-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        // sidebar starts with the provider-configured model
+        awaitText("model test-model");
+
+        // /model overrides the per-session model: the sidebar must follow it
+        tuiRef.get().dispatch(new PasteEvent("/model other-model"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("model other-model");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -429,10 +452,10 @@ class TuiCommandRenderTest {
             final Clock clock) {
         final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
-        final var conf = new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, showThinking, "dark", true);
+        final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
-                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, true, "unicode", "auto", "auto",
+                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, 3500L, true, "unicode", "auto", "auto",
                 List.of(), null, true);
         final var sessionStore = new SessionStore() {
             @Override
@@ -481,7 +504,8 @@ class TuiCommandRenderTest {
                 return runner;
             }
         };
-        final var tuiSlashCommands = new TuiSlashCommands();
+        final var tabManager = new TabManager();
+        final var tuiSlashCommands = new TuiSlashCommands(tabManager);
         final var providerManager = new ProviderManager(configuration, mapper);
         // one shared permission service like in production: the TUI and the slash
         // commands must observe the same mode for the gutter to follow /mode
@@ -519,6 +543,7 @@ class TuiCommandRenderTest {
                     }
                 },
                 sessionStore,
+                new SessionLifecycle(sessionStore),
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
                 mcpManager,
@@ -537,8 +562,10 @@ class TuiCommandRenderTest {
                 clock,
                 new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                 new ToolOutputFormat(formatMapper),
-                new BtwAnswerer(
-                        chatClient, sessionStore, configuration, new VirtualThreadExecutor(), null, null, null));
+                new BtwAnswerer(chatClient, sessionStore, configuration, new VirtualThreadExecutor(), null, null, null),
+                tabManager,
+                new SubagentRegistry(configuration, providerManager),
+                null);
     }
 
     @Test
@@ -1302,6 +1329,9 @@ class TuiCommandRenderTest {
         // leave the permissions-all state so the actual plan/build mode is shown textually
         tuiRef.get().dispatch(new PasteEvent("/permissions none"));
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        // the sidebar always shows "mode plan" (its own row), so sync on the
+        // permissions row flipping to the ask mode before probing the color
+        awaitText("permissions ask");
         awaitText("mode plan");
         final var col = columnOfLineContaining("mode plan") + 5; // skip the muted "mode " label
         final var row = rowOf("mode plan");
@@ -1340,6 +1370,163 @@ class TuiCommandRenderTest {
 
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.SHIFT));
         awaitNoRowStartingWith("┃"); // back to plan
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void toolOverlayShowsFormattedPreviewForEditFile() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-overlay-preview-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // an edit_file tool call whose transcript card is short: Ctrl+O must
+        // surface the structured arguments preview (the synthetic diff)
+        shellRegistry.onEvent(new AgentEvent.ToolStarted(
+                "edit_file",
+                "{\"path\":\"README.md\",\"oldString\":\"old\",\"newString\":\"new\"}",
+                sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("edit_file", "patched", true, sid(shellRegistry)));
+        awaitText("edit_file"); // condensed card rendered
+        awaitTextGone("-old"); // the diff preview only exists inside the overlay
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('o', KeyModifiers.CTRL));
+        awaitText("full output");
+        awaitText(" - old"); // DiffRenderer renders changed lines as " <tag> <text>"
+        awaitText(" + new");
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("full output");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void subagentMarkersRenderInParentAndOverlayListsEmpty() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-subagents-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // spawn/done markers fold into the parent transcript, no inline child stream
+        final var sessionId = sid(shellRegistry);
+        shellRegistry.onEvent(new AgentEvent.SubagentStarted("do the thing", sessionId, "sub-1", "child"));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("child reasoning", sessionId, "sub-1", "child"));
+        shellRegistry.onEvent(new AgentEvent.SubagentCompleted("done", true, sessionId, "sub-1", "child"));
+        awaitText("subagent child started: do the thing");
+        awaitTextGone("child reasoning");
+
+        // no subagents registered in this shell registry -> the list is empty
+        tuiRef.get().dispatch(new PasteEvent("/subagents"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("no subagents for this session");
+        awaitText("Esc close");
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("no subagents for this session");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void modelPickerScrollsBeyondTheVisibleWindow() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-picker-scroll-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // /model without an argument opens the interactive picker on the mock's 30 models
+        tuiRef.get().dispatch(new PasteEvent("/model"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("type to filter | Up/Down move | Enter select | Esc cancel");
+        awaitText("m01");
+        awaitText("▴ 1/30 ▾"); // the list overflows the picker window: the hint shows the viewport
+
+        // moving the selection past the window scrolls it: the top entry leaves the
+        // viewport while the focused entry below it becomes visible
+        for (int i = 0; i < 23; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.DOWN));
+        }
+        awaitTextGone("m01");
+        awaitText("m23");
+        awaitText("/30 ▾"); // the scroll hint still tracks the 30-entry list
+
+        // Esc cancels the wizard and closes the picker
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("type to filter | Up/Down move | Enter select | Esc cancel");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void escInterruptsTheRunningTurn() throws Exception {
+        final var shellRegistry = testRegistry();
+        // the stub turn parks on releaseTurn once it signaled turnStarted, so the
+        // Esc interrupt is exercised over a deterministically-live turn
+        final var turnStarted = new CountDownLatch(1);
+        final var releaseTurn = new CountDownLatch(1);
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                try {
+                    turnStarted.countDown();
+                    releaseTurn.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-esc-interrupt-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        assertTrue(
+                turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
+
+        // Esc while the turn runs must flag it as interrupted (same path Ctrl+C uses)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitText("interrupting...");
+
+        releaseTurn.countDown();
+        awaitText("hello from stub");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);

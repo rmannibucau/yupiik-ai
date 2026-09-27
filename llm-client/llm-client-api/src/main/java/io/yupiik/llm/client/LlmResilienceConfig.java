@@ -30,6 +30,9 @@ package io.yupiik.llm.client;
  *     concurrency-limit cooldown (default 5 minutes).
  * @param waitScale multiplier applied to the effective scheduling delay only; the reported reason
  *     keeps the logical wait (default 1.0).
+ * @param concurrencyAdaptationMs cooldown before relaxing a concurrency limit adapted from a
+ *     provider {@code 429 concurrency_limit_exceeded} response back to the configured cap
+ *     (default 15 minutes).
  */
 public record LlmResilienceConfig(
         int retriesMaxAttempts,
@@ -39,15 +42,16 @@ public record LlmResilienceConfig(
         boolean retryOnContextOverflow,
         boolean retryAfterEnabled,
         long retryAfterMaxWaitMs,
-        double waitScale) {
+        double waitScale,
+        long concurrencyAdaptationMs) {
 
     /**
      * The default configuration.
      *
      * @return 3 attempts, 500 ms base delay, throttling off, 4 concurrent, context overflow retry on,
-     *     retry-after honoring on capped at 5 minutes.
+     *     retry-after honoring on capped at 5 minutes, 15 minutes concurrency adaptation cooldown.
      */
     public static LlmResilienceConfig defaults() {
-        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d);
+        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d, 900_000L);
     }
 }

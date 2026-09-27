@@ -4,5 +4,10 @@
 Sessions are recorded as JSONL transcripts that can be resumed later. Each
 session keeps a todo list and advances it as the work progresses.
 
+Every shell can be launched directly on an existing session: `run --session
+<id>`, `cli --session <id>` and `tui --session <id>` (or `--context <file>` to
+name the session from a JSONL file). Inside the TUI, `/resume <id>` switches
+tab to another session and `go` resumes the last turn.
+
 A memory store is maintained automatically at both the global and per-project
 levels, letting yca remember recurring facts across sessions.

@@ -50,9 +50,6 @@ public final class LlmClientResilienceWrapper {
     /** Default wait when a concurrency-limit error carries no {@code retry-after} header. */
     static final long CONCURRENCY_LIMIT_DEFAULT_WAIT_MS = 10_000L;
 
-    /** Cooldown before relaxing a concurrency limit adapted from a provider response. */
-    static final long CONCURRENCY_LIMIT_RELAX_MS = 60_000L;
-
     private static final java.util.regex.Pattern CONCURRENCY_LIMIT_JSON =
             java.util.regex.Pattern.compile("\"limit\"\\s*:\\s*(\\d+)");
     private static final java.util.regex.Pattern CONCURRENCY_FAILED =
@@ -62,7 +59,14 @@ public final class LlmClientResilienceWrapper {
 
     private final LlmResilienceConfig config;
     private final Consumer<PauseEvent> pauseListener;
-    private final Semaphore semaphore;
+    /**
+     * Concurrency gate. May be {@code null} while the configured cap is unlimited
+     * (negative/zero): the first provider {@code concurrency_limit_exceeded} response
+     * lazily creates it bounded by the announced limit so the adaptation still applies
+     * even without a statically configured cap.
+     */
+    private volatile Semaphore semaphore;
+
     private final java.util.ArrayDeque<Long> requestTimes;
     private final Object concurrencyLock = new Object();
     private int adaptedConcurrency = -1;
@@ -384,16 +388,19 @@ public final class LlmClientResilienceWrapper {
             return;
         }
         synchronized (concurrencyLock) {
+            // with an unlimited configured cap the gate is null: lazily create it bounded
+            // by the provider-announced limit so the adaptation applies even then
+            if (semaphore == null && config.maxConcurrent() <= 0) {
+                semaphore = new Semaphore(Math.max(1, limit));
+            }
             final var current = semaphore == null ? Integer.MAX_VALUE : semaphore.availablePermits();
-            if (limit < current || limit < config.maxConcurrent()) {
-                if (semaphore != null) {
-                    while (semaphore.availablePermits() > limit) {
-                        semaphore.tryAcquire();
-                    }
+            if (semaphore != null && (limit < current || limit < config.maxConcurrent())) {
+                while (semaphore.availablePermits() > limit) {
+                    semaphore.tryAcquire();
                 }
             }
             adaptedConcurrency = Math.max(1, limit);
-            adaptedUntilMs = System.currentTimeMillis() + CONCURRENCY_LIMIT_RELAX_MS;
+            adaptedUntilMs = System.currentTimeMillis() + config.concurrencyAdaptationMs();
         }
         if (listener != null) {
             listener.accept(new PauseEvent(
@@ -402,16 +409,21 @@ public final class LlmClientResilienceWrapper {
     }
 
     private void relaxAdaptedConcurrency() {
-        if (semaphore == null || config.maxConcurrent() <= 0) {
+        if (semaphore == null || adaptedConcurrency <= 0) {
             return;
         }
         synchronized (concurrencyLock) {
             if (adaptedConcurrency <= 0 || System.currentTimeMillis() < adaptedUntilMs) {
                 return;
             }
-            // restore up to the configured cap
-            while (semaphore.availablePermits() < config.maxConcurrent()) {
-                semaphore.release();
+            if (config.maxConcurrent() > 0) {
+                // restore up to the configured cap
+                while (semaphore.availablePermits() < config.maxConcurrent()) {
+                    semaphore.release();
+                }
+            } else {
+                // the cap was provider-adapted only: drop the gate back to unlimited
+                semaphore = null;
             }
             adaptedConcurrency = -1;
             adaptedUntilMs = 0;

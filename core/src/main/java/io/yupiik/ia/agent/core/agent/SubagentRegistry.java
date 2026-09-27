@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,7 @@ public class SubagentRegistry {
     private final CodingAgentConfiguration configuration;
     private final ProviderManager providerManager;
     private final Map<String, SubagentState> subagents = new ConcurrentHashMap<>();
+    private final Map<String, ConversationTranscript> subagentTranscripts = new ConcurrentHashMap<>();
     private final AtomicInteger activeCount = new AtomicInteger(0);
     private volatile Semaphore semaphore;
     private volatile int maxConcurrent;
@@ -115,6 +117,21 @@ public class SubagentRegistry {
         }
     }
 
+    /**
+     * The per-subagent transcript capture for the given id, lazily created. This
+     * instance folds the subagent-tagged events (they are dropped from the parent
+     * transcript) so the TUI can render the child conversation through
+     * {@code /subagents <id>} without mixing two model voices in one pane.
+     */
+    public ConversationTranscript transcriptOf(final String subagentId) {
+        return subagentTranscripts.computeIfAbsent(subagentId, _ -> new ConversationTranscript(true));
+    }
+
+    /** Drops the transient subagent captures that already completed; bounded by the LRU cleanup. */
+    public void dropTranscript(final String subagentId) {
+        subagentTranscripts.remove(subagentId);
+    }
+
     public Optional<SubagentResult> collect(final String subagentId) {
         final var state = subagents.remove(subagentId);
         if (state != null && state.isDone()) {
@@ -131,6 +148,15 @@ public class SubagentRegistry {
     public List<SubagentState> listActive() {
         cleanup();
         return subagents.values().stream().filter(s -> !s.isDone()).toList();
+    }
+
+    /** Every tracked subagent of a parent session (running and recently completed). */
+    public List<SubagentState> listAll(final String parentSessionId) {
+        cleanup();
+        return subagents.values().stream()
+                .filter(s -> parentSessionId == null || parentSessionId.equals(s.parentSessionId()))
+                .sorted((a, b) -> Long.compare(a.startedAt(), b.startedAt()))
+                .toList();
     }
 
     public int activeCount() {

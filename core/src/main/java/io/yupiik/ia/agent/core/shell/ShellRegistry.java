@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -38,9 +39,20 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ShellRegistry {
     private final Emitter emitter;
     private final Map<String, ShellEnv> shellsBySession = new ConcurrentHashMap<>();
+    private volatile SubagentRegistry subagentRegistry;
 
     public ShellRegistry(final Emitter emitter) {
         this.emitter = emitter;
+    }
+
+    /**
+     * Binds the process-wide subagent registry so subagent-tagged events are
+     * captured into the per-subagent transcripts the TUI renders. Optional:
+     * without it the subagent streams are simply dropped from the parent
+     * (which is the pre-existing routing behavior).
+     */
+    public void bindSubagents(final SubagentRegistry subagentRegistry) {
+        this.subagentRegistry = subagentRegistry;
     }
 
     /**
@@ -85,6 +97,19 @@ public class ShellRegistry {
 
     /** Forwards an agent event to the shell owning its session, no-op when unknown or untagged. */
     public void onEvent(@OnEvent final AgentEvent event) {
+        // when a subagent registry is bound (TUI), the subagent stream is captured
+        // per-subagent (the /subagents modal) and never reaches the parent shell,
+        // which keeps the parent tab clean; the lifecycle markers still go to the
+        // parent so the user sees spawn/done lines. Unbound (run/cli) keeps the
+        // historical forwarding so prefixed live output still renders.
+        final var subagents = subagentRegistry;
+        if (subagents != null
+                && event.subagentId() != null
+                && !(event instanceof AgentEvent.SubagentStarted)
+                && !(event instanceof AgentEvent.SubagentCompleted)) {
+            subagents.transcriptOf(event.subagentId()).onEvent(event);
+            return;
+        }
         final var env = active(event.sessionId());
         if (env != null) {
             env.frontend().onEvent(event);

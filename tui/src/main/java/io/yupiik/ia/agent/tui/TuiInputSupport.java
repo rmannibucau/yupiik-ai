@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import dev.tamboui.text.CharWidth;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -109,5 +110,50 @@ public final class TuiInputSupport {
         final var idx = text.indexOf('\n');
         final var line = idx < 0 ? text : text.substring(0, idx);
         return line.length() > 120 ? line.substring(0, 120) + "..." : line;
+    }
+
+    /**
+     * Word-wraps prose to {@code width} columns, returning one fragment per row.
+     * Existing newlines are hard breaks; a single token wider than {@code width}
+     * is hard-split so no fragment ever exceeds the width.
+     */
+    public static List<String> wrapProse(final String text, final int width) {
+        if (text == null || text.isEmpty()) {
+            return List.of();
+        }
+        final var w = Math.max(1, width);
+        final var out = new ArrayList<String>();
+        for (final var raw : text.split("\n", -1)) {
+            if (raw.isBlank()) {
+                out.add("");
+                continue;
+            }
+            final var words = raw.split(" ");
+            var line = new StringBuilder();
+            for (final var word : words) {
+                if (word.length() > w) {
+                    if (line.length() > 0) {
+                        out.add(line.toString());
+                        line = new StringBuilder();
+                    }
+                    for (int from = 0; from < word.length(); from += w) {
+                        out.add(word.substring(from, Math.min(word.length(), from + w)));
+                    }
+                    continue;
+                }
+                if (line.length() > 0 && line.length() + 1 + word.length() > w) {
+                    out.add(line.toString());
+                    line = new StringBuilder();
+                }
+                if (line.length() > 0) {
+                    line.append(' ');
+                }
+                line.append(word);
+            }
+            if (line.length() > 0) {
+                out.add(line.toString());
+            }
+        }
+        return out;
     }
 }

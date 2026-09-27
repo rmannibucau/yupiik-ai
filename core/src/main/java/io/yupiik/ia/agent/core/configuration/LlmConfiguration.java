@@ -46,6 +46,12 @@ public record LlmConfiguration(
         long retryAfterMaxWaitMs,
 
         @Property(
+                defaultValue = "900000L",
+                documentation =
+                        "Cooldown in milliseconds before relaxing a concurrency limit adapted from a provider 429 concurrency_limit_exceeded response back to the configured cap (default 15 minutes).")
+        long concurrencyAdaptationMs,
+
+        @Property(
                 defaultValue = "true",
                 documentation =
                         "On a provider 'context length exceeded' error, compact the context and retry the request once.")

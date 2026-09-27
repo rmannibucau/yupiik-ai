@@ -21,16 +21,19 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Unified diff rendering for tool cards, the output overlay and the approval
- * modal: file headers emphasized, hunk headers annotated with +N/-M counters,
- * add/remove lines colored, and paired -/+ lines get word-level emphasis of
- * the actually changed segment. Pure and terminal-free so it is unit testable.
+ * Unified diff rendering for tool cards, the output overlay, the approval modal
+ * and the structured tool previews: file headers emphasized, hunk headers
+ * annotated with +N/-M counters, add/remove lines colored, and paired -/+ lines
+ * get word-level emphasis of the actually changed segment.
+ *
+ * <p>Stateless (the palette is a render argument) so a single instance can be
+ * shared, including across theme switches where the palette changes per frame.
+ * Pure and terminal-free so it is unit testable.
  */
-public final class DiffLines {
-    private DiffLines() {}
+public class DiffRenderer {
 
     /** True when the text plausibly is a unified diff (not a markdown list). */
-    public static boolean looksLikeDiff(final String text) {
+    public boolean looksLikeDiff(final String text) {
         if (text == null || text.isBlank()) {
             return false;
         }
@@ -57,7 +60,7 @@ public final class DiffLines {
      * @param width   the available width per line
      * @param palette the resolved palette
      */
-    public static List<Line> render(final String diff, final int width, final Palette palette) {
+    public List<Line> render(final String diff, final int width, final Palette palette) {
         final var out = new ArrayList<Line>();
         if (diff == null || diff.isBlank()) {
             return out;
@@ -104,7 +107,7 @@ public final class DiffLines {
     }
 
     /** Builds the {@code @@ ... @@ (+2 -1)} label for the hunk starting at {@code index}. */
-    static String hunkLabel(final String[] lines, final int index) {
+    private String hunkLabel(final String[] lines, final int index) {
         var add = 0;
         var del = 0;
         for (var j = index + 1; j < lines.length; j++) {
@@ -131,7 +134,7 @@ public final class DiffLines {
      *
      * @return {@code {start, end}} delimiting the changed range of {@code a}
      */
-    static int[] changedSegment(final String a, final String b) {
+    private int[] changedSegment(final String a, final String b) {
         var prefix = 0;
         final var max = Math.min(a.length(), b.length());
         while (prefix < max && a.charAt(prefix) == b.charAt(prefix)) {
@@ -146,7 +149,7 @@ public final class DiffLines {
         return new int[] {prefix, endA};
     }
 
-    private static List<Span> spansFor(
+    private List<Span> spansFor(
             final char tag,
             final String body,
             final int changedStart,
@@ -182,7 +185,7 @@ public final class DiffLines {
         return spans;
     }
 
-    private static void appendClipped(
+    private void appendClipped(
             final List<Span> spans, final String text, final dev.tamboui.style.Style style, final int budget) {
         if (text.isEmpty() || budget <= 0) {
             return;
@@ -190,7 +193,7 @@ public final class DiffLines {
         spans.add(Span.styled(text.length() > budget ? text.substring(0, budget) : text, style));
     }
 
-    private static String clip(final String text, final int width) {
+    private String clip(final String text, final int width) {
         return text.length() > width ? text.substring(0, Math.max(1, width - 1)) + "…" : text;
     }
 }

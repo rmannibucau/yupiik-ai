@@ -215,6 +215,7 @@ class McpManagerTest {
                 base.httpClient(),
                 base.tools(),
                 base.subagents(),
+                base.schedulerThreads(),
                 new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT),
                 base.maxLineLength(),
                 base.resumeAliases(),

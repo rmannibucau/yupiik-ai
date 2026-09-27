@@ -17,8 +17,10 @@ package io.yupiik.ia.agent.tui;
 
 import static java.time.Duration.ofMillis;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import dev.tamboui.style.Color;
 import dev.tamboui.tui.TuiConfig;
@@ -36,8 +38,10 @@ import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegis
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
@@ -49,8 +53,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterAll;
@@ -82,6 +89,8 @@ class TuiCommandHeadlessTest {
     private HeadlessBackend backend;
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
+    /** Render cycles observed through the headless runner (post-render processor), incl. no-op frames. */
+    private final AtomicLong renderCycles = new AtomicLong();
 
     @BeforeAll
     static void boot() throws IOException {
@@ -94,6 +103,17 @@ class TuiCommandHeadlessTest {
     }
 
     private static RuntimeContainer bootContainer() {
+        return bootContainer(Map.of());
+    }
+
+    private static RuntimeContainer bootContainer(final Map<String, String> extra) {
+        final var config = new LinkedHashMap<>(Map.of(
+                "yca.storageHome", temp.resolve("home").toString(),
+                "yca.provider.baseUrl", llm.baseUrl(),
+                "yca.provider.apiKey", "test-key",
+                "yca.provider.model", "test-model",
+                "yca.structuralCodeGraph.enabled", "false"));
+        config.putAll(extra);
         return ConfiguringContainer.of()
                 .register(new ProvidedInstanceBean<>(
                         DefaultScoped.class,
@@ -108,14 +128,7 @@ class TuiCommandHeadlessTest {
                     @Override
                     public void onEvent(
                             final RuntimeContainer container, final ConfigurationRegistration registration) {
-                        registration
-                                .addSource()
-                                .accept(new MapConfigSource(Map.of(
-                                        "yca.storageHome", temp.resolve("home").toString(),
-                                        "yca.provider.baseUrl", llm.baseUrl(),
-                                        "yca.provider.apiKey", "test-key",
-                                        "yca.provider.model", "test-model",
-                                        "yca.structuralCodeGraph.enabled", "false")));
+                        registration.addSource().accept(new MapConfigSource(config));
                     }
                 })
                 .start();
@@ -235,6 +248,63 @@ class TuiCommandHeadlessTest {
         }
     }
 
+    @Test
+    void idleTicksAreSkippedButHeartbeatAndMutationsStillRepaint() throws Exception {
+        // dedicated container with a shortened safety repaint (120ms) so the test observes the
+        // idle-skip and the heartbeat while staying well under half a second
+        try (final var isolated = bootContainer(Map.of("yca.tui.heartbeatMillis", "120"))) {
+            final var isolatedDeps = lookupDeps(isolated);
+            assertEquals(120, isolatedDeps.tuiConfiguration().heartbeatMillis());
+            final var command = newUiCommand(isolated, isolatedDeps);
+
+            uiThread = new Thread(command::run, "tui-headless-heartbeat");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("yca coding agent");
+            drainFrames();
+
+            // idle: no render cycle, no terminal write while the screen cannot change
+            final var baseCycles = renderCycles.get();
+            assertFalse(backend.awaitFrame(50), "an idle tick must not repaint the frame");
+            assertEquals(baseCycles, renderCycles.get(), "an idle tick must not run a render cycle");
+            // ...until the safety heartbeat forces a render cycle even though the frame is a no-op
+            awaitRenderCycle(baseCycles, 200);
+            // a no-op heartbeat frame diffed away by TamboUI: still no terminal write
+            assertFalse(backend.awaitFrame(30), "a no-op heartbeat must not write to the terminal");
+
+            // a background mutation still paints promptly: the slash error is delivered on the
+            // render thread through runLater and drawn by the next tick, not by a busy spinner
+            tuiRef.get().dispatch(new PasteEvent("/agent definitely-not-an-agent"));
+            awaitText("/agent definitely-not-an-agent");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("unknown agent: definitely-not-an-agent");
+            awaitText("Alt+E for details");
+
+            // the error banner is static: once painted, idle silence resumes
+            drainFrames();
+            assertFalse(backend.awaitFrame(50), "a static screen must not keep repainting");
+        }
+    }
+
+    /** Awaits the first render cycle above {@code base}, bounded (no fixed sleeping). */
+    private void awaitRenderCycle(final long base, final long timeoutMillis) throws InterruptedException {
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (renderCycles.get() == base) {
+            if (System.nanoTime() > deadline) {
+                fail("no render cycle within " + timeoutMillis + "ms (heartbeat did not fire)");
+            }
+            backend.awaitFrame(5);
+        }
+    }
+
+    /** Consumes any in-flight repaint so timing-sensitive assertions start from a quiet frame. */
+    private void drainFrames() throws InterruptedException {
+        while (backend.awaitFrame(20)) {
+            // bounded: stops as soon as a 20ms window contains no frame
+        }
+    }
+
     private static TuiDeps lookupDeps(final RuntimeContainer container) {
         try (final var depsInstance = container.lookup(TuiDeps.class)) {
             return depsInstance.instance();
@@ -242,18 +312,30 @@ class TuiCommandHeadlessTest {
     }
 
     private TuiCommand newUiCommand(final RuntimeContainer container, final TuiDeps d) {
-        final var tuiSlashCommands = new TuiSlashCommands();
-        try (final var shellRegistry = container.lookup(ShellRegistry.class);
+        return newUiCommand(
+                container, d, new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, true, "dark", true));
+    }
+
+    private TuiCommand newUiCommand(final RuntimeContainer container, final TuiDeps d, final TuiCommand.TuiConf conf) {
+        // share the container-managed instances with the SlashRegistry so "/tabs"
+        // dispatched through it mutates the same TabManager the TUI renders from
+        try (final var tabManagerInstance = container.lookup(TabManager.class);
+                final var slashCommandsInstance = container.lookup(TuiSlashCommands.class);
+                final var shellRegistry = container.lookup(ShellRegistry.class);
                 final var slashRegistry = container.lookup(SlashRegistry.class);
                 final var turnRunner = container.lookup(TurnRunner.class);
-                final var runtimeFactory = container.lookup(SessionRuntimeFactory.class)) {
+                final var runtimeFactory = container.lookup(SessionRuntimeFactory.class);
+                final var scheduler = container.lookup(ScheduledExecutorService.class)) {
+            final var tabManager = tabManagerInstance.instance();
+            final var tuiSlashCommands = slashCommandsInstance.instance();
             return new TuiCommand(
-                    new TuiCommand.TuiConf(KeyBindingPreset.STANDARD, true, "dark", true),
+                    conf,
                     d.tuiConfiguration(),
                     d.configuration(),
                     shellRegistry.instance(),
                     runtimeFactory.instance(),
                     d.sessionStore(),
+                    d.sessionLifecycle(),
                     d.chatClient(),
                     d.modelStyleService(),
                     d.mcpManager(),
@@ -271,7 +353,10 @@ class TuiCommandHeadlessTest {
                     new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                     new ToolOutputFormat(formatMapper),
                     new BtwAnswerer(
-                            d.chatClient(), d.sessionStore(), d.configuration(), d.executor(), null, null, null));
+                            d.chatClient(), d.sessionStore(), d.configuration(), d.executor(), null, null, null),
+                    tabManager,
+                    new SubagentRegistry(d.configuration(), d.providerManager()),
+                    scheduler.instance());
         }
     }
 
@@ -287,6 +372,9 @@ class TuiCommandHeadlessTest {
                         .bracketedPaste(false)
                         .shutdownHook(false)
                         .tickRate(ofMillis(20))
+                        // observes every render cycle, even the no-op frames an idle heartbeat
+                        // produces (TamboUI diffs them away so the backend never draws them)
+                        .postRenderProcessor(frame -> renderCycles.incrementAndGet())
                         .build());
                 tuiRef.set(runner);
                 return runner;
@@ -310,6 +398,76 @@ class TuiCommandHeadlessTest {
             }
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
             screen = backend.text();
+        }
+    }
+
+    private void awaitTextGone(final String expected) throws InterruptedException {
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(2_500);
+        var screen = backend.text();
+        while (screen.contains(expected)) {
+            if (System.nanoTime() > deadline) {
+                final var message = "'" + expected + "' never disappeared within 2.5s; last screen:\n" + screen;
+                throw new AssertionError(message);
+            }
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "' to vanish");
+            screen = backend.text();
+        }
+    }
+
+    @Test
+    void sessionOptionReplaysPersistedSession() throws Exception {
+        try (final var isolated = bootContainer()) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var sessionId = "sresume";
+            isolatedDeps.sessionStore().append(sessionId, SessionEntry.of(1, "user", "resumed question", null, null));
+            isolatedDeps
+                    .sessionStore()
+                    .append(sessionId, SessionEntry.of(2, "assistant", "resumed assistant reply", null, null));
+            final var command = newUiCommand(
+                    isolated,
+                    isolatedDeps,
+                    new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark", true));
+
+            uiThread = new Thread(command::run, "tui-headless-session");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            // the persisted history is replayed into the initial tab, not fetched from the model
+            awaitText("resumed assistant reply");
+            awaitText("ready");
+            final var requestsBefore = llm.requests().size();
+            assertEquals(requestsBefore, llm.requests().size(), "resuming a session at launch must not call the model");
+
+            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+            uiThread.join(TIMEOUT_MS);
+        }
+    }
+
+    @Test
+    void tabsSlashOpensOverlayThroughRealRegistry() throws Exception {
+        // the shared container's executor is shut down when a TUI run quits, so this
+        // test boots its own container like errorBannerUsesErrorColoredBorder
+        try (final var isolated = bootContainer()) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var command = newUiCommand(isolated, isolatedDeps);
+
+            uiThread = new Thread(command::run, "tui-tabs-list");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+
+            // dispatch through the real SlashRegistry: "/tabs" (no arg) opens the modal
+            tuiRef.get().dispatch(new PasteEvent("/tabs"));
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("1-9 switch");
+
+            // Esc closes the overlay again
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+            awaitTextGone("1-9 switch");
+
+            // quit the TUI so run() unwinds before the container closes
+            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+            uiThread.join(TIMEOUT_MS);
         }
     }
 }

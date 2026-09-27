@@ -107,7 +107,12 @@ public class SessionCommands implements SlashCommandSet {
         if (!arg.isBlank()) {
             return CompletableFuture.completedStage(doResume(arg.strip(), env));
         }
-        final var sessions = sessionStore.list().stream().limit(MAX_RESUME_LIST).toList();
+        // most recent first regardless of the store implementation
+        final var sessions = sessionStore.list().stream()
+                .sorted(java.util.Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
+                        .reversed())
+                .limit(MAX_RESUME_LIST)
+                .toList();
         if (sessions.isEmpty()) {
             return CompletableFuture.completedStage(ShellOutcome.status("no session to resume"));
         }

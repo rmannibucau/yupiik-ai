@@ -376,16 +376,18 @@ public class ConfigCommands implements SlashCommandSet {
     }
 
     private CompletionStage<ShellOutcome> provider(final String arg, final ShellEnv env) {
+        final var settings = env.session().chatSettings();
         if (!arg.isBlank()) {
             return CompletableFuture.completedStage(
-                    ShellOutcome.status("provider: " + agentSessionService.setProvider(arg)));
+                    ShellOutcome.status("provider: " + agentSessionService.setProvider(arg, settings)));
         }
         final var ids = providerManager.providers().stream().map(p -> p.id()).toList();
         return env.io()
                 .pick("provider", ids)
                 .thenApply(selected -> selected.isEmpty()
                         ? ShellOutcome.status("provider picker cancelled")
-                        : ShellOutcome.status("provider: " + agentSessionService.setProvider(selected.get())));
+                        : ShellOutcome.status(
+                                "provider: " + agentSessionService.setProvider(selected.get(), settings)));
     }
 
     private CompletionStage<ShellOutcome> agent(final String arg, final ShellEnv env) {

@@ -107,6 +107,15 @@ public record TuiConfiguration(
         long toastDurationMillis,
 
         @Property(
+                defaultValue = "3500L",
+                documentation =
+                        "Safety repaint: longest time (milliseconds) the UI can go without a full redraw while idle. "
+                                + "Any state change still repaints instantly (on the next tick); this only bounds missed "
+                                + "updates so the screen can never stay stale longer than this. Keep strictly below the "
+                                + "5s render-stall timeout. Set to 0 to disable the safety repaint.")
+        long heartbeatMillis,
+
+        @Property(
                 defaultValue = "true",
                 documentation =
                         "Persist submitted prompts to <storageHome>/history so they survive restarts. "

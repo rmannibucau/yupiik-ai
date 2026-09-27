@@ -131,8 +131,8 @@ public record ToolCard(
     }
 
     /** True when the captured output looks like a git/udiff patch. */
-    public boolean isDiff() {
-        return DiffLines.looksLikeDiff(output);
+    public boolean isDiff(final DiffRenderer diffRenderer) {
+        return diffRenderer.looksLikeDiff(output);
     }
 
     /**
@@ -143,8 +143,20 @@ public record ToolCard(
      * error first line. Blank when there is nothing worth showing.
      */
     public String keyCommand() {
+        return keyCommand(null);
+    }
+
+    /**
+     * Like {@link #keyCommand()} but with a transform applied to the significant
+     * command *before* the display-length clip, so shortening (e.g. relativizing
+     * an absolute path) sees the untruncated value {@code beforeClip}.
+     */
+    public String keyCommand(final java.util.function.Function<String, String> beforeClip) {
         final var raw = args.isBlank() && running ? name : args;
-        final var significant = ToolPresenter.significantCommand(raw);
+        var significant = ToolPresenter.significantCommand(raw);
+        if (beforeClip != null) {
+            significant = beforeClip.apply(significant);
+        }
         if (significant.length() <= KEY_COMMAND_MAX) {
             return significant;
         }

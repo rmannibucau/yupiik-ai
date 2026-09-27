@@ -221,20 +221,30 @@ public class AgentSessionService {
      * Sets the model of one session, stripping an optional leading {@code $} prefix.
      * Returns the effective model name. The selection lands in the passed
      * {@link ChatSettings} (owned by the shell/tab), never in the shared client.
+     * A model change drops any previous variant/sampling override: they belong to
+     * the previous model and would otherwise leak into the new one.
      */
     public String setModel(final String arg, final ChatSettings settings) {
         final var model = arg.strip();
         final var effective = model.startsWith("$") ? model.substring(1) : model;
         settings.setModel(effective);
+        settings.setVariant(null);
+        settings.setSampling(null);
         return effective;
     }
 
     /**
-     * Sets the active provider; returns the provider id.
+     * Sets the active provider; returns the provider id. The session override
+     * (model/variant/sampling) is provider-scoped, so switching provider resets
+     * the per-session selection and lets the new provider's configured model
+     * apply again.
      */
-    public String setProvider(final String arg) {
+    public String setProvider(final String arg, final ChatSettings settings) {
         final var id = arg.strip();
         chatClient.setProvider(id);
+        if (settings != null) {
+            settings.reset();
+        }
         return id;
     }
 

@@ -50,6 +50,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
 class AgentSessionServiceTest {
@@ -181,6 +182,21 @@ class AgentSessionServiceTest {
 
         assertEquals("my-model", service.setModel("$my-model", settings));
         assertEquals("my-model", settings.model());
+    }
+
+    @Test
+    void setModelClearsVariantAndSamplingOverrides() {
+        final var service = service(chatClient());
+        final var settings = new ChatSettings();
+        settings.setVariant("fast");
+        settings.setSampling(
+                new ChatClient.SamplingOverride(Map.of(ChatClient.SamplingField.TEMPERATURE, Optional.of(0.2))));
+
+        service.setModel("$gpt-5", settings);
+
+        assertEquals("gpt-5", settings.model());
+        assertNull(settings.variant(), "a model change must drop the variant of the previous model");
+        assertNull(settings.sampling(), "a model change must drop the sampling overrides of the previous model");
     }
 
     @Test

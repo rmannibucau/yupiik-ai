@@ -108,6 +108,12 @@ public record CodingAgentConfiguration(
         @Property(documentation = "Sub-agent settings (spawn_subagent, check_subagents).")
         SubagentConfiguration subagents,
 
+        @Property(
+                defaultValue = "Math.clamp(Runtime.getRuntime().availableProcessors(), 1, 2)",
+                documentation =
+                        "Thread count of the shared application scheduler (ScheduledExecutorService) used by the code graph and the TUI git branch poller. Defaults to the CPU count clamped to 1..2 so both consumers get a thread on typical machines; set 1 to stay on a single thread.")
+        int schedulerThreads,
+
         @Property(documentation = "Metrics display settings (LLM calls, thinking duration, tool duration).")
         MetricsConfiguration metrics,
 

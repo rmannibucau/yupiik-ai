@@ -17,8 +17,11 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.llm.Message;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * UI-less conversation state shared by the shells: transcript, streaming
@@ -42,10 +45,14 @@ public class ConversationTranscript {
     private final StringBuilder transcript = new StringBuilder();
     private final StringBuilder pending = new StringBuilder();
     private final StringBuilder thinking = new StringBuilder();
-    private final StringBuilder toolStream = new StringBuilder();
-    private volatile String runningTool;
-    private volatile String runningToolCommand;
-    private long toolStartedNanos;
+    /**
+     * Pending tool executions, one {@link RunningTool} per started-not-finished
+     * call. Keyed by tool name with a FIFO per name so parallel read-only tools
+     * (started/finished emitted by worker threads) each keep their own command,
+     * stream and elapsed clock instead of aliasing a single running-tool slot.
+     */
+    private final Map<String, ArrayDeque<RunningTool>> runningTools = new HashMap<>();
+
     private long toolCallOrdinal;
     private volatile boolean busy;
     private volatile String status = "";
@@ -55,19 +62,89 @@ public class ConversationTranscript {
     private volatile int contextPercent;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
+    /** True while the last failure was a retryable LLM error; the status clears on the next progress event. */
+    private volatile boolean retryableErrorSeen;
+
+    /**
+     * A retryable LLM failure (request failed with a transient status or a
+     * rate/concurrency limit) whose retry may still succeed: such errors are
+     * dropped from the status bar as soon as the turn makes progress again, so
+     * a successful retry does not leave a stale red error behind. Fatal errors
+     * are not detected here and stay until acknowledged.
+     */
+    public static boolean isRetryableLlmError(final String message) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        final var m = message.toLowerCase(java.util.Locale.ROOT);
+        if (m.contains("concurrency_limit_exceeded")
+                || m.contains("too many concurrent requests")
+                || m.contains("rate limit")
+                || m.contains("rate_limit")
+                || m.contains("too many requests")) {
+            return true;
+        }
+        if (!m.startsWith("llm request failed (") && !m.startsWith("llm call failed (")) {
+            return false;
+        }
+        final var start = message.indexOf('(');
+        final var end = message.indexOf(')', start + 1);
+        if (start < 0 || end < 0 || end <= start + 1) {
+            // request failed with an unknown status: the retry may still recover
+            return true;
+        }
+        try {
+            final var status =
+                    Integer.parseInt(message.substring(start + 1, end).strip());
+            return status == 408 || status == 425 || status == 429 || status >= 500;
+        } catch (final NumberFormatException e) {
+            return true;
+        }
+    }
+
+    /** True when the event proves the turn is making progress again after a failure. */
+    public static boolean isTurnProgress(final AgentEvent event) {
+        return event instanceof AgentEvent.TextDelta
+                || event instanceof AgentEvent.TextReset
+                || event instanceof AgentEvent.ThinkingDelta
+                || event instanceof AgentEvent.ToolStarted
+                || event instanceof AgentEvent.ToolStream
+                || event instanceof AgentEvent.ToolFinished
+                || event instanceof AgentEvent.TurnDone;
+    }
+
     /** Splits GLM-style inline {@code <think>} reasoning out of the text channel. */
     protected final ThinkTagSplitter thinkTags;
 
     private final ThinkTagSplitter.Parser inlineThink;
 
+    /**
+     * When true this instance folds subagent-tagged events instead of dropping
+     * them: used for the per-subagent captures the TUI renders through
+     * {@code /subagents <id>}. Parent transcripts keep {@code false} so a
+     * subagent stream never pollutes the parent conversation (only the
+     * SubagentStarted/SubagentCompleted markers are folded there).
+     */
+    private final boolean captureSubagentEvents;
+
     public ConversationTranscript() {
         this(new ThinkTagSplitter());
     }
 
+    /** Creates a capture-only transcript folding subagent-tagged events (see {@link #captureSubagentEvents}). */
+    public ConversationTranscript(final boolean captureSubagentEvents) {
+        this(new ThinkTagSplitter(), captureSubagentEvents);
+    }
+
     protected ConversationTranscript(final ThinkTagSplitter thinkTags) {
+        this(thinkTags, false);
+    }
+
+    protected ConversationTranscript(final ThinkTagSplitter thinkTags, final boolean captureSubagentEvents) {
         // defensive: hand-built instances (tests, generated subclasses) may pass null
         this.thinkTags = thinkTags != null ? thinkTags : new ThinkTagSplitter();
         this.inlineThink = this.thinkTags.create();
+        this.captureSubagentEvents = captureSubagentEvents;
     }
 
     // Per-turn metrics
@@ -79,6 +156,22 @@ public class ConversationTranscript {
     private volatile long turnDurationMs;
 
     public synchronized void onEvent(final AgentEvent event) {
+        // subagent streams never pollute the parent conversation: they are captured
+        // per-subagent (the /subagents modal) or dropped; only the lifecycle markers
+        // (SubagentStarted/SubagentCompleted) are folded into the parent transcript
+        if (event.subagentId() != null
+                && !captureSubagentEvents
+                && !(event instanceof AgentEvent.SubagentStarted)
+                && !(event instanceof AgentEvent.SubagentCompleted)) {
+            return;
+        }
+        // a retryable LLM failure (429/concurrency limit/rate limit) leaves the status
+        // strip red while the resilience layer retries internally: as soon as the turn
+        // makes progress again the stale error is dropped (the retry succeeded)
+        if (retryableErrorSeen && isTurnProgress(event)) {
+            retryableErrorSeen = false;
+            status = busy ? "working" : "";
+        }
         if (event
                 instanceof
                 AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
@@ -113,10 +206,9 @@ public class ConversationTranscript {
                         String subagentId,
                         String subagentName)) {
             flushThinking();
-            runningTool = name;
-            runningToolCommand = toolCommand(args);
-            toolStream.setLength(0);
-            toolStartedNanos = System.nanoTime();
+            runningTools
+                    .computeIfAbsent(name, n -> new ArrayDeque<>())
+                    .addLast(new RunningTool(name, toolCommand(args)));
         } else if (event
                 instanceof
                 AgentEvent.ToolStream(
@@ -125,10 +217,13 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
-            if (name.equals(runningTool)) {
-                toolStream.append(fragment).append('\n');
-                if (toolStream.length() > MAX_EMBEDDED_TOOL_CHARS) {
-                    toolStream.delete(0, toolStream.length() - MAX_EMBEDDED_TOOL_CHARS);
+            final var deque = runningTools.get(name);
+            if (deque != null && !deque.isEmpty()) {
+                // the most recently started tool with this name is the live one
+                final var tool = deque.peekLast();
+                tool.stream.append(fragment).append('\n');
+                if (tool.stream.length() > MAX_EMBEDDED_TOOL_CHARS) {
+                    tool.stream.delete(0, tool.stream.length() - MAX_EMBEDDED_TOOL_CHARS);
                 }
             }
         } else if (event
@@ -140,20 +235,23 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
-            final var running = runningTool;
-            final var command = runningToolCommand;
-            runningTool = null;
-            runningToolCommand = null;
-            final var elapsedMs = Math.max(0, (System.nanoTime() - toolStartedNanos) / 1_000_000);
+            final var deque = runningTools.get(name);
+            final var tool = deque == null ? null : deque.pollFirst();
+            if (deque != null && deque.isEmpty()) {
+                runningTools.remove(name);
+            }
+            // one ordinal per finished call (even when nothing is rendered) so the
+            // TUI's toolCallCount() mapping to cards stays exact
             final var ordinal = ++toolCallOrdinal;
-            if (running != null && (!toolStream.isEmpty() || (success && output != null && !output.isBlank()))) {
-                final var header = command == null || command.isBlank()
-                        ? "*streaming `" + running + "`* (#" + ordinal + ", " + elapsedMs + " ms)"
-                        : "*streaming `" + running + "`: " + command.replace('`', '\'') + "* (#" + ordinal + ", "
+            final var elapsedMs = tool == null ? 0 : Math.max(0, (System.nanoTime() - tool.startedNanos) / 1_000_000);
+            if (tool != null && (!tool.stream.isEmpty() || (success && output != null && !output.isBlank()))) {
+                final var header = tool.command == null || tool.command.isBlank()
+                        ? "*streaming `" + name + "`* (#" + ordinal + ", " + elapsedMs + " ms)"
+                        : "*streaming `" + name + "`: " + tool.command.replace('`', '\'') + "* (#" + ordinal + ", "
                                 + elapsedMs + " ms)";
-                final var captured = toolStream.isEmpty()
+                final var captured = tool.stream.isEmpty()
                         ? capToolOutput(output == null ? "" : output)
-                        : toolStream.toString().stripTrailing();
+                        : tool.stream.toString().stripTrailing();
                 transcript
                         .append("\n\n")
                         .append(TOOL_BEGIN)
@@ -165,7 +263,6 @@ public class ConversationTranscript {
                         .append(TOOL_END)
                         .append('\n');
             }
-            toolStream.setLength(0);
             if (!success) {
                 transcript
                         .append("\n\n")
@@ -226,6 +323,7 @@ public class ConversationTranscript {
                         case INFO -> "ⓘ";
                     };
             transcript.append("\n\n> ").append(tag).append(": ").append(message).append("\n");
+            retryableErrorSeen |= isRetryableLlmError(message);
             if (level == AgentEvent.Notice.Level.ERROR) {
                 status = "error: " + message;
             } else {
@@ -294,6 +392,33 @@ public class ConversationTranscript {
             pending.setLength(0);
             busy = false;
             status = "error: " + message;
+            retryableErrorSeen = isRetryableLlmError(message);
+        } else if (event
+                instanceof
+                AgentEvent.SubagentStarted(String task, String sessionId, String subagentId, String subagentName)) {
+            // marker only: the subagent stream itself is captured separately (no inline
+            // mixing of two model voices in one pane - see /subagents)
+            final var label = subagentName == null || subagentName.isBlank() ? subagentId : subagentName;
+            transcript
+                    .append("\n\n> subagent `")
+                    .append(label)
+                    .append("` started: ")
+                    .append(firstLine(task))
+                    .append('\n');
+        } else if (event
+                instanceof
+                AgentEvent.SubagentCompleted(
+                        String summary,
+                        boolean success,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
+            final var label = subagentName == null || subagentName.isBlank() ? subagentId : subagentName;
+            transcript.append("\n\n> subagent `").append(label).append("` ").append(success ? "completed" : "failed");
+            if (summary != null && !summary.isBlank()) {
+                transcript.append(": ").append(firstLine(summary));
+            }
+            transcript.append('\n');
         }
     }
 
@@ -332,23 +457,24 @@ public class ConversationTranscript {
             // classified into the thinking buffer by the stream splitter
             sb.append("\n\n**Assistant**\n\n").append(pending);
         }
-        if (runningTool != null) {
-            sb.append("\n\n")
-                    .append(TOOL_BEGIN)
-                    .append("\n`")
-                    .append(spinner)
-                    .append(" running ")
-                    .append(
-                            runningToolCommand == null || runningToolCommand.isBlank()
-                                    ? runningTool
-                                    : runningToolCommand)
-                    .append("`");
-            if (!toolStream.isEmpty()) {
-                sb.append("\n\n```text\n")
-                        .append(toolStream.toString().stripTrailing())
-                        .append("\n```\n");
+        // one running block per pending tool: parallel read-only tools each show
+        // their own command and streamed output instead of aliasing a single slot
+        for (final var entry : runningTools.entrySet()) {
+            for (final var tool : entry.getValue()) {
+                sb.append("\n\n")
+                        .append(TOOL_BEGIN)
+                        .append("\n`")
+                        .append(spinner)
+                        .append(" running ")
+                        .append(tool.command == null || tool.command.isBlank() ? tool.name : tool.command)
+                        .append("`");
+                if (!tool.stream.isEmpty()) {
+                    sb.append("\n\n```text\n")
+                            .append(tool.stream.toString().stripTrailing())
+                            .append("\n```\n");
+                }
+                sb.append(TOOL_END).append('\n');
             }
-            sb.append(TOOL_END).append('\n');
         }
         final var md = sb.toString().strip();
         return md.isBlank() ? fallback : md;
@@ -539,6 +665,10 @@ public class ConversationTranscript {
         pending.setLength(0);
         thinking.setLength(0);
         inlineThink.reset();
+        // NOTE: retryableErrorSeen is intentionally NOT cleared here: a stale
+        // "error: ..." status from the previous turn must survive until the new
+        // turn actually makes progress (the retry), then the auto-clear in
+        // onEvent() drops it from the bar
         busy = true;
     }
 
@@ -546,10 +676,10 @@ public class ConversationTranscript {
         transcript.setLength(0);
         pending.setLength(0);
         thinking.setLength(0);
-        toolStream.setLength(0);
         inlineThink.reset();
-        runningTool = null;
-        runningToolCommand = null;
+        runningTools.clear();
+        toolCallOrdinal = 0;
+        retryableErrorSeen = false;
         busy = false;
         status = "";
         promptTokens = 0;
@@ -613,11 +743,27 @@ public class ConversationTranscript {
     }
 
     public String runningTool() {
-        return runningTool;
+        final var newest = newestRunningTool();
+        return newest == null ? null : newest.name;
     }
 
     public String runningToolCommand() {
-        return runningToolCommand;
+        final var newest = newestRunningTool();
+        return newest == null ? null : newest.command;
+    }
+
+    /** The most recently started pending tool, for the status/spinner display. */
+    private RunningTool newestRunningTool() {
+        RunningTool newest = null;
+        long newestNanos = Long.MIN_VALUE;
+        for (final var deque : runningTools.values()) {
+            final var tail = deque.peekLast();
+            if (tail != null && tail.startedNanos > newestNanos) {
+                newest = tail;
+                newestNanos = tail.startedNanos;
+            }
+        }
+        return newest;
     }
 
     public int promptTokens() {
@@ -654,6 +800,13 @@ public class ConversationTranscript {
 
     public int turnToolsRun() {
         return turnToolsRun;
+    }
+
+    /** One in-flight tool execution: its command label, streamed output and start clock. */
+    private record RunningTool(String name, String command, StringBuilder stream, long startedNanos) {
+        private RunningTool(final String name, final String command) {
+            this(name, command, new StringBuilder(), System.nanoTime());
+        }
     }
 
     /** @return the 1-based ordinal of the last finished tool call, used to key tool cards. */

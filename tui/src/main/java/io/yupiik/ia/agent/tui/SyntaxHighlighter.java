@@ -688,4 +688,39 @@ public class SyntaxHighlighter {
         }
         return GENERIC;
     }
+
+    /**
+     * Maps a file path to a syntax-highlighting language id, or {@code null} when
+     * the extension is unknown (callers then fall back to the plain style).
+     */
+    public static String guessLanguage(final String path) {
+        if (path == null || path.isBlank()) {
+            return null;
+        }
+        var name = path;
+        final var slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+        final var dot = name.lastIndexOf('.');
+        if (dot < 0) {
+            return null;
+        }
+        return switch (name.substring(dot + 1).toLowerCase(Locale.ROOT)) {
+            case "java", "kt", "kts" -> "java";
+            case "xml", "html", "htm", "svg", "xhtml" -> "xml";
+            case "css", "scss", "less" -> "css";
+            case "json", "jsonc", "json5" -> "json";
+            case "yaml", "yml" -> "yaml";
+            case "js", "mjs", "cjs" -> "javascript";
+            case "ts", "mts", "cts" -> "typescript";
+            case "py", "pyw" -> "python";
+            case "sh", "bash", "zsh" -> "shell";
+            case "sql" -> "sql";
+            case "md", "markdown" -> "markdown";
+            case "properties", "ini", "toml" -> "yaml";
+            case "gradle", "groovy" -> "java";
+            default -> null;
+        };
+    }
 }

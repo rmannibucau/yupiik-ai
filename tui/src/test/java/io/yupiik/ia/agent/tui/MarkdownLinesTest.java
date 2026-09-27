@@ -129,13 +129,31 @@ class MarkdownLinesTest {
     }
 
     @Test
-    void tableRendersGrid() {
+    void tableRendersBorderedGrid() {
         final var md = """
                 | a | bb |
                 |---|----|
                 | 1 | 22 |
                 """;
-        assertEquals(List.of("a  bb", "1  22"), plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        assertEquals(
+                List.of("┌───┬────┐", "│ a │ bb │", "├───┼────┤", "│ 1 │ 22 │", "└───┴────┘"),
+                plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void tableWrapsNarrowGrid() {
+        final var md = """
+                | name | value       |
+                |------|-------------|
+                | long | alpha beta  |
+                """;
+        // the value column is narrowed so "alpha beta" wraps; every row stays within width
+        final var lines = plain(renderer.render(md, 18, Style.EMPTY, MarkdownStyles.DEFAULTS));
+        for (final var line : lines) {
+            assertTrue(line.length() <= 18, line);
+        }
+        assertTrue(lines.stream().anyMatch(l -> l.contains("alpha")), lines.toString());
+        assertTrue(lines.stream().anyMatch(l -> l.contains("beta")), lines.toString());
     }
 
     @Test
@@ -187,8 +205,10 @@ class MarkdownLinesTest {
         final var dim = Style.EMPTY.fg(Color.rgb(0x6b, 0x6b, 0x6b));
         final var lines = renderer.render("| a | b |\n|---|---|\n| 1 | 2 |\n", 80, dim, MarkdownStyles.DEFAULTS);
         final var spans = lines.stream().flatMap(l -> l.spans().stream()).toList();
-        final var cellA =
-                spans.stream().filter(s -> s.content().equals("a")).findFirst().orElseThrow();
+        final var cellA = spans.stream()
+                .filter(s -> s.content().strip().equals("a"))
+                .findFirst()
+                .orElseThrow();
         final var rgb = cellA.style().fg().orElseThrow().toRgb();
         assertEquals(0x6b, rgb.r());
         assertEquals(0x6b, rgb.g());

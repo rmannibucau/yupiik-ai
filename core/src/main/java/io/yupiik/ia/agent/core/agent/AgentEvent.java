@@ -34,6 +34,23 @@ public sealed interface AgentEvent {
      */
     String sessionId();
 
+    /**
+     * @return the subagent id when the event was produced inside a subagent turn,
+     *         {@code null} (the default) for parent-turn events. All record
+     *         implementations carry this component and override the default.
+     */
+    default String subagentId() {
+        return null;
+    }
+
+    /**
+     * @return the subagent display name when the event was produced inside a
+     *         subagent turn, {@code null} (the default) for parent-turn events.
+     */
+    default String subagentName() {
+        return null;
+    }
+
     record TextDelta(String delta, String sessionId, String subagentId, String subagentName) implements AgentEvent {
         public TextDelta(String delta, String sessionId) {
             this(delta, sessionId, null, null);
@@ -152,6 +169,21 @@ public sealed interface AgentEvent {
             this(message, sessionId, null, null);
         }
     }
+
+    /**
+     * A sub-agent was spawned under the parent session: the parent transcript
+     * records a marker so the user knows work is progressing off-screen
+     * (details are visible through {@code /subagents}).
+     */
+    record SubagentStarted(String task, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {}
+
+    /**
+     * A sub-agent finished (success or failure). The parent transcript records a
+     * marker; the detailed conversation stays reachable through {@code /subagents}.
+     */
+    record SubagentCompleted(String summary, boolean success, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {}
 
     /**
      * A queued prompt was injected into the running turn before it completed, so

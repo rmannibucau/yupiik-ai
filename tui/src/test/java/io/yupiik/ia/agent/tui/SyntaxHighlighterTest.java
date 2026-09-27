@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -383,5 +384,24 @@ class SyntaxHighlighterTest {
                     assertEquals(line, concat(lines));
                 },
                 "the possessive-quantified tokenizer must stay linear on messy long lines");
+    }
+
+    @Test
+    void guessLanguageMapsExtensionsAndIgnoresUnknown() {
+        assertEquals("java", SyntaxHighlighter.guessLanguage("src/main/java/Foo.java"));
+        assertEquals("java", SyntaxHighlighter.guessLanguage("Foo.KT"), "extensions are case-insensitive");
+        assertEquals("xml", SyntaxHighlighter.guessLanguage("pom.xml"));
+        assertEquals("json", SyntaxHighlighter.guessLanguage("/data/config.json5"));
+        assertEquals("yaml", SyntaxHighlighter.guessLanguage("build.yaml"));
+        assertEquals("javascript", SyntaxHighlighter.guessLanguage("app.js"));
+        assertEquals("typescript", SyntaxHighlighter.guessLanguage("app.ts"));
+        assertEquals("python", SyntaxHighlighter.guessLanguage("script.py"));
+        assertEquals("shell", SyntaxHighlighter.guessLanguage("run.sh"));
+        assertEquals("sql", SyntaxHighlighter.guessLanguage("query.sql"));
+        assertEquals("markdown", SyntaxHighlighter.guessLanguage("README.md"));
+        assertNull(SyntaxHighlighter.guessLanguage("Makefile"), "extension-less files are unknown");
+        assertNull(SyntaxHighlighter.guessLanguage("noext"));
+        assertNull(SyntaxHighlighter.guessLanguage(null));
+        assertNull(SyntaxHighlighter.guessLanguage(""));
     }
 }
