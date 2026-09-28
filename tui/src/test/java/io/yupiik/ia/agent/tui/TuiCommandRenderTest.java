@@ -171,8 +171,7 @@ class TuiCommandRenderTest {
         awaitText("hello from stub");
         awaitText("ready");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -192,8 +191,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("model other-model");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -209,8 +207,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("show the keyboard shortcuts");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -228,8 +225,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("ⓘ"); // notification glyph present in the status strip
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -257,8 +253,7 @@ class TuiCommandRenderTest {
         awaitTextGone("TAIL");
         awaitText("ready"); // agent state still first and untouched
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -287,8 +282,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("/model m02");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -352,7 +346,7 @@ class TuiCommandRenderTest {
         awaitText("thinking..."); // the leading agent state was not replaced by the integration notice
 
         releaseTurn.countDown();
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -382,8 +376,7 @@ class TuiCommandRenderTest {
                 rgb != null && rgb.r() == 0xe0 && rgb.g() == 0x6c && rgb.b() == 0x75,
                 "expected the error segment to be painted in the error red, fg=" + backend.fg(col, row));
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -426,8 +419,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('l', KeyModifiers.CTRL));
         awaitText("Type a prompt and press Enter");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -493,8 +485,7 @@ class TuiCommandRenderTest {
         releaseTurn.countDown();
         awaitText("hello from stub");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     private AgentLoop stubAgentLoop() {
@@ -717,8 +708,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
         awaitText("pondering");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -748,8 +738,7 @@ class TuiCommandRenderTest {
         clock.advance(5_000);
         awaitTextWithin("thinking... (5 s)", TIMEOUT_MS);
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -786,8 +775,7 @@ class TuiCommandRenderTest {
         clock.advance(2_000);
         awaitTextWithin("thinking... (2 s)", TIMEOUT_MS);
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -807,8 +795,7 @@ class TuiCommandRenderTest {
         shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
         awaitText("public int x()");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -845,8 +832,7 @@ class TuiCommandRenderTest {
                 "expected the 'public' keyword to be syntax-coloured on the row containing it, fg="
                         + backend.fg(col, row));
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -879,8 +865,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('p', KeyModifiers.CTRL));
         awaitText("fix header padding");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -906,8 +891,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("secret reasoning");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -942,8 +926,7 @@ class TuiCommandRenderTest {
         awaitText("ls -la");
         awaitTextGone("file.txt");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -971,8 +954,7 @@ class TuiCommandRenderTest {
         awaitText("✓ bash");
         awaitTextGone("secret-out");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -999,8 +981,7 @@ class TuiCommandRenderTest {
         awaitTextGone("full output");
         awaitTextGone("out-a"); // back to the condensed line, cards stay hidden
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1022,8 +1003,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
         awaitText("streamed line"); // cards shown: live stream visible
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1043,8 +1023,7 @@ class TuiCommandRenderTest {
         awaitText("1.5s");
         awaitText("session: 1 LLM calls");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1068,8 +1047,7 @@ class TuiCommandRenderTest {
         shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry)));
         awaitNoText("tok/s");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1088,8 +1066,7 @@ class TuiCommandRenderTest {
                 3, 120, 400, 500, 2, 1500, new AgentEvent.Throughput(150, 3000, 4000), sid(shellRegistry)));
         awaitText("50.0 tok/s (real 37.5 tok/s)");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1135,8 +1112,7 @@ class TuiCommandRenderTest {
         awaitText("lines:2"); // submitted as a single prompt
         org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1199,8 +1175,7 @@ class TuiCommandRenderTest {
         awaitTextWithin(" " + Glyphs.of("unicode").check() + " ", 2_000);
         awaitTextWithin(" +", 2_000); // the trailing new-tab affordance is on the bar
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1221,8 +1196,7 @@ class TuiCommandRenderTest {
                 backend.text().contains(Glyphs.of("unicode").cross() + " "),
                 "tab must show the close marker, got:\n" + backend.text());
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1242,8 +1216,7 @@ class TuiCommandRenderTest {
         // once the long line wraps onto a subsequent visual row rather than clipping
         awaitText(tail);
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1273,8 +1246,7 @@ class TuiCommandRenderTest {
                 promptStart, atHome[0], "HOME must move the cursor to the first character of the line");
         org.junit.jupiter.api.Assertions.assertEquals(atEnd[1], atHome[1], "HOME must not change the cursor row");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1305,8 +1277,7 @@ class TuiCommandRenderTest {
                 "cursor must sit inside the wrapped fragment, not pinned to its start; start=" + promptStart
                         + " cursor=" + moved[0]);
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1337,8 +1308,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('X'));
         awaitText("heXllo");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1385,8 +1355,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('X'));
         awaitText("Xwrap");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1415,8 +1384,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('X'));
         awaitText("aX中b");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1433,8 +1401,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('w', KeyModifiers.CTRL));
         awaitText("yca coding agent"); // still rendering -> no crash
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1457,8 +1424,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofChar('w', KeyModifiers.CTRL));
         awaitTextGone("foo bar");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1482,8 +1448,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("Up/Down scroll");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1525,8 +1490,7 @@ class TuiCommandRenderTest {
         awaitNoRowStartingWith("┃");
         awaitText("mode plan");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1546,8 +1510,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.SHIFT));
         awaitNoRowStartingWith("┃"); // back to plan
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1578,8 +1541,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("full output");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1609,8 +1571,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("no subagents for this session");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1666,8 +1627,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("kid thinks");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1700,8 +1660,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("type to filter | Up/Down move | Enter select | Esc cancel");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1731,8 +1690,7 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("type to filter | Up/Down move | Enter select | Esc cancel");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1791,8 +1749,7 @@ class TuiCommandRenderTest {
         awaitTextGone("full output");
         awaitText("transcript line 0");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1839,8 +1796,7 @@ class TuiCommandRenderTest {
         awaitTextGone(" btw ");
         awaitText("transcript line 0");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     @Test
@@ -1899,8 +1855,7 @@ class TuiCommandRenderTest {
         releaseTurn.countDown();
         awaitText("hello from stub");
 
-        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-        uiThread.join(TIMEOUT_MS);
+        quit();
     }
 
     private boolean anyRowStartsWith(final String prefix) {
@@ -1930,6 +1885,22 @@ class TuiCommandRenderTest {
 
     private static UsageTracker newUsageTracker() {
         return new UsageTracker(null, null, null, Clock.systemUTC());
+    }
+
+    /**
+     * Deterministic teardown: quits the runner directly instead of relying on a
+     * Ctrl+C key event, which overlays (e.g. the /subagents detail modal) can
+     * swallow before the global quit handler sees it. Also asserts the UI thread
+     * actually stopped so a missed quit fails fast instead of silently burning
+     * the join timeout.
+     */
+    private void quit() throws InterruptedException {
+        final var tui = tuiRef.get();
+        if (tui != null && tui.isRunning()) {
+            tui.quit();
+        }
+        uiThread.join(TIMEOUT_MS);
+        assertFalse(uiThread.isAlive(), "ui thread still alive after quit");
     }
 
     private CodingAgentConfiguration configuration() {
