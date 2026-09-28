@@ -149,6 +149,11 @@ public class AgentLoop {
     private boolean thinkingActive;
     private long thinkingStartNanos;
     private long turnStartNanos;
+    // output throughput: tokens produced vs. time actually spent producing them
+    private long turnLlmActiveMs;
+    private long turnLlmPausedMs;
+    private int turnOutputTokens;
+    private long turnLlmReportedMs;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -427,11 +432,15 @@ public class AgentLoop {
         }
         statusReporter.setSink(message -> emitter.emit(status(message)));
         // surface provider throttles and retry backoffs: without this the UI only shows a
-        // spinner while the resilience layer can silently wait up to minutes between attempts
-        pauseListener = pause -> emit(
-                pause.kind() == PauseEvent.Pause.THROTTLE
-                        ? status(pause.message())
-                        : notice(AgentEvent.Notice.Level.INFO, pause.message()));
+        // spinner while the resilience layer can silently wait up to minutes between attempts.
+        // the wait is also accumulated so the throughput metric ignores it.
+        pauseListener = pause -> {
+            turnLlmPausedMs += Math.max(0L, pause.durationMs());
+            emit(
+                    pause.kind() == PauseEvent.Pause.THROTTLE
+                            ? status(pause.message())
+                            : notice(AgentEvent.Notice.Level.INFO, pause.message()));
+        };
 
         try {
             return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt);
@@ -580,6 +589,7 @@ public class AgentLoop {
                 toolDurationWallMs,
                 toolsRun,
                 turnDurationMs,
+                new AgentEvent.Throughput(turnOutputTokens, turnLlmActiveMs, turnLlmReportedMs),
                 currentSessionId,
                 subagentId,
                 subagentName);
@@ -619,6 +629,10 @@ public class AgentLoop {
         turnToolSumMs = 0L;
         turnToolWallMs = 0L;
         turnToolsRun = 0;
+        turnLlmActiveMs = 0L;
+        turnLlmPausedMs = 0L;
+        turnOutputTokens = 0;
+        turnLlmReportedMs = 0L;
         thinkingActive = false;
         thinkingStartNanos = 0;
         turnStartNanos = System.nanoTime();
@@ -682,7 +696,10 @@ public class AgentLoop {
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final var finishReason = new String[] {null};
             final Message assistant;
+            final long llmStartNanos;
+            final long pausedBeforeMs = turnLlmPausedMs;
             try {
+                llmStartNanos = System.nanoTime();
                 assistant = streamWithRetry(request, usage, finishReason, cancelled);
             } catch (final ContextWindowExceededException e) {
                 if (!retryOnOverflow || overflowRetried) {
@@ -715,6 +732,9 @@ public class AgentLoop {
                 throw e;
             }
             usageTracker.record(usage[0]);
+            // throughput: time spent generating, idle time excluded. A request refused because the
+            // context window is too small contributes nothing (it is a preflight, not a generation).
+            recordThroughput(assistant, usage[0], (System.nanoTime() - llmStartNanos) / 1_000_000, pausedBeforeMs);
             // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
             // estimate at the same moment calibrates later deltas until the next observation
             usageTracker.anchor(usage[0].promptTokens(), usageTracker.estimateContext(messages, toolsTokens));
@@ -827,6 +847,55 @@ public class AgentLoop {
         if (content != null) {
             emit(turnDone(content));
         }
+    }
+
+    /**
+     * Accumulates one LLM request in the turn output throughput: the time it really spent generating
+     * (wall time minus the throttles and retry backoffs it waited for) and the tokens it produced.
+     *
+     * @param assistant the message produced by the request.
+     * @param usage the usage reported by the provider, {@link io.yupiik.ia.agent.core.llm.Usage#EMPTY} when none.
+     * @param wallMs wall time of the request, throttles and backoffs included.
+     * @param pausedBeforeMs the turn pause counter before the request started.
+     */
+    private void recordThroughput(
+            final Message assistant,
+            final io.yupiik.ia.agent.core.llm.Usage usage,
+            final long wallMs,
+            final long pausedBeforeMs) {
+        final var pausedMs = Math.max(0L, turnLlmPausedMs - pausedBeforeMs);
+        turnLlmActiveMs += Math.max(0L, wallMs - pausedMs);
+        if (usage != null && usage.completionTokens() > 0) {
+            turnOutputTokens += usage.completionTokens();
+            if (usage.generationTimeMs() > 0) {
+                turnLlmReportedMs += usage.generationTimeMs();
+            }
+        } else {
+            // no usage from the provider: estimate the produced tokens from what came back
+            turnOutputTokens += estimateOutputTokens(assistant);
+        }
+    }
+
+    /**
+     * Estimates the tokens a response produced when the provider reports no usage: the visible
+     * content plus the arguments of every tool call.
+     *
+     * @param assistant the produced message, may be {@code null}.
+     * @return the estimated token count, {@code 0} when there is nothing to estimate.
+     */
+    private int estimateOutputTokens(final Message assistant) {
+        if (assistant == null) {
+            return 0;
+        }
+        var tokens = TokenEstimator.estimate(str(assistant.content()));
+        if (assistant.toolCalls() != null) {
+            for (final var call : assistant.toolCalls()) {
+                if (call != null && call.function() != null) {
+                    tokens += TokenEstimator.estimate(call.function().arguments());
+                }
+            }
+        }
+        return tokens;
     }
 
     /**
@@ -957,7 +1026,10 @@ public class AgentLoop {
                         AgentEvent.Notice.Level.WARN,
                         "Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/' + maxAttempts
                                 + ")."));
-                Thread.sleep(streamRetryBackoffMs(attempt));
+                // the backoff is idle time: it must not be counted as generation time
+                final var backoffMs = streamRetryBackoffMs(attempt);
+                turnLlmPausedMs += backoffMs;
+                Thread.sleep(backoffMs);
             }
         }
         throw last;
@@ -1409,7 +1481,8 @@ public class AgentLoop {
                         Math.toIntExact(upper.completionTokens()),
                         Math.toIntExact(upper.totalTokens()),
                         upper.cacheRead(),
-                        upper.cacheWrite());
+                        upper.cacheWrite(),
+                        upper.generationTime());
             }
             turnLlmCalls++;
             // usage is recorded once per request after the stream completes (single record point,

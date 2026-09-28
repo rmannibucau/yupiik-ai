@@ -17,6 +17,7 @@ package io.yupiik.llm.client.anthropic;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -198,6 +199,7 @@ class AnthropicDialectTest {
         assertEquals(6, response.usage().totalTokens());
         assertEquals(3L, response.usage().cacheRead());
         assertEquals(2l, response.usage().cacheWrite());
+        assertNull(response.usage().generationTimeMs(), "a standard Anthropic payload carries no timing");
         final var body = reqBody.get();
         assertTrue(body.contains("\"max_tokens\":64"));
         assertTrue(body.contains("be concise"), body);

@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.tamboui.tui.TuiConfig;
@@ -33,10 +34,12 @@ import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
@@ -62,13 +65,17 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -251,6 +258,100 @@ class TuiCommandRenderTest {
         awaitText("ready"); // agent state still first and untouched
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void completionArrowsMoveHighlightAndEnterAppliesIt() throws Exception {
+        // Up/Down on an open completion popup must move the highlight (not apply-and-reset
+        // to the first candidate), and Enter must then accept the highlighted candidate
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-completion-arrows-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // type "/model m" - the live completion popup opens with the mock models (m01..m30)
+        for (final var c : "/model m".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01"); // first candidate highlighted
+
+        // Down moves the highlight to the second candidate without touching the input
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.DOWN));
+        awaitText("> m02");
+        awaitText("/model m"); // the line is unchanged: arrows only cycle the highlight
+
+        // Enter accepts the highlighted candidate into the line
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("/model m02");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void promptIntegratedUpdatesTheQueuedPromptNotification() throws Exception {
+        // PromptIntegrated (a queued prompt picked up by the running turn) must land in the
+        // trailing notification slot with the remaining queue count, not in the leading status
+        final var shellRegistry = testRegistry();
+        final var turnStarted = new CountDownLatch(1);
+        final var releaseTurn = new CountDownLatch(1);
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                try {
+                    turnStarted.countDown();
+                    releaseTurn.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-prompt-integrated-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // start a live turn, then queue a second prompt while it runs
+        tuiRef.get().dispatch(new PasteEvent("first"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        assertTrue(
+                turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
+
+        tuiRef.get().dispatch(new PasteEvent("follow up"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("queued prompt (1 pending)");
+
+        // the loop picks the queued prompt up: the notification must reflect the integration
+        // (remaining count) while the leading agent state stays untouched - with the stub turn
+        // parked the queue still holds the prompt, so the remaining-count form is expected
+        final var sessionId = sid(shellRegistry);
+        shellRegistry.active(sessionId).frontend().onEvent(new AgentEvent.PromptIntegrated("follow up", sessionId));
+        awaitText("1 queued prompts still pending");
+        awaitText("thinking..."); // the leading agent state was not replaced by the integration notice
+
+        releaseTurn.countDown();
         uiThread.join(TIMEOUT_MS);
     }
 
@@ -452,11 +553,31 @@ class TuiCommandRenderTest {
             final Clock clock) {
         final var mapper = MockLlmServer.mapper();
         final var configuration = configuration();
+        return command(
+                shellRegistry,
+                agentLoop,
+                showThinking,
+                usageTracker,
+                todoStore,
+                clock,
+                new SubagentRegistry(configuration, new ProviderManager(configuration, mapper)));
+    }
+
+    private TuiCommand command(
+            final ShellRegistry shellRegistry,
+            final AgentLoop agentLoop,
+            final boolean showThinking,
+            final UsageTracker usageTracker,
+            final TodoStore todoStore,
+            final Clock clock,
+            final SubagentRegistry subagentRegistry) {
+        final var mapper = MockLlmServer.mapper();
+        final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
                 0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, 3500L, true, "unicode", "auto", "auto",
-                List.of(), null, true);
+                List.of(), null, true, 3, 10);
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -562,9 +683,18 @@ class TuiCommandRenderTest {
                 clock,
                 new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                 new ToolOutputFormat(formatMapper),
-                new BtwAnswerer(chatClient, sessionStore, configuration, new VirtualThreadExecutor(), null, null, null),
+                new BtwAnswerer(
+                        chatClient,
+                        sessionStore,
+                        configuration,
+                        new VirtualThreadExecutor(),
+                        new ToolCallMarkupStripper(),
+                        null,
+                        null,
+                        null),
                 tabManager,
-                new SubagentRegistry(configuration, providerManager),
+                subagentRegistry,
+                new ScrollService(tuiConfiguration),
                 null);
     }
 
@@ -912,6 +1042,51 @@ class TuiCommandRenderTest {
         awaitText("3 LLM");
         awaitText("1.5s");
         awaitText("session: 1 LLM calls");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void outputThroughputShowsNextToTheTurnMetrics() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var usageTracker = newUsageTracker();
+        usageTracker.record(new Usage(10, 5, 15, 0, 0));
+        final var command = command(shellRegistry, stubAgentLoop(), true, usageTracker);
+        uiThread = new Thread(command, "tui-tps-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(
+                3, 120, 400, 500, 2, 1500, new AgentEvent.Throughput(150, 3000, 0), sid(shellRegistry)));
+        awaitText("3 LLM");
+        awaitText("50.0 tok/s");
+
+        // a turn whose throughput cannot be measured shows no segment at all
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, sid(shellRegistry)));
+        awaitNoText("tok/s");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void serverSideThroughputIsShownNextToTheMeasuredOne() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var usageTracker = newUsageTracker();
+        usageTracker.record(new Usage(10, 5, 15, 0, 0));
+        final var command = command(shellRegistry, stubAgentLoop(), true, usageTracker);
+        uiThread = new Thread(command, "tui-real-tps-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.TurnMetrics(
+                3, 120, 400, 500, 2, 1500, new AgentEvent.Throughput(150, 3000, 4000), sid(shellRegistry)));
+        awaitText("50.0 tok/s (real 37.5 tok/s)");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -1439,6 +1614,63 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void subagentDetailModalRendersRegionsAndHonorsThinkingToggle() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var mapper = MockLlmServer.mapper();
+        final var configuration = subagentConfiguration();
+        final var subagentRegistry = new SubagentRegistry(configuration, new ProviderManager(configuration, mapper));
+        final var command = command(
+                shellRegistry,
+                stubAgentLoop(),
+                true,
+                newUsageTracker(),
+                new TodoStore(configuration, mapper),
+                Clock.systemUTC(),
+                subagentRegistry);
+        uiThread = new Thread(command, "tui-subagents-detail-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a real tracked subagent with a captured thought/answer/tool stream
+        final var sessionId = sid(shellRegistry);
+        final var sub =
+                subagentRegistry.start(sessionId, "do the thing", "child").orElseThrow();
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("kid thinks", sessionId, sub.id(), "child"));
+        shellRegistry.onEvent(new AgentEvent.TextDelta("kid answer", sessionId, sub.id(), "child"));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", sessionId, sub.id(), "child"));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("grep", "match line", true, sessionId, sub.id(), "child"));
+
+        // the detail view renders the captured regions - never the raw yca markers
+        tuiRef.get().dispatch(new PasteEvent("/subagents " + sub.id()));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("kid thinks");
+        awaitText("kid answer");
+        awaitText("match line");
+        awaitNoText("<<<yca:");
+
+        // Ctrl+T hides the reasoning in the modal too; the overlay consumes every
+        // key while open, so the toggle happens with the modal closed and reopened
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
+        tuiRef.get().dispatch(new PasteEvent("/subagents " + sub.id()));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitNoText("kid thinks");
+        awaitText("kid answer");
+
+        // ... and it comes back once thinking is shown again
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
+        tuiRef.get().dispatch(new PasteEvent("/subagents " + sub.id()));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("kid thinks");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
     void modelPickerScrollsBeyondTheVisibleWindow() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
@@ -1467,6 +1699,145 @@ class TuiCommandRenderTest {
         // Esc cancels the wizard and closes the picker
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("type to filter | Up/Down move | Enter select | Esc cancel");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void modelPickerWheelScrollsTheList() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-picker-wheel-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("/model"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("type to filter | Up/Down move | Enter select | Esc cancel");
+        awaitText("m01");
+        awaitText("▴ 1/30 ▾");
+
+        // one wheel notch scrolls by yca.tui.scrollLines (3): 8 notches = 24 rows
+        for (int i = 0; i < 8; i++) {
+            tuiRef.get().dispatch(MouseEvent.scrollDown(10, 10));
+        }
+        awaitTextGone("m01");
+        awaitText("m24");
+        awaitText("/30 ▾"); // the scroll hint still tracks the 30-entry list
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("type to filter | Up/Down move | Enter select | Esc cancel");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void wheelScrollsTheToolOutputOverlayNotTheTranscript() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-wheel-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a conversation long enough to overflow the 40-row screen: a wheel leaked to the
+        // transcript would be visible (the top row would leave the viewport)
+        final var toolOutput =
+                IntStream.range(0, 60).mapToObj(i -> "tool line " + i).collect(Collectors.joining("\n"));
+        final var transcript =
+                IntStream.range(0, 60).mapToObj(i -> "transcript line " + i).collect(Collectors.joining("\n"));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", toolOutput, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", toolOutput, true, sid(shellRegistry)));
+        awaitTextWithin("✓ bash", TIMEOUT_MS); // condensed tool block
+
+        // the transcript now overflows the screen: TurnDone appends and auto-follows to the
+        // bottom, away from the tool block and the first transcript line
+        shellRegistry.onEvent(new AgentEvent.TurnDone(transcript, sid(shellRegistry)));
+        awaitTextWithin("transcript line 59", TIMEOUT_MS);
+
+        // prove the transcript really scrolls, otherwise the "does not move" guard below is void:
+        // scrolled to the very top, the clickable tool block is visible again
+        for (int i = 0; i < 5; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_UP));
+        }
+        awaitText("transcript line 0");
+        awaitText("✓ bash"); // the block is above the transcript lines: both at the top
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_DOWN));
+        awaitTextGone("transcript line 0");
+        for (int i = 0; i < 5; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_UP));
+        }
+        awaitText("transcript line 0");
+
+        // open the tool output overlay: a wheel during a modal must scroll the modal only
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+        awaitText("tool line 0");
+        awaitText("full output");
+        for (int i = 0; i < 5; i++) {
+            tuiRef.get().dispatch(MouseEvent.scrollDown(10, 10));
+        }
+        // the modal scrolled ...
+        awaitTextGone("tool line 0");
+
+        // ... and the transcript did not: a leaked wheel would have moved it down by 15 rows,
+        // so once the modal is closed the first transcript line must still be on screen
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("full output");
+        awaitText("transcript line 0");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void btwWheelScrollsItsDetailNotTheTranscript() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-btw-wheel-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a conversation long enough to overflow the 40-row screen: a wheel leaked to the
+        // transcript would be visible (the top row would leave the viewport)
+        final var transcript =
+                IntStream.range(0, 60).mapToObj(i -> "transcript line " + i).collect(Collectors.joining("\n"));
+        shellRegistry.onEvent(new AgentEvent.TurnDone(transcript, sid(shellRegistry)));
+        awaitTextWithin("transcript line 59", TIMEOUT_MS); // appended, auto-followed to the bottom
+
+        // bring the first transcript line back on screen: it must stay put while wheeling
+        for (int i = 0; i < 5; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.PAGE_UP));
+        }
+        awaitText("transcript line 0");
+
+        // a tall btw answer makes the modal scrollable, with a unique marker on its first line
+        llm.answer("FIRSTMARKER\n\n"
+                + IntStream.range(0, 40).mapToObj(i -> "btw detail line " + i).collect(Collectors.joining("\n\n")));
+        tuiRef.get().dispatch(new PasteEvent("/btw why?"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText(" btw "); // modal title
+        awaitText("Q: why?");
+        awaitTextWithin("FIRSTMARKER", TIMEOUT_MS);
+
+        // wheeling must scroll the btw modal, never the transcript hidden behind it
+        for (int i = 0; i < 4; i++) {
+            tuiRef.get().dispatch(MouseEvent.scrollDown(10, 10));
+        }
+        awaitTextGone("FIRSTMARKER"); // the detail scrolled: its first line left the window
+
+        // the btw modal covered the first transcript rows, so the transcript guard runs after it
+        // closes: a leaked wheel would have moved it down by 12 rows
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone(" btw ");
+        awaitText("transcript line 0");
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
@@ -1568,6 +1939,27 @@ class TuiCommandRenderTest {
                 .build();
     }
 
+    /**
+     * Same as {@link #configuration()} but with sub-agents enabled and enough
+     * headroom for the main agent (the effective limit is the model's max
+     * concurrency minus one): the default test config pins
+     * {@code yca.llm.maxConcurrent=1}, which makes {@code SubagentRegistry}
+     * compute zero free slots.
+     */
+    private CodingAgentConfiguration subagentConfiguration() {
+        final var map = new HashMap<String, String>();
+        map.put("yca.storageHome", temp.resolve("home").toString());
+        map.put("yca.provider.providers.length", "1");
+        map.put("yca.provider.providers.0.id", "default");
+        map.put("yca.provider.providers.0.baseUrl", llm.baseUrl());
+        map.put("yca.provider.providers.0.apiKey", "test-key");
+        map.put("yca.provider.providers.0.model", "test-model");
+        map.put("yca.llm.maxConcurrent", "4");
+        map.put("yca.subagents.enabled", "true");
+        map.put("yca.subagents.maxConcurrent", "4");
+        return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key))).get();
+    }
+
     private void awaitTui() throws InterruptedException {
         while (tuiRef.get() == null) {
             assertTrue(backend.awaitFrame(1_000), "tui runner was not created in time");
@@ -1580,6 +1972,18 @@ class TuiCommandRenderTest {
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
             screen = backend.text();
         }
+    }
+
+    /**
+     * Waits for a few frames and fails when {@code unexpected} is still on screen: for a segment
+     * that must disappear, one rendered frame without it is enough.
+     */
+    private void awaitNoText(final String unexpected) throws InterruptedException {
+        for (var i = 0; i < 3 && backend.text().contains(unexpected); i++) {
+            assertTrue(
+                    backend.awaitFrame(1_000), "no frame received while waiting for '" + unexpected + "' to be gone");
+        }
+        assertFalse(backend.text().contains(unexpected), "'" + unexpected + "' should not be rendered");
     }
 
     /**

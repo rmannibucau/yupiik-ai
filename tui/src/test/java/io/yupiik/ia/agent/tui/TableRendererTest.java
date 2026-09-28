@@ -113,4 +113,37 @@ class TableRendererTest {
         assertEquals(4, TableRenderer.displayWidth("A❤BC"));
         assertEquals(5, TableRenderer.displayWidth("A❤️BC"));
     }
+
+    @Test
+    void emptyStringHasZeroDisplayWidth() {
+        // an empty continuation cell must not consume a display cell, otherwise
+        // wrapped rows whose last column is empty end up one column short
+        assertEquals(0, TableRenderer.displayWidth(""));
+        assertEquals(0, TableRenderer.displayWidth(null));
+    }
+
+    @Test
+    void wrappedRowsWithEmptyTrailingCellsKeepTheSameWidthAsBorders() {
+        // last column wraps and the continuation row's cells are empty: every
+        // physical grid row (and the trailing bar) must match the border width
+        final var lines = renderer.render(
+                List.of("name", "value"),
+                List.of(List.of("T8", "alpha beta gamma delta")),
+                20,
+                List.of(),
+                List.of(),
+                dev.tamboui.style.Style.EMPTY);
+        final var texts = lines.stream().map(TableRendererTest::plain).toList();
+        final var border = texts.get(0).length();
+        for (final var text : texts) {
+            assertEquals(border, text.length(), "line has a different visible width: " + text);
+        }
+        // wrapped body rows (starting with a bar) must end with the right border
+        // bar, exactly like non-wrapped rows - this is the off-by-one regression
+        for (final var text : texts) {
+            if (text.startsWith("│")) {
+                assertTrue(text.endsWith("│"), "row must end with a border bar: " + text);
+            }
+        }
+    }
 }

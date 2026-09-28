@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -51,12 +52,14 @@ public class BtwAnswerer {
             "You answer quick side questions ('by the way') asked while a coding agent session is running. "
                     + "The session conversation is provided for context; the reply being streamed, if any, is not part of it. "
                     + "You have no tools: answer from the provided context and your own knowledge only, and never claim "
-                    + "to have executed anything. Keep the answer concise and in markdown.";
+                    + "to have executed anything. Never emit tool calls or tool-call markup (DSML or similar), even though "
+                    + "the context shows past tool usage. Keep the answer concise and in markdown.";
 
     private final ChatClient chatClient;
     private final SessionStore sessionStore;
     private final CodingAgentConfiguration configuration;
     private final VirtualThreadExecutor executor;
+    private final ToolCallMarkupStripper toolCallMarkup;
     private final JsonMapper mapper;
     private final ProviderManager providerManager;
     private final Clock clock;
@@ -69,6 +72,7 @@ public class BtwAnswerer {
             final SessionStore sessionStore,
             final CodingAgentConfiguration configuration,
             final VirtualThreadExecutor executor,
+            final ToolCallMarkupStripper toolCallMarkup,
             final JsonMapper mapper,
             final ProviderManager providerManager,
             final Clock clock) {
@@ -76,6 +80,7 @@ public class BtwAnswerer {
         this.sessionStore = sessionStore;
         this.configuration = configuration;
         this.executor = executor;
+        this.toolCallMarkup = toolCallMarkup;
         this.mapper = mapper;
         this.providerManager = providerManager;
         this.clock = clock;
@@ -122,12 +127,26 @@ public class BtwAnswerer {
             usage.recordAuxiliary(res.usage());
         }
         final var content = res.message() == null ? null : res.message().content();
-        final var answer = content == null ? "" : String.valueOf(content);
+        final var raw = content == null ? "" : String.valueOf(content);
+        final var answer = toolCallMarkup.strip(raw);
         if (answer.isBlank()) {
-            throw new IOException("btw got an empty answer");
+            if (raw.isBlank()) {
+                throw new IOException("btw got an empty answer");
+            }
+            // The model emitted tool-call markup with no prose at all: surface the glitch
+            // instead of an empty modal, and do not replay it into the next side questions.
+            return glitchNote(raw);
         }
         remember(conf, new BtwExchange(question, answer));
         return answer;
+    }
+
+    /** Renders a tool-call-only answer as a note plus the raw output, in markdown. */
+    private String glitchNote(final String raw) {
+        return "> The model tried to call a tool instead of answering this side question. Raw output:\n\n"
+                + "```\n"
+                + raw
+                + "\n```";
     }
 
     /** The client to use plus the settings riding the call: the shared one with no override, or a dedicated one. */

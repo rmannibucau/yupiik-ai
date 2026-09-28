@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -88,6 +89,36 @@ class TranscriptRendererTest {
         assertEquals(a.size(), b.size());
         assertEquals("before", b.get(0));
         assertEquals("after line", b.get(b.size() - 1));
+    }
+
+    @Test
+    void incrementalStreamingMatchesFullRenderAtEveryStep() {
+        final var full =
+                new MarkdownLines().render("alpha\nbeta\ngamma\ndelta", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var soFar = new StringBuilder();
+        final var seen = new ArrayList<String>();
+        for (final var line : List.of("alpha", "beta", "gamma", "delta")) {
+            if (!soFar.isEmpty()) {
+                soFar.append('\n');
+            }
+            soFar.append(line);
+            seen.add(line);
+            assertEquals(
+                    seen,
+                    plain(renderer.renderRegion(soFar.toString(), 80, Style.EMPTY, MarkdownStyles.DEFAULTS)),
+                    () -> "frame after appending '" + line + "'");
+        }
+        // the incremental (prefix-cached) renderer must agree with a full render at the end
+        assertEquals(plain(full), seen);
+    }
+
+    @Test
+    void multiLineDeltaAppendsThroughTheDeltaPath() {
+        final var a = plain(renderer.renderRegion("one\ntwo", 80, Style.EMPTY, MarkdownStyles.DEFAULTS));
+        assertEquals(List.of("one", "two"), a);
+        // several lines flushed between two frames: all land through the delta path
+        final var b = plain(renderer.renderRegion("one\ntwo\nthree\nfour", 80, Style.EMPTY, MarkdownStyles.DEFAULTS));
+        assertEquals(List.of("one", "two", "three", "four"), b);
     }
 
     private static List<String> plain(final List<Line> lines) {

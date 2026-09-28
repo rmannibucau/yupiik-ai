@@ -348,8 +348,11 @@ Project instructions and skills are loaded into the system prompt:
   copies it to the system clipboard on release; double/triple-click select a
   word / a whole row, `Ctrl+Shift+C` re-copies the selection and `Esc` clears
   it. Copying uses OSC 52 so it requires a terminal supporting it (kitty,
-  alacritty, iTerm2, Windows Terminal, tmux with clipboard passthrough, ...);
-  mouse wheel scrolling is unaffected
+  alacritty, iTerm2, Windows Terminal, tmux with clipboard passthrough, ...)
+- The mouse wheel scrolls the transcript and every modal or overlay (approval,
+  `btw`, `/model`, `/tabs`, shortcuts, subagents, search, full tool output,
+  last error); the amount is configurable with `yca.tui.scrollLines` (per notch,
+  default 3) and `yca.tui.scrollPageLines` (per `PgUp`/`PgDn`, default 10)
 - While a tool runs, a line under the input shows `calling <command>` with a
   spinner (and `esc to interrupt` on the right) and its output is streamed live
   into the transcript

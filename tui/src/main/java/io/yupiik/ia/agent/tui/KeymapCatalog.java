@@ -53,6 +53,7 @@ public final class KeymapCatalog {
                 new Binding("Alt+K/J", "prev/next tool call (portable)", "View", false),
                 new Binding("Alt+C", "copy last code block", "View", false),
                 new Binding("PgUp/PgDn", "scroll", "View", false),
+                new Binding("Mouse wheel", "scroll (view and overlays)", "View", false),
                 new Binding("Ctrl+Home/End", "jump top/bottom", "View", false),
                 new Binding("Ctrl+Shift+C", "copy selection", "View", false),
                 new Binding("Ctrl+T", "toggle thinking", "View", false),
@@ -86,7 +87,8 @@ public final class KeymapCatalog {
     /** Compact hints while an overlay is open. */
     public static List<Binding> overlayHints() {
         return List.of(
-                new Binding("Esc", "close", "Overlays", true), new Binding("Up/Down", "scroll", "Overlays", true));
+                new Binding("Esc", "close", "Overlays", true),
+                new Binding("Wheel/Up/Down", "scroll", "Overlays", true));
     }
 
     /** Compact hints in the idle state. */

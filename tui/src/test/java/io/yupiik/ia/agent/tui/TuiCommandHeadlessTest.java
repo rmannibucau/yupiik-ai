@@ -40,6 +40,7 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -353,9 +354,17 @@ class TuiCommandHeadlessTest {
                     new AskUserCardRenderer(new AskUserAnswersFormatter(formatMapper)),
                     new ToolOutputFormat(formatMapper),
                     new BtwAnswerer(
-                            d.chatClient(), d.sessionStore(), d.configuration(), d.executor(), null, null, null),
+                            d.chatClient(),
+                            d.sessionStore(),
+                            d.configuration(),
+                            d.executor(),
+                            new ToolCallMarkupStripper(),
+                            null,
+                            null,
+                            null),
                     tabManager,
                     new SubagentRegistry(d.configuration(), d.providerManager()),
+                    new ScrollService(d.tuiConfiguration()),
                     scheduler.instance());
         }
     }

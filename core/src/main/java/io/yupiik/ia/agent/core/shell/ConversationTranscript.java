@@ -46,6 +46,13 @@ public class ConversationTranscript {
     private final StringBuilder pending = new StringBuilder();
     private final StringBuilder thinking = new StringBuilder();
     /**
+     * Whether the {@code **Assistant**} label was already emitted for the current
+     * turn: a turn streams its answer in several chunks (one per reasoning round,
+     * split by tool calls) but is labelled once, so the transcript reads as a
+     * single answer interleaved with its tools and thoughts.
+     */
+    private boolean answerHeaderWritten;
+    /**
      * Pending tool executions, one {@link RunningTool} per started-not-finished
      * call. Keyed by tool name with a FIFO per name so parallel read-only tools
      * (started/finished emitted by worker threads) each keep their own command,
@@ -61,6 +68,25 @@ public class ConversationTranscript {
     private volatile int estimatedContext;
     private volatile int contextPercent;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
+
+    /**
+     * Monotonic counter bumped on every mutation that can change what
+     * {@link #markdown(String, String)} renders (the transcript, the pending
+     * answer tail, the thinking buffer or the running tools). {@code markdown()}
+     * caches its built string against this version, so render loops that call it
+     * once per tick with unchanged content are O(1) instead of re-concatenating
+     * the whole transcript every frame (one of the busy-frame CPU hot spots).
+     */
+    private volatile long contentVersion;
+
+    private long markdownVersion = -1;
+    private String markdownSpinner;
+    private String markdownCache;
+
+    /** Marks the transcript-markdown inputs as changed so {@code markdown()} rebuilds its cache. */
+    private synchronized void touch() {
+        contentVersion++;
+    }
 
     /** True while the last failure was a retryable LLM error; the status clears on the next progress event. */
     private volatile boolean retryableErrorSeen;
@@ -154,6 +180,7 @@ public class ConversationTranscript {
     private volatile long turnToolWallMs;
     private volatile int turnToolsRun;
     private volatile long turnDurationMs;
+    private volatile AgentEvent.Throughput turnThroughput = AgentEvent.Throughput.EMPTY;
 
     public synchronized void onEvent(final AgentEvent event) {
         // subagent streams never pollute the parent conversation: they are captured
@@ -187,16 +214,19 @@ public class ConversationTranscript {
                     pending.append(segment.text());
                 }
             }
+            touch();
         } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
             pending.setLength(0);
             inlineThink.reset();
             // keep the reasoning visible: flush instead of dropping it, the model resets
             // its output right before the final answer streams
             flushThinking();
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             thinking.append(delta);
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.ToolStarted(
@@ -206,9 +236,13 @@ public class ConversationTranscript {
                         String subagentId,
                         String subagentName)) {
             flushThinking();
+            // the answer streamed before the call is now final: write it in place so the
+            // tool block that follows cannot jump on top of it
+            flushPending();
             runningTools
                     .computeIfAbsent(name, n -> new ArrayDeque<>())
                     .addLast(new RunningTool(name, toolCommand(args)));
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.ToolStream(
@@ -225,6 +259,7 @@ public class ConversationTranscript {
                 if (tool.stream.length() > MAX_EMBEDDED_TOOL_CHARS) {
                     tool.stream.delete(0, tool.stream.length() - MAX_EMBEDDED_TOOL_CHARS);
                 }
+                touch();
             }
         } else if (event
                 instanceof
@@ -240,6 +275,9 @@ public class ConversationTranscript {
             if (deque != null && deque.isEmpty()) {
                 runningTools.remove(name);
             }
+            // defensive: a finish without its start (parallel batches emit from
+            // worker threads) still has to close the answer chunk before the block
+            flushPending();
             // one ordinal per finished call (even when nothing is rendered) so the
             // TUI's toolCallCount() mapping to cards stays exact
             final var ordinal = ++toolCallOrdinal;
@@ -279,6 +317,7 @@ public class ConversationTranscript {
                         .append(TOOL_END)
                         .append('\n');
             }
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.UsageUpdated(
@@ -307,6 +346,7 @@ public class ConversationTranscript {
                     .append(" applied (")
                     .append(mode.toLowerCase(java.util.Locale.ROOT))
                     .append(")\n");
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.Notice(
@@ -323,6 +363,7 @@ public class ConversationTranscript {
                         case INFO -> "ⓘ";
                     };
             transcript.append("\n\n> ").append(tag).append(": ").append(message).append("\n");
+            touch();
             retryableErrorSeen |= isRetryableLlmError(message);
             if (level == AgentEvent.Notice.Level.ERROR) {
                 status = "error: " + message;
@@ -337,11 +378,13 @@ public class ConversationTranscript {
                 instanceof
                 AgentEvent.PromptIntegrated(String text, String sessionId, String subagentId, String subagentName)) {
             flushThinking();
-            pending.setLength(0);
+            // the in-progress answer belongs above the prompt that just cut it off
+            flushPending();
             thinking.setLength(0);
             inlineThink.reset();
             transcript.append("\n\n---\n\n**You**\n\n").append(text).append('\n');
             status = "queued prompt integrated";
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.TurnMetrics(
@@ -351,6 +394,7 @@ public class ConversationTranscript {
                         long toolWallMs,
                         int toolsRun,
                         long turnDurationMs,
+                        AgentEvent.Throughput throughput,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
@@ -360,6 +404,7 @@ public class ConversationTranscript {
             turnToolWallMs = toolWallMs;
             turnToolsRun = toolsRun;
             this.turnDurationMs = turnDurationMs;
+            turnThroughput = throughput == null ? AgentEvent.Throughput.EMPTY : throughput;
         } else if (event
                 instanceof
                 AgentEvent.TurnDone(String content, String sessionId, String subagentId, String subagentName)) {
@@ -377,22 +422,36 @@ public class ConversationTranscript {
                         .append(THOUGHT_END)
                         .append('\n');
             }
-            transcript.append("\n\n**Assistant**\n\n").append(parts.visible()).append('\n');
+            // content is only the last assistant message: it supersedes the pending
+            // tail of this round (already in the transcript from the flushes above),
+            // so the label is only re-emitted when the turn never streamed text
+            if (!answerHeaderWritten) {
+                answerHeaderWritten = true;
+                transcript.append("\n\n**Assistant**\n\n");
+            } else {
+                transcript.append("\n\n");
+            }
+            transcript.append(parts.visible()).append('\n');
             pending.setLength(0);
             thinking.setLength(0);
             inlineThink.reset();
+            answerHeaderWritten = false;
             busy = false;
             status = "ready";
+            touch();
         } else if (event
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
             // keep the reasoning readable even when the turn fails
             flushThinking();
+            // ... and the answer it already streamed, above the error line
+            flushPending();
             inlineThink.reset();
             transcript.append("\n\n> error: ").append(message).append("\n");
-            pending.setLength(0);
+            answerHeaderWritten = false;
             busy = false;
             status = "error: " + message;
             retryableErrorSeen = isRetryableLlmError(message);
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.SubagentStarted(String task, String sessionId, String subagentId, String subagentName)) {
@@ -405,6 +464,7 @@ public class ConversationTranscript {
                     .append("` started: ")
                     .append(firstLine(task))
                     .append('\n');
+            touch();
         } else if (event
                 instanceof
                 AgentEvent.SubagentCompleted(
@@ -419,6 +479,7 @@ public class ConversationTranscript {
                 transcript.append(": ").append(firstLine(summary));
             }
             transcript.append('\n');
+            touch();
         }
     }
 
@@ -448,14 +509,65 @@ public class ConversationTranscript {
                 .append('\n')
                 .append(THOUGHT_END)
                 .append('\n');
+        touch();
+    }
+
+    /**
+     * Writes the answer streamed so far into the transcript, in place, and clears
+     * the buffer. The reasoning counterpart is {@link #flushThinking()}; both are
+     * called at the turn boundaries (a tool call, an integrated prompt, a failed
+     * turn) because {@code markdown()} only ever renders the pending tail at the
+     * very end of the pane: without this the tool blocks and the thoughts
+     * streamed in between would be rendered above the answer they followed, and
+     * everything the model said before calling a tool would be lost when the turn
+     * ends (only the last assistant message reaches {@code TurnDone}).
+     * <p>
+     * Deliberately not called on {@code TextDelta} (that would close a paragraph
+     * per delta) nor on {@code TurnDone} / {@code TextReset}, where the pending
+     * tail is superseded by the full content the provider sends again.
+     * <p>
+     * The {@code **Assistant**} label is written once per turn: a turn streams its
+     * answer in as many chunks as it has reasoning rounds, and they are all part
+     * of the same answer.
+     */
+    public synchronized void flushPending() {
+        if (pending.isEmpty()) {
+            return;
+        }
+        final var text = pending.toString().stripTrailing();
+        pending.setLength(0);
+        if (text.isBlank()) {
+            return;
+        }
+        transcript.append("\n\n");
+        if (!answerHeaderWritten) {
+            answerHeaderWritten = true;
+            transcript.append("**Assistant**\n\n");
+        }
+        transcript.append(text).append('\n');
+        touch();
     }
 
     public synchronized String markdown(final String spinner, final String fallback) {
+        // hot path: nothing changed since the last build -> reuse the cached string
+        // instead of re-concatenating the whole transcript on every render tick
+        if (markdownCache != null
+                && markdownVersion == contentVersion
+                && java.util.Objects.equals(markdownSpinner, spinner)) {
+            return markdownCache;
+        }
         final var sb = new StringBuilder(transcript);
         if (busy && !pending.isEmpty()) {
             // pending only carries visible text: inline <think> content is already
-            // classified into the thinking buffer by the stream splitter
-            sb.append("\n\n**Assistant**\n\n").append(pending);
+            // classified into the thinking buffer by the stream splitter. It renders
+            // last because that is where it happened: everything the turn produced
+            // before this chunk was already flushed into the transcript in place.
+            sb.append("\n\n");
+            if (!answerHeaderWritten) {
+                // same turn-scoped label as flushPending(): a turn streams one answer
+                sb.append("**Assistant**\n\n");
+            }
+            sb.append(pending);
         }
         // one running block per pending tool: parallel read-only tools each show
         // their own command and streamed output instead of aliasing a single slot
@@ -477,7 +589,11 @@ public class ConversationTranscript {
             }
         }
         final var md = sb.toString().strip();
-        return md.isBlank() ? fallback : md;
+        final var result = md.isBlank() ? fallback : md;
+        markdownVersion = contentVersion;
+        markdownSpinner = spinner;
+        markdownCache = result;
+        return result;
     }
 
     public record Region(String text, boolean thought, boolean tool) {}
@@ -539,6 +655,7 @@ public class ConversationTranscript {
         kept = dropDanglingRegion(kept, TOOL_BEGIN, TOOL_END);
         transcript.setLength(0);
         transcript.append(kept.stripLeading());
+        touch();
     }
 
     /**
@@ -651,6 +768,7 @@ public class ConversationTranscript {
                 default -> {}
             }
         }
+        touch();
         return transcript.substring(start);
     }
 
@@ -658,6 +776,8 @@ public class ConversationTranscript {
         transcript.setLength(0);
         thinking.setLength(0);
         inlineThink.reset();
+        answerHeaderWritten = false;
+        touch();
     }
 
     public synchronized void startUserTurn(final String text) {
@@ -665,11 +785,13 @@ public class ConversationTranscript {
         pending.setLength(0);
         thinking.setLength(0);
         inlineThink.reset();
+        answerHeaderWritten = false;
         // NOTE: retryableErrorSeen is intentionally NOT cleared here: a stale
         // "error: ..." status from the previous turn must survive until the new
         // turn actually makes progress (the retry), then the auto-clear in
         // onEvent() drops it from the bar
         busy = true;
+        touch();
     }
 
     public synchronized void reset() {
@@ -677,6 +799,7 @@ public class ConversationTranscript {
         pending.setLength(0);
         thinking.setLength(0);
         inlineThink.reset();
+        answerHeaderWritten = false;
         runningTools.clear();
         toolCallOrdinal = 0;
         retryableErrorSeen = false;
@@ -693,6 +816,8 @@ public class ConversationTranscript {
         turnToolWallMs = 0;
         turnToolsRun = 0;
         turnDurationMs = 0;
+        turnThroughput = AgentEvent.Throughput.EMPTY;
+        touch();
     }
 
     /**
@@ -703,6 +828,7 @@ public class ConversationTranscript {
      */
     public synchronized void appendTranscript(final String markdown) {
         transcript.append(markdown);
+        touch();
     }
 
     public StringBuilder transcript() {
@@ -722,7 +848,11 @@ public class ConversationTranscript {
     }
 
     public void busy(final boolean value) {
-        this.busy = value;
+        // the busy flag gates the pending tail in markdown(): a flip must invalidate the cache
+        if (this.busy != value) {
+            this.busy = value;
+            touch();
+        }
     }
 
     public String status() {
@@ -800,6 +930,22 @@ public class ConversationTranscript {
 
     public int turnToolsRun() {
         return turnToolsRun;
+    }
+
+    /**
+     * Output throughput of the current turn.
+     *
+     * @return the throughput, never {@code null} ({@link AgentEvent.Throughput#EMPTY} when unknown).
+     */
+    public AgentEvent.Throughput turnThroughput() {
+        return turnThroughput;
+    }
+
+    /**
+     * @return the turn output tokens per second, {@code 0} when not measurable.
+     */
+    public double turnOutputTokensPerSecond() {
+        return turnThroughput.tokensPerSecond();
     }
 
     /** One in-flight tool execution: its command label, streamed output and start clock. */

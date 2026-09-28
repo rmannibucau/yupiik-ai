@@ -414,6 +414,80 @@ class AnsiShellFrontendTest {
     }
 
     @Test
+    void anotherSubagentThoughtStartsItsOwnLineAndHeader() {
+        final var frontend = frontend(false, true, true);
+        frontend.beginTurn();
+
+        // the parent turn and a spawned sub-agent reason concurrently: their deltas
+        // must not be spliced into a single line, and the second voice needs its
+        // own 'thinking...' header (the first one must not suppress it)
+        frontend.onEvent(new AgentEvent.ThinkingDelta("parent reasoning", "s1"));
+        frontend.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "kid"));
+
+        final var lines = stripAnsi(err.toString(StandardCharsets.UTF_8)).split("\n", -1);
+        assertEquals(4, lines.length, () -> "unexpected stderr: " + String.join(" | ", lines));
+        assertEquals("thinking...", lines[0]);
+        assertEquals("parent reasoning", lines[1]);
+        assertEquals("[kid] thinking...", lines[2]);
+        assertEquals("[kid] child reasoning", lines[3]);
+    }
+
+    /**
+     * Regression test for garbled reasoning: a spawned sub-agent streams on its own
+     * thread while the parent turn keeps going, and thought deltas are printed
+     * without a trailing newline. The stderr line is therefore owned by one actor
+     * at a time: a delta from another actor starts below it instead of in it.
+     */
+    @Test
+    void concurrentThoughtsNeverShareALine() throws InterruptedException {
+        final var frontend = frontend(false, true, true);
+        frontend.beginTurn();
+        for (int i = 0; i < 200; i++) {
+            final var barrier = new CyclicBarrier(2);
+            final var parent = Thread.ofVirtual().start(() -> {
+                try {
+                    barrier.await();
+                } catch (final Exception e) {
+                    return;
+                }
+                for (int j = 0; j < 20; j++) {
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("P" + j + " ", "s1"));
+                }
+            });
+            final var child = Thread.ofVirtual().start(() -> {
+                try {
+                    barrier.await();
+                } catch (final Exception e) {
+                    return;
+                }
+                for (int j = 0; j < 20; j++) {
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("C" + j + " ", "s1", "sub-1", "kid"));
+                }
+            });
+            parent.join();
+            child.join();
+        }
+
+        final var stderr = stripAnsi(err.toString(StandardCharsets.UTF_8));
+        final var lines = stderr.split("\n", -1);
+        assertTrue(lines.length > 2, "the race produced no reasoning to check: " + stderr);
+        for (final var line : lines) {
+            // P*/C* are the per-actor delta tokens, one line may only carry one voice
+            final var parent = line.matches(".*P\\d+ .*");
+            final var child = line.matches(".*C\\d+ .*");
+            assertFalse(parent && child, () -> "two thoughts spliced into one line: \"" + line + "\" in: " + stderr);
+            // and a round header is never written on top of another voice's thought
+            assertFalse(
+                    line.contains("thinking...") && (parent || child),
+                    () -> "a 'thinking...' header glued to a thought line: \"" + line + "\" in: " + stderr);
+        }
+    }
+
+    private static String stripAnsi(final String text) {
+        return text.replaceAll("\u001b\\[[0-9;]*m", "");
+    }
+
+    @Test
     void replayedTranscriptDimsThoughtAndToolRegions() {
         final var frontend = frontend(new MarkdownColorizer(true), false, true, ToolOutputVisibility.SHOWN);
         frontend.transcript(ConversationTranscript.THOUGHT_BEGIN + "\n**Thinking**\n\nsecret\n"

@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
@@ -163,6 +165,34 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void markdownIsCachedUntilContentActuallyChanges() {
+        final var t = new ConversationTranscript();
+        final var welcome = "> welcome";
+        assertEquals(welcome, t.markdown("|", welcome), "blank transcript renders the fallback");
+
+        t.appendTranscript("\n**Assistant**\n\nhello\n");
+        final var second = t.markdown("|", welcome);
+        final var third = t.markdown("|", welcome);
+        assertSame(second, third, "no mutation -> the same cached String instance is reused (O(1) per-tick path)");
+
+        t.appendTranscript("\nmore\n");
+        assertNotSame(third, t.markdown("|", welcome), "a mutation must invalidate the markdown cache");
+        assertTrue(t.markdown("|", welcome).contains("more"));
+    }
+
+    @Test
+    void markdownCacheIsSpinnerSensitiveAndStreamEventsRebuild() {
+        final var t = new ConversationTranscript();
+        t.appendTranscript("**Assistant**\n\nhi\n");
+        final var a = t.markdown("|", "");
+        final var b = t.markdown("*", "");
+        assertNotSame(a, b, "a different spinner marker must rebuild the running-tool header");
+        t.onEvent(new AgentEvent.ThinkingDelta("hm", "s1"));
+        final var c = t.markdown("|", "");
+        assertNotSame(a, c, "a thinking delta must invalidate the cache");
+    }
+
+    @Test
     void turnMetricsKeepDurationAndResetClearsIt() {
         final var t = new ConversationTranscript();
         t.onEvent(new AgentEvent.TurnMetrics(3, 120, 400, 500, 2, 1500, "s1"));
@@ -175,6 +205,120 @@ class ConversationTranscriptTest {
         t.reset();
         assertEquals(0, t.turnDurationMs());
         assertEquals("", t.thinkingText());
+    }
+
+    @Test
+    void turnThroughputIsExposedAndResetClearsIt() {
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.TurnMetrics(1, 0, 0, 0, 0, 900, new AgentEvent.Throughput(150, 3000, 4000), "s1"));
+        assertEquals(150, t.turnThroughput().outputTokens());
+        assertEquals(50d, t.turnOutputTokensPerSecond(), 0.001d, "150 tokens over 3s of generation");
+        assertEquals(37.5d, t.turnThroughput().reportedTokensPerSecond(), 0.001d, "the server view stays available");
+
+        t.reset();
+        assertEquals(0, t.turnOutputTokensPerSecond());
+        assertFalse(t.turnThroughput().measurable());
+    }
+
+    @Test
+    void multiRoundTurnStaysChronologicalAndKeepsTheAnswersSupersededByTools() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        // round 1: think, say something, call a tool
+        t.onEvent(new AgentEvent.ThinkingDelta("first I read the file", "s1"));
+        t.onEvent(new AgentEvent.TextDelta("let me look", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true, "s1"));
+        // round 2: think again, then the real answer (TurnDone carries it in full)
+        t.onEvent(new AgentEvent.ThinkingDelta("now I answer", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("here is the answer", "s1"));
+
+        final var md = t.transcript().toString();
+        // chronological: thought, what it said before the call, the tool, the final thought, the answer
+        assertOrdered(
+                md,
+                "first I read the file",
+                "let me look",
+                "*streaming `read_file`",
+                "now I answer",
+                "here is the answer");
+        // one label for the whole turn, not one per chunk
+        assertEquals(1, countOccurrences(md, "**Assistant**"), md);
+        // what the model said before calling the tool is not lost when the turn ends
+        assertTrue(md.contains("**Assistant**\n\nlet me look"), md);
+    }
+
+    @Test
+    void liveAnswerRendersAfterTheToolItFollowed() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("first part", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("bash", "a.txt", true, "s1"));
+        t.onEvent(new AgentEvent.ThinkingDelta("hmm", "s1"));
+        t.onEvent(new AgentEvent.TextDelta(" second part", "s1"));
+
+        // the finished tool is part of the transcript, the streaming tail is not
+        final var md = t.markdown("|", "welcome");
+        assertOrdered(md, "**Assistant**\n\nfirst part", "*streaming `bash`", "hmm", " second part");
+        // the live tail does not re-label the answer
+        assertEquals(1, countOccurrences(md, "**Assistant**"), md);
+    }
+
+    @Test
+    void integratedPromptRendersBelowTheAnswerItInterrupted() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("I was saying something", "s1"));
+        t.onEvent(new AgentEvent.PromptIntegrated("actually, do this instead", "s1"));
+
+        final var md = t.transcript().toString();
+        assertOrdered(md, "I was saying something", "**You**\n\nactually, do this instead");
+        assertEquals("", t.pending().toString());
+    }
+
+    @Test
+    void errorKeepsTheStreamedAnswerAboveTheErrorLine() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("partial answer", "s1"));
+        t.onEvent(new AgentEvent.Error("kaput", "s1"));
+
+        final var md = t.transcript().toString();
+        assertOrdered(md, "partial answer", "> error: kaput");
+    }
+
+    @Test
+    void aRetryResetDropsThePartialAnswerInsteadOfDuplicatingIt() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("half an ans", "s1"));
+        t.onEvent(new AgentEvent.TextReset("s1"));
+        t.onEvent(new AgentEvent.TextDelta("half an answer", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("half an answer", "s1"));
+
+        final var md = t.transcript().toString();
+        // the provider re-sends the whole text after a reset: the partial must not survive
+        assertEquals(1, countOccurrences(md, "half an answer"), md);
+        assertFalse(md.contains("half an ans\n"), md);
+    }
+
+    private static void assertOrdered(final String md, final String... fragments) {
+        var previous = -1;
+        for (final var fragment : fragments) {
+            final var index = md.indexOf(fragment);
+            assertTrue(index >= 0, () -> "missing \"" + fragment + "\" in: " + md);
+            assertTrue(index > previous, () -> "\"" + fragment + "\" is out of order in: " + md);
+            previous = index;
+        }
+    }
+
+    private static int countOccurrences(final String text, final String needle) {
+        var count = 0;
+        for (var index = text.indexOf(needle); index >= 0; index = text.indexOf(needle, index + needle.length())) {
+            count++;
+        }
+        return count;
     }
 
     @Test

@@ -27,6 +27,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -54,6 +55,20 @@ public class AnsiShellFrontend implements ShellFrontend {
     private boolean thinkingRoundOpen;
     /** Whether the last stderr emission (a thought delta) did not end with a newline. */
     private boolean stderrNeedsNewline;
+    /**
+     * Actor owning the open 'thinking...' round: the subagent id, or {@code null}
+     * for the main loop. Spawned sub-agents stream concurrently with the parent
+     * turn, so the round is tracked per actor: with a single flag the first
+     * voice to stream suppressed the header of the next one.
+     */
+    private String thinkingRoundOwner;
+    /**
+     * Actor owning the open (newline-less) stderr line, {@code null} when no
+     * line is open. Thought deltas are printed without a trailing newline, so
+     * without this two concurrent voices splice their fragments into one
+     * garbled line.
+     */
+    private String stderrLineOwner;
 
     private Spinner spinner;
     /** Whether the frontend is inside a turn: async events (subagents, parallel tool workers)
@@ -87,6 +102,17 @@ public class AnsiShellFrontend implements ShellFrontend {
      * for each interaction card + prompt draw.
      */
     private final ReentrantLock renderLock = new ReentrantLock();
+
+    /**
+     * Serializes the event handling between the event threads: a spawned
+     * sub-agent streams on its own virtual thread while the parent turn keeps
+     * going, and the shared rendering state below ({@code thinkingRoundOpen},
+     * {@code stderrNeedsNewline}, the owners above, {@link #textBuffer}) was
+     * updated check-then-act. Always acquired before {@code spinnerLock} /
+     * {@code renderLock}, never the other way round: it is only taken here, and
+     * nothing it waits for takes it back.
+     */
+    private final ReentrantLock eventLock = new ReentrantLock();
 
     public ReentrantLock renderLock() {
         return renderLock;
@@ -132,7 +158,19 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     @Override
     public void showThinking(final boolean value) {
-        this.showThinking = value;
+        if (this.showThinking != value) {
+            this.showThinking = value;
+            if (!value) {
+                // hiding the reasoning while a thought line is open would glue the
+                // next stderr line to it: terminate the open line under the event lock
+                eventLock.lock();
+                try {
+                    ensureStderrNewline();
+                } finally {
+                    eventLock.unlock();
+                }
+            }
+        }
     }
 
     @Override
@@ -274,8 +312,9 @@ public class AnsiShellFrontend implements ShellFrontend {
     public void beginTurn() {
         stats.beginTurn();
         textBuffer.reset();
-        thinkingRoundOpen = false;
+        closeThinkingRound();
         stderrNeedsNewline = false;
+        stderrLineOwner = null;
         stopSpinner();
         spinnerLock.lock();
         try {
@@ -322,34 +361,50 @@ public class AnsiShellFrontend implements ShellFrontend {
         } finally {
             pendingLock.unlock();
         }
-        final var prefix = subagentPrefix(event);
+        // one event at a time: the parent turn and its sub-agents emit concurrently
+        eventLock.lock();
+        try {
+            renderEvent(event, subagentPrefix(event));
+        } finally {
+            eventLock.unlock();
+        }
+    }
+
+    private void renderEvent(final AgentEvent event, final String prefix) {
         if (event
                 instanceof
                 AgentEvent.TextDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             stopSpinner();
-            thinkingRoundOpen = false;
+            closeThinkingRound();
             print(textBuffer.append(prefix + delta));
         } else if (event instanceof AgentEvent.TextReset(String sessionId, String subagentId, String subagentName)) {
             textBuffer.reset();
-            thinkingRoundOpen = false;
+            closeThinkingRound();
         } else if (event
                 instanceof
                 AgentEvent.ThinkingDelta(String delta, String sessionId, String subagentId, String subagentName)) {
             if (showThinking) {
-                if (!thinkingRoundOpen) {
+                // a second voice must not splice into the line the current one left
+                // open: close it so both thoughts stay readable
+                if (stderrNeedsNewline && !Objects.equals(stderrLineOwner, subagentId)) {
+                    ensureStderrNewline();
+                }
+                if (!thinkingRoundOpen || !Objects.equals(thinkingRoundOwner, subagentId)) {
                     thinkingRoundOpen = true;
+                    thinkingRoundOwner = subagentId;
                     printlnErr(MarkdownColorizer.thinking(prefix + "thinking..."));
                 }
                 stopSpinner();
                 printErr(MarkdownColorizer.thinking(prefix + delta));
                 stderrNeedsNewline = !delta.endsWith("\n");
+                stderrLineOwner = subagentId;
             } else {
                 beginSpinner(prefix + "thinking");
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();
             toolStreamed = false;
-            thinkingRoundOpen = false;
+            closeThinkingRound();
             onToolStarted(t);
         } else if (event instanceof final AgentEvent.ToolStream t) {
             toolStreamed = true;
@@ -357,9 +412,12 @@ public class AnsiShellFrontend implements ShellFrontend {
                 // streamed tool output replaces the spinner: frames and fragments
                 // share the stderr line and would interleave, so output wins
                 stopSpinner();
+                // same for a thought delta left mid-line: the fragment goes below it
+                ensureStderrNewline();
                 printErr(prefix + (t.fragment().endsWith("\n") ? t.fragment() : t.fragment() + "\n"));
             } else if (showToolOutput.shown() && verbosity == CliVerbosity.VERBOSE) {
                 stopSpinner();
+                ensureStderrNewline();
                 printErr(MarkdownColorizer.dim(prefix + t.fragment()));
             }
         } else if (event instanceof final AgentEvent.ToolFinished t) {
@@ -448,7 +506,17 @@ public class AnsiShellFrontend implements ShellFrontend {
             subagentName = name;
         } else if (event
                 instanceof
-                AgentEvent.TurnMetrics(var _, var _, var _, var _, var _, var _, var _, String id, String name)) {
+                AgentEvent.TurnMetrics(
+                        var _,
+                        var _,
+                        var _,
+                        var _,
+                        var _,
+                        var _,
+                        var _,
+                        var _,
+                        String id,
+                        String name)) {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.TurnDone(var _, var _, String id, String name)) {
@@ -629,7 +697,14 @@ public class AnsiShellFrontend implements ShellFrontend {
         if (stderrNeedsNewline) {
             printlnErr("");
             stderrNeedsNewline = false;
+            stderrLineOwner = null;
         }
+    }
+
+    /** Closes the current reasoning round: the next delta opens a fresh 'thinking...' header. */
+    private void closeThinkingRound() {
+        thinkingRoundOpen = false;
+        thinkingRoundOwner = null;
     }
 
     /** Renders on stdout under {@link #renderLock}: spinner frames are dropped for the whole write. */

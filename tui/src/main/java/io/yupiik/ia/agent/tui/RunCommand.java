@@ -250,6 +250,10 @@ public class RunCommand implements Runnable {
                 + " toolErrors=" + metrics.toolErrors.get()
                 + " toolMs=" + metrics.toolMs.get()
                 + " llmMs=" + Math.max(0, elapsedMs - metrics.toolMs.get())
+                + " outputTokens=" + metrics.throughput.get().outputTokens()
+                + " llmActiveMs=" + metrics.throughput.get().activeMs()
+                + " outTokPerSec=" + rate(metrics.throughput.get().tokensPerSecond())
+                + " realTokPerSec=" + rate(metrics.throughput.get().reportedTokensPerSecond())
                 + " answerChars=" + metrics.answerChars.get();
         try {
             Files.writeString(
@@ -257,6 +261,17 @@ public class RunCommand implements Runnable {
         } catch (final IOException e) {
             LOGGER.severe(() -> "failed to write metrics to " + conf.metricsOutputFile() + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * Renders a rate for the machine readable metrics line: always a number so the output stays
+     * parsable, {@code 0.0} meaning "not measured".
+     *
+     * @param value the rate.
+     * @return the rate with a single decimal.
+     */
+    private static String rate(final double value) {
+        return String.format(java.util.Locale.ROOT, "%.1f", value);
     }
 
     private static final class Metrics {
@@ -273,6 +288,8 @@ public class RunCommand implements Runnable {
         private final AtomicInteger toolErrors = new AtomicInteger();
         private final AtomicLong toolMs = new AtomicLong();
         private final AtomicInteger answerChars = new AtomicInteger();
+        private final AtomicReference<AgentEvent.Throughput> throughput =
+                new AtomicReference<>(AgentEvent.Throughput.EMPTY);
         private final Deque<Long> toolStack = new ArrayDeque<>();
         private final StringBuilder answer = new StringBuilder();
         private volatile long contextTokens;
@@ -338,6 +355,7 @@ public class RunCommand implements Runnable {
                         started,
                         t.content() == null ? answer.length() : t.content().length());
             } else if (event instanceof final AgentEvent.TurnMetrics tm) {
+                throughput.set(tm.throughput() == null ? AgentEvent.Throughput.EMPTY : tm.throughput());
                 detail.turnMetrics(
                         started,
                         tm.llmCalls(),
@@ -345,7 +363,8 @@ public class RunCommand implements Runnable {
                         tm.toolDurationSumMs(),
                         tm.toolDurationWallMs(),
                         tm.toolsRun(),
-                        tm.turnDurationMs());
+                        tm.turnDurationMs(),
+                        tm.throughput());
             }
         }
     }
@@ -426,14 +445,21 @@ public class RunCommand implements Runnable {
                 final long toolSumMs,
                 final long toolWallMs,
                 final int toolsRun,
-                final long turnDurationMs) {
+                final long turnDurationMs,
+                final AgentEvent.Throughput throughput) {
+            final var t = throughput == null ? AgentEvent.Throughput.EMPTY : throughput;
             write("turnMetrics t=" + (System.nanoTime() - started) / 1_000_000L
                     + " llmCalls=" + llmCalls
                     + " thinkingMs=" + thinkingMs
                     + " toolSumMs=" + toolSumMs
                     + " toolWallMs=" + toolWallMs
                     + " toolsRun=" + toolsRun
-                    + " turnDurationMs=" + turnDurationMs);
+                    + " turnDurationMs=" + turnDurationMs
+                    + " outputTokens=" + t.outputTokens()
+                    + " llmActiveMs=" + t.activeMs()
+                    + " llmReportedMs=" + t.reportedMs()
+                    + " tokPerSec=" + rate(t.tokensPerSecond())
+                    + " realTokPerSec=" + rate(t.reportedTokensPerSecond()));
         }
 
         @Override

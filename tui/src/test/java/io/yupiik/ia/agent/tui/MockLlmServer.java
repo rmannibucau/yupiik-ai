@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.internal.JsonStrings;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
@@ -70,9 +71,9 @@ public final class MockLlmServer implements AutoCloseable {
                 respond(
                         exchange,
                         200,
-                        "{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\""
-                                + answer()
-                                + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}",
+                        "{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":"
+                                + JsonStrings.escape(answer())
+                                + "},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}",
                         "application/json");
             }
         });

@@ -24,6 +24,7 @@ import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
+import io.yupiik.llm.client.model.UsageExtensions;
 import io.yupiik.llm.client.openai.model.ResponsesInput;
 import io.yupiik.llm.client.openai.model.ResponsesRequest;
 import io.yupiik.llm.client.openai.model.ResponsesTool;
@@ -32,6 +33,7 @@ import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -326,14 +328,33 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                             && details.get("cached_tokens") instanceof Number n
                     ? n.longValue()
                     : null;
+            final var completion = number(map.get("output_tokens"));
             return new Usage(
                     number(map.get("input_tokens")),
-                    number(map.get("output_tokens")),
+                    completion,
                     number(map.get("total_tokens")),
                     cacheRead,
-                    null);
+                    null,
+                    UsageExtensions.generationTimeMs(extensions(map), completion));
         }
         return Usage.EMPTY;
+    }
+
+    /**
+     * The usage payload seen as a plain string keyed map, so the non standard timing fields published
+     * by some gateways can be read back. Only the entries of the usage object itself are kept.
+     *
+     * @param map the usage payload.
+     * @return the non standard fields, {@code null} when the payload is not a plain object.
+     */
+    private static Map<String, Object> extensions(final Map<?, ?> map) {
+        final var extensions = new LinkedHashMap<String, Object>(map.size());
+        map.forEach((key, value) -> {
+            if (key instanceof final String name) {
+                extensions.put(name, value);
+            }
+        });
+        return extensions;
     }
 
     private static long number(final Object value) {

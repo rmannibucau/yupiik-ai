@@ -152,4 +152,15 @@ public record TuiConfiguration(
                 documentation =
                         "Hide the terminal hardware cursor while the TUI runs: only the in-app drawn caret is shown "
                                 + "on the prompt. Disable to keep the terminal cursor visible next to the drawn one.")
-        boolean hideCursor) {}
+        boolean hideCursor,
+
+        @Property(
+                defaultValue = "3",
+                documentation =
+                        "Rows moved by a single mouse wheel notch, and by Up/Down, in the transcript and in every modal/overlay.")
+        int scrollLines,
+
+        @Property(
+                defaultValue = "10",
+                documentation = "Rows moved by PgUp/PgDn, in the transcript and in every modal/overlay.")
+        int scrollPageLines) {}

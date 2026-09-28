@@ -34,6 +34,11 @@ import java.util.List;
  * word under the cursor and a triple-click the whole row; dragging then
  * extends by words or whole rows. The selection stays highlighted until the
  * next press or {@link #clear()}.
+ * <p>
+ * A selection is confined to the {@link #zone(List) pane} its press landed in
+ * (a modal, the prompt input, the conversation body...), resolved once at press
+ * time so a layout change mid-drag cannot make the highlight and the copied
+ * text disagree.
  */
 final class SelectionState {
     private static final long CLICK_WINDOW_NANOS = 500_000_000L;
@@ -48,6 +53,12 @@ final class SelectionState {
     private int lastClickY = -1;
 
     /**
+     * The pane the press was resolved in, or null to select the whole frame.
+     * Resolved on press and kept until the next press or {@link #clear()}.
+     */
+    private Rect zone;
+
+    /**
      * @return true when a selection is currently visible
      */
     boolean hasSelection() {
@@ -58,10 +69,16 @@ final class SelectionState {
      * Handles a left-button press: starts a new selection, or a word/row
      * selection when clicking again on the same cell within the double-click
      * window.
+     * <p>
+     * The press also resolves the selection {@link #zone(List) zone} from the
+     * clamped click cell, before any double/triple click expands the anchor to
+     * a word or a whole row: a word may reach across a modal border, but the
+     * selection must still stay in the pane the user actually clicked.
      *
      * @param grid the last rendered frame snapshot, may be empty
+     * @param zones the candidate panes, most specific first (see the caller for the order)
      */
-    void press(final int rawX, final int rawY, final String[][] grid) {
+    void press(final int rawX, final int rawY, final String[][] grid, final List<Rect> zones) {
         final var height = grid.length;
         if (height == 0 || grid[0].length == 0) {
             clear();
@@ -70,6 +87,7 @@ final class SelectionState {
         final var width = grid[0].length;
         final var x = Math.clamp(rawX, 0, width - 1);
         final var y = Math.clamp(rawY, 0, height - 1);
+        zone = zone(zones, x, y);
         final var now = System.nanoTime();
         if (now - lastClickNanos <= CLICK_WINDOW_NANOS && y == lastClickY && Math.abs(x - lastClickX) <= 1) {
             clickCount = Math.min(3, clickCount + 1);
@@ -125,25 +143,24 @@ final class SelectionState {
         focusX = -1;
         focusY = -1;
         clickCount = 0;
+        zone = null;
     }
 
     /**
      * Reverses the style of the selected cells so the selection is visible.
      * <p>
-     * The highlight is clipped to the {@link #zone(List) zone} holding the
-     * selection's anchor, so the shaded area matches what
-     * {@link #copy(String[][], List)} would extract; when no zone holds the
-     * anchor the whole selected span is lit.
+     * The highlight is clipped to the {@link #zone(List) zone} resolved by the
+     * press, so the shaded area matches what {@link #copy(String[][])} would
+     * extract; when the press fell in no zone the whole selected span is lit.
      */
-    void highlight(final Buffer buffer, final List<Rect> zones) {
+    void highlight(final Buffer buffer) {
         if (!hasSelection()) {
             return;
         }
         final var width = buffer.width();
         final var bounds = bounds(width);
-        final var zone = zone(zones);
         for (var y = bounds.fromY(); y <= bounds.toY(); y++) {
-            final var span = span(bounds, width, zone, y);
+            final var span = span(bounds, width, y);
             if (span == null) {
                 continue;
             }
@@ -156,26 +173,25 @@ final class SelectionState {
      * trailing whitespace is stripped from each row and trailing empty rows
      * are dropped.
      * <p>
-     * The selection is clipped to the {@link #zone(List) zone} holding its
-     * anchor: rows outside that zone's vertical span are skipped and each
-     * row's start/end columns are clamped into the zone's horizontal span. This
-     * keeps a multi-line drag from pulling the left gutter/bar or the right
-     * sidebar/todos into the copied text. When no zone holds the anchor the
-     * whole frame is copied.
+     * The selection is clipped to the {@link #zone(List) zone} resolved by the
+     * press: rows outside that zone's vertical span are skipped and each row's
+     * start/end columns are clamped into the zone's horizontal span. This keeps
+     * a drag that overflows its pane from pulling the content rendered
+     * underneath it, or the left gutter/bar or the right sidebar/todos, into
+     * the copied text. When the press fell in no zone the whole frame is
+     * copied.
      *
-     * @param zones the candidate rectangles to confine the selection to (chat body, prompt input...)
      * @return the selected text, possibly empty, or null when nothing is selected
      */
-    String copy(final String[][] grid, final List<Rect> zones) {
+    String copy(final String[][] grid) {
         if (!hasSelection() || grid.length == 0 || grid[0].length == 0) {
             return null;
         }
         final var width = grid[0].length;
         final var bounds = bounds(width);
-        final var zone = zone(zones);
         final var rows = new ArrayList<String>(bounds.toY() - bounds.fromY() + 1);
         for (var y = bounds.fromY(); y <= bounds.toY() && y < grid.length; y++) {
-            final var span = span(bounds, width, zone, y);
+            final var span = span(bounds, width, y);
             if (span == null) {
                 continue;
             }
@@ -192,17 +208,21 @@ final class SelectionState {
     }
 
     /**
-     * Selects the zone the selection's anchor fell into, so a drag that starts
-     * in the chat body is confined to the chat and one starting in the prompt
-     * input to the input. Returns null (whole frame) when the anchor is not in
-     * any of the given zones or there is none.
+     * Selects the zone the given cell fell into, so a drag that starts in a
+     * modal is confined to that modal, one starting in the chat body to the
+     * chat and one starting in the prompt input to the input. Returns null
+     * (whole frame) when the cell is in none of the given zones or there is
+     * none.
+     * <p>
+     * The first matching zone wins, so callers must order the list most
+     * specific first - typically the topmost overlay before the panes it covers.
      */
-    private Rect zone(final List<Rect> zones) {
+    private static Rect zone(final List<Rect> zones, final int x, final int y) {
         if (zones == null) {
             return null;
         }
         for (final var candidate : zones) {
-            if (candidate != null && !candidate.isEmpty() && candidate.contains(anchorX, anchorY)) {
+            if (candidate != null && !candidate.isEmpty() && candidate.contains(x, y)) {
                 return candidate;
             }
         }
@@ -211,10 +231,10 @@ final class SelectionState {
 
     /**
      * Computes the cell span of the selection on the given row, clamped into
-     * the zone (when any). Returns null for rows outside the zone's vertical
-     * span or when the horizontal span collapses.
+     * the {@link #zone} resolved by the press (when any). Returns null for rows
+     * outside the zone's vertical span or when the horizontal span collapses.
      */
-    private static Span span(final Bounds bounds, final int width, final Rect zone, final int y) {
+    private Span span(final Bounds bounds, final int width, final int y) {
         final var clip = zone != null && !zone.isEmpty() ? zone : null;
         if (clip != null && (y < clip.y() || y >= clip.bottom())) {
             return null;

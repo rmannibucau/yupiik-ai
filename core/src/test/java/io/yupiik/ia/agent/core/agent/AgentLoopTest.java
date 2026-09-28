@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.CompactionResult;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
@@ -296,6 +297,121 @@ class AgentLoopTest {
                 .filter(e -> (e instanceof AgentEvent.Notice n && n.message().contains("retrying"))
                         || (e instanceof AgentEvent.Status s && s.message().contains("Rate limit")))
                 .count();
+    }
+
+    @Test
+    void turnThroughputCountsTokensOverTheTimeActuallySpentGenerating() {
+        final var reply =
+                new ScriptedReply("done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L));
+        loop(timedChatClient(reply, 60, 0), null, configuration(true)).run("do it", null, "s1", null, () -> false);
+
+        final var throughput = lastTurnMetrics().throughput();
+        assertEquals(100, throughput.outputTokens(), "output tokens come from the provider usage");
+        assertEquals(0, throughput.reportedMs(), "no server side generation time was reported");
+        assertTrue(
+                throughput.activeMs() >= 60, "time spent in the LLM call is active time, got " + throughput.activeMs());
+        assertEquals(throughput.outputTokens() * 1000.0 / throughput.activeMs(), throughput.tokensPerSecond());
+        assertEquals(0, throughput.reportedTokensPerSecond());
+    }
+
+    @Test
+    void turnThroughputIgnoresTheIdleTimeOfThrottlesAndRetries() {
+        // a 10s throttle on a 20ms generation: waiting for the provider is not generating
+        final var reply =
+                new ScriptedReply("done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L));
+        loop(timedChatClient(reply, 20, 10_000), null, configuration(true)).run("do it", null, "s1", null, () -> false);
+
+        final var throughput = lastTurnMetrics().throughput();
+        assertEquals(100, throughput.outputTokens());
+        assertEquals(0, throughput.activeMs(), "the throttle must be discounted, not counted as generation time");
+        assertEquals(0, throughput.tokensPerSecond(), "an unmeasurable rate is 0 so the displays omit the segment");
+        assertFalse(throughput.measurable());
+    }
+
+    @Test
+    void turnThroughputExposesTheServerSideRateWhenTheProviderReportsOne() {
+        // 100 output tokens, 2s of generation as reported by the server itself
+        final var reply = new ScriptedReply(
+                "done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, 2_000L));
+        loop(chatClient(new ArrayDeque<>(List.of(reply)), new ArrayList<>()), null, configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        final var throughput = lastTurnMetrics().throughput();
+        assertEquals(2_000, throughput.reportedMs());
+        assertEquals(50d, throughput.reportedTokensPerSecond(), 0.001d, "100 tokens over the 2s the server reported");
+        assertTrue(throughput.measurable());
+    }
+
+    @Test
+    void turnThroughputEstimatesTokensWhenTheProviderReportsNoUsage() {
+        final var content = "a short answer with a handful of words";
+        loop(
+                        chatClient(
+                                new ArrayDeque<>(List.of(new ScriptedReply(content, "stop", false))),
+                                new ArrayList<>()),
+                        null,
+                        configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals(
+                TokenEstimator.estimate(content),
+                lastTurnMetrics().throughput().outputTokens(),
+                "without provider usage the produced tokens are estimated from what came back");
+    }
+
+    private AgentEvent.TurnMetrics lastTurnMetrics() {
+        final var published =
+                events.stream().filter(AgentEvent.TurnMetrics.class::isInstance).toList();
+        assertFalse(published.isEmpty(), "the turn must publish its metrics");
+        return (AgentEvent.TurnMetrics) published.getLast();
+    }
+
+    /**
+     * A ChatClient stub replaying a single reply while reproducing the timing of a real generation:
+     * how long the call takes and which pause the resilience layer reports before it.
+     *
+     * @param reply the reply to replay.
+     * @param workMs how long the generation actually takes.
+     * @param pauseMs the idle wait reported through the pause listener.
+     * @return the stub client.
+     */
+    private ChatClient timedChatClient(final ScriptedReply reply, final long workMs, final long pauseMs) {
+        return new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                pauseListenerReference.set(pauseListener);
+                if (pauseListener != null && pauseMs > 0) {
+                    pauseListener.accept(
+                            PauseEvent.throttle("Rate limit reached, waiting ~" + pauseMs + "ms", pauseMs));
+                }
+                sleep(workMs);
+                if (reply.usage() != null) {
+                    onDelta.accept(new End(null, reply.usage()));
+                }
+                if (reply.finishReason() != null) {
+                    onDelta.accept(new End(reply.finishReason(), null));
+                }
+                return reply.toMessage();
+            }
+        };
+    }
+
+    private static void sleep(final long ms) {
+        if (ms <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(ms);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
     }
 
     @Test

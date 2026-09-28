@@ -29,6 +29,7 @@ import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
+import io.yupiik.llm.client.model.UsageExtensions;
 import io.yupiik.llm.client.spi.AbstractDialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
@@ -469,6 +470,12 @@ public final class AnthropicDialect extends AbstractDialect {
         }
         final var in = usage.inputTokens() == null ? 0 : usage.inputTokens();
         final var out = usage.outputTokens() == null ? 0 : usage.outputTokens();
-        return new Usage(in, out, in + out, usage.cacheReadInputTokens(), usage.cacheCreationInputTokens());
+        return new Usage(
+                in,
+                out,
+                in + out,
+                usage.cacheReadInputTokens(),
+                usage.cacheCreationInputTokens(),
+                UsageExtensions.generationTimeMs(usage.others(), out));
     }
 }

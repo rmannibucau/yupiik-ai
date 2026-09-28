@@ -19,6 +19,7 @@ import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -31,6 +32,14 @@ import java.util.Map;
  * not inside a fenced code block - and reuses the rendered lines of the stable
  * prefix while only re-rendering the short suffix each frame.
  *
+ * <p>On top of that suffix trick, the stable prefix itself is not re-parsed while
+ * it grows: the previous frame's prefix is remembered, and when the new prefix is
+ * just that prefix plus appended lines (streaming is append-only), only the delta
+ * between the two is sent through the markdown engine. The rendered lines of the
+ * already-stable part are kept as-is, so a long streaming turn costs O(delta) per
+ * frame instead of re-parsing the whole accumulated text every frame (which
+ * previously put the main render thread at ~40% CPU inside commonmark).
+ *
  * <p>This matches the streaming constraint: we never wait for the stream to end
  * and never buffer more than one logical region; buffering happens at line and
  * code-block granularity only. The {@link MarkdownLines} renderer produces plain,
@@ -40,18 +49,27 @@ final class TranscriptRenderer {
     private static final int MAX_CACHED_PREFIXES = 64;
 
     private final MarkdownLines markdownLines = new MarkdownLines();
-    // key -> rendered lines of a stable (completed) source prefix
-    private final Map<Key, List<Line>> prefixCache = new LinkedHashMap<>(16, 0.75f, true) {
+    // key -> rendered lines of a stable (completed) source prefix; thread-safe and
+    // bounded so a long session (a new key per region switch) never grows the
+    // footprint. The append-only delta path deliberately skips this cache: growing
+    // prefixes are moving targets that would churn (and blow up) the entries.
+    private final Map<Key, List<Line>> prefixCache = Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(final Map.Entry<Key, List<Line>> eldest) {
             return size() > MAX_CACHED_PREFIXES;
         }
-    };
+    });
 
-    private String lastSource;
-    private List<Line> lastPrefixLines;
-    private Style lastBase;
-    private MarkdownStyles lastStyles;
+    // single slot remembering the last stable prefix rendered: an exact hit makes a
+    // busy frame with unchanged content O(1), and the append-only path re-parses only
+    // the delta added since the previous frame instead of the whole accumulated turn.
+    // Only ever touched by the render thread, but kept volatile so concurrent readers
+    // never observe a torn half-updated state.
+    private volatile String lastPrefix;
+    private volatile List<Line> lastPrefixLines;
+    private volatile int lastWidth = -1;
+    private volatile Style lastBase;
+    private volatile MarkdownStyles lastStyles;
 
     List<Line> renderRegion(final String source, final int width, final Style base, final MarkdownStyles styles) {
         if (source == null || source.isEmpty()) {
@@ -60,24 +78,60 @@ final class TranscriptRenderer {
         final var safe = lastSafeNewline(source);
         final var prefix = source.substring(0, safe);
         final var suffix = source.substring(safe);
-        List<Line> prefixLines;
-        if (prefix.equals(lastSource) && lastPrefixLines != null && base.equals(lastBase) && styles == lastStyles) {
-            prefixLines = lastPrefixLines;
-        } else {
-            prefixLines = prefixCache.computeIfAbsent(
-                    new Key(prefix, width, base, styles), k -> renderToList(prefix, width, base, styles));
-        }
-        lastSource = prefix;
-        lastPrefixLines = prefixLines;
-        lastBase = base;
-        lastStyles = styles;
+        final var prefixLines = prefixLines(prefix, width, base, styles);
         if (suffix.isEmpty()) {
+            // defensive copy: cached lines must never be mutated by the caller
             return new ArrayList<>(prefixLines);
         }
         final var combined = new ArrayList<Line>(prefixLines.size() + 16);
         combined.addAll(prefixLines);
         combined.addAll(renderToList(suffix, width, base, styles));
         return combined;
+    }
+
+    private List<Line> prefixLines(
+            final String prefix, final int width, final Style base, final MarkdownStyles styles) {
+        if (prefix.isEmpty()) {
+            return List.of();
+        }
+        final var sameParams = width == lastWidth && lastBase != null && lastBase.equals(base) && styles == lastStyles;
+        if (lastPrefixLines != null && sameParams) {
+            if (prefix.equals(lastPrefix)) {
+                // identical stable prefix as the previous frame: reuse verbatim
+                return lastPrefixLines;
+            }
+            if (lastPrefix != null && prefix.startsWith(lastPrefix)) {
+                // append-only streaming: only the delta (the lines added since the
+                // previous frame) is markdown-parsed; the rest was already rendered.
+                final var result = new ArrayList<Line>(lastPrefixLines.size() + 8);
+                result.addAll(lastPrefixLines);
+                result.addAll(renderToList(prefix.substring(lastPrefix.length()), width, base, styles));
+                remember(prefix, result, width, base, styles);
+                return result;
+            }
+        }
+        // region switch or width/base/styles change: full render through the bounded cache
+        final var key = new Key(prefix, width, base, styles);
+        var lines = prefixCache.get(key);
+        if (lines == null) {
+            lines = renderToList(prefix, width, base, styles);
+            prefixCache.put(key, lines);
+        }
+        remember(prefix, lines, width, base, styles);
+        return lines;
+    }
+
+    private void remember(
+            final String prefix,
+            final List<Line> lines,
+            final int width,
+            final Style base,
+            final MarkdownStyles styles) {
+        lastPrefix = prefix;
+        lastPrefixLines = lines;
+        lastWidth = width;
+        lastBase = base;
+        lastStyles = styles;
     }
 
     private List<Line> renderToList(

@@ -16,8 +16,10 @@
 package io.yupiik.llm.client.anthropic.model;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Anthropic Messages wire response.
@@ -80,11 +82,23 @@ public record AnthropicMessagesResponse(
      * @param outputTokens completion tokens produced.
      * @param cacheReadInputTokens prompt tokens served from the prompt cache.
      * @param cacheCreationInputTokens prompt tokens written to the prompt cache.
+     * @param others non standard usage fields published by some Anthropic compatible gateways, used
+     *        to recover the provider side generation time when present.
      */
     @JsonModel
     public record AnthropicUsage(
             @JsonProperty("input_tokens") Long inputTokens,
             @JsonProperty("output_tokens") Long outputTokens,
             @JsonProperty("cache_read_input_tokens") Long cacheReadInputTokens,
-            @JsonProperty("cache_creation_input_tokens") Long cacheCreationInputTokens) {}
+            @JsonProperty("cache_creation_input_tokens") Long cacheCreationInputTokens,
+            @JsonOthers Map<String, Object> others) {
+
+        public AnthropicUsage(
+                final Long inputTokens,
+                final Long outputTokens,
+                final Long cacheReadInputTokens,
+                final Long cacheCreationInputTokens) {
+            this(inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, null);
+        }
+    }
 }

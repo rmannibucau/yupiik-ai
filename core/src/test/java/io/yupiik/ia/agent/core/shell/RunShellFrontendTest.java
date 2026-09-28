@@ -25,6 +25,7 @@ import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -139,5 +140,49 @@ class RunShellFrontendTest {
         frontend.onEvent(new AgentEvent.ThinkingDelta("thinking...", "s1"));
 
         assertEquals("thinking...", err.toString(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Regression test for garbled reasoning: a spawned sub-agent streams on its own
+     * thread while the parent turn keeps going, and thought deltas carry no trailing
+     * newline. The open stderr line is therefore owned by one actor at a time.
+     */
+    @Test
+    void concurrentThoughtsNeverShareALine() throws InterruptedException {
+        final var frontend = new RunShellFrontend(true, ToolOutputVisibility.COLLAPSED);
+        for (int i = 0; i < 200; i++) {
+            final var barrier = new CyclicBarrier(2);
+            final var parent = Thread.ofVirtual().start(() -> {
+                try {
+                    barrier.await();
+                } catch (final Exception e) {
+                    return;
+                }
+                for (int j = 0; j < 20; j++) {
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("P" + j + " ", "s1"));
+                }
+            });
+            final var child = Thread.ofVirtual().start(() -> {
+                try {
+                    barrier.await();
+                } catch (final Exception e) {
+                    return;
+                }
+                for (int j = 0; j < 20; j++) {
+                    frontend.onEvent(new AgentEvent.ThinkingDelta("C" + j + " ", "s1", "sub-1", "kid"));
+                }
+            });
+            parent.join();
+            child.join();
+        }
+
+        final var lines = err.toString(StandardCharsets.UTF_8).split("\n", -1);
+        assertTrue(lines.length > 2, "the race produced no reasoning to check");
+        for (final var line : lines) {
+            // P*/C* are the per-actor delta tokens, one line may only carry one voice
+            final var parent2 = line.matches(".*P\\d+ .*");
+            final var child2 = line.matches(".*C\\d+ .*");
+            assertFalse(parent2 && child2, () -> "two thoughts spliced into one line: \"" + line + "\"");
+        }
     }
 }

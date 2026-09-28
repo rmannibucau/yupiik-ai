@@ -197,6 +197,48 @@ public sealed interface AgentEvent {
     }
 
     /**
+     * Output throughput of a turn: the tokens it produced versus the time actually spent producing them.
+     *
+     * @param outputTokens output tokens produced in the turn, as reported by the provider or estimated
+     *        when the provider reports no usage
+     * @param activeMs time spent inside LLM requests, excluding provider throttles, retry backoffs and
+     *        everything outside of the LLM calls (tool executions, compaction, user typing, ...)
+     * @param reportedMs generation time as reported by the provider itself, {@code 0} when the provider
+     *        does not publish any
+     */
+    record Throughput(int outputTokens, long activeMs, long reportedMs) {
+        /** Zeroed throughput, used when a turn produced nothing. */
+        public static final Throughput EMPTY = new Throughput(0, 0, 0);
+
+        /**
+         * Our own measurement: output tokens over the time actually spent producing them. This is the
+         * number to trust to compare models and runtimes, it never includes idle time.
+         *
+         * @return the average output tokens per second, {@code 0} when it cannot be computed.
+         */
+        public double tokensPerSecond() {
+            return activeMs > 0 && outputTokens > 0 ? outputTokens * 1000.0 / activeMs : 0;
+        }
+
+        /**
+         * The provider own view, when it publishes a generation time. It is displayed next to
+         * {@link #tokensPerSecond()} to expose the client overhead, and is {@code 0} when unknown.
+         *
+         * @return the average output tokens per second as seen by the server, {@code 0} when unknown.
+         */
+        public double reportedTokensPerSecond() {
+            return reportedMs > 0 && outputTokens > 0 ? outputTokens * 1000.0 / reportedMs : 0;
+        }
+
+        /**
+         * @return {@code true} when at least one of the two rates can be displayed.
+         */
+        public boolean measurable() {
+            return tokensPerSecond() > 0 || reportedTokensPerSecond() > 0;
+        }
+    }
+
+    /**
      * Per-turn aggregate metrics emitted at turn completion.
      *
      * @param llmCalls              number of LLM requests (UsageUpdated events) in this turn
@@ -205,6 +247,7 @@ public sealed interface AgentEvent {
      * @param toolDurationWallMs    wall-clock batch duration: first tool start to last tool finish in parallel batches
      * @param toolsRun              total number of tool executions in this turn
      * @param turnDurationMs        total turn wall time: turn start to TurnDone
+     * @param throughput            output tokens of the turn versus the time spent generating them
      */
     record TurnMetrics(
             int llmCalls,
@@ -213,6 +256,7 @@ public sealed interface AgentEvent {
             long toolDurationWallMs,
             int toolsRun,
             long turnDurationMs,
+            Throughput throughput,
             String sessionId,
             String subagentId,
             String subagentName)
@@ -233,6 +277,29 @@ public sealed interface AgentEvent {
                     toolDurationWallMs,
                     toolsRun,
                     turnDurationMs,
+                    Throughput.EMPTY,
+                    sessionId,
+                    null,
+                    null);
+        }
+
+        public TurnMetrics(
+                int llmCalls,
+                long thinkingDurationMs,
+                long toolDurationSumMs,
+                long toolDurationWallMs,
+                int toolsRun,
+                long turnDurationMs,
+                Throughput throughput,
+                String sessionId) {
+            this(
+                    llmCalls,
+                    thinkingDurationMs,
+                    toolDurationSumMs,
+                    toolDurationWallMs,
+                    toolsRun,
+                    turnDurationMs,
+                    throughput,
                     sessionId,
                     null,
                     null);

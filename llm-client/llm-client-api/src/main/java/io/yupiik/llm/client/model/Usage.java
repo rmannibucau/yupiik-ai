@@ -23,14 +23,40 @@ package io.yupiik.llm.client.model;
  * @param totalTokens total tokens, may be {@code null} when the provider omits it.
  * @param cacheReadTokens prompt tokens served from a provider-side prompt cache, when reported.
  * @param cacheWriteTokens prompt tokens written to a provider-side prompt cache, when reported.
+ * @param generationTimeMs provider-side generation time in milliseconds, when reported. This is a
+ *        non-standard field only emitted by some OpenAI compatible servers and proxies (e.g.
+ *        {@code generation_time}, {@code tokens_per_second}), {@code null} otherwise.
  */
 public record Usage(
-        Long promptTokens, Long completionTokens, Long totalTokens, Long cacheReadTokens, Long cacheWriteTokens) {
+        Long promptTokens,
+        Long completionTokens,
+        Long totalTokens,
+        Long cacheReadTokens,
+        Long cacheWriteTokens,
+        Long generationTimeMs) {
 
-    public static final Usage EMPTY = new Usage(0L, 0L, 0L, 0L, 0L);
+    public static final Usage EMPTY = new Usage(0L, 0L, 0L, 0L, 0L, null);
 
     public Usage(final Long promptTokens, final Long completionTokens, final Long totalTokens) {
-        this(promptTokens, completionTokens, totalTokens, null, null);
+        this(promptTokens, completionTokens, totalTokens, null, null, null);
+    }
+
+    public Usage(
+            final Long promptTokens,
+            final Long completionTokens,
+            final Long totalTokens,
+            final Long cacheReadTokens,
+            final Long cacheWriteTokens) {
+        this(promptTokens, completionTokens, totalTokens, cacheReadTokens, cacheWriteTokens, null);
+    }
+
+    /**
+     * The provider-side generation time.
+     *
+     * @return the generation time in milliseconds, 0 when the provider does not report one.
+     */
+    public long generationTime() {
+        return generationTimeMs == null ? 0 : generationTimeMs;
     }
 
     /**

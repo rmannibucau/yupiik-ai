@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -35,6 +36,13 @@ public class RunShellFrontend implements ShellFrontend {
     private final ToolOutputVisibility showToolOutput;
     private final AtomicBoolean toolStreamed = new AtomicBoolean();
     private boolean stderrNeedsNewline;
+    /**
+     * Actor owning the open (newline-less) stderr line, {@code null} when none:
+     * a spawned sub-agent streams on its own thread while the parent turn keeps
+     * going, so a thought delta from a different actor must not be appended to
+     * the line the current one left mid-thought.
+     */
+    private String stderrLineOwner;
 
     public RunShellFrontend(final boolean showThinking, final ToolOutputVisibility showToolOutput) {
         this.showThinking = showThinking;
@@ -81,14 +89,20 @@ public class RunShellFrontend implements ShellFrontend {
     }
 
     @Override
-    public void onEvent(final AgentEvent event) {
+    public synchronized void onEvent(final AgentEvent event) {
         final var prefix = subagentPrefix(event);
         if (event instanceof final AgentEvent.TextDelta t) {
             System.out.print(prefix + t.delta());
         } else if (event instanceof final AgentEvent.ThinkingDelta t) {
             if (showThinking) {
+                // a second voice must not splice into the line the current one left
+                // open: close it so both thoughts stay readable
+                if (stderrNeedsNewline && !Objects.equals(stderrLineOwner, t.subagentId())) {
+                    ensureStderrNewline();
+                }
                 System.err.print(prefix + t.delta());
                 stderrNeedsNewline = !t.delta().endsWith("\n");
+                stderrLineOwner = t.subagentId();
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             toolStreamed.set(false);
@@ -145,6 +159,7 @@ public class RunShellFrontend implements ShellFrontend {
         if (stderrNeedsNewline) {
             System.err.println();
             stderrNeedsNewline = false;
+            stderrLineOwner = null;
         }
     }
 

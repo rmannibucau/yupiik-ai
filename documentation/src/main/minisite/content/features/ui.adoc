@@ -29,8 +29,8 @@ this mean?" questions rather than actions.
 The last few side questions are replayed to the model so follow-up side
 questions stay coherent.
 In the xref:../cli/tui.adoc[`tui`] the answer opens a modal titled `btw`:
-`Up`/`Down` scroll it, `Esc` closes it and cancels the request if still
-running, and the main turn keeps streaming underneath.
+the mouse wheel or `Up`/`Down` scroll it, `Esc` closes it and cancels the
+request if still running, and the main turn keeps streaming underneath.
 In the xref:../cli/cli.adoc[`cli`] the answer is printed inline as a delimited
 block once ready.
 

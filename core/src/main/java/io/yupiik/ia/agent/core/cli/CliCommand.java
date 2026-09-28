@@ -35,6 +35,7 @@ import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
+import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
@@ -687,6 +688,10 @@ public class CliCommand implements Runnable {
             sb.append(lastTurnMetrics.llmCalls()).append(" LLM");
             if (lastTurnMetrics.thinkingDurationMs() > 0) {
                 sb.append(" (").append(lastTurnMetrics.thinkingDurationMs()).append("ms think)");
+            }
+            final var tokPerSec = MetricsFormat.tokPerSec(lastTurnMetrics.throughput());
+            if (!tokPerSec.isEmpty()) {
+                sb.append(" · ").append(tokPerSec);
             }
             if (session.metrics().displayMode() == MetricsDisplayMode.FULL) {
                 sb.append(" · ")

@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.openai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -232,6 +233,72 @@ class OpenAIDialectTest {
         final var body = reqBody.get();
         assertTrue(body.contains("\"model\":\"m\""));
         assertTrue(body.contains("\"max_tokens\":64"), body);
+    }
+
+    @Test
+    void completionsDialectReadsTheProviderSideGenerationTime() throws Exception {
+        server.createContext(
+                "/v1/chat/completions",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                                + "\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,"
+                                + "\"completion_tokens\":100,\"total_tokens\":103,\"generation_time\":2.5}}"));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals(
+                2_500L, response.usage().generationTime(), "a gateway generation_time in seconds is normalized to ms");
+    }
+
+    @Test
+    void completionsDialectDerivesTheGenerationTimeFromAReportedRate() throws Exception {
+        server.createContext(
+                "/v1/chat/completions",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                                + "\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,"
+                                + "\"completion_tokens\":100,\"total_tokens\":103,\"tokens_per_second\":50}}"));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals(2_000L, response.usage().generationTime(), "100 tokens at 50 tok/s is 2s of generation");
+    }
+
+    @Test
+    void completionsDialectHasNoGenerationTimeWhenTheProviderReportsNone() throws Exception {
+        server.createContext(
+                "/v1/chat/completions",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                                + "\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,"
+                                + "\"completion_tokens\":1,\"total_tokens\":4}}"));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper(),
+                client(),
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertNull(
+                response.usage().generationTimeMs(),
+                "a standard payload carries no timing: the client measures instead");
     }
 
     @Test

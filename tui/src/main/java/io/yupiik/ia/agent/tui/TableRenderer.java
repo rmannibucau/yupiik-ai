@@ -66,6 +66,9 @@ public final class TableRenderer {
      * Non-empty input never reports 0.
      */
     static int displayWidth(final String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
         var total = 0;
         var upgradable = false; // previous glyph is 1-cell text-presentation and a VS16 can make it 2-cell
         for (int i = 0; i < text.length(); ) {

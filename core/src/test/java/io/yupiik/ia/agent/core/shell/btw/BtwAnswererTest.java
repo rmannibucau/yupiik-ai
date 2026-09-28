@@ -32,6 +32,7 @@ import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
@@ -59,6 +60,13 @@ class BtwAnswererTest {
     @TempDir
     Path storageHome;
 
+    /** A realistic DSML tool-call block as emitted by DeepSeek V4. */
+    private static final String DSML_BLOCK = "<\uFF5CDSML\uFF5Ctool_calls>\n"
+            + "<\uFF5CDSML\uFF5Cinvoke name=read_file>\n"
+            + "<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
+            + "</\uFF5CDSML\uFF5Cinvoke>\n"
+            + "</\uFF5CDSML\uFF5Ctool_calls>";
+
     private HttpServer server;
     private java.util.concurrent.ExecutorService serverExecutor;
     private InMemorySessionStore sessionStore;
@@ -73,12 +81,8 @@ class BtwAnswererTest {
         server.createContext("/v1/chat/completions", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             bodies.add(body);
-            respond(
-                    exchange,
-                    200,
-                    """
-                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}""".formatted(body.contains("EMPTY PLEASE") ? "" : "hello there"),
-                    "application/json");
+            respond(exchange, 200, """
+                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}""".formatted(responseContent(body)), "application/json");
         });
         serverExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
         server.setExecutor(serverExecutor);
@@ -110,9 +114,25 @@ class BtwAnswererTest {
                 sessionStore,
                 configuration,
                 new VirtualThreadExecutor(),
+                new ToolCallMarkupStripper(),
                 mapper,
                 providerManager,
                 Clock.systemUTC());
+    }
+
+    /** What the stub returns for a given request body, selected by magic question words. */
+    private static String responseContent(final String body) {
+        if (body.contains("EMPTY PLEASE")) {
+            return "";
+        }
+        if (body.contains("TOOLCALL MARKUP")) {
+            // newlines must be JSON-escaped before embedding into the response
+            return ("the parsed answer\n\n" + DSML_BLOCK).replace("\n", "\\n");
+        }
+        if (body.contains("TOOLCALL ONLY")) {
+            return DSML_BLOCK.replace("\n", "\\n");
+        }
+        return "hello there";
     }
 
     private Map<String, String> config(final Map<String, String> extra) {
@@ -258,5 +278,35 @@ class BtwAnswererTest {
                         .toCompletableFuture()
                         .get(5, TimeUnit.SECONDS));
         assertTrue(error.getCause() instanceof IOException, String.valueOf(error.getCause()));
+    }
+
+    @Test
+    void dsmlMarkupIsStrippedFromTheAnswer() throws Exception {
+        sessionStore.replace("s1", List.of(Message.user("hi")));
+        final var answer = answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("the parsed answer", answer);
+        // the glitch never touches the session, and the request still carries no tools
+        assertEquals(1, sessionStore.size("s1"));
+        assertTrue(!bodies.getLast().contains("\"tools\""), bodies.getLast());
+    }
+
+    @Test
+    void toolCallOnlyAnswerFallsBackToRawNoteAndIsNotReplayed() throws Exception {
+        sessionStore.replace("s1", List.of());
+        final var answerer = answerer(Map.of());
+        final var answer = answerer.ask("TOOLCALL ONLY", "s1", usageTracker, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertTrue(answer.startsWith("> "), answer);
+        assertTrue(answer.contains("```\n" + DSML_BLOCK + "\n```"), answer);
+        // a broken exchange is never replayed into the next side question
+        answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        final var body = bodies.getLast();
+        assertTrue(!body.contains("Q: TOOLCALL ONLY"), body);
+        assertTrue(body.contains("Side question: TOOLCALL MARKUP"), body);
     }
 }

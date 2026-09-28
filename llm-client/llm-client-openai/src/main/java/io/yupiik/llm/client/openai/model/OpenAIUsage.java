@@ -16,8 +16,11 @@
 package io.yupiik.llm.client.openai.model;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import io.yupiik.llm.client.model.Usage;
+import io.yupiik.llm.client.model.UsageExtensions;
+import java.util.Map;
 
 /**
  * Token usage reported by the OpenAI endpoints.
@@ -26,13 +29,24 @@ import io.yupiik.llm.client.model.Usage;
  * @param completionTokens completion tokens produced.
  * @param totalTokens total tokens consumed.
  * @param promptTokensDetails prompt token breakdown (cached tokens, ...).
+ * @param others non standard usage fields published by some servers and proxies, used to recover
+ *        the provider side generation time when present.
  */
 @JsonModel
 public record OpenAIUsage(
         @JsonProperty("prompt_tokens") Long promptTokens,
         @JsonProperty("completion_tokens") Long completionTokens,
         @JsonProperty("total_tokens") Long totalTokens,
-        @JsonProperty("prompt_tokens_details") PromptTokensDetails promptTokensDetails) {
+        @JsonProperty("prompt_tokens_details") PromptTokensDetails promptTokensDetails,
+        @JsonOthers Map<String, Object> others) {
+
+    public OpenAIUsage(
+            final Long promptTokens,
+            final Long completionTokens,
+            final Long totalTokens,
+            final PromptTokensDetails promptTokensDetails) {
+        this(promptTokens, completionTokens, totalTokens, promptTokensDetails, null);
+    }
 
     /**
      * Prompt token breakdown reported by OpenAI endpoints.
@@ -49,7 +63,11 @@ public record OpenAIUsage(
      * @return the neutral usage, {@link Usage#EMPTY} when no data is present.
      */
     public Usage toNeutral() {
-        if (this == null || (promptTokens == null && completionTokens == null && totalTokens == null)) {
+        if (this == null) {
+            return Usage.EMPTY;
+        }
+        final var generationTimeMs = UsageExtensions.generationTimeMs(others, completionTokens);
+        if (promptTokens == null && completionTokens == null && totalTokens == null && generationTimeMs == null) {
             return Usage.EMPTY;
         }
         return new Usage(
@@ -59,6 +77,7 @@ public record OpenAIUsage(
                         ? (promptTokens == null ? 0 : promptTokens) + (completionTokens == null ? 0 : completionTokens)
                         : totalTokens,
                 promptTokensDetails == null ? null : promptTokensDetails.cachedTokens(),
-                null);
+                null,
+                generationTimeMs);
     }
 }

@@ -22,7 +22,8 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 public record MetricsConfiguration(
         @Property(
                 defaultValue = "true",
-                documentation = "Show per-turn metrics (LLM calls, thinking and tool duration).")
+                documentation =
+                        "Show per-turn metrics (LLM calls, thinking, tool duration and output tokens per second).")
         boolean showPerTurn,
 
         @Property(defaultValue = "true", documentation = "Show session level totals.")

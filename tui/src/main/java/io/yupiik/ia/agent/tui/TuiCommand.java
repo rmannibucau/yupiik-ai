@@ -68,6 +68,7 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
+import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
@@ -114,6 +115,19 @@ import java.util.regex.Pattern;
 public class TuiCommand implements Runnable {
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
+
+    /**
+     * Constant spinner placeholder handed to {@code ConversationTranscript.markdown()}
+     * for the memoized chunks. The running-tool header only needs a non-empty marker:
+     * {@link ToolCard} detects a live tool from the {@code " running "} token, it never
+     * displays this character (the card draws {@code glyphs.running()} instead). Passing
+     * a fixed marker keeps the {@code ContentKey} stable across ticks while a tool runs,
+     * so a busy frame with unchanged content reuses the previous chunk render instead of
+     * re-parsing the whole transcript because the spinning character changed. The real,
+     * animated spinners (thinking..., calling, status strip) live outside this memo.
+     */
+    private static final String RUNNING_TOOL_MARKER = "|";
+
     private static final Logger LOG = Logger.getLogger(TuiCommand.class.getName());
 
     private String help() {
@@ -135,6 +149,7 @@ public class TuiCommand implements Runnable {
     private final AgentProvider agentProvider;
     private final AgentSessionService agentSessionService;
     private final SubagentRegistry subagentRegistry;
+    private final ScrollService scrollService;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final TurnRunner turnRunner;
     private final ThinkTagSplitter thinkTags;
@@ -148,6 +163,11 @@ public class TuiCommand implements Runnable {
 
     private final List<Rect> tabCloseRects = new CopyOnWriteArrayList<>();
     private volatile Rect tabAddRect;
+    /**
+     * Content regions registered by the current frame's renderers, bottom to top.
+     * Render-thread only, published to {@link UiState#paneZones} at the end of the frame.
+     */
+    private final List<Rect> frameZones = new ArrayList<>();
 
     private volatile Style thoughtStyle;
     private volatile Style thoughtCodeStyle;
@@ -162,6 +182,7 @@ public class TuiCommand implements Runnable {
     private final PromptHistory promptHistory;
     private volatile long completionGeneration;
     private final CompletionCache completionCache = new CompletionCache();
+    private volatile String lastCompletionProviderId = "";
     private volatile String cachedGitBranch;
     private volatile long cachedGitBranchAt;
     private final TuiSlashCommands slashCommands;
@@ -238,6 +259,7 @@ public class TuiCommand implements Runnable {
             final BtwAnswerer btwAnswerer,
             final TabManager tabManager,
             final SubagentRegistry subagentRegistry,
+            final ScrollService scrollService,
             final ScheduledExecutorService scheduler) {
         this.conf = conf;
         this.tuiConfiguration = tuiConfiguration;
@@ -269,6 +291,7 @@ public class TuiCommand implements Runnable {
         this.toolOutputFormat = toolOutputFormat;
         this.btwAnswerer = btwAnswerer;
         this.subagentRegistry = subagentRegistry;
+        this.scrollService = scrollService == null ? new ScrollService(null) : scrollService;
         this.formatToolOutput = !"off".equalsIgnoreCase(tuiConfiguration.toolOutputFormat());
         this.syntaxHighlighter = new SyntaxHighlighter().maxLineLength(configuration.maxLineLength());
         this.toolArgsPreview = new ToolArgsPreview(toolOutputFormat, syntaxHighlighter, diffRenderer);
@@ -301,6 +324,7 @@ public class TuiCommand implements Runnable {
         applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
         // warm the completion cache off the render thread so TAB never blocks on the network
         refreshCompletionCache();
+        this.lastCompletionProviderId = chatClient == null ? "" : chatClient.providerId();
     }
 
     @RootConfiguration("tui")
@@ -912,6 +936,17 @@ public class TuiCommand implements Runnable {
             notify(state, status.message());
             return;
         }
+        if (event instanceof AgentEvent.PromptIntegrated) {
+            // the queued prompt already landed in the transcript (**You** block): keep the
+            // leading agent state stable (spinner/status) and surface the integration in the
+            // trailing notification slot, with the count of prompts still waiting
+            final var leading = state.model.status();
+            state.model.onEvent(event);
+            state.model.status(leading);
+            final var n = state.pendingPrompts.size();
+            notify(state, n == 0 ? "queued prompt integrated" : (n + " queued prompts still pending"));
+            return;
+        }
         state.model.onEvent(event);
         if (event instanceof AgentEvent.ToolStarted started) {
             state.spinnerTick = 0;
@@ -994,6 +1029,9 @@ public class TuiCommand implements Runnable {
             return needsTickRender(state)
                     || (heartbeatMillis > 0 && clock.millis() - state.lastRenderTick >= heartbeatMillis);
         }
+        if (event instanceof final MouseEvent wheel && wheel.isScroll()) {
+            return scrollTopOverlay(wheel, state);
+        }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
         }
@@ -1033,22 +1071,13 @@ public class TuiCommand implements Runnable {
             }
             if (event instanceof final KeyEvent pickKey) {
                 if (!state.picker.confirm(pickKey)) {
-                    state.picker.stroke(pickKey);
+                    state.picker.stroke(pickKey, scrollService);
                 }
             }
             return true;
         }
         if (event instanceof final MouseEvent mouse) {
-            if (mouse.isScroll()) {
-                if (mouse.kind() == MouseEventKind.SCROLL_UP) {
-                    state.model.anchorRow(state.model.anchorRow() - 3);
-                    state.model.userScrolled(true);
-                } else if (mouse.kind() == MouseEventKind.SCROLL_DOWN) {
-                    state.model.anchorRow(state.model.anchorRow() + 3);
-                    state.model.userScrolled(state.model.anchorRow() < state.maxViewOffset);
-                }
-                return true;
-            }
+            // the wheel is already routed to the topmost scrollable view by scrollTopOverlay
             if (mouse.isPress() && mouse.isLeftButton()) {
                 // tab close zones first: they are sub-rects of the tab cells
                 for (var i = 0; i < tabCloseRects.size(); i++) {
@@ -1116,7 +1145,7 @@ public class TuiCommand implements Runnable {
                     final var caret = inputCaretAt(state, mouse.x(), mouse.y());
                     applyCursor(state, caret.row(), caret.col());
                 }
-                state.selection.press(mouse.x(), mouse.y(), state.screenGrid);
+                state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
                 return true;
             }
             if (mouse.kind() == MouseEventKind.DRAG && mouse.isLeftButton()) {
@@ -1156,14 +1185,8 @@ public class TuiCommand implements Runnable {
                 approval.action(1);
             } else if (key.isChar('3')) {
                 approval.action(2);
-            } else if (key.isKey(KeyCode.PAGE_UP)) {
-                approval.detailScroll(approval.detailScroll() - 5);
-            } else if (key.isKey(KeyCode.PAGE_DOWN)) {
-                approval.detailScroll(approval.detailScroll() + 5);
-            } else if (key.isKey(KeyCode.UP)) {
-                approval.detailScroll(approval.detailScroll() - 1);
-            } else if (key.isKey(KeyCode.DOWN)) {
-                approval.detailScroll(approval.detailScroll() + 1);
+            } else {
+                approval.detailScroll(scrollService.apply(approval.detailScroll(), scrollService.keyDelta(key)));
             }
             return true;
         }
@@ -1337,13 +1360,11 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isPageUp()) {
-            state.model.anchorRow(state.model.anchorRow() - 10);
-            state.model.userScrolled(true);
+            scrollTranscript(state, -scrollService.pageRows());
             return true;
         }
         if (key.isPageDown()) {
-            state.model.anchorRow(state.model.anchorRow() + 10);
-            state.model.userScrolled(state.model.anchorRow() < state.maxViewOffset);
+            scrollTranscript(state, scrollService.pageRows());
             return true;
         }
         if (key.hasCtrl() && key.isKey(KeyCode.HOME)) {
@@ -1429,6 +1450,14 @@ public class TuiCommand implements Runnable {
                 pending.complete(Optional.of(answer));
                 return true;
             }
+            if (state.completion != null && !state.completion.empty() && state.completionNavigated) {
+                // the user moved the completion highlight with Up/Down: Enter accepts the
+                // highlighted candidate instead of submitting the line (Tab still completes
+                // without pressing Enter)
+                applyCompletion(state);
+                dismissCompletion(state);
+                return true;
+            }
             final var text = state.input.text().strip();
             state.input.clear();
             if (!text.isEmpty()) {
@@ -1490,7 +1519,7 @@ public class TuiCommand implements Runnable {
      * avoid accidental clipboard overwrites.
      */
     private void copySelection(final TuiRunner runner, final UiState state) {
-        final var text = state.selection.copy(state.screenGrid, copyZones(state));
+        final var text = state.selection.copy(state.screenGrid);
         if (text == null || text.length() <= 1 || text.isBlank()) {
             return;
         }
@@ -1498,12 +1527,27 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * The zones a selection may be confined to, most specific first: the chat
-     * body (conversation) and the prompt input. The selection engine clips to
-     * whichever zone holds the drag's anchor.
+     * The panes a selection may be confined to, most specific first, so a press
+     * resolves to the visible thing the user actually clicked:
+     * <ol>
+     *     <li>the overlay dialogs and floating panels of the last frame, most
+     *     recently drawn first (a toast outranks the modal it covers),</li>
+     *     <li>the prompt input,</li>
+     *     <li>the conversation body.</li>
+     * </ol>
+     * The selection engine clips to whichever pane holds the press and keeps it
+     * for the whole drag, so overflowing past a dialog's bottom edge stops at
+     * the dialog instead of copying the content drawn underneath it.
      */
     private static java.util.List<Rect> copyZones(final UiState state) {
-        return java.util.List.of(state.copyZone, state.inputZone);
+        final var panes = state.paneZones;
+        final var zones = new ArrayList<Rect>(panes.size() + 2);
+        for (var i = panes.size() - 1; i >= 0; i--) {
+            zones.add(panes.get(i));
+        }
+        zones.add(state.inputZone);
+        zones.add(state.copyZone);
+        return zones;
     }
 
     /**
@@ -1719,13 +1763,9 @@ public class TuiCommand implements Runnable {
             closeBtw(state);
             return true;
         }
-        if (key.isKey(KeyCode.UP) || key.isKey(KeyCode.PAGE_UP)) {
-            state.btw = withBtwScroll(state.btw, key.isKey(KeyCode.PAGE_UP) ? -5 : -1);
-            return true;
-        }
-        if (key.isKey(KeyCode.DOWN) || key.isKey(KeyCode.PAGE_DOWN)) {
-            state.btw = withBtwScroll(state.btw, key.isKey(KeyCode.PAGE_DOWN) ? 5 : 1);
-            return true;
+        final var delta = scrollService.keyDelta(key);
+        if (delta != 0) {
+            state.btw = withBtwScroll(state.btw, delta);
         }
         return true;
     }
@@ -1737,7 +1777,7 @@ public class TuiCommand implements Runnable {
                 btw.answer(),
                 btw.error(),
                 btw.running(),
-                btw.scroll() + delta,
+                scrollService.apply(btw.scroll(), delta),
                 btw.cancelled());
     }
 
@@ -1753,6 +1793,15 @@ public class TuiCommand implements Runnable {
             }
         }
         syncSession(state);
+        // /provider switched the active provider: the completion cache is provider-scoped
+        // (model ids differ per provider, e.g. glm-5.3 vs z-ai/glm-5.3), so the stale list
+        // must be dropped and re-fetched for the new provider
+        final var providerId = chatClient == null ? "" : chatClient.providerId();
+        if (!providerId.equals(lastCompletionProviderId)) {
+            lastCompletionProviderId = providerId;
+            completionCache.invalidateModels();
+            refreshCompletionCache();
+        }
     }
 
     private void syncSession(final UiState state) {
@@ -1922,6 +1971,7 @@ public class TuiCommand implements Runnable {
             state.completion = suggestion;
             state.completionCursor = cursor;
             state.completionIndex = 0;
+            state.completionNavigated = false;
         }
         applyCompletion(state);
     }
@@ -1971,16 +2021,19 @@ public class TuiCommand implements Runnable {
         } else {
             state.completionIndex = (state.completionIndex + size - 1) % size;
         }
-        applyCompletion(state);
-        // after applying, re-suggest so the popup tracks the new input
-        final var re = completionEngine.suggest(state.input.getLine(state.input.cursorRow()), state.input.cursorCol());
-        state.completion = re.empty() ? suggestion : re;
-        state.completionIndex = 0;
+        // arrow navigation marks the popup as explicitly navigated so Enter accepts the
+        // highlighted candidate; Tab resets it (Tab applies-and-advances by itself, Enter
+        // after Tab must keep submitting the line)
+        state.completionNavigated = true;
+        // the popup highlight is not an animated region: mark the tab dirty so the next
+        // tick repaints the moved selection even when no other state changed
+        state.dirty = true;
     }
 
     private void dismissCompletion(final UiState state) {
         state.completion = null;
         state.completionCursor = -1;
+        state.completionNavigated = false;
     }
 
     /**
@@ -2018,6 +2071,7 @@ public class TuiCommand implements Runnable {
             state.completion = suggestion;
             state.completionCursor = reqCursor;
             state.completionIndex = 0;
+            state.completionNavigated = false;
         });
     }
 
@@ -2045,8 +2099,12 @@ public class TuiCommand implements Runnable {
             executor.execute(() -> {
                 if (chatClient != null) {
                     try {
+                        // provider-scoped guard: the models list is cached while an async refresh
+                        // runs; if the provider switches meanwhile (invalidateModels bumps the
+                        // generation) the stale result must not overwrite the new provider's list
+                        final var generation = completionCache.modelGeneration();
                         final var ids = chatClient.models().ids();
-                        completionCache.models(ids == null ? List.of() : List.copyOf(ids));
+                        completionCache.updateModels(generation, ids == null ? List.of() : List.copyOf(ids));
                     } catch (final Exception e) {
                         LOG.log(Level.SEVERE, "model list refresh failed; keeping previous completion cache", e);
                     }
@@ -2087,6 +2145,7 @@ public class TuiCommand implements Runnable {
                     }
                 }
                 if (chatClient != null) {
+                    final var variantGeneration = completionCache.modelGeneration();
                     final var variants = new LinkedHashMap<String, List<String>>();
                     for (final var model : completionCache.models()) {
                         final var selected = new ArrayList<String>();
@@ -2110,7 +2169,7 @@ public class TuiCommand implements Runnable {
                             variants.put(model, List.copyOf(selected));
                         }
                     }
-                    completionCache.variants(variants);
+                    completionCache.updateVariants(variantGeneration, variants);
                 }
             });
         } catch (final RuntimeException e) {
@@ -2148,13 +2207,72 @@ public class TuiCommand implements Runnable {
     }
 
     /**
+     * Routes a wheel event to the scrollable view the user is actually looking at, walking the same
+     * topmost-wins priority as {@link #onKey(Event, TuiRunner, UiState)}.
+     * <p>
+     * This has to happen before the overlay chain because the approval and "behind the scenes"
+     * dialogs are dispatched after the {@code KeyEvent} guard of {@code onKey}: a wheel event over
+     * them used to fall through to the main view and scroll the conversation hidden behind the modal.
+     *
+     * @return always {@code true}, the wheel is consumed even by overlays with nothing to scroll so
+     *         it can never leak to the transcript while a dialog is up
+     */
+    private boolean scrollTopOverlay(final MouseEvent wheel, final UiState state) {
+        final var delta = scrollService.wheelDelta(wheel);
+        if (delta == 0) {
+            return false;
+        }
+        if (state.toolOverlay != null) {
+            scrollToolOverlay(state, delta);
+        } else if (tabManager.isListOpen()) {
+            tabManager.listScroll(scrollService.apply(tabManager.listScroll(), delta));
+        } else if (state.shortcutsOpen) {
+            state.shortcutsScroll = scrollService.apply(state.shortcutsScroll, delta);
+        } else if (state.subagentsOverlay != null) {
+            state.subagentsScroll = scrollService.apply(state.subagentsScroll, delta);
+        } else if (state.searchOpen) {
+            // single line search bar: nothing to scroll
+        } else if (state.errorDetail != null && state.errorOpen) {
+            state.errorScroll = scrollService.apply(state.errorScroll, delta);
+        } else if (state.editPlan != null) {
+            // two buttons, no scrollable body
+        } else if (state.feedbackPrompt != null) {
+            final var prompt = state.feedbackPrompt;
+            if (prompt.tab() < prompt.questions().size()) {
+                moveOption(prompt, prompt.tab(), delta);
+            }
+        } else if (state.picker != null) {
+            state.picker.move(delta);
+        } else if (state.approval != null) {
+            final var approval = state.approval;
+            approval.detailScroll(scrollService.apply(approval.detailScroll(), delta));
+        } else if (state.btw != null) {
+            state.btw = withBtwScroll(state.btw, delta);
+        } else {
+            scrollTranscript(state, delta);
+        }
+        return true;
+    }
+
+    /** Scrolls the conversation, keeping the "user browsed" flag in sync so auto-follow re-arms at the bottom. */
+    private void scrollTranscript(final UiState state, final int delta) {
+        if (delta == 0) {
+            return;
+        }
+        state.model.anchorRow(scrollService.clamp(state.model.anchorRow(), delta, state.maxViewOffset));
+        state.model.userScrolled(state.model.anchorRow() < state.maxViewOffset);
+    }
+
+    /**
      * Up/Down on the prompt line: when a completion popup is active the arrows
      * cycle its matches; otherwise (idle, single logical line) they recall the
      * prompt history; in all other cases the cursor moves across lines.
      */
     private void handleLineOrHistory(final UiState state, final boolean up) {
         if (state.completion != null && !state.completion.empty()) {
-            cycleCompletion(state, up);
+            // the popup lists candidates top-down above the prompt: Down moves to the next
+            // candidate, Up back to the previous one (the highlight only; Enter applies)
+            cycleCompletion(state, !up);
             return;
         }
         if (state.model.busy()) {
@@ -2480,7 +2598,7 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(10, frame.height() / 3), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.25);
-        final var inner = Modal.box(frame, rect, " edit plan ", warning);
+        final var inner = modal(frame, rect, " edit plan ", warning);
         if (inner == null) {
             return;
         }
@@ -2582,6 +2700,7 @@ public class TuiCommand implements Runnable {
     private void render(final dev.tamboui.terminal.Frame frame, final UiState state) {
         state.lastRenderTick = clock.millis();
         state.dirty = false;
+        frameZones.clear();
         if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
             state.spinnerTick++;
         }
@@ -2641,6 +2760,7 @@ public class TuiCommand implements Runnable {
                 .split(root.get(1));
         if (!narrow) {
             renderSidebar(body.get(1), frame, state);
+            frameZones.add(body.get(1));
         }
         var chat = accentGutter(body.get(0), frame);
         if (state.showTodos) {
@@ -2649,6 +2769,7 @@ public class TuiCommand implements Runnable {
                     .split(chat);
             chat = withTodos.get(0);
             renderTodos(withTodos.get(1), frame, state, todosRender);
+            frameZones.add(withTodos.get(1));
         }
         // thinking streams inline in the conversation panel (dimmed, thin left bar),
         // gated by showThinking, so no dedicated stacked panel is needed anymore
@@ -2659,12 +2780,15 @@ public class TuiCommand implements Runnable {
         var bottomIndex = 2;
         if (queueRows > 0) {
             renderQueue(root.get(bottomIndex++), frame, state);
+            frameZones.add(root.get(bottomIndex - 1));
         }
         renderInput(root.get(bottomIndex), frame, state);
         renderCompletionPopup(root.get(bottomIndex), frame, state);
         bottomIndex++;
         renderCalling(root.get(bottomIndex++), frame, state);
+        frameZones.add(root.get(bottomIndex - 1));
         renderStatus(root.get(bottomIndex), frame, state, narrow);
+        frameZones.add(root.get(bottomIndex));
         if (state.searchOpen) {
             renderSearchBar(frame, state);
         }
@@ -2699,8 +2823,31 @@ public class TuiCommand implements Runnable {
             renderBtw(frame, state);
         }
         renderToast(frame, state);
-        state.selection.highlight(frame.buffer(), copyZones(state));
+        // published before the highlight so both passes resolve a press against
+        // the very same pane set
+        state.paneZones = List.copyOf(frameZones);
+        state.selection.highlight(frame.buffer());
         state.screenGrid = SelectionState.snapshot(frame.buffer());
+    }
+
+    /**
+     * Draws a centered dialog and registers its content area as a selection
+     * {@link #frameZones pane}, so a drag started on the dialog is confined to
+     * it instead of falling through to whatever the dialog covers (the
+     * conversation behind it, the prompt, the whole frame...).
+     * <p>
+     * Panes are registered in draw order and {@link #copyZones(UiState)} picks
+     * the first match, so a later (topmost) dialog wins.
+     *
+     * @return the inner drawable area, or null when the box is too small to host content
+     */
+    private Rect modal(
+            final dev.tamboui.terminal.Frame frame, final Rect rect, final String title, final Color borderColor) {
+        final var inner = Modal.box(frame, rect, title, borderColor);
+        if (inner != null) {
+            frameZones.add(inner);
+        }
+        return inner;
     }
 
     private Style modelNameStyle(final String model) {
@@ -2905,12 +3052,7 @@ public class TuiCommand implements Runnable {
         final var toolTops = new ArrayList<UiState.ToolTop>();
         final var footerLinks = new ArrayList<UiState.FooterLink>();
         final var chunks = chunks(
-                state.model.markdown(spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick), WELCOME),
-                inner.width(),
-                state,
-                toolTops,
-                footerLinks,
-                rows);
+                state.model.markdown(RUNNING_TOOL_MARKER, WELCOME), inner.width(), state, toolTops, footerLinks, rows);
         state.flatRows = rows;
         final var total = chunks.stream().mapToInt(RenderedChunk::height).sum();
         final var maxViewOffset = Math.max(0, total - Math.max(1, inner.height()));
@@ -3780,6 +3922,9 @@ public class TuiCommand implements Runnable {
         if (inner.isEmpty()) {
             return;
         }
+        // the popup is drawn after the input, so registering it last makes it the
+        // topmost pane a press can resolve to
+        frameZones.add(inner);
         final var lines = new ArrayList<Line>();
         for (var i = 0; i < visible; i++) {
             final var selected = i == (state.completionIndex % items.size());
@@ -3883,17 +4028,22 @@ public class TuiCommand implements Runnable {
         if (metrics.showPerTurn() && state.model.turnLlmCalls() > 0) {
             final var mode = metrics.displayMode();
             final var duration = String.format(Locale.ROOT, "%.1fs", state.model.turnDurationMs() / 1000.0);
+            // empty when the throughput cannot be measured: the segment is then simply skipped
+            final var tokPerSec = MetricsFormat.tokPerSec(state.model.turnThroughput());
+            final var throughput = tokPerSec.isEmpty() ? "" : " · " + tokPerSec;
             if (mode == MetricsDisplayMode.COMPACT) {
                 parts.add(Span.styled(
-                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms) · "
-                                + state.model.turnToolsRun() + " tools (" + state.model.turnToolSumMs() + "/"
-                                + state.model.turnToolWallMs() + "ms) · " + duration + "  ",
+                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms)"
+                                + throughput + " · " + state.model.turnToolsRun() + " tools ("
+                                + state.model.turnToolSumMs() + "/" + state.model.turnToolWallMs() + "ms) · " + duration
+                                + "  ",
                         muted));
             } else if (mode == MetricsDisplayMode.FULL) {
                 parts.add(Span.styled(
-                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms think) · "
-                                + state.model.turnToolsRun() + " tools (" + state.model.turnToolSumMs() + "ms sum/"
-                                + state.model.turnToolWallMs() + "ms wall) · " + duration + "  ",
+                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms think)"
+                                + throughput + " · " + state.model.turnToolsRun() + " tools ("
+                                + state.model.turnToolSumMs() + "ms sum/" + state.model.turnToolWallMs()
+                                + "ms wall) · " + duration + "  ",
                         muted));
             }
         }
@@ -3993,7 +4143,7 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(66, frame.width() - 4);
         final var height = Math.min(3, frame.height());
         final var rect = Modal.rect(frame, width, height, 0.72);
-        final var inner = Modal.box(frame, rect, " find ", Color.hex(palette.accent()));
+        final var inner = modal(frame, rect, " find ", Color.hex(palette.accent()));
         if (inner == null) {
             return;
         }
@@ -4024,14 +4174,7 @@ public class TuiCommand implements Runnable {
     /** Key handling while the shortcuts overlay is open. */
     private boolean onShortcutsKey(final Event event, final UiState state) {
         if (event instanceof final MouseEvent mouse) {
-            // wheel support: the overlay is taller than the terminal on small screens
-            if (mouse.isScroll()) {
-                if (mouse.kind() == MouseEventKind.SCROLL_UP) {
-                    state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 3);
-                } else {
-                    state.shortcutsScroll += 3;
-                }
-            }
+            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
             return true;
         }
         if (event instanceof PasteEvent) {
@@ -4044,14 +4187,13 @@ public class TuiCommand implements Runnable {
             state.shortcutsOpen = false;
             return true;
         }
-        if (key.isKey(KeyCode.PAGE_UP) || (key.hasAlt() && key.isCharIgnoreCase('u'))) {
-            state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 10);
-        } else if (key.isKey(KeyCode.PAGE_DOWN) || (key.hasAlt() && key.isCharIgnoreCase('d'))) {
-            state.shortcutsScroll += 10;
-        } else if (key.isKey(KeyCode.UP)) {
-            state.shortcutsScroll = Math.max(0, state.shortcutsScroll - 1);
-        } else if (key.isKey(KeyCode.DOWN)) {
-            state.shortcutsScroll += 1;
+        // the overlay is taller than the terminal on small screens, so it scrolls too
+        if (key.hasAlt() && key.isCharIgnoreCase('u')) {
+            state.shortcutsScroll = scrollService.apply(state.shortcutsScroll, -scrollService.pageRows());
+        } else if (key.hasAlt() && key.isCharIgnoreCase('d')) {
+            state.shortcutsScroll = scrollService.apply(state.shortcutsScroll, scrollService.pageRows());
+        } else {
+            state.shortcutsScroll = scrollService.apply(state.shortcutsScroll, scrollService.keyDelta(key));
         }
         return true;
     }
@@ -4059,14 +4201,7 @@ public class TuiCommand implements Runnable {
     /** Key handling while the "/tabs" list overlay is open. */
     private boolean onTabsListKey(final Event event) {
         if (event instanceof final MouseEvent mouse) {
-            // wheel support: the tab titles can overflow the overlay height
-            if (mouse.isScroll()) {
-                if (mouse.kind() == MouseEventKind.SCROLL_UP) {
-                    tabManager.listScroll(tabManager.listScroll() - 3);
-                } else {
-                    tabManager.listScroll(tabManager.listScroll() + 3);
-                }
-            }
+            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
             return true;
         }
         if (event instanceof PasteEvent) {
@@ -4079,14 +4214,12 @@ public class TuiCommand implements Runnable {
             tabManager.closeList();
             return true;
         }
-        if (key.isKey(KeyCode.PAGE_UP)) {
-            tabManager.listScroll(tabManager.listScroll() - 10);
-        } else if (key.isKey(KeyCode.PAGE_DOWN)) {
-            tabManager.listScroll(tabManager.listScroll() + 10);
-        } else if (key.isKey(KeyCode.UP)) {
-            tabManager.listScroll(tabManager.listScroll() - 1);
-        } else if (key.isKey(KeyCode.DOWN)) {
-            tabManager.listScroll(tabManager.listScroll() + 1);
+        if (key.isKey(KeyCode.UP)
+                || key.isKey(KeyCode.DOWN)
+                || key.isKey(KeyCode.PAGE_UP)
+                || key.isKey(KeyCode.PAGE_DOWN)) {
+            // the tab titles can overflow the overlay height
+            tabManager.listScroll(scrollService.apply(tabManager.listScroll(), scrollService.keyDelta(key)));
         } else if (!key.hasAlt() && !key.hasCtrl() && key.character() >= '0' && key.character() <= '9') {
             final var index = key.character() == '0' ? 9 : Character.digit(key.character(), 10) - 1;
             if (index < tabManager.size()) {
@@ -4103,7 +4236,7 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
-        final var inner = Modal.box(frame, rect, " shortcuts ", Color.hex(palette.accent()));
+        final var inner = modal(frame, rect, " shortcuts ", Color.hex(palette.accent()));
         if (inner == null) {
             return;
         }
@@ -4139,7 +4272,8 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
-                                "  Up/Down scroll  Esc close  ", Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                                "  Wheel/Up/Down scroll  Esc close  ",
+                                Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
                 splits.get(1));
@@ -4150,7 +4284,7 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(10, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
-        final var inner = Modal.box(frame, rect, " tabs ", Color.hex(palette.accent()));
+        final var inner = modal(frame, rect, " tabs ", Color.hex(palette.accent()));
         if (inner == null) {
             return;
         }
@@ -4191,7 +4325,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
-                                "  1-9 switch  Up/Down scroll  Esc close  ",
+                                "  1-9 switch  Wheel/Up/Down scroll  Esc close  ",
                                 Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
@@ -4219,9 +4353,7 @@ public class TuiCommand implements Runnable {
     /** Key handling while the subagents overlay is open. */
     private boolean onSubagentsKey(final Event event, final UiState state) {
         if (event instanceof final MouseEvent mouse) {
-            if (mouse.isScroll()) {
-                state.subagentsScroll += mouse.kind() == MouseEventKind.SCROLL_UP ? -3 : 3;
-            }
+            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
             return true;
         }
         if (event instanceof PasteEvent) {
@@ -4234,14 +4366,11 @@ public class TuiCommand implements Runnable {
             state.subagentsOverlay = null;
             return true;
         }
-        if (key.isKey(KeyCode.PAGE_UP)) {
-            state.subagentsScroll -= 10;
-        } else if (key.isKey(KeyCode.PAGE_DOWN)) {
-            state.subagentsScroll += 10;
-        } else if (key.isKey(KeyCode.UP)) {
-            state.subagentsScroll -= 1;
-        } else if (key.isKey(KeyCode.DOWN)) {
-            state.subagentsScroll += 1;
+        if ((key.isKey(KeyCode.UP)
+                || key.isKey(KeyCode.DOWN)
+                || key.isKey(KeyCode.PAGE_UP)
+                || key.isKey(KeyCode.PAGE_DOWN))) {
+            state.subagentsScroll = scrollService.apply(state.subagentsScroll, scrollService.keyDelta(key));
         } else if ((key.isLeft() || key.isKey(KeyCode.BACKSPACE)) && !state.subagentsOverlay.isEmpty()) {
             state.subagentsOverlay = "";
             state.subagentsScroll = 0;
@@ -4255,7 +4384,7 @@ public class TuiCommand implements Runnable {
         final var height = Math.min(Math.max(12, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
         final var detail = !state.subagentsOverlay.isEmpty();
-        final var inner = Modal.box(
+        final var inner = modal(
                 frame,
                 rect,
                 detail ? " subagents - " + state.subagentsOverlay : " subagents ",
@@ -4270,11 +4399,27 @@ public class TuiCommand implements Runnable {
         if (detail) {
             final var captured = subagentRegistry.transcriptOf(state.subagentsOverlay);
             final var md = captured.markdown("|", "");
-            rows.addAll(transcriptRenderer.renderRegion(
-                    md.isBlank() ? "*still starting...*" : md,
-                    Math.max(1, inner.width() - 2),
-                    textStyle,
-                    MarkdownStyles.DEFAULTS));
+            if (md.isBlank()) {
+                rows.add(Line.from(Span.styled("*still starting...*", muted)));
+            } else {
+                // the per-subagent capture is a transcript like the main pane: split it into
+                // thought/tool/plain regions instead of rendering the raw marker markdown
+                // (markers are opaque to the markdown renderer and would show literally)
+                final var contentWidth = Math.max(1, inner.width() - 2);
+                for (final var region : TuiTranscriptModel.regions(md)) {
+                    if (region.thought()) {
+                        if (state.showThinking) {
+                            rows.addAll(thoughtLines(region.text(), contentWidth));
+                        }
+                    } else if (region.tool()) {
+                        if (state.showToolActions != ToolOutputVisibility.HIDDEN) {
+                            appendModalRegion(rows, region.text(), contentWidth, textStyle);
+                        }
+                    } else if (!region.text().isBlank()) {
+                        appendModalRegion(rows, region.text(), contentWidth, textStyle);
+                    }
+                }
+            }
         } else {
             final var active = active();
             final var list = subagentRegistry.listAll(active == null ? null : active.sessionId);
@@ -4311,7 +4456,8 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
-                                "  Up/Down scroll  Esc close  ", Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                                "  Wheel/Up/Down scroll  Esc close  ",
+                                Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
                 splits.get(1));
@@ -4326,12 +4472,24 @@ public class TuiCommand implements Runnable {
         return summary == null || summary.isBlank() ? (sub.task() == null ? "" : sub.task()) : summary;
     }
 
+    /** Renders one non-thought subagent-region body (prose or fenced code) into plain modal lines. */
+    private void appendModalRegion(final List<Line> rows, final String text, final int width, final Style base) {
+        for (final var seg : syntaxHighlighter.split(text)) {
+            if (seg.type() == SyntaxHighlighter.Segment.Type.CODE) {
+                rows.addAll(MarkdownLines.wrapCode(
+                        syntaxHighlighter.highlightLines(seg.language(), seg.text()), Math.max(1, width - 4)));
+            } else if (!seg.text().isBlank()) {
+                rows.addAll(transcriptRenderer.renderRegion(seg.text(), width, base, MarkdownStyles.DEFAULTS));
+            }
+        }
+    }
+
     private void renderBtw(final dev.tamboui.terminal.Frame frame, final UiState state) {
         final var btw = state.btw;
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.12);
-        final var inner = Modal.box(frame, rect, " btw ", Color.hex(palette.accent()));
+        final var inner = modal(frame, rect, " btw ", Color.hex(palette.accent()));
         if (inner == null) {
             return;
         }
@@ -4365,7 +4523,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
-                                btw.running() ? "  Esc cancel" : "  Up/Down scroll  Esc close  ",
+                                btw.running() ? "  Esc cancel" : "  Wheel/Up/Down scroll  Esc close  ",
                                 Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
@@ -4455,9 +4613,7 @@ public class TuiCommand implements Runnable {
     /** Key/mouse handling while the full tool output overlay is open. */
     private boolean onToolOverlayEvent(final Event event, final TuiRunner runner, final UiState state) {
         if (event instanceof final MouseEvent mouse) {
-            if (mouse.isScroll()) {
-                scrollToolOverlay(state, mouse.kind() == MouseEventKind.SCROLL_UP ? -3 : 3);
-            }
+            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
             return true;
         }
         if (!(event instanceof final KeyEvent key)) {
@@ -4474,15 +4630,7 @@ public class TuiCommand implements Runnable {
             copyText(runner, state, state.toolOverlay.entry().output());
             return true;
         }
-        if (key.isKey(KeyCode.PAGE_UP)) {
-            scrollToolOverlay(state, -20);
-        } else if (key.isKey(KeyCode.PAGE_DOWN)) {
-            scrollToolOverlay(state, 20);
-        } else if (key.isKey(KeyCode.UP)) {
-            scrollToolOverlay(state, -1);
-        } else if (key.isKey(KeyCode.DOWN)) {
-            scrollToolOverlay(state, 1);
-        }
+        scrollToolOverlay(state, scrollService.keyDelta(key));
         return true;
     }
 
@@ -4546,8 +4694,7 @@ public class TuiCommand implements Runnable {
         final var height = Math.min(Math.max(14, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.1);
         final var title = " " + (entry.failed() ? glyphs.cross() + " " : "") + entry.name() + " - full output ";
-        final var inner =
-                Modal.box(frame, rect, title, Color.hex(entry.failed() ? palette.error() : palette.success()));
+        final var inner = modal(frame, rect, title, Color.hex(entry.failed() ? palette.error() : palette.success()));
         if (inner == null) {
             return;
         }
@@ -4574,7 +4721,7 @@ public class TuiCommand implements Runnable {
                 + (entry.args() == null || entry.args().isBlank()
                         ? ""
                         : ellipsize(entry.args(), Math.max(1, inner.width() - 42)) + "  ")
-                + "Ctrl+O/q/Esc close | Up/Down scroll | c copy output ";
+                + "Ctrl+O/q/Esc close | Wheel/Up/Down scroll | c copy output ";
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(footer, Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
@@ -4585,7 +4732,11 @@ public class TuiCommand implements Runnable {
 
     /** Key handling while the error detail modal (Alt+E) is open. */
     private boolean onErrorKey(final Event event, final TuiRunner runner, final UiState state) {
-        if (event instanceof PasteEvent || event instanceof MouseEvent) {
+        if (event instanceof PasteEvent) {
+            return true;
+        }
+        if (event instanceof final MouseEvent mouse) {
+            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
             return true;
         }
         if (!(event instanceof final KeyEvent key)) {
@@ -4606,15 +4757,7 @@ public class TuiCommand implements Runnable {
                     detail.stack() == null ? detail.message() : detail.message() + "\n" + detail.stack());
             return true;
         }
-        if (key.isKey(KeyCode.PAGE_UP)) {
-            state.errorScroll = Math.max(0, state.errorScroll - 10);
-        } else if (key.isKey(KeyCode.PAGE_DOWN)) {
-            state.errorScroll += 10;
-        } else if (key.isKey(KeyCode.UP)) {
-            state.errorScroll = Math.max(0, state.errorScroll - 1);
-        } else if (key.isKey(KeyCode.DOWN)) {
-            state.errorScroll += 1;
-        }
+        state.errorScroll = scrollService.apply(state.errorScroll, scrollService.keyDelta(key));
         return true;
     }
 
@@ -4624,7 +4767,7 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(Math.max(70, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 3 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.15);
-        final var inner = Modal.box(frame, rect, " error details ", Color.hex(palette.error()));
+        final var inner = modal(frame, rect, " error details ", Color.hex(palette.error()));
         if (inner == null) {
             return;
         }
@@ -4660,7 +4803,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
-                                " Esc close | Up/Down scroll | c copy ",
+                                " Esc close | Wheel/Up/Down scroll | c copy ",
                                 Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
@@ -4797,7 +4940,7 @@ public class TuiCommand implements Runnable {
         final var accent = Style.EMPTY.fg(Color.hex(color));
         final var width = Math.clamp(toast.message().length() + 4, 16, Math.max(16, frame.width()));
         final var rect = new Rect(Math.max(0, (frame.width() - width) / 2), Math.max(0, frame.height() - 6), width, 3);
-        final var inner = Modal.box(frame, rect, " notice ", Color.hex(color));
+        final var inner = modal(frame, rect, " notice ", Color.hex(color));
         if (inner == null) {
             return;
         }
@@ -4863,7 +5006,7 @@ public class TuiCommand implements Runnable {
         final var height = Math.min(Math.max(12, frame.height() * 2 / 3), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.2);
         final var warning = Color.hex(palette.warning());
-        final var inner = Modal.box(frame, rect, " approval required ", warning);
+        final var inner = modal(frame, rect, " approval required ", warning);
         if (inner == null) {
             return;
         }
@@ -4979,7 +5122,7 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(Math.max(50, frame.width() * 3 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 2 / 3), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.2);
-        final var inner = Modal.box(frame, rect, " " + picker.title + " ", accent);
+        final var inner = modal(frame, rect, " " + picker.title + " ", accent);
         if (inner == null) {
             return;
         }
@@ -5095,7 +5238,7 @@ public class TuiCommand implements Runnable {
         final var height = Math.min(
                 Math.max(12, 8 + prompt.questions().size() * 3 + questionRows), Math.max(12, frame.height() * 3 / 4));
         final var rect = Modal.rect(frame, width, height, 0.25);
-        final var inner = Modal.box(frame, rect, " user request ", Color.hex(palette.accent()));
+        final var inner = modal(frame, rect, " user request ", Color.hex(palette.accent()));
         if (inner == null || inner.height() < 4) {
             return;
         }
@@ -5627,7 +5770,7 @@ public class TuiCommand implements Runnable {
             selected = Math.clamp(selected + delta, 0, v.size() - 1);
         }
 
-        private void stroke(final KeyEvent key) {
+        private void stroke(final KeyEvent key, final ScrollService scroll) {
             if (key.isKey(KeyCode.UP)) {
                 move(-1);
             } else if (key.isKey(KeyCode.DOWN)) {
@@ -5637,10 +5780,8 @@ public class TuiCommand implements Runnable {
             } else if (key.isKey(KeyCode.END)) {
                 final var v = visible();
                 selected = v.isEmpty() ? 0 : v.size() - 1;
-            } else if (key.isKey(KeyCode.PAGE_UP)) {
-                move(-8);
-            } else if (key.isKey(KeyCode.PAGE_DOWN)) {
-                move(8);
+            } else if (key.isKey(KeyCode.PAGE_UP) || key.isKey(KeyCode.PAGE_DOWN)) {
+                move(scroll.keyDelta(key));
             } else if (key.hasCtrl() && key.isCharIgnoreCase('u')) {
                 filterClear();
             } else if (key.isKey(KeyCode.BACKSPACE)) {
@@ -5836,52 +5977,6 @@ public class TuiCommand implements Runnable {
         return prompt.questions().get(idx).ownAnswer();
     }
 
-    /**
-     * Cached completion value sources. Populated asynchronously on the shared
-     * executor so the render thread never blocks on a network/IO round-trip
-     * while completing. Each field is replaced atomically with an immutable
-     * list (or map); readers just call get.
-     */
-    private static final class CompletionCache {
-        private volatile List<String> models = List.of();
-        private volatile List<String> sessions = List.of();
-        private volatile List<String> tools = List.of();
-        private volatile Map<String, List<String>> variants = Map.of();
-
-        List<String> models() {
-            return models;
-        }
-
-        void models(final List<String> value) {
-            models = value == null ? List.of() : value;
-        }
-
-        List<String> sessions() {
-            return sessions;
-        }
-
-        void sessions(final List<String> value) {
-            sessions = value == null ? List.of() : value;
-        }
-
-        List<String> tools() {
-            return tools;
-        }
-
-        void tools(final List<String> value) {
-            tools = value == null ? List.of() : value;
-        }
-
-        List<String> variants(final String model) {
-            final var map = variants;
-            return model == null ? List.of() : map.getOrDefault(model, List.of());
-        }
-
-        void variants(final Map<String, List<String>> value) {
-            variants = value == null ? Map.of() : value;
-        }
-    }
-
     static final class UiState {
         private record Wait(String message, SpinnerStyle style) {}
 
@@ -5937,10 +6032,18 @@ public class TuiCommand implements Runnable {
         private volatile CompletionEngine.Suggestion completion;
         private volatile int completionIndex;
         private volatile int completionCursor = -1;
+        private volatile boolean completionNavigated;
         private final SelectionState selection = new SelectionState();
         private volatile String[][] screenGrid = new String[0][0];
         private volatile Rect copyZone;
         private volatile Rect inputZone;
+        /**
+         * Content regions of the last rendered frame that a selection may be
+         * confined to, in draw order (bottom to top). Read by the event thread
+         * to resolve a mouse press, published by the render thread each frame.
+         */
+        private volatile java.util.List<Rect> paneZones = java.util.List.of();
+
         private volatile int spinnerTick;
         private volatile String lastTodosRender = "";
         private volatile Toast toast;
