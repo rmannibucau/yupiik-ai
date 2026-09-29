@@ -187,8 +187,12 @@ they are exposed and stored: some OpenAI compatible backends (llama.cpp /
 ollama style) reject whole turns with an HTTP 500
 (`Failed to parse tool call arguments as JSON:
 [json.exception.parse_error.101]`) when the arguments carry unescaped control
-characters (literal tabs/newlines in string values) or a truncated tail under
-a heavy context. Values are `enabled` (always repair the safe cases), `disabled`
+characters (literal tabs/newlines in string values) or a structurally corrupt
+tail under a heavy context (a truncated blob or a second JSON value after the
+closing brace). The repair escapes control characters and trims a trailing
+second JSON value, always re-validating and never inventing values: payloads
+that stay unparseable are left untouched so the corruption stays visible.
+Values are `enabled` (always repair the safe cases), `disabled`
 (never) and `auto` (the default): `auto` repairs for any Qwen 27B variant (the
 effective model contains `qwen` and `27b`, case-insensitive) and is disabled
 otherwise. The per-model `behavior` value wins over the provider `tuning`

@@ -3087,6 +3087,18 @@ public class TuiCommand implements Runnable {
             cost.ifPresent(c -> text.add(Line.from(
                     Span.styled("cost ~     ", label), Span.styled(String.format(Locale.ROOT, "$%.4f", c), value))));
         }
+        // context appliances (dedup/prune/compact/...) as side feedback, right above the gauge:
+        // the bottom status strip is reserved for the leading status + notices/errors and must
+        // never be clobbered by a "context dedup done" line — the appliance lives here instead.
+        final var appliances = state.model.appliances();
+        if (!appliances.isEmpty()) {
+            final var app = appliances.getFirst();
+            text.add(Line.from(
+                    Span.styled("ctx ", label),
+                    Span.styled(
+                            ellipsize(app.kind() + " " + modeLabel(app.mode()), Math.max(8, width - 4)),
+                            Style.EMPTY.fg(Color.hex(palette.info())))));
+        }
         final var lines = Text.from(text.toArray(Line[]::new));
         final var textRect = rows.getFirst();
         final var overflow = Math.max(0, lines.height() - textRect.height());
@@ -4123,14 +4135,29 @@ public class TuiCommand implements Runnable {
         final var helpText = "  [Alt+?] ";
         final var helpW = Math.min(helpText.length(), Math.max(1, rect.width()));
         final var statusW = Math.max(1, rect.width() - helpW);
-        // flexible informational messages (code graph refreshes, clipboard feedback, queue notices...)
-        // trail the fixed segments: clipped with an ellipsis to the space left on the leading row
-        // so they never wrap onto a second line nor push model/permission/metrics out
-        if (state.notification != null && !state.notification.isBlank()) {
-            final var fixedWidth = parts.stream().mapToInt(Span::width).sum();
+        final var notifW = state.notification == null
+                        || state.notification.isBlank()
+                        || System.currentTimeMillis() - state.notificationShownAt > NOTIFICATION_TTL_MS
+                ? 0
+                : ("  ⓘ " + state.notification).length();
+        final var totalW = new int[] {parts.stream().mapToInt(Span::width).sum()};
+        // flexible informational messages (code graph refreshes, clipboard feedback, queue
+        // notices, provider retries...) get priority over the trailing per-turn metrics when
+        // they contend for the row: a retry/failure notice must never vanish behind metrics.
+        // When the notice needs more room than the metrics would, the metrics are clipped and
+        // the notice fully shown; the metrics already live in the sidebar, the notice does not.
+        if (notifW > 0 && totalW[0] + notifW > statusW) {
+            // drop trailing segments (metrics, session totals) until the notice fits, keeping the
+            // leading state (model, permissions, agent, narrow ctx/io) intact
+            while (parts.size() > 4 && totalW[0] + notifW > statusW) {
+                final var removed = parts.remove(parts.size() - 1);
+                totalW[0] -= removed.width();
+            }
+        }
+        if (notifW > 0) {
             final var notifColor = activeError(state) ? palette.error() : palette.warning();
             final var notifPrefix = "  ⓘ ";
-            final var remaining = statusW - fixedWidth - CharWidth.of(notifPrefix) - 2; // trailing "  "
+            final var remaining = statusW - totalW[0] - CharWidth.of(notifPrefix) - 2; // trailing "  "
             parts.add(Span.styled(
                     notifPrefix + ellipsize(state.notification, Math.max(8, remaining)) + "  ",
                     Style.EMPTY.fg(Color.hex(notifColor))));
@@ -5038,7 +5065,11 @@ public class TuiCommand implements Runnable {
 
     private static void notify(final UiState state, final String message) {
         state.notification = message;
+        state.notificationShownAt = System.currentTimeMillis();
     }
+
+    /** Status-strip notifications expire after a few seconds so they don't linger as stale noise. */
+    private static final long NOTIFICATION_TTL_MS = 5_000L;
 
     /** True while an error recorded via {@link #modelError} is awaiting acknowledgment. */
     private static boolean activeError(final UiState state) {
@@ -5576,6 +5607,14 @@ public class TuiCommand implements Runnable {
             return Color.hex(palette.permitAll());
         }
         return Color.hex(planMode() ? palette.warning() : palette.accent());
+    }
+
+    /** Human label for a context-appliance mode (CLEARED/SUMMARY/...) used in the sidebar line. */
+    private static String modeLabel(final String mode) {
+        if (mode == null || mode.isBlank()) {
+            return "";
+        }
+        return mode.toLowerCase(Locale.ROOT);
     }
 
     private static String ellipsize(final String text, final int max) {
@@ -6123,6 +6162,10 @@ public class TuiCommand implements Runnable {
         private volatile boolean errorOpen;
         private volatile int errorScroll;
         private volatile String notification;
+
+        /** Millis when {@link #notification} was set; {@code 0} when none is pending. */
+        private volatile long notificationShownAt;
+
         private volatile ToolOverlay toolOverlay;
         private volatile BtwOverlay btw;
 

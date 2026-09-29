@@ -90,6 +90,50 @@ class ToolCallArgumentsRepairerTest {
     }
 
     @Test
+    void validJsonWithTrailingObjectIsTrimmed() {
+        // the parse_error.101 signature: a complete tool-call object followed by a second object
+        final var args = "{\"path\":\"src/main/java\",\"line\":12}{\"extra\":true}";
+        final var repaired = repairer.repair(args, true, "qwen3.8-27b");
+        assertEquals("{\"path\":\"src/main/java\",\"line\":12}", repaired);
+        assertTrue(isParseable(repaired));
+    }
+
+    @Test
+    void trailingArrayOrIncompleteSecondValueIsTrimmed() {
+        assertEquals("{\"a\":1}", repairer.repair("{\"a\":1}[1,2,3]", true, "qwen3.8-27b"));
+        // whitespace between the completed value and the trailing junk is fine
+        assertEquals("{\"a\":1}", repairer.repair("{\"a\":1}  {\"b\":2}", true, "qwen3.8-27b"));
+        // an incomplete re-emitted object (the model was cut mid-brace) is trimmed too
+        assertEquals("{\"a\":1}", repairer.repair("{\"a\":1}{\"b\":2,", true, "qwen3.8-27b"));
+    }
+
+    @Test
+    void invalidStructureWithoutTrailingJsonValueIsLeftUntouched() {
+        // unterminated object: nothing complete to cut at, no value invented
+        final var unterminated = "{\"path\":\"src/main/java\",\"line\":12";
+        assertEquals(unterminated, repairer.repair(unterminated, true, "qwen3.8-27b"));
+        // free text after the closed object is not a second JSON value: kept as-is
+        final var freeText = "{\"a\":1}\nimport jax\n";
+        assertEquals(freeText, repairer.repair(freeText, true, "qwen3.8-27b"));
+    }
+
+    @Test
+    void trimTailGarbageOnlyCutsSecondJsonValues() {
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}{\"b\":2}"));
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}  {\"b\":2}"));
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}{"));
+        // trailing whitespace only and free text are not a second JSON value: kept untouched
+        assertEquals("{\"a\":1}   ", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}   "));
+        assertEquals("{\"a\":1} trailing", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1} trailing"));
+        assertEquals("{\"a\":1}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1}"));
+        assertEquals("{\"a\":1", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":1"));
+        assertEquals("", ToolCallArgumentsRepairer.trimTailGarbage(""));
+        assertEquals("x", ToolCallArgumentsRepairer.trimTailGarbage("x"));
+        // a brace inside a string value is not a closing brace
+        assertEquals("{\"a\":\"}\"}", ToolCallArgumentsRepairer.trimTailGarbage("{\"a\":\"}\"}{\"b\":1}"));
+    }
+
+    @Test
     void nullAndBlankAreUntouched() {
         assertEquals(null, repairer.repair(null, true, "qwen3.8-27b"));
         assertEquals("", repairer.repair("", true, "qwen3.8-27b"));

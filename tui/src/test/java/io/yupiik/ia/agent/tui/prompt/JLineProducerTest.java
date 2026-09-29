@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.wiring.HackStdIo;
+import java.io.ByteArrayInputStream;
 import java.io.PrintStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,13 +53,20 @@ class JLineProducerTest {
     @Test
     void hijackedTerminalStillReportsAUsableSize() throws Exception {
         final var stdio = new HackStdIo();
+        final var originalIn = System.in;
         try {
             stdio.install();
+            // jline derives the terminal from System.in: when the fork is attached to a
+            // real terminal it allocates a PosixPtyTerminal whose pump threads outlive
+            // System.exit() and push surefire into its 30s kill-self-fork path. Hiding
+            // the tty behind a plain pipe keeps the streams path deterministic anywhere.
+            System.setIn(new ByteArrayInputStream(new byte[0]));
             assertTrue(stdio.installed(), "the runtime must have taken the streams over");
             try (final var terminal = new JLineProducer().terminal(stdio)) {
                 assertUsableSize(terminal);
             }
         } finally {
+            System.setIn(originalIn);
             stdio.uninstall();
         }
     }

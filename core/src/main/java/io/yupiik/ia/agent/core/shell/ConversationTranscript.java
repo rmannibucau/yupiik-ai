@@ -182,6 +182,12 @@ public class ConversationTranscript {
     private volatile long turnDurationMs;
     private volatile AgentEvent.Throughput turnThroughput = AgentEvent.Throughput.EMPTY;
 
+    /** Recent context appliances (dedup/prune/compact/...), newest first, for side feedback. */
+    private final java.util.ArrayDeque<AgentEvent.Compacted> appliances = new java.util.ArrayDeque<>(8);
+
+    /** Max number of appliance entries remembered for the sidebar. */
+    private static final int MAX_APPLIANCES = 6;
+
     public synchronized void onEvent(final AgentEvent event) {
         // subagent streams never pollute the parent conversation: they are captured
         // per-subagent (the /subagents modal) or dropped; only the lifecycle markers
@@ -339,7 +345,10 @@ public class ConversationTranscript {
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
-            status = "context " + kind + " done (" + mode.toLowerCase(java.util.Locale.ROOT) + ")";
+            // side feedback only: record the appliance for the sidebar instead of touching the
+            // leading status, which must stay on the short busy/ready state (a stale "context
+            // dedup done..." used to hide the current spinner/error at the bottom)
+            recordAppliance(new AgentEvent.Compacted(kind, mode, sessionId, subagentId, subagentName));
             transcript
                     .append("\n\n> context ")
                     .append(kind)
@@ -789,6 +798,7 @@ public class ConversationTranscript {
         thinking.setLength(0);
         inlineThink.reset();
         answerHeaderWritten = false;
+        appliances.clear();
         touch();
     }
 
@@ -817,6 +827,7 @@ public class ConversationTranscript {
         retryableErrorSeen = false;
         busy = false;
         status = "";
+        appliances.clear();
         promptTokens = 0;
         completionTokens = 0;
         estimatedContext = 0;
@@ -869,6 +880,22 @@ public class ConversationTranscript {
 
     public String status() {
         return status;
+    }
+
+    /** Recent context appliances (dedup/prune/compact/...), newest first, capped for the sidebar. */
+    public java.util.List<AgentEvent.Compacted> appliances() {
+        synchronized (this) {
+            return List.copyOf(appliances);
+        }
+    }
+
+    private void recordAppliance(final AgentEvent.Compacted appliance) {
+        synchronized (this) {
+            appliances.addFirst(appliance);
+            while (appliances.size() > MAX_APPLIANCES) {
+                appliances.removeLast();
+            }
+        }
     }
 
     public void status(final String value) {

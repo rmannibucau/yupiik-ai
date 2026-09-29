@@ -267,9 +267,21 @@ class TuiTranscriptModelTest {
 
     @Test
     void compactedUpdatesStatusAndTranscript() {
+        // a compaction/dedup event is side feedback only: it must not clobber the leading
+        // status (spinner/ready/error) - the appliance is recorded for the sidebar instead
         model.onEvent(new AgentEvent.Compacted("auto", "SUMMARY", "s1"));
-        assertEquals("context auto done (summary)", model.status());
+        assertEquals("", model.status());
+        assertEquals(1, model.appliances().size());
+        assertEquals("auto", model.appliances().getFirst().kind());
+        assertEquals("SUMMARY", model.appliances().getFirst().mode());
         assertTrue(model.transcript().toString().contains("> context auto applied (summary)"));
+        // the next appliance replaces the previous in the sidebar slot (newest first, capped)
+        model.onEvent(new AgentEvent.Compacted("dedup", "CLEARED", "s1"));
+        assertEquals(2, model.appliances().size());
+        assertEquals("dedup", model.appliances().getFirst().kind());
+        assertEquals("CLEARED", model.appliances().getFirst().mode());
+        // the status is still untouched by the second event
+        assertEquals("", model.status());
     }
 
     @Test

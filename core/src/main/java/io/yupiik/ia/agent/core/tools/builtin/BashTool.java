@@ -127,7 +127,9 @@ public class BashTool implements EmbeddedTool {
         reader.start();
         boolean finished;
         // deadline loop: the command is killed as soon as the running turn is cancelled so an
-        // "interrupt" actually stops the subprocess instead of letting it run to completion
+        // "interrupt" actually stops the subprocess instead of letting it run to completion.
+        // waitFor is polled in short slices so both the deadline and the cancellation flag are
+        // re-checked until the command actually finishes.
         final var deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
         while (true) {
             if (context.isCancelled()) {
@@ -142,7 +144,10 @@ public class BashTool implements EmbeddedTool {
             try {
                 finished =
                         process.waitFor(Math.min(100, Math.max(1, remainingNanos / 1_000_000)), TimeUnit.MILLISECONDS);
-                break;
+                if (finished) {
+                    break;
+                }
+                // not finished yet: loop back to re-check cancellation/deadline before the next slice
             } catch (final InterruptedException e) {
                 process.destroyForcibly();
                 Thread.currentThread().interrupt();

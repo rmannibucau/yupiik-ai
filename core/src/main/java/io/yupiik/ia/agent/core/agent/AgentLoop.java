@@ -28,7 +28,6 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.MidStreamFailureException;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -47,6 +46,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.ContextWindowExceededException;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
@@ -1377,7 +1377,38 @@ public class AgentLoop {
             try {
                 return chatClient.stream(
                         request, chatSettings, pauseListener, delta -> dispatch(delta, usage, finishReason), cancelled);
-            } catch (final MidStreamFailureException e) {
+            } catch (final LlmHttpFailureException e) {
+                // llama.cpp / ollama style backends reject the whole turn with a 500 when the
+                // tool-call arguments they just produced are malformed (unescaped control chars or
+                // a structurally corrupt tail): the retry loop below would burn the same failing
+                // payload again, so surface the cause explicitly instead of a bare "falling back"
+                // silence. The repairer normally fixes these payloads; when it cannot (or the
+                // arguments were already stored by an earlier turn), the user must see why.
+                if (isToolCallArgumentsRejected(e)) {
+                    emit(notice(
+                            AgentEvent.Notice.Level.WARN,
+                            "Server rejected the request: malformed tool call arguments (parse_error.101). "
+                                    + "The arguments were kept as-is (repair failed or disabled); remove the "
+                                    + "corrupted call from the transcript or retry with the repair enabled."));
+                }
+                last = e;
+                if (attempt >= maxAttempts) {
+                    break;
+                }
+                emit(textReset());
+                emit(notice(
+                        AgentEvent.Notice.Level.WARN,
+                        "Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/' + maxAttempts
+                                + ")."));
+                // the backoff is idle time: it must not be counted as generation time
+                final var backoffMs = streamRetryBackoffMs(attempt);
+                turnLlmPausedMs += backoffMs;
+                // an interrupt pressed during the backoff must abort the retry immediately:
+                // the sleep is the only gap between two stream attempts, so check around it
+                if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {
+                    throw new IOException("Cancelled");
+                }
+            } catch (final IOException e) {
                 last = e;
                 if (attempt >= maxAttempts) {
                     break;
@@ -1433,7 +1464,7 @@ public class AgentLoop {
         }
     }
 
-    private static String causeSummary(final MidStreamFailureException e) {
+    private static String causeSummary(final Throwable e) {
         final var cause = e.getCause();
         final var message = cause == null
                         || cause.getMessage() == null
@@ -1441,6 +1472,18 @@ public class AgentLoop {
                 ? e.getMessage()
                 : cause.getMessage();
         return message == null ? "unknown transport failure" : message;
+    }
+
+    /**
+     * Whether a provider rejection is the llama.cpp / ollama style "the tool call arguments this
+     * model just produced are not parseable JSON" HTTP failure. The arguments are repaired before
+     * being sent (see {@code ToolCallArgumentsRepairer}); when this marker still shows up the
+     * payload was already corrupt at generation time and the repair could not recover it (or is
+     * disabled for the model). Surfaced explicitly because retrying the same turn cannot fix it.
+     */
+    private static boolean isToolCallArgumentsRejected(final LlmHttpFailureException e) {
+        final var body = e.body();
+        return body != null && body.contains("parse_error.101");
     }
 
     /**

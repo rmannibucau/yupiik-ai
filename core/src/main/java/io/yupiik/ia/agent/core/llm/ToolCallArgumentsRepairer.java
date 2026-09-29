@@ -49,32 +49,159 @@ public class ToolCallArgumentsRepairer {
     /**
      * Repair the arguments when {@code enabled} is true. Returns the (possibly repaired) arguments.
      *
+     * <p>Two repair passes are applied, in order, only when the payload is not already valid JSON:</p>
+     * <ol>
+     *   <li>raw 0x00-0x1F control characters inside string values are escaped ({@code \\uXXXX});</li>
+     *   <li>when the payload still does not parse (eg. a dangling truncated tail or trailing
+     *       garbage after the closing brace - the "unexpected '{'; expected end of input"
+     *       signature), the trailing bytes after the first complete JSON value are dropped.</li>
+     * </ol>
+     * Each pass re-validates with a strict parse; when nothing recovers a parseable payload the
+     * original is returned untouched: a corrupted call must stay visible, never silently changed.
+     *
      * @param arguments raw arguments string emitted by the model.
      * @param enabled   whether the repair is active for the calling model.
      * @param model     effective model name, used only for the FINE log.
      */
     public String repair(final String arguments, final boolean enabled, final String model) {
-        if (arguments == null || arguments.isBlank() || !enabled || !hasBareControlChar(arguments)) {
+        if (arguments == null || arguments.isBlank() || !enabled || isValidJson(mapper, arguments)) {
+            // blank/enabled-off/valid JSON are all zero-cost paths; a valid payload is never touched
             return arguments;
         }
-        final var repaired = escapeControlChars(arguments);
-        if (repaired.equals(arguments) || !isValidJson(mapper, repaired)) {
-            // escaping did not change anything or the fix did not help: keep the original so the
-            // corruption remains visible instead of silently changing the model intent
-            return arguments;
+        var repaired = escapeControlChars(arguments);
+        if (!repaired.equals(arguments) && isValidJson(mapper, repaired)) {
+            logRepair(model, arguments, repaired, "control-char escape");
+            return repaired;
         }
-        LOGGER.fine(() ->
-                "repaired tool call arguments for " + model + ": " + preview(arguments) + " -> " + preview(repaired));
-        return repaired;
+        final var trimmed = trimTailGarbage(repaired);
+        if (!trimmed.equals(repaired) && isValidJson(mapper, trimmed)) {
+            logRepair(model, arguments, trimmed, "tail trim");
+            return trimmed;
+        }
+        // escaping did not change anything or no fix helped: keep the original so the corruption
+        // remains visible instead of silently changing the model intent
+        return arguments;
     }
 
+    private static void logRepair(final String model, final String original, final String repaired, final String pass) {
+        LOGGER.fine(() -> "repaired tool call arguments for " + model + " (" + pass + "): " + preview(original) + " -> "
+                + preview(repaired));
+    }
+
+    /**
+     * Drops a trailing second JSON value ({@code {...}} / {@code [...]} prefixed garbage or an
+     * incomplete re-emitted opening brace/bracket) after the first complete JSON value: the
+     * "unexpected '{'; expected end of input" signature, typically a truncated tool-call blob the
+     * model kept writing after it already closed the object. Anything else after the completed
+     * value (free text, a dangling comma, a cut-open string) is left untouched: it may belong to
+     * a value and silently dropping it would change the call semantics. Returns the input
+     * unchanged when no safe cut point is found. The prefix scan tracks string/escape depth so a
+     * {@code }} / {@code ]} inside a string value is never mistaken for the value end.
+     */
+    static String trimTailGarbage(final String json) {
+        var inString = false;
+        var depth = 0;
+        var firstComplete = -1; // index just past the first brace/bracket that closed a value
+        for (var i = 0; i < json.length(); i++) {
+            final var c = json.charAt(i);
+            if (inString) {
+                if (c == '\\') {
+                    i++; // escaped char: skip both
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            switch (c) {
+                case '"' -> inString = true;
+                case '{', '[' -> depth++;
+                case '}', ']' -> {
+                    depth--;
+                    if (depth == 0 && firstComplete < 0) {
+                        firstComplete = i + 1;
+                    }
+                }
+                default -> {
+                    // structural JSON whitespace is ignored; anything else inside a value
+                    // (letters/digits of a literal) keeps the current depth open
+                }
+            }
+        }
+        if (firstComplete <= 0 || firstComplete >= json.length()) {
+            return json;
+        }
+        var j = firstComplete;
+        while (j < json.length() && Character.isWhitespace(json.charAt(j))) {
+            j++;
+        }
+        if (j >= json.length() || (json.charAt(j) != '{' && json.charAt(j) != '[')) {
+            // trailing whitespace only, or free-text garbage: not a second JSON value, keep everything
+            return json;
+        }
+        return json.substring(0, firstComplete);
+    }
+
+    /**
+     * Strict validity: the payload must be one complete JSON document with no trailing content.
+     * The fusion mapper (and many others) tolerate trailing garbage after the first value
+     * (MapJsonCodec stops at the closing brace without asserting EOF), so a plain
+     * {@code mapper.read} would accept {@code {"a":1}[1,2,3]} - exactly the payload llama.cpp /
+     * ollama reject with {@code parse_error.101}. This structural check requires the single
+     * complete value to end the input (modulo whitespace) and supplements the parse.
+     */
     private static boolean isValidJson(final JsonMapper mapper, final String value) {
         try (final var reader = new StringReader(value)) {
             mapper.read(Map.class, reader);
-            return true;
         } catch (final RuntimeException e) {
             return false;
         }
+        final var trim = value.strip();
+        return trim.isEmpty() || isSingleCompleteDocument(trim);
+    }
+
+    /**
+     * Whether the string is a single complete JSON document: the structural scanner reaches
+     * depth 0 at a single value exactly at the end (whitespace allowed). Mirrors
+     * {@link #trimTailGarbage}'s scan so both agree on what "complete" means.
+     */
+    private static boolean isSingleCompleteDocument(final String json) {
+        var inString = false;
+        var depth = 0;
+        var closedAt = -1; // index of the char that closed the first complete value
+        for (var i = 0; i < json.length(); i++) {
+            final var c = json.charAt(i);
+            if (inString) {
+                if (c == '\\') {
+                    i++; // escaped char: skip both
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (closedAt >= 0) {
+                // after the first value closed at depth 0, only whitespace may follow;
+                // any non-whitespace is a second value (or trailing garbage)
+                if (!Character.isWhitespace(c)) {
+                    return false;
+                }
+                continue;
+            }
+            switch (c) {
+                case '"' -> inString = true;
+                case '{', '[' -> depth++;
+                case '}', ']' -> {
+                    depth--;
+                    if (depth == 0) {
+                        closedAt = i;
+                    }
+                }
+                default -> {
+                    // structural JSON whitespace is ignored; anything else inside a value
+                    // (letters/digits of a literal) keeps the current depth open
+                }
+            }
+        }
+        return closedAt >= 0 && depth == 0;
     }
 
     /** Whether the payload contains a raw control character (0x00-0x1F) inside a string value. */
