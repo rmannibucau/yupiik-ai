@@ -217,18 +217,19 @@ public class CompactionCoordinator {
      * Compacts older messages into a structured summary, retrying then degrading to a local
      * truncation. Never returns the input unchanged as a silent no-op.
      *
-     * @param overflow whether this compaction recovers a provider context overflow (tighter floors)
+     * @param force whether to force compaction even below the thresholds (tighter keep floors and a
+     *              halved tail budget, as used by overflow recovery)
      * @param focus optional hint folded into the summarizer prompt (model-managed compaction)
      * @param keepLastOverride optional minimum number of recent messages to keep verbatim (0 = default)
      */
     public CompactionResult compact(
-            final List<Message> messages, final boolean overflow, final String focus, final int keepLastOverride) {
+            final List<Message> messages, final boolean force, final String focus, final int keepLastOverride) {
         final var p = configuration.pruning();
         final var keepFloor =
-                Math.max(2, keepLastOverride > 0 ? keepLastOverride : overflow ? p.keepRecent() / 2 : p.keepRecent());
+                Math.max(2, keepLastOverride > 0 ? keepLastOverride : force ? p.keepRecent() / 2 : p.keepRecent());
         final var system = messages.get(0).role().equals("system") ? messages.get(0) : null;
         final var from = system == null ? 0 : 1;
-        final var boundary = splitBoundary(messages, from, keepFloor, overflow);
+        final var boundary = splitBoundary(messages, from, keepFloor, force);
         if (boundary <= from) {
             return new CompactionResult(messages, Mode.NONE, "");
         }
@@ -255,11 +256,11 @@ public class CompactionCoordinator {
                 out.add(Message.user(str(messages.get(lastUser).content())));
             }
             final var digestIndex = system == null ? 0 : 1;
-            out = ensureUnderWindow(out, overflow, digestIndex);
+            out = ensureUnderWindow(out, force, digestIndex);
             return new CompactionResult(out, Mode.SUMMARY, "");
         }
         final var truncated = localTruncate(messages, from, boundary);
-        final var keptTruncated = ensureUnderWindow(truncated, overflow, -1);
+        final var keptTruncated = ensureUnderWindow(truncated, force, -1);
         LOGGER.warning(
                 outcome.error() == null || outcome.error().isBlank()
                         ? "compaction failed; truncated locally"
@@ -371,14 +372,14 @@ public class CompactionCoordinator {
      * size-fitting unchanged. This closes the gap where compaction "succeeded" but the output still
      * overflowed.
      */
-    private List<Message> ensureUnderWindow(final List<Message> out, final boolean overflow, final int digestIndex) {
+    private List<Message> ensureUnderWindow(final List<Message> out, final boolean tight, final int digestIndex) {
         if (usageTracker == null) {
             return out;
         }
         final var window = usageTracker.contextWindow();
         final var headroom = Math.max(1_000, (int) (window * 0.1));
         var list = out;
-        final var cap = overflow ? TAIL_SPLICE_CAP / 2 : TAIL_SPLICE_CAP;
+        final var cap = tight ? TAIL_SPLICE_CAP / 2 : TAIL_SPLICE_CAP;
         for (var guard = 0; guard < 8; guard++) {
             if (usageTracker.estimateContext(list) <= window - headroom) {
                 break;

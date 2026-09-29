@@ -18,13 +18,18 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import dev.tamboui.style.Color;
+import dev.tamboui.style.Style;
+import dev.tamboui.text.Line;
+import dev.tamboui.text.Span;
+import io.yupiik.ia.agent.tui.TableRenderer.Cell;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class TableRendererTest {
     private final TableRenderer renderer = new TableRenderer();
 
-    private static String plain(final dev.tamboui.text.Line line) {
+    private static String plain(final Line line) {
         final var sb = new StringBuilder();
         for (final var span : line.spans()) {
             sb.append(span.content());
@@ -32,15 +37,27 @@ class TableRendererTest {
         return sb.toString();
     }
 
+    private static String plainCell(final Cell cell) {
+        final var sb = new StringBuilder();
+        for (final var span : cell.spans()) {
+            sb.append(span.content());
+        }
+        return sb.toString();
+    }
+
+    private static List<String> plainCells(final List<Cell> cells) {
+        return cells.stream().map(TableRendererTest::plainCell).toList();
+    }
+
     @Test
     void rendersBorderedGridFittingContent() {
         final var lines = renderer.render(
-                List.of("a", "bb"),
-                List.of(List.of("1", "22")),
+                List.of(Cell.of("a"), Cell.of("bb")),
+                List.of(List.of(Cell.of("1"), Cell.of("22"))),
                 80,
                 List.of(),
                 List.of(),
-                dev.tamboui.style.Style.EMPTY);
+                Style.EMPTY);
         final var texts = lines.stream().map(TableRendererTest::plain).toList();
         assertEquals("┌───┬────┐", texts.get(0));
         assertTrue(texts.get(1).startsWith("│ a │ bb "), texts.toString());
@@ -52,12 +69,12 @@ class TableRendererTest {
     @Test
     void neverExceedsRequestedWidthAndWrapsLongCells() {
         final var lines = renderer.render(
-                List.of("name", "value"),
-                List.of(List.of("configuration", "alpha beta gamma delta")),
+                List.of(Cell.of("name"), Cell.of("value")),
+                List.of(List.of(Cell.of("configuration"), Cell.of("alpha beta gamma delta"))),
                 20,
                 List.of(),
                 List.of(),
-                dev.tamboui.style.Style.EMPTY);
+                Style.EMPTY);
         for (final var line : lines) {
             assertTrue(plain(line).length() <= 20, plain(line));
         }
@@ -73,7 +90,7 @@ class TableRendererTest {
     @Test
     void headerOnlyTableStillBorders() {
         final var lines = renderer.render(
-                List.of("h1", "h2"), List.of(), 40, List.of(), List.of(), dev.tamboui.style.Style.EMPTY);
+                List.of(Cell.of("h1"), Cell.of("h2")), List.of(), 40, List.of(), List.of(), Style.EMPTY);
         assertEquals(3, lines.size(), "top border, header, bottom border (no body separator)");
         assertTrue(lines.get(1).spans().stream().anyMatch(s -> s.content().contains("h1")));
     }
@@ -81,15 +98,15 @@ class TableRendererTest {
     @Test
     void emojiAndWideCharactersKeepGridAligned() {
         final var lines = renderer.render(
-                List.of("Run", "Résultat", "Détails"),
+                List.of(Cell.of("Run"), Cell.of("Résultat"), Cell.of("Détails")),
                 List.of(
-                        List.of("T8", "✅ SYNC OK", "load 1230 s"),
-                        List.of("T10", "⏳ en génération", "35 min"),
-                        List.of("T11", "ok", "borne 30 Go")),
+                        List.of(Cell.of("T8"), Cell.of("✅ SYNC OK"), Cell.of("load 1230 s")),
+                        List.of(Cell.of("T10"), Cell.of("⏳ en génération"), Cell.of("35 min")),
+                        List.of(Cell.of("T11"), Cell.of("ok"), Cell.of("borne 30 Go"))),
                 120,
                 List.of(),
                 List.of(),
-                dev.tamboui.style.Style.EMPTY);
+                Style.EMPTY);
         final var texts = lines.stream().map(TableRendererTest::plain).toList();
         final var widths = texts.stream().mapToInt(TableRenderer::displayWidth).toArray();
         for (int i = 1; i < widths.length; i++) {
@@ -102,9 +119,23 @@ class TableRendererTest {
 
     @Test
     void wrapSplitsByDisplayCellsWithoutCuttingWideCharacters() {
-        final var parts = TableRenderer.wrapCell("AB⏳EF", 4);
-        assertEquals(List.of("AB⏳", "EF"), parts);
-        assertTrue(parts.stream().allMatch(p -> TableRenderer.displayWidth(p) <= 4), parts.toString());
+        final var parts = TableRenderer.wrapCell(Cell.of("AB⏳EF"), 4);
+        assertEquals(List.of("AB⏳", "EF"), plainCells(parts));
+        assertTrue(parts.stream().allMatch(p -> TableRenderer.displayWidth(plainCell(p)) <= 4), parts.toString());
+    }
+
+    @Test
+    void wrapPreservesSpanStylesOfCellText() {
+        final var codeStyle = Style.EMPTY.fg(Color.GRAY).dim();
+        final var cell = new Cell(List.of(
+                Span.styled("run ", Style.EMPTY), Span.styled("code", codeStyle), Span.styled(" end", Style.EMPTY)));
+        final var parts = TableRenderer.wrapCell(cell, 8);
+        assertEquals(List.of("run code", "end"), plainCells(parts));
+        final var span = parts.get(0).spans().stream()
+                .filter(s -> s.content().equals("code"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(codeStyle, span.style());
     }
 
     @Test
@@ -127,12 +158,12 @@ class TableRendererTest {
         // last column wraps and the continuation row's cells are empty: every
         // physical grid row (and the trailing bar) must match the border width
         final var lines = renderer.render(
-                List.of("name", "value"),
-                List.of(List.of("T8", "alpha beta gamma delta")),
+                List.of(Cell.of("name"), Cell.of("value")),
+                List.of(List.of(Cell.of("T8"), Cell.of("alpha beta gamma delta"))),
                 20,
                 List.of(),
                 List.of(),
-                dev.tamboui.style.Style.EMPTY);
+                Style.EMPTY);
         final var texts = lines.stream().map(TableRendererTest::plain).toList();
         final var border = texts.get(0).length();
         for (final var text : texts) {
@@ -145,5 +176,24 @@ class TableRendererTest {
                 assertTrue(text.endsWith("│"), "row must end with a border bar: " + text);
             }
         }
+    }
+
+    @Test
+    void cellInlineStyleSurvivesRendering() {
+        final var codeStyle = Style.EMPTY.fg(Color.GRAY).dim();
+        final var lines = renderer.render(
+                List.of(Cell.of("a")),
+                List.of(List.of(new Cell(List.of(Span.styled("run ", Style.EMPTY), Span.styled("code", codeStyle))))),
+                40,
+                List.of(),
+                List.of(),
+                Style.EMPTY);
+        // 0 top, 1 header, 2 separator, 3 body, 4 bottom
+        final var body = lines.get(3);
+        final var span = body.spans().stream()
+                .filter(s -> s.content().equals("code"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(codeStyle, span.style());
     }
 }

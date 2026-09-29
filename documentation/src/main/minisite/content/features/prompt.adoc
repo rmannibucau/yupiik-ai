@@ -8,7 +8,7 @@ By default the built-in template is used:
 
 [source,handlebars]
 ----
-[{{#if (eq mode "plan")}}{{lookup colors "accent"}}{{else}}{{lookup colors "success"}}{{/if}}{{{mode}}}{{lookup colors "reset"}}@{{lookup colors "model"}}{{{modelName}}}{{lookup colors "reset"}}]{{#if permission}} ({{#if (eq permission "all")}}{{lookup colors "error"}}{{else if (eq permission "auto")}}{{lookup colors "warning"}}{{else}}{{lookup colors "status"}}{{/if}}{{{permission}}}{{lookup colors "reset"}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}} {{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}{{{model.contextPercentage}}}%>{{lookup colors "reset"}} 
+[{{#if (eq mode "plan")}}{{lookup colors "accent"}}{{else}}{{lookup colors "success"}}{{/if}}{{{mode}}}{{lookup colors "reset"}}@{{lookup colors "model"}}{{{modelName}}}{{lookup colors "reset"}}]{{#if permission}} ({{#if (eq permission "all")}}{{lookup colors "error"}}{{else if (eq permission "auto")}}{{lookup colors "warning"}}{{else}}{{lookup colors "status"}}{{/if}}{{{permission}}}{{lookup colors "reset"}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}} {{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}{{{model.contextPercentage}}}%{{lookup colors "reset"}}> 
 ----
 
 which renders, for a build in `all` mode with a `reviewer` agent and the context
@@ -19,7 +19,8 @@ at 42%:
 [build@gpt-x] (all) [reviewer] 42%> 
 ----
 
-The line ends with a reset and a trailing space, so the typed input starts
+The context percent is closed with a reset before the `>` prompt glyph and the
+line ends with a trailing space, so the chevron and the typed input start
 uncolored, one column after the `>`.
 
 Colors and thresholds are expressed directly in the template, so you can tune

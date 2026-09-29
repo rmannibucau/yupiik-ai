@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -58,15 +59,47 @@ public class SlashCommandCompleter implements Completer {
             final SessionStore sessionStore,
             final McpManager mcpManager) {
         this.slashNames = registry.names();
-        this.engine = new CompletionEngine(
-                registry,
-                () -> modelsOf(chatClient),
-                () -> providersOf(providerManager),
-                () -> agentsOf(agentProvider),
-                () -> sessionsOf(sessionStore),
-                () -> toolsOf(mcpManager),
-                () -> agentsOf(agentProvider),
-                model -> variantsOf(chatClient, model));
+        this.engine = new CompletionEngine(registry, new ArgCompletion.Env() {
+            @Override
+            public List<String> models() {
+                return modelsOf(chatClient);
+            }
+
+            @Override
+            public List<String> providers() {
+                return providersOf(providerManager);
+            }
+
+            @Override
+            public List<String> agents() {
+                return agentsOf(agentProvider);
+            }
+
+            @Override
+            public List<String> sessions() {
+                return sessionsOf(sessionStore);
+            }
+
+            @Override
+            public List<String> tools() {
+                return toolsOf(mcpManager);
+            }
+
+            @Override
+            public List<String> servers() {
+                return serversOf(mcpManager);
+            }
+
+            @Override
+            public List<String> variants(final String model) {
+                return variantsOf(chatClient, model);
+            }
+
+            @Override
+            public List<String> paths(final String token) {
+                return CompletionEngine.pathCandidates(token);
+            }
+        });
     }
 
     @Override
@@ -172,6 +205,19 @@ public class SlashCommandCompleter implements Completer {
                     .map(EmbeddedTool::name)
                     .distinct()
                     .sorted()
+                    .toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> serversOf(final McpManager mcpManager) {
+        if (mcpManager == null) {
+            return List.of();
+        }
+        try {
+            return mcpManager.serverStatuses().stream()
+                    .map(status -> status.name())
                     .toList();
         } catch (final RuntimeException e) {
             return List.of();

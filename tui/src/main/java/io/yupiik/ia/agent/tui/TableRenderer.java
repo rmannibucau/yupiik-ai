@@ -33,11 +33,12 @@ import org.jline.utils.WCWidth;
  * a separate {@link Line} so the output participates in the transcript's
  * text pipeline (search rows, click hit-areas, Ctrl+O overlay, Ctrl+Y modes).
  *
- * <p>Pure and terminal-free: the input is plain strings (commonmark is peeled
- * off by the caller) and the style/prefix spans are render arguments, so a
- * single instance is shared and the class is unit testable without a display.
- * The header is bold; borders reuse the base style so the grid follows the
- * current theme.</p>
+ * <p>Pure and terminal-free: the input is {@link Cell}s of explicitly styled
+ * spans (commonmark is peeled off by the caller) and the style/prefix spans are
+ * render arguments, so a single instance is shared and the class is unit
+ * testable without a display. Column widths are computed from the raw text, so
+ * inline styles never reflow the grid; the header is bold; borders reuse the
+ * base style so the grid follows the current theme.</p>
  */
 public final class TableRenderer {
     private static final char TOP_LEFT = '┌';
@@ -57,6 +58,19 @@ public final class TableRenderer {
     private static final Pattern EMOJI_PRESENTATION = Pattern.compile("\\p{IsEmoji_Presentation}");
     /** Variation selector 16: turns the preceding text-presentation glyph into an emoji-presentation one. */
     private static final int VS16 = 0xFE0F;
+
+    /** One table cell: its text split into explicitly styled spans. */
+    public record Cell(List<Span> spans) {
+        private static final Cell EMPTY = new Cell(List.of());
+
+        public static Cell of(final String text) {
+            return new Cell(List.of(Span.styled(text, Style.EMPTY)));
+        }
+
+        public static Cell of(final Span... spans) {
+            return new Cell(List.of(spans));
+        }
+    }
 
     /**
      * Visible (terminal) width of {@code text} in cells: East Asian wide/fullwidth
@@ -114,8 +128,8 @@ public final class TableRenderer {
      * @param base         the base style for cells and borders (header is bolded)
      */
     public List<Line> render(
-            final List<String> header,
-            final List<List<String>> rows,
+            final List<Cell> header,
+            final List<List<Cell>> rows,
             final int width,
             final List<Span> prefixFirst,
             final List<Span> prefixCont,
@@ -160,7 +174,7 @@ public final class TableRenderer {
     }
 
     /** Fills {@code natural} with the full single-line width of the widest cell (min 1). */
-    private static void collectNatural(final List<String> header, final List<List<String>> rows, final int[] natural) {
+    private static void collectNatural(final List<Cell> header, final List<List<Cell>> rows, final int[] natural) {
         java.util.Arrays.fill(natural, 1);
         if (header != null) {
             for (int i = 0; i < header.size() && i < natural.length; i++) {
@@ -174,8 +188,26 @@ public final class TableRenderer {
         }
     }
 
-    private static int cellWidth(final String text) {
-        return text == null || text.isBlank() ? 1 : displayWidth(text);
+    private static int cellWidth(final Cell cell) {
+        return isBlank(cell.spans()) ? 1 : spanWidth(cell.spans());
+    }
+
+    private static boolean isBlank(final List<Span> spans) {
+        for (final var span : spans) {
+            if (span.content() != null && !span.content().isBlank()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Display width of a span list = sum of the display widths of its raw text. */
+    private static int spanWidth(final List<Span> spans) {
+        var w = 0;
+        for (final var span : spans) {
+            w += displayWidth(span.content());
+        }
+        return w;
     }
 
     /**
@@ -231,81 +263,125 @@ public final class TableRenderer {
     }
 
     /** Wraps every cell of a row to its column width; short rows are padded with empty cells. */
-    private static List<List<String>> wrapCells(final List<String> cells, final int[] widths) {
-        final var out = new ArrayList<List<String>>(widths.length);
+    private static List<List<Cell>> wrapCells(final List<Cell> cells, final int[] widths) {
+        final var out = new ArrayList<List<Cell>>(widths.length);
         for (int i = 0; i < widths.length; i++) {
-            out.add(i < cells.size() ? wrapCell(cells.get(i), widths[i]) : List.of(""));
+            out.add(i < cells.size() ? wrapCell(cells.get(i), widths[i]) : List.of(Cell.EMPTY));
         }
         return out;
     }
 
-    /** Word-wraps one cell body to {@code colW} display cells; overlong tokens are hard-split without cutting wide characters. */
-    static List<String> wrapCell(final String text, final int colW) {
-        final var out = new ArrayList<String>();
-        if (text == null || text.isBlank()) {
-            out.add("");
+    /** Word-wraps one cell to {@code colW} display cells, preserving the span styles; overlong words are hard-split without cutting wide characters. */
+    static List<Cell> wrapCell(final Cell cell, final int colW) {
+        final var out = new ArrayList<Cell>();
+        if (cell == null || isBlank(cell.spans())) {
+            out.add(Cell.EMPTY);
             return out;
         }
-        final var words = text.split(" ");
-        var line = new StringBuilder();
+        final var words = words(cell.spans());
+        var line = new ArrayList<Span>();
         var lineWidth = 0; // display cells accumulated on the current line
         for (final var word : words) {
-            final var wordWidth = displayWidth(word);
+            final var wordWidth = spanWidth(word);
             if (wordWidth > colW) {
-                if (line.length() > 0) {
-                    out.add(line.toString());
-                    line = new StringBuilder();
+                if (!line.isEmpty()) {
+                    out.add(new Cell(line));
+                    line = new ArrayList<>();
                     lineWidth = 0;
                 }
-                var segment = new StringBuilder();
-                var segmentWidth = 0;
-                for (int i = 0; i < word.length(); ) {
-                    final var cp = word.codePointAt(i);
-                    i += Character.charCount(cp);
-                    final var cw = charWidth(cp);
-                    if (segment.length() > 0 && segmentWidth + cw > colW) {
-                        out.add(segment.toString());
-                        segment = new StringBuilder();
-                        segmentWidth = 0;
-                    }
-                    segment.appendCodePoint(cp);
-                    segmentWidth += cw;
-                }
-                if (segment.length() > 0) {
-                    out.add(segment.toString());
-                }
+                out.addAll(splitWord(word, colW));
                 continue;
             }
-            if (line.length() > 0 && lineWidth + 1 + wordWidth > colW) {
-                out.add(line.toString());
-                line = new StringBuilder();
+            if (!line.isEmpty() && lineWidth + 1 + wordWidth > colW) {
+                out.add(new Cell(line));
+                line = new ArrayList<>();
                 lineWidth = 0;
             }
-            if (line.length() > 0) {
-                line.append(' ');
+            if (!line.isEmpty()) {
+                line.add(Span.styled(" ", Style.EMPTY));
                 lineWidth++;
             }
-            line.append(word);
+            line.addAll(word);
             lineWidth += wordWidth;
         }
-        if (line.length() > 0) {
-            out.add(line.toString());
+        if (!line.isEmpty()) {
+            out.add(new Cell(line));
         }
         if (out.isEmpty()) {
-            out.add("");
+            out.add(Cell.EMPTY);
         }
         return out;
+    }
+
+    /**
+     * Splits {@code content} into whitespace-separated word tokens, each a list of
+     * styled spans (a word never mixes source spans across a space).
+     */
+    private static List<List<Span>> words(final List<Span> content) {
+        final var tokens = new ArrayList<List<Span>>();
+        var current = new ArrayList<Span>();
+        for (final var span : content) {
+            if (span.content() == null) {
+                continue;
+            }
+            final var parts = span.content().split(" ", -1);
+            for (var i = 0; i < parts.length; i++) {
+                if (!parts[i].isEmpty()) {
+                    current.add(Span.styled(parts[i], span.style()));
+                }
+                if (i < parts.length - 1 && !current.isEmpty()) {
+                    tokens.add(current);
+                    current = new ArrayList<>();
+                }
+            }
+        }
+        if (!current.isEmpty()) {
+            tokens.add(current);
+        }
+        return tokens;
+    }
+
+    /** Hard-splits a word wider than {@code colW} into chunks of at most {@code colW} display cells, keeping each span's style. */
+    private static List<Cell> splitWord(final List<Span> word, final int colW) {
+        final var chunks = new ArrayList<Cell>();
+        var cur = new ArrayList<Span>();
+        for (final var span : word) {
+            final var text = span.content() == null ? "" : span.content();
+            var segment = new StringBuilder();
+            var segmentWidth = 0;
+            for (int i = 0; i < text.length(); ) {
+                final var cp = text.codePointAt(i);
+                i += Character.charCount(cp);
+                final var cw = charWidth(cp);
+                if (segment.length() > 0 && segmentWidth + cw > colW) {
+                    cur.add(Span.styled(segment.toString(), span.style()));
+                    chunks.add(new Cell(cur));
+                    cur = new ArrayList<>();
+                    segment = new StringBuilder();
+                    segmentWidth = 0;
+                }
+                segment.appendCodePoint(cp);
+                segmentWidth += cw;
+            }
+            if (segment.length() > 0) {
+                cur.add(Span.styled(segment.toString(), span.style()));
+            }
+        }
+        if (!cur.isEmpty()) {
+            chunks.add(new Cell(cur));
+        }
+        return chunks;
     }
 
     /** Aligns the wrapped cell segments into a rectangular grid of height = tallest cell. */
-    private static List<List<String>> gridRow(final List<List<String>> cells, final List<Integer> widths) {
+    private static List<List<Cell>> gridRow(final List<List<Cell>> cells, final List<Integer> widths) {
         final var height = cells.stream().mapToInt(List::size).max().orElse(1);
-        final var grid = new ArrayList<List<String>>(height);
+        final var grid = new ArrayList<List<Cell>>(height);
         for (int h = 0; h < height; h++) {
-            final var segments = new ArrayList<String>(cells.size());
+            final var segments = new ArrayList<Cell>(cells.size());
             for (int c = 0; c < cells.size(); c++) {
                 final var cell = cells.get(c);
-                segments.add(h < cell.size() ? cell.get(h) : "");
+                segments.add(h < cell.size() ? cell.get(h) : Cell.EMPTY);
             }
             grid.add(segments);
         }
@@ -314,7 +390,7 @@ public final class TableRenderer {
 
     private static void appendGridLines(
             final List<Line> out,
-            final List<List<String>> grid,
+            final List<List<Cell>> grid,
             final List<Span> prefix,
             final Style style,
             final List<Integer> widths) {
@@ -324,9 +400,10 @@ public final class TableRenderer {
             spans.add(Span.styled(String.valueOf(VERTICAL), style));
             for (int c = 0; c < segments.size(); c++) {
                 final var width = widths.get(Math.min(c, widths.size() - 1));
-                final var body = segments.get(c);
-                final var pad = Math.max(0, width - displayWidth(body));
-                spans.add(Span.styled(" " + body, style));
+                final var body = segments.get(c).spans();
+                final var pad = Math.max(0, width - spanWidth(body));
+                spans.add(Span.styled(" ", style));
+                spans.addAll(body);
                 spans.add(Span.styled(" ".repeat(pad) + " ", style));
                 spans.add(Span.styled(String.valueOf(VERTICAL), style));
             }

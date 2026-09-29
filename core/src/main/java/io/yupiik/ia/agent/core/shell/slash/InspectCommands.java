@@ -48,7 +48,7 @@ public class InspectCommands implements SlashCommandSet {
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/tools", "[filter]", "list tools, optionally filtered", SlashGroup.INSPECT),
-                        ArgCompletion.TOOLS,
+                        ArgCompletion.from("tool", ArgCompletion.Env::tools),
                         SlashAction.sync(this::tools)),
                 SlashCommand.of(
                         new SlashCommandSpec("/todos", null, "show the todo list", SlashGroup.INSPECT),

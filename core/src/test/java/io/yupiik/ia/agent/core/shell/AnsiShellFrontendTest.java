@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.cli.CliVerbosity;
 import io.yupiik.ia.agent.core.cli.MarkdownColorizer;
 import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
+import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
@@ -251,6 +252,171 @@ class AnsiShellFrontendTest {
         frontend.showToolOutput(ToolOutputVisibility.COLLAPSED);
         assertFalse(frontend.showThinking());
         assertEquals(ToolOutputVisibility.COLLAPSED, frontend.showToolOutput());
+    }
+
+    @Test
+    void activePromptOutputRoutesWritesAboveThePrompt() {
+        final var seen = new java.util.ArrayList<String>();
+        final var frontend = new AnsiShellFrontend(
+                new MarkdownColorizer(false),
+                new Symbols(false),
+                new ToolPresenter(mapper()),
+                CliVerbosity.COMPACT,
+                true,
+                true,
+                ToolOutputVisibility.SHOWN,
+                new PromptOutput() {
+                    @Override
+                    public boolean active() {
+                        return true;
+                    }
+
+                    @Override
+                    public void print(final String text) {
+                        seen.add(text);
+                    }
+                });
+
+        frontend.status("live status");
+        frontend.transcript("answer line\n");
+        frontend.onEvent(new AgentEvent.ThinkingDelta("reasoning", "s1"));
+        frontend.endTurn();
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1"));
+
+        assertFalse(seen.isEmpty(), "writes landing while a prompt is live must go through the sink");
+        assertEquals("", out.toString(StandardCharsets.UTF_8));
+        assertEquals("", err.toString(StandardCharsets.UTF_8));
+        assertTrue(seen.stream().anyMatch(t -> t.contains("live status")), "status must reach the sink: " + seen);
+        assertTrue(seen.stream().anyMatch(t -> t.contains("reasoning")), "thinking must reach the sink: " + seen);
+        assertTrue(seen.stream().anyMatch(t -> t.contains("answer line")), "answer must reach the sink: " + seen);
+    }
+
+    @Test
+    void theFrontendNeverForksOnActiveTheSinkOwnsTheDecision() {
+        // The frontend used to do `if (sink.active()) printAbove else raw`: a
+        // check-then-act race, where the turn cleanup or a late sub-agent could land on
+        // the row jline had just painted and leave the prompt invisible until the next
+        // keystroke. It now delegates every chunk to the sink, which is the only place
+        // that knows whether a read is live - atomically with the write.
+        final var seen = new java.util.ArrayList<String>();
+        final var frontend = new AnsiShellFrontend(
+                new MarkdownColorizer(false),
+                new Symbols(false),
+                new ToolPresenter(mapper()),
+                CliVerbosity.COMPACT,
+                true,
+                true,
+                ToolOutputVisibility.SHOWN,
+                new PromptOutput() {
+                    @Override
+                    public boolean active() {
+                        return false;
+                    }
+
+                    @Override
+                    public void print(final String text) {
+                        seen.add(text);
+                    }
+                });
+
+        frontend.status("status chunk");
+        frontend.transcript("answer chunk\n");
+        frontend.endTurn();
+
+        assertTrue(seen.stream().anyMatch(t -> t.contains("status chunk")), "status must reach the sink: " + seen);
+        assertTrue(seen.stream().anyMatch(t -> t.contains("answer chunk")), "answer must reach the sink: " + seen);
+        assertEquals(
+                "", out.toString(StandardCharsets.UTF_8), "the frontend must not write raw behind the sink's back");
+        assertEquals(
+                "", err.toString(StandardCharsets.UTF_8), "the frontend must not write raw behind the sink's back");
+    }
+
+    @Test
+    void nullPromptOutputFallsBackToTheRawStreams() {
+        // the plain-stdin backend has no in-place display: a null sink must not make
+        // the whole frontend silent
+        final var frontend = new AnsiShellFrontend(
+                new MarkdownColorizer(false),
+                new Symbols(false),
+                new ToolPresenter(mapper()),
+                CliVerbosity.COMPACT,
+                true,
+                true,
+                ToolOutputVisibility.SHOWN,
+                null);
+
+        frontend.status("fallback status");
+        frontend.transcript("fallback answer\n");
+        frontend.endTurn();
+
+        assertTrue(err.toString(StandardCharsets.UTF_8).contains("fallback status"));
+        assertTrue(out.toString(StandardCharsets.UTF_8).contains("fallback answer"));
+    }
+
+    @Test
+    void lateAsyncEventFromAnotherThreadNeverTouchesTheRawStreams() throws Exception {
+        // A sub-agent or the memory extraction emits on a virtual thread long after the
+        // turn ended, while the REPL already painted the next prompt. Routing it through
+        // the sink is what keeps it off the prompt row: a raw write there is invisible
+        // to the line editor's display bookkeeping, so the prompt only came back once
+        // the user typed.
+        final var seen = new java.util.ArrayList<String>();
+        final var promptLive = new java.util.concurrent.atomic.AtomicBoolean();
+        final var painted = new java.util.concurrent.CountDownLatch(1);
+        final var release = new java.util.concurrent.CountDownLatch(1);
+        final var frontend = new AnsiShellFrontend(
+                new MarkdownColorizer(false),
+                new Symbols(false),
+                new ToolPresenter(mapper()),
+                CliVerbosity.COMPACT,
+                true,
+                true,
+                ToolOutputVisibility.SHOWN,
+                new PromptOutput() {
+                    @Override
+                    public boolean active() {
+                        return promptLive.get();
+                    }
+
+                    @Override
+                    public void print(final String text) {
+                        seen.add(text);
+                    }
+                });
+
+        frontend.beginTurn();
+        frontend.onEvent(new AgentEvent.TextDelta("the answer\n", "s1"));
+        frontend.endTurn();
+
+        // the REPL is now painting the next prompt
+        promptLive.set(true);
+        painted.countDown();
+        assertTrue(painted.await(5, java.util.concurrent.TimeUnit.SECONDS));
+
+        final var late = new Thread(
+                () -> {
+                    try {
+                        frontend.onEvent(new AgentEvent.TextDelta("late sub-agent delta\n", "s1"));
+                        frontend.onEvent(
+                                new AgentEvent.Notice(AgentEvent.Notice.Level.WARN, "memory extraction failed", "s1"));
+                    } finally {
+                        release.countDown();
+                    }
+                },
+                "late-event");
+        late.start();
+        assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS), "the late event never completed");
+        late.join(5000);
+
+        assertTrue(
+                seen.stream().anyMatch(t -> t.contains("late sub-agent delta")),
+                "the late delta must be routed above the prompt: " + seen);
+        assertTrue(
+                seen.stream().anyMatch(t -> t.contains("memory extraction failed")),
+                "the late notice must be routed above the prompt: " + seen);
+        assertEquals("", out.toString(StandardCharsets.UTF_8), "a late event must never reach stdout raw");
+        assertEquals("", err.toString(StandardCharsets.UTF_8), "a late event must never reach stderr raw");
     }
 
     @Test

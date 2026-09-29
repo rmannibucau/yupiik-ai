@@ -316,6 +316,24 @@ public class AgentSessionService {
         };
     }
 
+    /**
+     * Prunes the context window of a persisted session (local, no LLM call). Returns nothing to
+     * prune when empty or when no old tool output is worth clearing.
+     */
+    public CompactionApplied prune(final String sessionId, final SessionRuntime runtime) {
+        final var history = sessionStore.load(sessionId);
+        if (history.isEmpty()) {
+            return new CompactionApplied(false, "nothing to prune", null);
+        }
+        final var result = runtime.contextManager().prune(history);
+        if (!result.changed()) {
+            return new CompactionApplied(false, "nothing to prune", null);
+        }
+        sessionStore.replace(sessionId, result.messages());
+        return new CompactionApplied(
+                true, "prune applied (" + result.mode().name().toLowerCase(Locale.ROOT) + ")", null);
+    }
+
     public record SessionInfo(String id, Path path) {}
 
     /**

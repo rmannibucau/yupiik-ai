@@ -153,21 +153,21 @@ class CliPromptTemplateTest {
         assertTrue(rendered.contains("[error]all[reset])"), "expected error-wrapped permission: " + rendered);
         // model -> model palette entry, reset before the ']'
         assertTrue(rendered.contains("[model]gpt-x[reset]]"), "expected model-wrapped name: " + rendered);
-        // 42% context -> warning band, reset after '%>' so typed input is uncolored
-        assertTrue(rendered.contains("[warning]42%>[reset] "), "expected warning-wrapped context: " + rendered);
+        // 42% context -> warning band, reset after the '%' so the chevron and typed input are uncolored
+        assertTrue(rendered.contains("[warning]42%[reset]> "), "expected warning-wrapped context: " + rendered);
     }
 
     @Test
     void defaultTemplateContextThresholds() {
         // 0-30 -> dim, 31-70 -> warning, 71+ -> error
         assertTrue(
-                defaultTemplate().render(data("plan", null, "", 25)).contains("[dim]25%>[reset] "),
+                defaultTemplate().render(data("plan", null, "", 25)).contains("[dim]25%[reset]> "),
                 "low context should be dim");
         assertTrue(
-                defaultTemplate().render(data("plan", null, "", 55)).contains("[warning]55%>[reset] "),
+                defaultTemplate().render(data("plan", null, "", 55)).contains("[warning]55%[reset]> "),
                 "mid context should be warning");
         assertTrue(
-                defaultTemplate().render(data("plan", null, "", 80)).contains("[error]80%>[reset] "),
+                defaultTemplate().render(data("plan", null, "", 80)).contains("[error]80%[reset]> "),
                 "high context should be error");
     }
 

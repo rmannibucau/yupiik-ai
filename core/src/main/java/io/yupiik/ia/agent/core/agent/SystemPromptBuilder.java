@@ -180,6 +180,14 @@ public class SystemPromptBuilder {
         // mode tail last: only a mode switch rewrites this suffix, so every turn within a mode keeps
         // the whole system prompt byte-stable and provider caches keep hitting
         final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
+        // durable memory lives in the stable prefix (message[0], built once per turn) so it is never
+        // re-sent at every tool-call round; only a mid-turn memory_write refreshes it via the tail
+        if (memoryStore != null) {
+            final var memory = memoryStore.promptSection(prompt);
+            if (!memory.isBlank()) {
+                sb.append('\n').append(memory).append('\n');
+            }
+        }
         if (plan) {
             sb.append('\n');
             sb.append(
@@ -193,12 +201,14 @@ public class SystemPromptBuilder {
     }
 
     /**
-     * Renders the volatile session state (mode, date, todo list, memory section): injected on the
+     * Renders the volatile session state (mode, date, todo list): injected on the
      * wire at the very end of the last message of every request - never part of the system prompt -
      * so mutating state never invalidates the cached prefix. The mode line is the authoritative
      * per-request signal: it is re-rendered fresh regardless of how the mode was reached (slash
      * command, startup flag or session restore), so the model never has to infer it from stale
-     * conversation artifacts. Callers enclose it in {@code <session-state>} tags.
+     * conversation artifacts. The durable memory is {@link #memorySection(String) part of the
+     * stable system prefix} and is only re-appended here (as a caller-side refresh) when a
+     * mid-turn {@code memory_write} changed it. Callers enclose the result in {@code <session-state>} tags.
      *
      * @param prompt the current user prompt used to select relevant memories; may be null
      * @return the rendered session state, without the enclosing tags
@@ -212,11 +222,24 @@ public class SystemPromptBuilder {
         sb.append("Current todo list:\n")
                 .append(todoStore == null ? "(empty)" : todoStore.render())
                 .append('\n');
-        final var memory = memoryStore == null ? "" : memoryStore.promptSection(prompt);
-        if (!memory.isBlank()) {
-            sb.append('\n').append(memory).append('\n');
-        }
         return sb.toString();
+    }
+
+    /**
+     * The durable memory section, {@code "&lt;memory&gt;...&lt;/memory&gt;"} (capped and prompt-ranked).
+     * Empty when memory is disabled or not stored.
+     */
+    public String memorySection(final String prompt) {
+        return memoryStore == null ? "" : memoryStore.promptSection(prompt);
+    }
+
+    /**
+     * Content fingerprint of the memory files, stable across reads and bumped on every write.
+     * The agent loop compares it to the turn-start value to detect a mid-turn {@code memory_write}
+     * and refresh the tail without re-reading the files at every round.
+     */
+    public int memoryVersion() {
+        return memoryStore == null ? -1 : memoryStore.version();
     }
 
     /**

@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
@@ -42,7 +43,7 @@ class TurnRunnerTest {
         final var frontend = new RecordingFrontend();
         final var session = new ShellSession();
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSessionService());
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(
                         loop,
@@ -66,7 +67,7 @@ class TurnRunnerTest {
     void nullPromptResumesInsteadOfRunning() {
         final var loop = new RecordingLoop();
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSessionService());
 
         runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, null, List::of, () -> false))
                 .toCompletableFuture()
@@ -82,7 +83,7 @@ class TurnRunnerTest {
         final var session = new ShellSession();
         final var seenBusy = new AtomicBoolean(false);
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSessionService());
         loop.onRun = () -> seenBusy.set(session.busy());
 
         runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "go", List::of, () -> false))
@@ -97,7 +98,7 @@ class TurnRunnerTest {
     void declinedConfirmSkipsTheTurnAndReturnsFalse() throws Exception {
         final var loop = new RecordingLoop();
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(false), new ShellSession(), null);
-        final var runner = new TurnRunner(indexing(3), new VirtualThreadExecutor());
+        final var runner = new TurnRunner(indexing(3), new VirtualThreadExecutor(), agentSessionService());
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "hi", List::of, () -> false))
                 .toCompletableFuture()
@@ -106,6 +107,44 @@ class TurnRunnerTest {
         assertFalse(ran);
         assertNull(loop.prompt().get());
         assertNull(loop.resumedSession().get());
+    }
+
+    @Test
+    void pendingModeIsAppliedAtTheEndOfTheTurn() {
+        final var loop = new RecordingLoop();
+        final var frontend = new RecordingFrontend();
+        final var session = new ShellSession();
+        final var agentSession = new RecordingAgentSessionService();
+        final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
+        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSession);
+        session.pendingMode("build");
+
+        runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "go", List::of, () -> false))
+                .toCompletableFuture()
+                .join();
+
+        assertEquals("build", agentSession.lastMode());
+        assertNull(session.pendingMode(), "the pending mode must be consumed");
+        assertFalse(session.busy());
+    }
+
+    /** Recording AgentSessionService: setMode records the argument instead of mutating real state. */
+    private static final class RecordingAgentSessionService extends AgentSessionService {
+        private String lastMode;
+
+        RecordingAgentSessionService() {
+            super(null, null, null, null, null, null, null, null, null, null);
+        }
+
+        @Override
+        public ModeChange setMode(final String arg, final String sessionId, final SessionRuntime runtime) {
+            lastMode = arg;
+            return new ModeChange("mode: " + arg, null, null);
+        }
+
+        String lastMode() {
+            return lastMode;
+        }
     }
 
     /** Indexing service override with a fabricated in-flight run (total {@code total}). */
@@ -124,6 +163,11 @@ class TurnRunnerTest {
     /** Indexing service with no run in flight: the confirm gate is skipped. */
     private static MavenRepositoryKnowledgeService noIndexing() {
         return new MavenRepositoryKnowledgeService() {};
+    }
+
+    /** Default (do-nothing) recording session service for the non-mode tests. */
+    private static AgentSessionService agentSessionService() {
+        return new RecordingAgentSessionService();
     }
 
     private static final class FixedIo implements ShellIO {

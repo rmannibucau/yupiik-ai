@@ -15,23 +15,22 @@
  */
 package io.yupiik.ia.agent.tui;
 
-import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.function.Supplier;
 
 /**
- * Completion engine for the prompt line: slash commands, per-command
- * parameter completers, @agent prefixes and filesystem paths. Command names
- * and argument kinds come from the shared {@link SlashRegistry}; all dynamic
- * value sources (models, providers, agents, sessions, tools) are supplied by
- * the shell. Pure and terminal-free so it can be unit tested.
+ * Prompt-line completion engine shared by the TUI and the JLine completer.
+ * It only tokenizes the line (command name, current token, typed arguments)
+ * and delegates argument completion to the command itself through
+ * {@link ArgCompletion} - the registry resolves the command's completion and
+ * the shell provides the value sources ({@link ArgCompletion.Env}). The
+ * engine keeps the two prompt-level grammars: slash command names and the
+ * free-text {@code @agent} prefix.
  */
 public final class CompletionEngine {
     /** A completion candidate: the range of text to replace and the matches. */
@@ -46,35 +45,11 @@ public final class CompletionEngine {
     }
 
     private final SlashRegistry registry;
-    private final Supplier<List<String>> models;
-    private final Supplier<List<String>> providers;
-    private final Supplier<List<String>> agents;
-    private final Supplier<List<String>> sessions;
-    private final Supplier<List<String>> tools;
-    private final Supplier<List<String>> agentNames;
-    private final java.util.function.Function<String, List<String>> variants;
+    private final ArgCompletion.Env env;
 
-    public CompletionEngine(
-            final SlashRegistry registry,
-            final Supplier<List<String>> models,
-            final Supplier<List<String>> providers,
-            final Supplier<List<String>> agents,
-            final Supplier<List<String>> sessions,
-            final Supplier<List<String>> tools,
-            final Supplier<List<String>> agentNames,
-            final java.util.function.Function<String, List<String>> variants) {
+    public CompletionEngine(final SlashRegistry registry, final ArgCompletion.Env env) {
         this.registry = registry;
-        this.models = orEmpty(models);
-        this.providers = orEmpty(providers);
-        this.agents = orEmpty(agents);
-        this.sessions = orEmpty(sessions);
-        this.tools = orEmpty(tools);
-        this.agentNames = orEmpty(agentNames);
-        this.variants = variants == null ? model -> List.of() : variants;
-    }
-
-    private static Supplier<List<String>> orEmpty(final Supplier<List<String>> supplier) {
-        return supplier == null ? () -> List.of() : supplier;
+        this.env = env == null ? new ArgCompletion.Env() {} : env;
     }
 
     /**
@@ -100,7 +75,8 @@ public final class CompletionEngine {
         if (cursor == text.length() && prefixInner.startsWith("@")) {
             // free-text @agent prefix: strip '@' for matching ("@coder" -> "coder")
             final var name = prefixInner.substring(1);
-            final var items = fuzzy(agentNames.get(), name);
+            final var items =
+                    ArgCompletion.fuzzyResult("agents", env.agents(), name).items();
             return items.isEmpty() ? Suggestion.none() : new Suggestion(items, tokenStart + 1, cursor, "agents");
         }
         final var beforeRaw = text.substring(0, tokenStart);
@@ -116,97 +92,30 @@ public final class CompletionEngine {
             return Suggestion.none();
         }
         final var command = firstToken.substring(1);
-        // for /model the first argument completes model names and the second (separated by a
-        // space) completes variant names; detect the position from the already-typed tokens
-        if ("model".equals(command) && beforeRaw.strip().split("\\s+").length >= 2) {
-            final var tokens = beforeRaw.strip().split("\\s+");
-            final var typedModel = tokens.length > 1 ? tokens[1] : "";
-            return complete(prefixInner, tokenStart, variants.apply(typedModel), "variant");
+        // the arguments typed before the current token: the text before the
+        // token minus the leading command name, so positional completions
+        // (e.g. /metrics session on|off) branch on the typed arguments only
+        final var typed = text.substring(0, tokenStart).strip();
+        final var arg =
+                typed.indexOf(' ') > 0 ? typed.substring(typed.indexOf(' ') + 1).strip() : "";
+        final var result = registry.completionFor(command).complete(arg, prefixInner, env);
+        if (result.empty()) {
+            return Suggestion.none();
         }
-        return switch (registry.completionFor(command)) {
-            case NONE -> Suggestion.none();
-            case MODELS -> complete(prefixInner, tokenStart, models.get(), "model");
-            case PROVIDERS -> complete(prefixInner, tokenStart, providers.get(), "provider");
-            case AGENTS -> complete(prefixInner, tokenStart, agents.get(), "agent");
-            case SESSIONS -> complete(prefixInner, tokenStart, sessions.get(), "session");
-            case TOOLS -> complete(prefixInner, tokenStart, tools.get(), "tool");
-            case MODE -> suggestionsWithHint("build", "plan", prefixInner, tokenStart);
-            case PERMISSIONS -> complete(prefixInner, tokenStart, permissionCandidates(), "option");
-            case SHOW_HIDE -> suggestionsWithHint("show", "hide", prefixInner, tokenStart);
-            case SHOW_COLLAPSE_HIDE -> suggestionsWithHint("show", "collapse", "hide", prefixInner, tokenStart);
-            case PATH -> {
-                final var items = pathCandidates(prefixInner);
-                yield items.isEmpty() ? Suggestion.none() : new Suggestion(items, tokenStart, cursor, "path");
-            }
-        };
+        final var label = result.label() == null || result.label().isBlank() ? "complete" : result.label();
+        return new Suggestion(result.items(), tokenStart, cursor, label);
     }
 
     private Suggestion complete(
             final String token, final int replaceStart, final List<String> candidates, final String label) {
-        final var items = fuzzy(candidates, token);
+        final var items = ArgCompletion.fuzzyResult(label, candidates, token).items();
         return items.isEmpty()
                 ? Suggestion.none()
                 : new Suggestion(items, replaceStart, replaceStart + token.length(), label);
     }
 
-    /** Accepted /permissions values: the permission-mode enum plus the toggle extras. */
-    private static List<String> permissionCandidates() {
-        final var out = new ArrayList<String>(PermissionMode.VALUES);
-        out.add("all");
-        out.add("none");
-        out.add("show");
-        return out;
-    }
-
-    private Suggestion suggestionsWithHint(
-            final String first, final String second, final String token, final int tokenStart) {
-        final var out = new ArrayList<String>();
-        final var lc = token.toLowerCase(Locale.ROOT);
-        if (first.toLowerCase(Locale.ROOT).contains(lc)) {
-            out.add(first);
-        }
-        if (second.toLowerCase(Locale.ROOT).contains(lc)) {
-            out.add(second);
-        }
-        return out.isEmpty()
-                ? Suggestion.none()
-                : new Suggestion(out, tokenStart, tokenStart + token.length(), "option");
-    }
-
-    private Suggestion suggestionsWithHint(
-            final String first, final String second, final String third, final String token, final int tokenStart) {
-        final var a = suggestionsWithHint(first, second, token, tokenStart);
-        final var lc = token.toLowerCase(Locale.ROOT);
-        if (third.toLowerCase(Locale.ROOT).contains(lc)) {
-            final var items = new ArrayList<String>(a.items());
-            if (!items.contains(third)) {
-                items.add(third);
-            }
-            return items.isEmpty()
-                    ? Suggestion.none()
-                    : new Suggestion(items, a.replaceStart(), a.replaceStart() + token.length(), "option");
-        }
-        return a;
-    }
-
-    /** Substring + contains fuzzy match, lower-cased, stable sorted. */
-    static List<String> fuzzy(final List<String> candidates, final String token) {
-        if (candidates == null || candidates.isEmpty()) {
-            return List.of();
-        }
-        final var lc = token.toLowerCase(Locale.ROOT);
-        final var out = new ArrayList<String>();
-        for (final var c : candidates) {
-            if (c != null && !c.isBlank() && c.toLowerCase(Locale.ROOT).contains(lc)) {
-                out.add(c);
-            }
-        }
-        out.sort(Comparator.naturalOrder());
-        return out;
-    }
-
-    /** Filesystem path completer used by /context and /editplan. */
-    static List<String> pathCandidates(final String token) {
+    /** Filesystem path completer used by the shell env implementations of /context and /editplan. */
+    public static List<String> pathCandidates(final String token) {
         final var base = token.isEmpty() ? "." : token;
         final var norm = base.replace("~", System.getProperty("user.home"));
         final var path = Path.of(norm).toAbsolutePath();

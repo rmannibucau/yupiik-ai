@@ -305,6 +305,55 @@ class PermissionServiceTest {
     }
 
     @Test
+    void planModeAllowsReadOnlyGitInspectionsWithoutGate() {
+        // no gate, no explicit rules: plan mode + the built-in default rules must
+        // let read-only git inspection pipelines through (regression for `git show ... | head -60`
+        // denied headless because git show/merge-base/xargs were missing from the defaults)
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setMode(AgentMode.PLAN);
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "git show --stat 7483271 | head -60"))
+                .allowed());
+        assertTrue(service.check(
+                        "bash",
+                        ToolCategory.BASH,
+                        Map.of("command", "git merge-base HEAD master | xargs git log --oneline -1"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "grep -m1 '<version>' pom.xml"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "git remote add origin https://x"))
+                .allowed());
+    }
+
+    @Test
+    void planModeAllowsReadOnlyTextProcessingWithoutGate() {
+        // no gate, no explicit rules: plan mode + built-in default rules must let
+        // read-only text processing pipelines through (regression for `cat X | awk ...; echo ...; grep -n ...`
+        // denied headless because awk was missing from the defaults)
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setMode(AgentMode.PLAN);
+        final var inspection =
+                "cat fusion-handlebars/src/main/java/io/yupiik/fusion/framework/handlebars/helper/Truthiness.java"
+                        + " | awk 'NR>=16'; echo ====NEW-IF;"
+                        + " grep -n newIf fusion-handlebars/src/main/java/io/yupiik/fusion/framework/handlebars/helper/Truthiness.java";
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", inspection))
+                .allowed());
+        // harmless read-only forms stay allowed
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "diff -u pom.xml pom.xml.orig"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "date +%s"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "sha256sum pom.xml"))
+                .allowed());
+        // write/impure forms are carved out (redirection, diff -o, date -s)
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "awk 'NR>=16' pom.xml > out.txt"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "diff -o out.txt a b"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "date -s '2026-01-01'"))
+                .allowed());
+    }
+
+    @Test
     void planModeBashToleratesEnvPrefixes() {
         final var service = service(PermissionMode.ASK, List.of(), List.of(), rules(PermissionMode.YOLO, "grep"));
         service.setMode(AgentMode.PLAN);

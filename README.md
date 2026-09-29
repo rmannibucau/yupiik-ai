@@ -190,8 +190,11 @@ Main groups: `provider` (providers, defaultProvider, baseUrl, apiKey, model,
 api, reasoningField, contextWindow, outputTokens, timeoutSeconds, color,
 models, providerSpecificOptions),
 `llm` (retries, rpm throttle, maxConcurrent, retryOnContextOverflow),
-`compaction` (thresholdPercent, enabled), `pruning` (thresholdPercent,
-keepRecent, toolOutputMaxChars), `memory` (enabled, maxChars), `optimize`
+`compaction` (thresholdPercent, enabled, tailBudgetTokens), `pruning` (thresholdPercent,
+keepRecent, toolOutputMaxChars, ingestionOutputCapChars, minPruneTokens, protectTurns,
+protectRecentTokens, shrinkOutputChars, deduplicateToolCalls, supersedeOverwrittenWrites,
+purgeFailedToolInputs, purgeFailedToolInputsTurns, nudgeThresholdPercent,
+nudgeIterationThreshold, nudgeTemplate), `memory` (enabled, maxChars), `optimize`
 (disabled processors and tools, matched loosely - `mvn`, `./mvnw`,
 `git.exe` and `git` all match the git/maven processors), `permissions` (mode, allow, deny, bash rules), `sessions`
 (retentionDays, compressDays), `mode` (plan by default, or build), `skills` (enabled),
@@ -331,9 +334,10 @@ Project instructions and skills are loaded into the system prompt:
   submits; the prompt grows with its content up to a few rows
 - The status bar shows per-turn metrics when the turn completes - LLM calls,
   thinking time, tool count and durations, turn duration - honoring
-  `yca.metrics.displayMode` (compact/full/hidden, also runtime-tunable with
-  `/config metrics`), plus session totals (`session: N LLM calls`) when
-  `yca.metrics.showSessionTotals` is on
+  `yca.metrics.displayMode` (compact/full/hidden, runtime-tunable with
+  `/metrics compact|full`), plus session totals (`session: N LLM calls`) when
+  `yca.metrics.showSessionTotals` is on (`/metrics session on|off`); `/metrics`
+  alone prints the current configuration and the last turn values
 - The transcript is capped in memory at
   `yca.tui.transcript.maxHistoryCharacters` (default `10000000`): once
   exceeded, the oldest content is truncated from the beginning
@@ -341,7 +345,7 @@ Project instructions and skills are loaded into the system prompt:
   opens automatically on the first todo update
 - Switching `/mode build` keeps the plan todos recorded in `plan` mode, or
   derives them from the last plan of the session when the list is empty
-- `Ctrl+S` compact, `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt; `Shift+Tab`
+- `Ctrl+S` compact (or scheduled at the next agent checkpoint while a turn is running), `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt; `Shift+Tab`
   flips between `plan` and `build` modes (same as `/mode`), `Tab` completes
   slash commands and their parameters
 - Mouse drag selects any visible text (transcript, sidebar, status bar...) and
@@ -363,7 +367,7 @@ Project instructions and skills are loaded into the system prompt:
   structural code graph); the status bar shows the same animated feedback
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact`, `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan`, `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [path]` (show the resolved context, write it to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [path]` (show the resolved context, write it to path when given, or `compact|prune` to trigger an idempotent context operation), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

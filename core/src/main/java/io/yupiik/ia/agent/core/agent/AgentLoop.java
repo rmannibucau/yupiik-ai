@@ -56,10 +56,12 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.function.BooleanSupplier;
@@ -443,7 +445,7 @@ public class AgentLoop {
         };
 
         try {
-            return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt);
+            return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt, memoryVersionAtStart());
         } catch (final IOException e) {
             emit(error(e.getMessage()));
             return null;
@@ -606,7 +608,8 @@ public class AgentLoop {
             final List<Message> messages,
             final String prompt,
             final BooleanSupplier cancelled,
-            final Supplier<String> queuedPrompt)
+            final Supplier<String> queuedPrompt,
+            final int memoryVersionAtStart)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         final var maxIterations = configuration.llm().maxIterations();
@@ -643,8 +646,26 @@ public class AgentLoop {
             if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
                 continue;
             }
+            // user/tool-requested context operations (manage_context, /compact while busy) are
+            // applied at the first safe checkpoint of the turn, at most one per turn
+            if (!toolDirectiveApplied && contextView != null) {
+                final var directive = contextView.poll();
+                if (directive != null) {
+                    toolDirectiveApplied = true;
+                    applyToolDirective(sessionId, messages, directive, toolsTokens);
+                }
+            }
+            // zero-LLM DCP-style strategies (dedup, write superseding, error-input purge) run only at
+            // the automatic-prune check point: like the prune, they mutate already-sent messages, so
+            // running them on every iteration would invalidate the prompt prefix cache for no gain.
+            // When they change something the result is persisted and the usage anchor cleared.
             var compactedThisTurn = false;
             if (contextManager.pruneNeeded(messages, toolsTokens)) {
+                final var zeroLlmChanged = applyZeroLlmStrategies(messages);
+                if (zeroLlmChanged) {
+                    persistContext(sessionId, messages);
+                    usageTracker.clearAnchor();
+                }
                 final var pruned = contextManager.prune(messages);
                 if (pruned.changed()) {
                     messages.clear();
@@ -684,7 +705,7 @@ public class AgentLoop {
             // stays raw for persistence, compaction and memory extraction
             final var request = new ChatCompletionRequest(
                     model,
-                    wireMessages(sessionId, messages, prompt),
+                    wireMessages(sessionId, messages, prompt, memoryVersionAtStart),
                     null,
                     null,
                     null,
@@ -783,7 +804,7 @@ public class AgentLoop {
                 emitTurnMetrics(content, turnStartNanos);
                 return content;
             }
-            executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads);
+            executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens);
             toolsRanThisTurn = true;
             if (!toolDirectiveApplied && contextView != null) {
                 final var directive = contextView.poll();
@@ -809,9 +830,15 @@ public class AgentLoop {
      * per-request freshness never mutates a byte of the cached prefix. The working list itself stays
      * raw: persistence, compaction and memory extraction keep seeing the pristine conversation.
      */
-    private List<Message> wireMessages(final String sessionId, final List<Message> messages, final String prompt) {
+    private List<Message> wireMessages(
+            final String sessionId,
+            final List<Message> messages,
+            final String prompt,
+            final int memoryVersionAtTurnStart) {
         final var state = "<session-state>\n"
                 + systemPromptBuilder.sessionState(prompt)
+                + memoryRefresh(prompt, memoryVersionAtTurnStart)
+                + nudgeBlock(messages)
                 + snapshotBlock(sessionId)
                 + "</session-state>";
         final var wire = new ArrayList<Message>(messages.size() + 1);
@@ -836,6 +863,28 @@ public class AgentLoop {
             wire.add(new Message("user", state, null, null, null, Map.of("volatileTail", true)));
         }
         return wire;
+    }
+
+    /**
+     * Memory version captured once at turn start (see {@code doRun}): the durable memory already
+     * sits in the stable system prefix built by {@code SystemPromptBuilder.build}, so the volatile
+     * tail only re-appends the memory section when a mid-turn {@code memory_write} changed it.
+     */
+    private int memoryVersionAtStart() {
+        return systemPromptBuilder.memoryVersion();
+    }
+
+    /**
+     * The memory section to append to the volatile tail: empty when memory did not change since the
+     * turn started (it is already in the stable prefix), the fresh section otherwise (a mid-turn
+     * {@code memory_write} must be visible to the next rounds).
+     */
+    private String memoryRefresh(final String prompt, final int memoryVersionAtTurnStart) {
+        if (systemPromptBuilder.memoryVersion() == memoryVersionAtTurnStart) {
+            return "";
+        }
+        final var section = systemPromptBuilder.memorySection(prompt);
+        return section.isBlank() ? "" : "\n" + section + "\n";
     }
 
     private void emitTurnMetrics(final String content, final long turnStartNanos) {
@@ -948,6 +997,21 @@ public class AgentLoop {
      * at most one per turn (enforced by the caller), results persisted and surfaced as a
      * {@link AgentEvent.Compacted} event with the {@code tool} kind.
      */
+    /**
+     * Shell-side entry point for a user-triggered context operation during a turn
+     * (e.g. {@code /compact} or {@code /context prune} while the shell is busy): the operation is
+     * queued as a directive and applied by the loop at the next safe checkpoint, at most once per
+     * turn. Returns {@code false} when no consumer can accept the request (no context view) or when
+     * an operation is already pending this turn.
+     */
+    public boolean requestUserContextOperation(
+            final String action, final String focus, final int keepLast, final boolean force) {
+        if (contextView == null) {
+            return false;
+        }
+        return contextView.request(new ContextView.Directive(action, focus, keepLast, "user", force));
+    }
+
     private void applyToolDirective(
             final String sessionId,
             final List<Message> messages,
@@ -955,7 +1019,7 @@ public class AgentLoop {
             final int toolsTokens) {
         final var result = "prune".equals(directive.action())
                 ? contextManager.prune(messages)
-                : contextManager.compact(messages, directive.focus(), directive.keepLast());
+                : contextManager.compact(messages, directive.force(), directive.focus(), directive.keepLast());
         if (!result.changed()) {
             emit(notice(
                     AgentEvent.Notice.Level.WARN,
@@ -991,6 +1055,284 @@ public class AgentLoop {
         } catch (final RuntimeException e) {
             LOGGER.log(Level.WARNING, e, () -> "Could not persist the compacted session " + sessionId);
             emit(notice(AgentEvent.Notice.Level.WARN, "Compacted context could not be persisted: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Zero-LLM context strategies run at the same point as the automatic prune (start of an
+     * iteration), in a single non-incremental transform:
+     * <ol>
+     *   <li>deduplicate identical tool calls (same tool, same normalized arguments) keeping the latest,
+     *       protected tools excluded;</li>
+     *   <li>supersede write inputs overwritten by a later read of the same file (opt-in);</li>
+     *   <li>purge the (potentially large) inputs of failed tool calls after a number of turns.</li>
+     * </ol>
+     * Each strategy reports a single {@code Compacted} event when it changed the history. The
+     * conversation list is mutated in place because the loop owns it and keeps the call/result
+     * pairing intact.
+     */
+    private boolean applyZeroLlmStrategies(final List<Message> messages) {
+        final var p = configuration.pruning();
+        var deduped = 0;
+        if (p.deduplicateToolCalls()) {
+            deduped = deduplicateToolCalls(messages);
+        }
+        var superseded = 0;
+        if (p.supersedeOverwrittenWrites()) {
+            superseded = supersedeOverwrittenWrites(messages);
+        }
+        var purged = 0;
+        if (p.purgeFailedToolInputs()) {
+            purged = purgeFailedToolInputs(messages);
+        }
+        if (deduped > 0) {
+            emit(compacted("dedup", "CLEARED"));
+        }
+        if (superseded > 0) {
+            emit(compacted("supersede", "CLEARED"));
+        }
+        if (purged > 0) {
+            emit(compacted("purge-errors", "CLEARED"));
+        }
+        return deduped > 0 || superseded > 0 || purged > 0;
+    }
+
+    /** Tools whose calls/results are never deduplicated, superseded or input-purged (state/decisions). */
+    private static final Set<String> PROTECTED_CONTEXT_TOOLS =
+            Set.of("write_file", "edit_file", "apply_patch", "todo_write", "todo_read", "todo_update", "memory_write");
+
+    /** Write tools whose inputs can be superseded by a later read of the same path. */
+    private static final Set<String> WRITE_CONTEXT_TOOLS = Set.of("write_file", "edit_file", "apply_patch");
+
+    private String normalizedArguments(final String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            return "";
+        }
+        try {
+            final var json = mapper.read(Map.class, new java.io.StringReader(arguments));
+            final var sorted = new TreeMap<String, Object>();
+            if (json != null) {
+                json.forEach((k, v) -> sorted.put(String.valueOf(k), v));
+            }
+            return String.valueOf(sorted);
+        } catch (final RuntimeException e) {
+            // not JSON (eg. a freeform text argument): keep the raw form, dedup still works on exact matches
+            return arguments.strip();
+        }
+    }
+
+    /** Deduplicates identical tool calls keeping the latest occurrence. Returns the number of replacements. */
+    int deduplicateToolCalls(final List<Message> messages) {
+        // last index per signature (excluding protected tools); signatures are resolved across the
+        // whole list so identical calls far apart collapse too
+        final var lastBySignature = new LinkedHashMap<String, Integer>();
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call == null
+                        || call.function() == null
+                        || PROTECTED_CONTEXT_TOOLS.contains(call.function().name())) {
+                    continue;
+                }
+                final var signature = call.function().name()
+                        + '\n'
+                        + normalizedArguments(call.function().arguments());
+                lastBySignature.put(signature, i);
+            }
+        }
+        var replaced = 0;
+        // second pass: replace the tool result of any assistant call whose signature was seen later
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call == null
+                        || call.function() == null
+                        || PROTECTED_CONTEXT_TOOLS.contains(call.function().name())) {
+                    continue;
+                }
+                final var signature = call.function().name()
+                        + '\n'
+                        + normalizedArguments(call.function().arguments());
+                final var last = lastBySignature.get(signature);
+                if (last != null && last != i) {
+                    // replace the matching tool result (same call id) with a marker; the assistant
+                    // call itself is left in place to keep the call/result pairing unambiguous
+                    for (var j = i + 1; j < messages.size(); j++) {
+                        final var candidate = messages.get(j);
+                        if ("tool".equals(candidate.role()) && call.id().equals(candidate.toolCallId())) {
+                            messages.set(
+                                    j,
+                                    Message.tool(
+                                            call.id(),
+                                            "[duplicate tool call pruned - same tool and arguments as the last call, keeping the latest output]"));
+                            replaced++;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        return replaced;
+    }
+
+    /** Replaces write inputs overwritten by a later read of the same file, keeping the write confirmation. */
+    int supersedeOverwrittenWrites(final List<Message> messages) {
+        // track read paths seen after this position; a write whose path is read later is superseded
+        final var readsAfter = new HashSet<String>();
+        var replaced = 0;
+        for (var i = messages.size() - 1; i >= 0; i--) {
+            final var message = messages.get(i);
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call == null || call.function() == null) {
+                    continue;
+                }
+                final var name = call.function().name();
+                if ("read_file".equals(name) || "grep".equals(name) || "glob".equals(name)) {
+                    final var path = toolFilePath(call);
+                    if (path != null) {
+                        readsAfter.add(path);
+                    }
+                } else if (WRITE_CONTEXT_TOOLS.contains(name)
+                        && toolFilePath(call) != null
+                        && readsAfter.contains(toolFilePath(call))) {
+                    // only the input is superseded; the (small) confirmation output is kept
+                    final var newCall = new ToolCall(
+                            call.id(),
+                            call.type(),
+                            new ToolCall.FunctionCall(
+                                    call.function().name(),
+                                    "[write superseded by later read - file content already captured]"),
+                            call.index());
+                    // re-read the current message: an earlier call of the same message may already
+                    // have been superseded
+                    messages.set(i, replaceToolCall(messages.get(i), call.id(), newCall));
+                    replaced++;
+                }
+            }
+        }
+        return replaced;
+    }
+
+    /** Returns a copy of {@code message} with the tool call of {@code callId} replaced by {@code replacement}. */
+    private static Message replaceToolCall(final Message message, final String callId, final ToolCall replacement) {
+        return new Message(
+                message.role(),
+                message.content(),
+                message.name(),
+                message.toolCalls().stream()
+                        .map(c -> callId.equals(c == null ? null : c.id()) ? replacement : c)
+                        .toList(),
+                message.toolCallId(),
+                message.others());
+    }
+
+    private String toolFilePath(final ToolCall call) {
+        if (call == null || call.function() == null || call.function().arguments() == null) {
+            return null;
+        }
+        try {
+            final var json = mapper.read(
+                    Map.class, new java.io.StringReader(call.function().arguments()));
+            final var path = json == null ? null : json.get("path");
+            return path == null ? null : String.valueOf(path);
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Purges the (potentially large) input of failed tool calls after {@code purgeFailedToolInputsTurns}
+     * user turns, keeping the error message. Returns the number of purged inputs.
+     */
+    int purgeFailedToolInputs(final List<Message> messages) {
+        final var turns = configuration.pruning().purgeFailedToolInputsTurns();
+        final var failedCallIds = new HashSet<String>();
+        for (final var message : messages) {
+            if ("tool".equals(message.role())
+                    && message.others() != null
+                    && Boolean.TRUE.equals(message.others().get("is_error"))) {
+                failedCallIds.add(message.toolCallId());
+            }
+        }
+        if (failedCallIds.isEmpty()) {
+            return 0;
+        }
+        var purged = 0;
+        for (var i = 0; i < messages.size(); i++) {
+            final var message = messages.get(i);
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            // count user turns between this call and the end
+            var userTurnsAfter = 0;
+            for (var j = i + 1; j < messages.size(); j++) {
+                if ("user".equals(messages.get(j).role())) {
+                    userTurnsAfter++;
+                }
+            }
+            if (turns > 0 && userTurnsAfter < turns) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call == null || call.function() == null || !failedCallIds.contains(call.id())) {
+                    continue;
+                }
+                if (call.function().arguments() == null
+                        || call.function().arguments().isBlank()
+                        || call.function().arguments().equals("{}")) {
+                    continue;
+                }
+                final var newCall = new ToolCall(
+                        call.id(),
+                        call.type(),
+                        new ToolCall.FunctionCall(call.function().name(), "{}"),
+                        call.index());
+                messages.set(i, replaceToolCall(messages.get(i), call.id(), newCall));
+                purged++;
+            }
+        }
+        return purged;
+    }
+
+    /**
+     * Round-level budget guard: after each tool result lands, if the estimated context is above the
+     * pruning threshold, prune locally first (zero LLM cost); only if it remains above the
+     * compaction threshold, run the LLM compaction. The round continues: the already-landed results
+     * stay in the verbatim tail protected by the compaction's keep budget. Each reduction is
+     * persisted and clears the usage anchor like any other context reduction.
+     */
+    private void checkRoundBudget(final String sessionId, final List<Message> messages, final int toolsTokens) {
+        if (contextManager == null) {
+            return;
+        }
+        if (contextManager.pruneNeeded(messages, toolsTokens)) {
+            final var pruned = contextManager.prune(messages);
+            if (pruned.changed()) {
+                messages.clear();
+                messages.addAll(pruned.messages());
+                emit(compacted("round-prune", pruned.mode().name()));
+                persistContext(sessionId, messages);
+                usageTracker.clearAnchor();
+            }
+        }
+        if (contextManager.compactNeeded(messages, toolsTokens)) {
+            final var compacted = contextManager.compact(messages);
+            if (compacted.changed()) {
+                messages.clear();
+                messages.addAll(compacted.messages());
+                emit(compacted("round-compact", compacted.mode().name()));
+                persistContext(sessionId, messages);
+                usageTracker.clearAnchor();
+            }
         }
     }
 
@@ -1138,7 +1480,8 @@ public class AgentLoop {
             final List<Message> messages,
             final List<ToolCall> calls,
             final ToolRepeats repeats,
-            final StaleReads staleReads)
+            final StaleReads staleReads,
+            final int toolsTokens)
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
@@ -1165,17 +1508,20 @@ public class AgentLoop {
                     }
                     for (final var future : futures) {
                         appendToolResult(sessionId, messages, awaitTool(future), staleReads);
+                        checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                     final var batchWallMs = (System.nanoTime() - batchStartNanos) / 1_000_000;
                     turnToolWallMs += batchWallMs;
                 } else {
                     for (var j = i; j < end; j++) {
                         appendToolResult(sessionId, messages, runGuarded(calls.get(j), repeats), staleReads);
+                        checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                 }
                 i = end;
             } else {
                 appendToolResult(sessionId, messages, runGuarded(calls.get(i), repeats), staleReads);
+                checkRoundBudget(sessionId, messages, toolsTokens);
                 i++;
             }
         }
@@ -1424,13 +1770,19 @@ public class AgentLoop {
                 call.id(), name, result.output(), result.success(), true, touchedPaths(name, args), toolDurationMs);
     }
 
-    /** Lands an executed outcome in the conversation and the session store, in call order. */
+    /**
+     * Lands an executed outcome in the conversation and the session store, in call order. The output
+     * is capped at ingestion time (head+tail, deterministic) so a single oversized result can never
+     * blow the context budget: the capped version becomes the canonical session content, keeping the
+     * prompt prefix stable for caching (no retroactive mutation of already-sent messages).
+     */
     private void appendToolResult(
             final String sessionId,
             final List<Message> messages,
             final ToolOutcome outcome,
             final StaleReads staleReads) {
-        final var output = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
+        final var raw = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
+        final var output = capIngestionOutput(raw);
         messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
         if (outcome.persist()) {
             sessionStore.append(
@@ -1442,6 +1794,18 @@ public class AgentLoop {
         }
         turnToolsRun++;
         turnToolSumMs += outcome.durationMs();
+    }
+
+    /** Head+tail ingestion cap applied to tool outputs before they enter the conversation. */
+    String capIngestionOutput(final String output) {
+        final var cap = configuration.pruning().ingestionOutputCapChars();
+        if (cap <= 0 || output == null || output.length() <= cap) {
+            return output;
+        }
+        final var half = cap / 2;
+        return output.substring(0, half)
+                + "\n[... output truncated (" + output.length() + " chars), kept head and tail ...]\n"
+                + output.substring(output.length() - half);
     }
 
     private static String unknownToolDiagnostic(final String name) {
@@ -1536,6 +1900,39 @@ public class AgentLoop {
      * Appends the per-session snapshot block (active checkpoint label plus retained summaries that
      * must survive compaction) to the system prompt, when any exist.
      */
+    /**
+     * Soft context-usage nudge appended to the volatile session state (never to the stable prefix, so
+     * prompt caching is unaffected). Only fires when {@code nudgeThresholdPercent} is non-zero, the
+     * estimated usage is above it and at least {@code nudgeIterationThreshold} iterations ran since
+     * the last user message: the model is invited to finish or to compress instead of waiting for the
+     * hard compaction wall.
+     */
+    String nudgeBlock(final List<Message> messages) {
+        final var p = configuration.pruning();
+        final var threshold = p.nudgeThresholdPercent();
+        if (threshold <= 0) {
+            return "";
+        }
+        var sinceLastUser = 0;
+        for (var i = messages.size() - 1; i >= 0; i--) {
+            if ("user".equals(messages.get(i).role())) {
+                break;
+            }
+            sinceLastUser++;
+        }
+        if (sinceLastUser < p.nudgeIterationThreshold()) {
+            return "";
+        }
+        final var percent = (int) Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, 0)));
+        if (percent < threshold) {
+            return "";
+        }
+        final var template = p.nudgeTemplate() == null || p.nudgeTemplate().isBlank()
+                ? "Context is at ~%USAGE%% of the usable window. Consider finishing the task soon, or running manage_context with action=compact or action=prune."
+                : p.nudgeTemplate();
+        return "\n<nudge>" + template.replace("%USAGE%", String.valueOf(percent)) + "</nudge>";
+    }
+
     private String snapshotBlock(final String sessionId) {
         if (snapshotStore == null || sessionId == null) {
             return "";

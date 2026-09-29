@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import java.time.Clock;
 import org.junit.jupiter.api.Test;
@@ -120,5 +121,16 @@ class TuiSlashCommandsTest {
                 .map(s -> s.name())
                 .toList();
         assertTrue(names.contains("/tabs"), "expected /tabs in " + names);
+    }
+
+    @Test
+    void tuiCommandsDocumentTheirCompletions() {
+        for (final var command : commands.commands()) {
+            if (command.spec().usage() == null || command.spec().usage().isBlank()) {
+                continue;
+            }
+            assertTrue(
+                    command.completion() != ArgCompletion.NONE, command.spec().name() + " must have a completion");
+        }
     }
 }

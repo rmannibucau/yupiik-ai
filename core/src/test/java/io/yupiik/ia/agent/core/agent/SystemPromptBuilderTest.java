@@ -172,6 +172,54 @@ class SystemPromptBuilderTest {
     }
 
     @Test
+    void memoryLivesInTheStablePrefixNotInTheSessionState() throws Exception {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString()));
+        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        memory.append(true, List.of("- a durable global fact"));
+        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null);
+        final var prompt = builder.build();
+        assertTrue(
+                prompt.contains("<memory>") && prompt.contains("a durable global fact"),
+                "memory must be part of the stable system prefix (built once per turn): " + prompt);
+        final var state = builder.sessionState(null);
+        assertFalse(
+                state.contains("<memory>"),
+                "the volatile session state must no longer carry the memory section: " + state);
+        assertFalse(
+                state.contains("a durable global fact"),
+                "memory facts must not leak into the per-round tail: " + state);
+    }
+
+    @Test
+    void memoryIsDeduplicatedInsideTheSection() throws Exception {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString()));
+        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        memory.append(true, List.of("- fact one", "- fact one", "- fact two"));
+        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null);
+        final var prompt = builder.build();
+        final var section = prompt.substring(prompt.indexOf("<memory>"), prompt.indexOf("</memory>"));
+        assertEquals(1, occurrences(section, "- fact one"), "duplicated bullets must be deduplicated: " + section);
+        assertEquals(1, occurrences(section, "- fact two"), "distinct bullets must be kept: " + section);
+    }
+
+    private static int occurrences(final String haystack, final String needle) {
+        var out = 0;
+        var from = 0;
+        while (true) {
+            final var i = haystack.indexOf(needle, from);
+            if (i < 0) {
+                return out;
+            }
+            out++;
+            from = i + needle.length();
+        }
+    }
+
+    @Test
     void sessionStateReportsTheCurrentMode() throws Exception {
         final var cfg = config(Map.of("yca.mode", "plan"));
         final var permissions = new PermissionService(cfg);

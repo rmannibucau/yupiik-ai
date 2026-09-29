@@ -20,12 +20,14 @@ import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
+import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
@@ -57,6 +59,33 @@ public class ConfigCommands implements SlashCommandSet {
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
 
+    /** /permissions accepted values: the permission-mode enum plus the toggle extras. */
+    private static final List<String> PERMISSION_OPTIONS = permissionOptions();
+
+    private static List<String> permissionOptions() {
+        final var out = new ArrayList<String>(PermissionMode.VALUES);
+        out.add("all");
+        out.add("none");
+        out.add("show");
+        return List.copyOf(out);
+    }
+
+    /** /model completion: the first argument completes model names, the next ones the variants of the typed model. */
+    private static final ArgCompletion MODEL_COMPLETION = (arg, token, env) -> {
+        if (arg == null || arg.isBlank()) {
+            return ArgCompletion.fuzzyResult("model", env.models(), token);
+        }
+        return ArgCompletion.fuzzyResult("variant", env.variants(arg.strip().split("\\s+")[0]), token);
+    };
+
+    /** /metrics completion: a "session" argument expects on|off, the other forms are a closed set. */
+    private static final ArgCompletion METRICS_COMPLETION = (arg, token, env) -> {
+        if ("session".equals(ArgCompletion.previousToken(arg))) {
+            return ArgCompletion.fuzzyResult("option", List.of("on", "off"), token);
+        }
+        return ArgCompletion.fuzzyResult("option", List.of("show", "hide", "compact", "full", "session"), token);
+    };
+
     public ConfigCommands(
             final AgentSessionService agentSessionService,
             final ChatClient chatClient,
@@ -73,7 +102,7 @@ public class ConfigCommands implements SlashCommandSet {
         return List.of(
                 SlashCommand.of(
                         new SlashCommandSpec("/mode", "plan|build", "switch the agent working mode", SlashGroup.CONFIG),
-                        ArgCompletion.MODE,
+                        List.of("build", "plan"),
                         SlashAction.sync(this::mode)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -81,16 +110,16 @@ public class ConfigCommands implements SlashCommandSet {
                                 "[name] [variant] [temperature] [topK] [topP] | [temp=..] [top_k=..] [top_p=..]",
                                 "show or switch the model, optionally a named variant and in-memory sampling overrides",
                                 SlashGroup.CONFIG),
-                        ArgCompletion.MODELS,
+                        MODEL_COMPLETION,
                         this::model),
                 SlashCommand.of(
                         new SlashCommandSpec("/provider", "[id]", "show or switch the provider", SlashGroup.CONFIG),
-                        ArgCompletion.PROVIDERS,
+                        ArgCompletion.from("provider", ArgCompletion.Env::providers),
                         this::provider),
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/agent", "[name]", "show or set the active custom agent", SlashGroup.CONFIG),
-                        ArgCompletion.AGENTS,
+                        ArgCompletion.from("agent", ArgCompletion.Env::agents),
                         this::agent),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -98,7 +127,7 @@ public class ConfigCommands implements SlashCommandSet {
                                 String.join("|", PermissionMode.VALUES) + "|all|none|show",
                                 "allow all tools, ask for approval, or show current (session-scoped) settings",
                                 SlashGroup.CONFIG),
-                        ArgCompletion.PERMISSIONS,
+                        PERMISSION_OPTIONS,
                         SlashAction.sync(this::permissions)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -106,7 +135,7 @@ public class ConfigCommands implements SlashCommandSet {
                                 "show|hide",
                                 "show or hide the reasoning/thinking stream",
                                 SlashGroup.CONFIG),
-                        ArgCompletion.SHOW_HIDE,
+                        List.of("show", "hide"),
                         SlashAction.sync(ConfigCommands::thinking)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -114,21 +143,28 @@ public class ConfigCommands implements SlashCommandSet {
                                 "show|collapse|hide",
                                 "show, collapse to a summary line, or hide tool invocations and output",
                                 SlashGroup.CONFIG),
-                        ArgCompletion.SHOW_COLLAPSE_HIDE,
+                        List.of("show", "collapse", "hide"),
                         SlashAction.sync(ConfigCommands::toolOutput)),
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/metrics",
-                                "[show|hide|compact|full|session on|off|status]",
-                                "control the turn/session metrics display",
+                                "[show|hide|compact|full|session on|off]",
+                                "show or hide the metrics display, switch its density, or report the current values",
                                 SlashGroup.CONFIG),
+                        METRICS_COMPLETION,
                         SlashAction.sync(this::metrics)));
     }
 
     private ShellOutcome mode(final String arg, final ShellEnv env) {
+        final var mode = AgentMode.fromConfigurationString(arg);
         if (env.session().busy()) {
-            return ShellOutcome.status("cannot switch mode while busy");
+            // deferred: applied by TurnRunner when the current turn ends, so the running turn keeps
+            // its mode and permissions intact
+            env.session().pendingMode(mode.name().toLowerCase(Locale.ROOT));
+            return ShellOutcome.status("mode switch to " + mode.name().toLowerCase(Locale.ROOT)
+                    + " queued - applied when the current turn ends");
         }
+        env.session().pendingMode(null); // an explicit idle switch clears any queued one
         final var result = agentSessionService.setMode(
                 arg, env.session().sessionId(), env.session().runtime());
         final var sb = new StringBuilder(result.message());
@@ -503,36 +539,40 @@ public class ConfigCommands implements SlashCommandSet {
 
     private ShellOutcome metrics(final String arg, final ShellEnv env) {
         final var value = arg == null ? "" : arg.strip().toLowerCase(Locale.ROOT);
-        var metrics = env.session().metrics();
-        if (value.isBlank() || "status".equals(value)) {
-            return ShellOutcome.status("metrics: showPerTurn=" + metrics.showPerTurn()
-                    + " showSessionTotals=" + metrics.showSessionTotals()
-                    + " displayMode=" + metrics.displayMode());
+        final var metrics = env.session().metrics();
+        if (value.isBlank()) {
+            final var runtime = env.session().runtime();
+            return ShellOutcome.status(
+                    MetricsFormat.report(metrics, env.transcript(), runtime == null ? null : runtime.usage()));
         }
         final var parts = value.split("\\s+", 2);
+        var updated = metrics;
         switch (parts[0]) {
-            case "show" -> metrics = new MetricsConfiguration(true, metrics.showSessionTotals(), metrics.displayMode());
-            case "hide" ->
-                metrics = new MetricsConfiguration(false, metrics.showSessionTotals(), metrics.displayMode());
+            case "show" -> updated = new MetricsConfiguration(true, true, metrics.displayMode());
+            case "hide" -> updated = new MetricsConfiguration(false, false, metrics.displayMode());
             case "compact" ->
-                metrics = new MetricsConfiguration(
+                updated = new MetricsConfiguration(
                         metrics.showPerTurn(), metrics.showSessionTotals(), MetricsDisplayMode.COMPACT);
             case "full" ->
-                metrics = new MetricsConfiguration(
+                updated = new MetricsConfiguration(
                         metrics.showPerTurn(), metrics.showSessionTotals(), MetricsDisplayMode.FULL);
             case "session" -> {
                 if (parts.length > 1) {
-                    metrics = new MetricsConfiguration(
-                            metrics.showPerTurn(), "on".equalsIgnoreCase(parts[1].strip()), metrics.displayMode());
+                    final var sessionArg = parts[1].strip().toLowerCase(Locale.ROOT);
+                    if (!"on".equals(sessionArg) && !"off".equals(sessionArg)) {
+                        return ShellOutcome.status("usage: /metrics session on|off");
+                    }
+                    updated = new MetricsConfiguration(
+                            metrics.showPerTurn(), "on".equals(sessionArg), metrics.displayMode());
                 } else {
                     return ShellOutcome.status("usage: /metrics session on|off");
                 }
             }
             default -> {
-                return ShellOutcome.status("usage: /metrics [show|hide|compact|full|session on|off|status]");
+                return ShellOutcome.status("usage: /metrics [show|hide|compact|full|session on|off]");
             }
         }
-        env.session().metrics(metrics);
+        env.session().metrics(updated);
         return ShellOutcome.status("metrics updated");
     }
 }

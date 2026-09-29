@@ -19,11 +19,14 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.Test;
@@ -31,18 +34,18 @@ import org.junit.jupiter.api.Test;
 class SpinnerTest {
     @Test
     void inertWithoutTty() {
-        final var out = new ByteArrayOutputStream();
-        final var spinner = new Spinner(new Symbols(false), new PrintStream(out, true), false, new ReentrantLock());
+        final var stream = new RecordingStream();
+        final var spinner = new Spinner(new Symbols(false), stream.promptOutput(), false, new ReentrantLock());
         spinner.start("thinking");
         spinner.stop();
-        assertEquals(0, out.size());
+        assertEquals(0, stream.size());
     }
 
     @Test
     void doubleStartDoesNotOrphanTheFirstAnimationThread() throws InterruptedException {
         final var stream = new RecordingStream();
         final var spinner = new Spinner(
-                new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
+                new Symbols(true), stream.promptOutput(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         spinner.start("thinking");
         assertTrue(stream.awaitFrame(), "spinner did not render a frame");
@@ -56,7 +59,7 @@ class SpinnerTest {
     void restartAfterStopAnimatesAgain() throws InterruptedException {
         final var stream = new RecordingStream();
         final var spinner = new Spinner(
-                new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
+                new Symbols(true), stream.promptOutput(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         assertTrue(stream.awaitFrame(), "spinner did not render a frame");
         spinner.stop();
@@ -72,7 +75,7 @@ class SpinnerTest {
     void stopReturnsOnlyAfterWorkerExited() throws InterruptedException {
         final var stream = new RecordingStream();
         final var spinner = new Spinner(
-                new Symbols(true), stream.printStream(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
+                new Symbols(true), stream.promptOutput(), true, new ReentrantLock(), TimeUnit.MINUTES.toMillis(1));
         spinner.start("thinking");
         assertTrue(stream.awaitFrame(), "spinner did not render a frame");
         final var worker = spinner.worker();
@@ -98,7 +101,7 @@ class SpinnerTest {
                 return acquired;
             }
         };
-        final var spinner = new Spinner(new Symbols(true), stream.printStream(), true, lock, 5);
+        final var spinner = new Spinner(new Symbols(true), stream.promptOutput(), true, lock, 5);
         lock.lock();
         try {
             spinner.start("thinking");
@@ -115,15 +118,118 @@ class SpinnerTest {
         spinner.stop();
     }
 
+    @Test
+    void noFrameAndNoEraseWhileThePromptOwnsTheRow() throws InterruptedException {
+        // The spinner is the only cursor-mutating writer of the CLI: an erase landing
+        // on the row jline just painted is invisible to its display bookkeeping, so
+        // the prompt only came back once the user typed. Frames and the final erase are
+        // therefore suppressed for as long as a prompt is live.
+        final var stream = new RecordingStream();
+        final var output = stream.promptOutput();
+        final var spinner = new Spinner(new Symbols(true), output, true, new ReentrantLock(), 5);
+        spinner.start("thinking");
+        assertTrue(stream.awaitFrame(), "spinner did not render a frame before the prompt took the row");
+        spinner.stop();
+        final var sizeAfterStop = stream.size();
+        assertTrue(sizeAfterStop > 0);
+
+        final var attempts = new CountDownLatch(1);
+        final var lock = new ReentrantLock() {
+            @Override
+            public boolean tryLock() {
+                final var acquired = super.tryLock();
+                attempts.countDown();
+                return acquired;
+            }
+        };
+        final var guarded = new Spinner(new Symbols(true), output, true, lock, 5);
+        stream.promptLive(true);
+        guarded.start("thinking");
+        // the worker keeps trying, it just never writes while the prompt is live
+        assertTrue(attempts.await(5, TimeUnit.SECONDS), "the spinner worker never attempted a frame");
+        assertEquals(sizeAfterStop, stream.size(), "a frame was written while the prompt owned the row");
+        guarded.stop();
+        assertEquals(sizeAfterStop, stream.size(), "the row was erased even though a prompt owned it");
+        assertFalse(
+                stream.text().substring(sizeAfterStop).contains("\u001b[2K"), "the prompt row must never be erased");
+    }
+
+    @Test
+    void droppingAFrameForALivePromptStillReleasesTheRenderLock() throws InterruptedException {
+        // A skipped frame must not keep the render lock: stop() takes it from another
+        // thread, so holding it would hang the CLI on the next turn end.
+        final var stream = new RecordingStream();
+        stream.promptLive(true);
+        final var attempts = new CountDownLatch(1);
+        final var lock = new ReentrantLock() {
+            @Override
+            public boolean tryLock() {
+                final var acquired = super.tryLock();
+                attempts.countDown();
+                return acquired;
+            }
+        };
+        final var spinner = new Spinner(new Symbols(true), stream.promptOutput(), true, lock, 5);
+        spinner.start("thinking");
+        assertTrue(attempts.await(5, TimeUnit.SECONDS), "the spinner worker never attempted a frame");
+        assertEquals(0, stream.size(), "no frame may be written while the prompt owns the row");
+
+        // would hang here if stop() could not take the render lock
+        spinner.stop();
+        assertFalse(lock.isLocked(), "a dropped frame must not keep the render lock");
+    }
+
+    @Test
+    void stopErasesAndClosesTheRowSoTheNextPromptStartsFresh() throws InterruptedException {
+        final var stream = new RecordingStream();
+        final var spinner = new Spinner(new Symbols(true), stream.promptOutput(), true, new ReentrantLock(), 5);
+        spinner.start("thinking");
+        assertTrue(stream.awaitFrame(), "spinner did not render a frame");
+        spinner.stop();
+        final var text = stream.text();
+        assertTrue(text.contains("\u001b[2K"), "the spinner row must be erased");
+        assertTrue(text.endsWith("\n"), "the erase must close the row, or the next prompt lands over it");
+    }
+
     /**
      * Records rendered bytes and signals each write through a latch so tests await real frames instead of sleeping.
      */
     private static final class RecordingStream extends OutputStream {
         private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         private final AtomicReference<CountDownLatch> frame = new AtomicReference<>(new CountDownLatch(1));
+        private final AtomicBoolean live = new AtomicBoolean();
 
         PrintStream printStream() {
             return new PrintStream(this, true);
+        }
+
+        /** A {@link PromptOutput} writing to this stream, whose {@code active()} a test can flip. */
+        PromptOutput promptOutput() {
+            return new PromptOutput() {
+                @Override
+                public boolean active() {
+                    return live.get();
+                }
+
+                @Override
+                public void print(final String text) {
+                    writeText(text);
+                }
+
+                @Override
+                public void printErr(final String text) {
+                    writeText(text);
+                }
+            };
+        }
+
+        /** Turns the "a prompt owns the row" flag the returned sink reports. */
+        void promptLive(final boolean value) {
+            live.set(value);
+        }
+
+        String text() {
+            return bytes.toString(StandardCharsets.UTF_8);
         }
 
         void nextFrame() {
@@ -140,6 +246,11 @@ class SpinnerTest {
 
         int size() {
             return bytes.size();
+        }
+
+        private void writeText(final String text) {
+            final var bytes = text.getBytes(StandardCharsets.UTF_8);
+            write(bytes, 0, bytes.length);
         }
 
         @Override

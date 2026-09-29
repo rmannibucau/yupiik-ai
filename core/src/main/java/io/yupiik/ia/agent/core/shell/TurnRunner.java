@@ -16,10 +16,12 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -39,16 +41,21 @@ import java.util.function.Supplier;
 public class TurnRunner {
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final VirtualThreadExecutor executor;
+    private final AgentSessionService agentSessionService;
 
     public TurnRunner(
-            final MavenRepositoryKnowledgeService mavenKnowledgeService, final VirtualThreadExecutor executor) {
+            final MavenRepositoryKnowledgeService mavenKnowledgeService,
+            final VirtualThreadExecutor executor,
+            final AgentSessionService agentSessionService) {
         this.mavenKnowledgeService = mavenKnowledgeService;
         this.executor = executor;
+        this.agentSessionService = agentSessionService;
     }
 
     protected TurnRunner() {
         this.mavenKnowledgeService = null;
         this.executor = null;
+        this.agentSessionService = null;
     }
 
     /**
@@ -128,6 +135,25 @@ public class TurnRunner {
             } catch (final Throwable t) {
                 done.completeExceptionally(t);
             } finally {
+                // a mode switch queued while the turn was running is applied now, before the next turn
+                // can start: the current turn kept its own mode and permissions throughout
+                final var pending = env.session().pendingMode();
+                env.session().pendingMode(null);
+                if (pending != null && !pending.isBlank() && agentSessionService != null) {
+                    try {
+                        final var result = agentSessionService.setMode(
+                                pending,
+                                env.session().sessionId(),
+                                env.session().runtime());
+                        env.frontend()
+                                .notice(
+                                        AgentEvent.Notice.Level.INFO,
+                                        result.message()
+                                                + (result.seedMessage() == null ? "" : " - " + result.seedMessage()));
+                    } catch (final RuntimeException e) {
+                        env.frontend().notice(AgentEvent.Notice.Level.ERROR, "mode switch failed: " + e.getMessage());
+                    }
+                }
                 env.session().busy(false);
                 env.frontend().endTurn();
                 // completing last so awaiters observe the turn fully finished

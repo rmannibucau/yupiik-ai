@@ -62,4 +62,52 @@ public record PruningConfiguration(
                 defaultValue = "80",
                 documentation =
                         "Character cap (head and tail) used by the local truncation fallback applied to old messages when the compaction summarizer fails.")
-        int toolOutputMaxChars) {}
+        int toolOutputMaxChars,
+
+        @Property(
+                defaultValue = "20000",
+                documentation =
+                        "Character cap (head and tail) applied to tool outputs at ingestion time, before they enter the conversation; 0 disables the cap.")
+        int ingestionOutputCapChars,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Remove duplicate tool calls (same tool with the same normalized arguments): only the latest occurrence is kept, earlier ones are replaced by a short marker before the request is sent.")
+        boolean deduplicateToolCalls,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Replace the input of write operations (write_file/edit_file/apply_patch) that were overwritten by a later read of the same file with a short marker, keeping the write confirmation.")
+        boolean supersedeOverwrittenWrites,
+
+        @Property(
+                defaultValue = "true",
+                documentation =
+                        "Remove the (potentially large) input of failed tool calls after the configured number of turns, keeping the error message.")
+        boolean purgeFailedToolInputs,
+
+        @Property(
+                defaultValue = "4",
+                documentation = "Number of turns after which a failed tool call input is purged (0 = immediately).")
+        int purgeFailedToolInputsTurns,
+
+        @Property(
+                defaultValue = "0",
+                documentation =
+                        "Soft context-usage threshold (percent) above which, once iterationNudgeThreshold iterations ran since the last user message, a short nudge is appended to the session state to invite the model to finish or to compress; 0 disables the nudge.")
+        int nudgeThresholdPercent,
+
+        @Property(
+                defaultValue = "15",
+                documentation =
+                        "Number of iterations since the last user message after which the soft nudge can be appended (ignored when nudgeThresholdPercent is 0).")
+        int nudgeIterationThreshold,
+
+        @Property(
+                defaultValue =
+                        "\"Context is at ~%USAGE%% of the usable window. Consider finishing the task soon, or running manage_context with action=compact or action=prune.\"",
+                documentation =
+                        "Template of the soft context-usage nudge; %USAGE% is replaced by the usage percentage.")
+        String nudgeTemplate) {}

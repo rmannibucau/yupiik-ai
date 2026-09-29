@@ -220,7 +220,8 @@ class McpManagerTest {
                 base.maxLineLength(),
                 base.resumeAliases(),
                 base.slashcommands(),
-                base.prompt());
+                base.prompt(),
+                base.logging());
     }
 
     private static JsonMapper mapper() {

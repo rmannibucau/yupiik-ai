@@ -269,6 +269,16 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
         if ("number".equals(node.get("$id")) && !"int64".equals(node.get("format"))) {
             result.put("type", "number");
         }
+        // fusion binds Map<String, String> configuration entries from a single flat string parsed
+        // as java.util.Properties (ConfigurationFactoryGenerator#mapOf), the JSON object form not
+        // being consumable, so such properties are plain string in the schema, not objects.
+        if ("object".equals(node.get("type"))
+                && node.get("additionalProperties") instanceof Map<?, ?> additional
+                && "string".equals(additional.get("type"))
+                && !additional.containsKey("$ref")) {
+            result.remove("additionalProperties");
+            result.put("type", "string");
+        }
         if ("object".equals(result.get("type"))) {
             result.put("additionalProperties", false);
         }

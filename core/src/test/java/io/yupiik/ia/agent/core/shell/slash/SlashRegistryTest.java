@@ -38,7 +38,7 @@ class SlashRegistryTest {
                         (arg, env) -> completedStage(ShellOutcome.status("alpha:" + arg))),
                 SlashCommand.of(
                         new SlashCommandSpec("/beta", "", "beta cmd", SlashGroup.CONFIG),
-                        ArgCompletion.MODELS,
+                        ArgCompletion.options("m1", "m2"),
                         (arg, env) -> completedStage(ShellOutcome.quit())));
         return new SlashRegistry(List.of(set));
     }
@@ -77,7 +77,11 @@ class SlashRegistryTest {
     void namesAndCompletionComeFromSpecs() {
         final var registry = registry();
         assertTrue(registry.names().containsAll(List.of("/alpha", "/beta", "/help")));
-        assertEquals(ArgCompletion.MODELS, registry.completionFor("beta"));
+        assertEquals(
+                List.of("m1", "m2"),
+                registry.completionFor("beta")
+                        .complete("", "", new ArgCompletion.Env() {})
+                        .items());
         assertEquals(ArgCompletion.NONE, registry.completionFor("alpha"));
     }
 

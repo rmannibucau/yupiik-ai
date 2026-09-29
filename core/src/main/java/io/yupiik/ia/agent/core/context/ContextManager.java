@@ -90,6 +90,16 @@ public class ContextManager {
         return coordinator.compact(messages, false, focus, keepLastOverride);
     }
 
+    /**
+     * Explicit compaction with a {@code force} flag (bypasses the within-budget guard so compaction
+     * runs even below the thresholds), an optional focus hint folded into the summarizer prompt and an
+     * optional {@code keepLastOverride} raising the verbatim tail floor.
+     */
+    public CompactionResult compact(
+            final List<Message> messages, final boolean force, final String focus, final int keepLastOverride) {
+        return coordinator.compact(messages, force, focus, keepLastOverride);
+    }
+
     public CompactionResult compactForOverflow(final List<Message> messages) {
         return coordinator.compact(messages, true, null, 0);
     }

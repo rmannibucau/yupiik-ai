@@ -47,9 +47,10 @@ public interface Prompt {
 
     /**
      * Whether this prompt can detect a standalone {@code Esc} press while a
-     * turn is running without blocking. Rich backends (jline) return
-     * {@code true}; the plain stdin backend cannot and stays {@code false} so
-     * the REPL keeps its blocking turn wait untouched.
+     * turn is running without blocking. Only a backend with a genuinely
+     * pollable reader may return {@code true}: a backend whose read parks
+     * until input arrives would hide the next prompt until the user types,
+     * so it must return {@code false} and keep the blocking turn wait.
      */
     default boolean isInterruptAvailable() {
         return false;
@@ -64,5 +65,22 @@ public interface Prompt {
      */
     default boolean pollInterrupt() {
         return false;
+    }
+
+    /**
+     * The write path the surrounding REPL must use for every chunk it prints.
+     * Line-editing backends (jline) return a sink that decides - atomically
+     * with the read lifecycle - between a raw terminal write and a
+     * {@code printAbove} + prompt repaint, so external output can never
+     * desynchronize the prompt display; the plain {@code stdin} backend has no
+     * in-place display and returns {@link PromptOutput#raw()}.
+     * <p>
+     * Never {@code null}: callers must not need a fallback branch, as choosing
+     * one themselves is precisely the race this sink removes.
+     *
+     * @return the sink routing the REPL output for this backend.
+     */
+    default PromptOutput externalOutput() {
+        return PromptOutput.raw();
     }
 }

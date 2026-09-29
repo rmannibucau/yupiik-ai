@@ -16,12 +16,13 @@
 package io.yupiik.ia.agent.core.shell.slash;
 
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
+import java.util.List;
 
 /**
  * The single registration unit of a slash command: its catalog entry
- * ({@link SlashCommandSpec}), the kind of argument completion it accepts and
- * its body. Declaring the three together is what removes the former
- * spec-catalog / dispatch-table / completion-table drift.
+ * ({@link SlashCommandSpec}), its argument completion and its body. Declaring
+ * the three together is what removes the former spec-catalog /
+ * dispatch-table / completion-table drift.
  */
 public record SlashCommand(SlashCommandSpec spec, ArgCompletion completion, SlashAction action) {
 
@@ -39,6 +40,12 @@ public record SlashCommand(SlashCommandSpec spec, ArgCompletion completion, Slas
         return new SlashCommand(spec, ArgCompletion.NONE, action);
     }
 
+    /** A command completing against a closed set of options. */
+    public static SlashCommand of(final SlashCommandSpec spec, final List<String> options, final SlashAction action) {
+        return new SlashCommand(spec, ArgCompletion.options(options.toArray(String[]::new)), action);
+    }
+
+    /** A command with a custom argument completion. */
     public static SlashCommand of(
             final SlashCommandSpec spec, final ArgCompletion completion, final SlashAction action) {
         return new SlashCommand(spec, completion, action);

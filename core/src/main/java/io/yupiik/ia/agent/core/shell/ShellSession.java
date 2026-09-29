@@ -31,6 +31,7 @@ public class ShellSession {
     private volatile boolean showThinking = true;
     private volatile ToolOutputVisibility showToolOutput = ToolOutputVisibility.COLLAPSED;
     private volatile boolean busy;
+    private volatile String pendingMode;
     private MetricsConfiguration metrics = new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT);
     private SessionRuntime runtime;
 
@@ -66,6 +67,20 @@ public class ShellSession {
 
     public ShellSession busy(final boolean busy) {
         this.busy = busy;
+        return this;
+    }
+
+    /**
+     * Mode switch queued while a turn was running: applied by {@link TurnRunner} when the
+     * current turn ends, before the next turn can start. Cleared by an explicit
+     * {@code /mode} when idle.
+     */
+    public String pendingMode() {
+        return pendingMode;
+    }
+
+    public ShellSession pendingMode(final String pendingMode) {
+        this.pendingMode = pendingMode;
         return this;
     }
 

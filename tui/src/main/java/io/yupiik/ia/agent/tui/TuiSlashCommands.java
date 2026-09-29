@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashAction;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
@@ -77,6 +78,7 @@ public class TuiSlashCommands implements SlashCommandSet {
                                 "(light|dark)",
                                 "switch between light and dark themes (persisted)",
                                 SlashGroup.CONFIG),
+                        List.of("light", "dark"),
                         themeAction()),
                 SlashCommand.of(
                         new SlashCommandSpec("/shortcuts", null, "show the keyboard shortcuts", SlashGroup.OTHER),
@@ -87,6 +89,7 @@ public class TuiSlashCommands implements SlashCommandSet {
                                 "[index|last|+N|-N|+|-]",
                                 "list open tabs, or switch to the tab at the given index",
                                 SlashGroup.SESSION),
+                        List.of("last", "+", "-"),
                         SlashAction.sync(this::tabsOutcome)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -94,6 +97,7 @@ public class TuiSlashCommands implements SlashCommandSet {
                                 "[id]",
                                 "list the session subagents, or open the transcript of the given subagent",
                                 SlashGroup.SESSION),
+                        ArgCompletion.from("subagent", ArgCompletion.Env::subagents),
                         SlashAction.sync(this::subagentsOutcome)));
     }
 

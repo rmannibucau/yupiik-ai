@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.prompt.LinedPrompt;
 import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
+import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
@@ -56,6 +57,16 @@ public class AnsiShellIO implements ShellIO {
      */
     private final Lock renderLock;
 
+    /**
+     * The single write path for the interaction cards (option lists, approval
+     * box, question, answer summary). Routing them through the prompt sink -
+     * rather than {@code System.out.println} - is what keeps them from landing
+     * on the row a line editor has just painted: the sink decides, atomically
+     * with the read lifecycle, between a raw write and a {@code printAbove} plus
+     * prompt repaint.
+     */
+    private final PromptOutput output;
+
     public AnsiShellIO(final Prompt prompt, final Symbols symbols, final Runnable onInterrupt) {
         this(prompt, symbols, onInterrupt, () -> {}, () -> {}, new ReentrantLock());
     }
@@ -88,6 +99,13 @@ public class AnsiShellIO implements ShellIO {
         this.onInteractionStart = onInteractionStart;
         this.onInteractionEnd = onInteractionEnd;
         this.renderLock = renderLock;
+        final var sink = prompt.externalOutput();
+        this.output = sink == null ? PromptOutput.raw() : sink;
+    }
+
+    /** Prints one line of interaction chrome on stdout through the prompt sink. */
+    private void println(final String text) {
+        output.print(text + "\n");
     }
 
     private <T> CompletionStage<T> interact(final Supplier<CompletionStage<T>> interaction) {
@@ -145,9 +163,9 @@ public class AnsiShellIO implements ShellIO {
             return CompletableFuture.completedStage(Optional.empty());
         }
         return interact(() -> {
-            System.out.println(MarkdownColorizer.status(title + ":"));
+            println(MarkdownColorizer.status(title + ":"));
             for (int i = 0; i < options.size(); i++) {
-                System.out.println((i + 1) + ". " + options.get(i));
+                println((i + 1) + ". " + options.get(i));
             }
             try {
                 final var choice = interactionLine(
@@ -161,11 +179,11 @@ public class AnsiShellIO implements ShellIO {
                 try {
                     index = Integer.parseInt(choice) - 1;
                 } catch (final NumberFormatException e) {
-                    System.out.println(MarkdownColorizer.status("invalid selection"));
+                    println(MarkdownColorizer.status("invalid selection"));
                     return CompletableFuture.completedStage(Optional.empty());
                 }
                 if (index < 0 || index >= options.size()) {
-                    System.out.println(MarkdownColorizer.status("invalid selection"));
+                    println(MarkdownColorizer.status("invalid selection"));
                     return CompletableFuture.completedStage(Optional.empty());
                 }
                 return CompletableFuture.completedStage(Optional.of(options.get(index)));
@@ -244,9 +262,9 @@ public class AnsiShellIO implements ShellIO {
                 answers.put(question.id(), answer);
             }
             // summary
-            System.out.println(MarkdownColorizer.status("your answers:"));
+            println(MarkdownColorizer.status("your answers:"));
             for (final var question : questions) {
-                System.out.println("- " + question.prompt() + " -> " + answers.get(question.id()));
+                println("- " + question.prompt() + " -> " + answers.get(question.id()));
             }
             final var c = readAnswer(MarkdownColorizer.status("confirm? (a=accept, e=restart, c=cancel) [a] "))
                     .map(line -> line.strip().toLowerCase(Locale.ROOT))
@@ -261,19 +279,19 @@ public class AnsiShellIO implements ShellIO {
     }
 
     private Object askOne(final Question question) {
-        System.out.println();
-        System.out.println(MarkdownColorizer.accent(question.prompt()));
+        output.print("\n");
+        println(MarkdownColorizer.accent(question.prompt()));
         final var options = question.options() == null ? List.<String>of() : question.options();
         for (int i = 0; i < options.size(); i++) {
-            System.out.println("  " + (i + 1) + ". " + options.get(i));
+            println("  " + (i + 1) + ". " + options.get(i));
         }
         final var ownIndex = options.size(); // 1-based id = options.size()
         if (question.multiple()) {
-            System.out.println("  " + (ownIndex + 1) + ". (type your own answer)");
-            System.out.println(MarkdownColorizer.status("enter comma-separated numbers"));
+            println("  " + (ownIndex + 1) + ". (type your own answer)");
+            println(MarkdownColorizer.status("enter comma-separated numbers"));
         } else {
-            System.out.println("  " + (ownIndex + 1) + ". (type your own answer)");
-            System.out.println(MarkdownColorizer.status("enter a number, or " + (ownIndex + 1) + " then your text"));
+            println("  " + (ownIndex + 1) + ". (type your own answer)");
+            println(MarkdownColorizer.status("enter a number, or " + (ownIndex + 1) + " then your text"));
         }
         final var answer = readAnswer(MarkdownColorizer.status("> "));
         if (answer.isEmpty()) {
@@ -354,7 +372,7 @@ public class AnsiShellIO implements ShellIO {
         }
         width = Math.clamp(width, 32, 72);
         final var rule = symbols.boxHorizontal().repeat(width);
-        System.out.println(MarkdownColorizer.accent(symbols.boxTop() + rule + symbols.boxCorner()));
+        println(MarkdownColorizer.accent(symbols.boxTop() + rule + symbols.boxCorner()));
         for (int i = 0; i < lines.size(); i++) {
             for (final var fragment : wrapLine(lines.get(i), width)) {
                 final var styled = i == 0
@@ -362,10 +380,10 @@ public class AnsiShellIO implements ShellIO {
                         : i == 1
                                 ? MarkdownColorizer.warning(padTo(fragment, width))
                                 : MarkdownColorizer.status(padTo(fragment, width));
-                System.out.println(MarkdownColorizer.accent(symbols.boxLine()) + styled);
+                println(MarkdownColorizer.accent(symbols.boxLine()) + styled);
             }
         }
-        System.out.println(MarkdownColorizer.accent(symbols.boxBottom() + rule + symbols.boxCornerBottom()));
+        println(MarkdownColorizer.accent(symbols.boxBottom() + rule + symbols.boxCornerBottom()));
     }
 
     private static List<String> wrapLine(final String text, final int width) {

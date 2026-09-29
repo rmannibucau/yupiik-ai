@@ -348,10 +348,10 @@ public final class MarkdownLines {
                     out);
         } else if (node instanceof HtmlBlock h) {
             // HtmlBlock stores its content in getLiteral() (no Text children): rendering
-            // textOf(h) alone silently dropped whole blocks such as inline <think> notes
+            // the old Text-only walk (textOf) silently dropped whole blocks and inline code
             final var literal = h.getLiteral();
             emitLiteral(
-                    literal == null || literal.isBlank() ? textOf(h) : literal,
+                    literal == null || literal.isBlank() ? inlineText(h) : literal,
                     styles.html() == null ? base : styles.html().patch(base),
                     width,
                     out);
@@ -383,7 +383,7 @@ public final class MarkdownLines {
             final var avail = Math.max(1, width - widthOf(prefix.first()));
             out.add(Line.from(concat(prefix.first(), List.of(Span.styled("─".repeat(avail), style)))));
         } else if (node instanceof TableBlock table) {
-            renderTable(table, prefix, base, width, out);
+            renderTable(table, prefix, base, styles, width, out);
         } else {
             renderChildren(node, prefix, base, styles, width, breakWords, out);
         }
@@ -540,33 +540,57 @@ public final class MarkdownLines {
         }
     }
 
-    private static String textOf(final Node node) {
+    private static String inlineText(final Node node) {
         final var sb = new StringBuilder();
-        for (final var n : descendants(node)) {
-            if (n instanceof Text t) {
-                sb.append(t.getLiteral());
-            } else if (n instanceof SoftLineBreak || n instanceof HardLineBreak) {
-                sb.append('\n');
-            }
-        }
+        appendInlineText(node, sb);
         return sb.toString();
     }
 
+    /**
+     * Appends the inline text content of {@code node}: {@link Text} literals, inline
+     * {@link Code} (backticks stripped, matching the paragraph renderer), {@link HtmlInline}
+     * and the children of emphasis/strong/strikethrough/link/image nodes; soft and hard
+     * line breaks become {@code \n}. Unlike a Text-only walk this keeps commonmark
+     * {@code Code} nodes - their content lives in {@code getLiteral()} with no {@code Text}
+     * child - so inline code inside table cells is no longer dropped.
+     */
+    private static void appendInlineText(final Node node, final StringBuilder sb) {
+        if (node instanceof Text t) {
+            sb.append(t.getLiteral());
+        } else if (node instanceof Code c) {
+            sb.append(c.getLiteral());
+        } else if (node instanceof HtmlInline h) {
+            sb.append(h.getLiteral());
+        } else if (node instanceof SoftLineBreak || node instanceof HardLineBreak) {
+            sb.append('\n');
+        } else {
+            for (final var child : children(node)) {
+                appendInlineText(child, sb);
+            }
+        }
+    }
+
     private static void renderTable(
-            final TableBlock table, final Prefix prefix, final Style base, final int width, final List<Line> out) {
-        List<String> headCells = null;
-        final var bodyRows = new ArrayList<List<String>>();
+            final TableBlock table,
+            final Prefix prefix,
+            final Style base,
+            final MarkdownStyles styles,
+            final int width,
+            final List<Line> out) {
+        List<TableRenderer.Cell> headCells = null;
+        final var bodyRows = new ArrayList<List<TableRenderer.Cell>>();
         for (final var block : children(table)) {
             if (block instanceof TableHead h) {
                 for (final var row : children(h)) {
                     if (row instanceof TableRow r) {
-                        headCells = cellsOf(r);
+                        // header cells are bold like the prose headings, keeping inline styles
+                        headCells = cellsOf(r, base.bold(), styles);
                     }
                 }
             } else if (block instanceof TableBody b) {
                 for (final var row : children(b)) {
                     if (row instanceof TableRow r) {
-                        bodyRows.add(cellsOf(r));
+                        bodyRows.add(cellsOf(r, base, styles));
                     }
                 }
             }
@@ -574,14 +598,131 @@ public final class MarkdownLines {
         out.addAll(TABLE_RENDERER.render(headCells, bodyRows, width, prefix.first(), prefix.cont(), base));
     }
 
-    private static List<String> cellsOf(final TableRow row) {
-        final var out = new ArrayList<String>();
+    private static List<TableRenderer.Cell> cellsOf(final TableRow row, final Style base, final MarkdownStyles styles) {
+        final var out = new ArrayList<TableRenderer.Cell>();
         for (final var cell : children(row)) {
             if (cell instanceof TableCell tc) {
-                out.add(textOf(tc).strip());
+                // inline formats (code, emphasis, links) are kept as styled spans; a newline
+                // inside a cell becomes a space so TableRenderer can wrap it cleanly
+                final var raw = new ArrayList<Span>();
+                for (final var span : cellInline(tc, base, styles)) {
+                    final var content = span.content() == null ? "" : span.content();
+                    raw.add(Span.styled(content.replace('\n', ' '), span.style()));
+                }
+                out.add(new TableRenderer.Cell(trimSpans(raw)));
             }
         }
         return out;
+    }
+
+    /**
+     * Renders the inline content of a table cell as styled spans, mirroring the
+     * prose walk: {@link Text} is buffered, {@link Code} uses the theme inline-code
+     * style, strong/emphasis/strikethrough/link/html their theme style, each patched
+     * over {@code base} (line/header style first); breaks become {@code \n} so the
+     * caller can normalize them to spaces. Unlike {@link #inlineText(Node)} this
+     * keeps the per-node styles, so inline formatting is visible inside table cells.
+     */
+    private static List<Span> cellInline(final Node node, final Style base, final MarkdownStyles styles) {
+        final var out = new ArrayList<Span>();
+        final var sb = new StringBuilder();
+        cellInline(node, base, styles, out, sb);
+        flushCell(out, sb, base);
+        return out;
+    }
+
+    private static void cellInline(
+            final Node node,
+            final Style base,
+            final MarkdownStyles styles,
+            final List<Span> out,
+            final StringBuilder sb) {
+        if (node instanceof Text t) {
+            sb.append(t.getLiteral());
+        } else if (node instanceof Code c) {
+            flushCell(out, sb, base);
+            out.add(Span.styled(c.getLiteral(), styles.inlineCode().patch(base)));
+        } else if (node instanceof HtmlInline h) {
+            flushCell(out, sb, base);
+            out.add(Span.styled(h.getLiteral(), styles.html().patch(base)));
+        } else if (node instanceof SoftLineBreak || node instanceof HardLineBreak) {
+            sb.append('\n');
+        } else if (node instanceof Emphasis) {
+            flushCell(out, sb, base);
+            renderCellMarkup(node, base, styles.emphasis(), styles, out);
+        } else if (node instanceof StrongEmphasis) {
+            flushCell(out, sb, base);
+            renderCellMarkup(node, base, styles.strong(), styles, out);
+        } else if (node instanceof Strikethrough) {
+            flushCell(out, sb, base);
+            renderCellMarkup(node, base, styles.strikethrough(), styles, out);
+        } else if (node instanceof Link) {
+            flushCell(out, sb, base);
+            renderCellMarkup(node, base, styles.link(), styles, out);
+        } else if (node instanceof Image) {
+            flushCell(out, sb, base);
+            renderCellMarkup(node, base, styles.link(), styles, out);
+        } else {
+            for (final var child : children(node)) {
+                cellInline(child, base, styles, out, sb);
+            }
+        }
+    }
+
+    /** Flushes the pending plain-text buffer as one span styled with {@code base}. */
+    private static void flushCell(final List<Span> out, final StringBuilder sb, final Style base) {
+        if (sb.length() > 0) {
+            out.add(Span.styled(sb.toString(), base));
+            sb.setLength(0);
+        }
+    }
+
+    /** Emits the children of a markup node, each patched over the markup style (nested markups compose). */
+    private static void renderCellMarkup(
+            final Node node, final Style base, final Style markup, final MarkdownStyles styles, final List<Span> out) {
+        final var childBase = markup.patch(base);
+        final var nested = new ArrayList<Span>();
+        final var nestedSb = new StringBuilder();
+        for (final var child : children(node)) {
+            cellInline(child, childBase, styles, nested, nestedSb);
+        }
+        flushCell(nested, nestedSb, childBase);
+        out.addAll(nested);
+    }
+
+    /** Trims leading/trailing whitespace of a span list, keeping the styles of the remaining text. */
+    static List<Span> trimSpans(final List<Span> spans) {
+        final var text = spans.stream().map(Span::content).reduce("", String::concat);
+        final var start = leading(text);
+        final var end = trailing(text, text.length() - start);
+        final var out = new ArrayList<Span>();
+        var offset = 0;
+        for (final var span : spans) {
+            final var content = span.content() == null ? "" : span.content();
+            var from = Math.max(0, start - offset);
+            var to = Math.min(content.length(), end - offset);
+            if (to > from) {
+                out.add(Span.styled(content.substring(from, to), span.style()));
+            }
+            offset += content.length();
+        }
+        return out;
+    }
+
+    private static int leading(final String text) {
+        var i = 0;
+        while (i < text.length() && Character.isWhitespace(text.charAt(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    private static int trailing(final String text, final int limit) {
+        var i = text.length();
+        while (i > limit && Character.isWhitespace(text.charAt(i - 1))) {
+            i--;
+        }
+        return i;
     }
 
     private static Iterable<Node> descendants(final Node root) {

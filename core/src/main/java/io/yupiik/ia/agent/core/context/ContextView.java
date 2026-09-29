@@ -45,14 +45,19 @@ public class ContextView {
             int compactThresholdPercent) {}
 
     /**
-     * A tool-requested context operation.
+     * A tool-requested or user-requested context operation.
      *
      * @param action {@code compact} or {@code prune}
      * @param focus optional hint folded into the summarizer prompt
      * @param keepLast optional minimum number of recent messages to keep verbatim (0 = default)
-     * @param requestedBy tool name that requested the operation
+     * @param requestedBy tool name that requested the operation, or {@code "user"} for shell-triggered operations
+     * @param force bypass the within-budget guard so compaction runs even below the thresholds
      */
-    public record Directive(String action, String focus, int keepLast, String requestedBy) {}
+    public record Directive(String action, String focus, int keepLast, String requestedBy, boolean force) {
+        public Directive(String action, String focus, int keepLast, String requestedBy) {
+            this(action, focus, keepLast, requestedBy, false);
+        }
+    }
 
     private volatile Snapshot snapshot;
     private volatile Directive directive;

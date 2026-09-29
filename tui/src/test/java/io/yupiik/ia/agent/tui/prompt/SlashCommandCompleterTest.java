@@ -36,11 +36,25 @@ class SlashCommandCompleterTest {
         final SlashCommandSet set = () -> List.of(
                 SlashCommand.of(
                         new SlashCommandSpec("/model", null, "model cmd", SlashGroup.CONFIG),
-                        ArgCompletion.MODELS,
+                        ArgCompletion.from("model", ArgCompletion.Env::models),
                         (arg, env) -> null),
                 SlashCommand.of(
                         new SlashCommandSpec("/mode", null, "mode cmd", SlashGroup.CONFIG),
-                        ArgCompletion.MODE,
+                        ArgCompletion.options("build", "plan"),
+                        (arg, env) -> null),
+                SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/metrics",
+                                "[show|hide|compact|full|session on|off]",
+                                "metrics cmd",
+                                SlashGroup.CONFIG),
+                        (arg, token, env) -> {
+                            if ("session".equals(ArgCompletion.previousToken(arg))) {
+                                return ArgCompletion.fuzzyResult("option", List.of("on", "off"), token);
+                            }
+                            return ArgCompletion.fuzzyResult(
+                                    "option", List.of("show", "hide", "compact", "full", "session"), token);
+                        },
                         (arg, env) -> null));
         return new SlashRegistry(List.of(set));
     }
@@ -60,9 +74,22 @@ class SlashCommandCompleterTest {
         // no dynamic source is wired (all null): must not throw and must not invent candidates
         completer.complete(null, line("/model ", 7), candidates);
         assertTrue(candidates.isEmpty(), candidates.toString());
-        // mode has static hints baked in CompletionEngine
+        // mode has static hints baked in the command completion
         completer.complete(null, line("/mode b", 7), candidates);
         assertTrue(candidates.stream().anyMatch(c -> "build".equals(c.value())), candidates.toString());
+    }
+
+    @Test
+    void completesMetricsThroughJLine() {
+        final var completer = new SlashCommandCompleter(registry(), null, null, null, null, null);
+        final var candidates = new ArrayList<Candidate>();
+        completer.complete(null, line("/metrics c", 10), candidates);
+        assertTrue(candidates.stream().anyMatch(c -> "compact".equals(c.value())), candidates.toString());
+        assertTrue(candidates.stream().noneMatch(c -> "show".equals(c.value())), candidates.toString());
+        final var sessionCandidates = new ArrayList<Candidate>();
+        completer.complete(null, line("/metrics session o", 18), sessionCandidates);
+        assertTrue(sessionCandidates.stream().anyMatch(c -> "on".equals(c.value())), sessionCandidates.toString());
+        assertTrue(sessionCandidates.stream().anyMatch(c -> "off".equals(c.value())), sessionCandidates.toString());
     }
 
     @Test

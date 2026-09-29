@@ -380,6 +380,72 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void agentTurnErrorRendersRedRightSlotAndKeepsLeftStatusReady() throws Exception {
+        // AgentEvent.Error (a failed turn with all retries exhausted, eg. the JDK transport
+        // error "HTTP/1.1 header parser received no bytes") must land in the trailing red
+        // error slot (right, Alt+E for details), never replace the leading status text
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-agent-error-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Error("HTTP/1.1 header parser received no bytes", sessionId));
+
+        // the trailing red segment carries the message (single space after the cross glyph);
+        // the boxed banner below uses a double space, so this matches only the trailing one
+        awaitText("✗ HTTP/1.1 header parser received no bytes");
+        // the far-left status text must keep the normal "ready", not be replaced by the error
+        awaitText("ready");
+
+        // the error segment must be painted in the error red (#e06c75)
+        final var col = columnOfLineContaining("✗ HTTP/1.1 header parser");
+        final var row = rowOf("✗ HTTP/1.1 header parser");
+        final var rgb = backend.fg(col, row).map(c -> c.toRgb()).orElse(null);
+        assertTrue(
+                rgb != null && rgb.r() == 0xe0 && rgb.g() == 0x6c && rgb.b() == 0x75,
+                "expected the error segment to be painted in the error red, fg=" + backend.fg(col, row));
+
+        quit();
+    }
+
+    @Test
+    void agentErrorNoticeRendersRedRightSlotAndKeepsLeftStatusUntouched() throws Exception {
+        // ERROR notices (truncation give-up, compaction exhaustion...) are failures too: they
+        // must reach the red trailing slot while the leading agent state stays untouched
+        // ("ready" when idle, "working" mid-turn)
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-agent-error-notice-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.ERROR,
+                        "Response truncated by the output token limit (finish_reason=length)",
+                        sessionId));
+
+        awaitText("✗ Response truncated by the output token limit");
+        awaitText("ready");
+
+        quit();
+    }
+
+    @Test
     void clearRestoresWelcomeScreen() throws Exception {
         final var shellRegistry = testRegistry();
         final var agentLoop = new AgentLoop() {
@@ -666,7 +732,8 @@ class TuiCommandRenderTest {
                 new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
                 new TurnRunner(
                         new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
-                        new VirtualThreadExecutor()),
+                        new VirtualThreadExecutor(),
+                        agentSessionService),
                 new ThinkTagSplitter(),
                 factory,
                 tuiSlashCommands,

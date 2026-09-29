@@ -32,10 +32,19 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class MemoryStore {
-    public static final String HEADER =
-            "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n";
+    /** The header line of {@link #HEADER}: filtered out of the prompt sections (it is not a fact). */
+    public static final String HEADER_LINE = "Durable facts, decisions and preferences. One bullet per line.";
+
+    public static final String HEADER = "# Memory\n\n" + HEADER_LINE + "\n\n";
 
     private final CodingAgentConfiguration configuration;
+
+    /**
+     * Content fingerprint of the memory files, cached and invalidated on every write
+     * ({@link #append} / {@link #appendText}). Lets the agent loop detect a mid-turn
+     * {@code memory_write} without re-reading the files at every LLM round.
+     */
+    private volatile int contentVersion = -1;
 
     public MemoryStore(final CodingAgentConfiguration configuration) {
         this.configuration = configuration;
@@ -43,6 +52,19 @@ public class MemoryStore {
 
     protected MemoryStore() {
         this.configuration = null;
+    }
+
+    /**
+     * Cached fingerprint of the current memory content (global + project). Changes whenever
+     * memory is written through this store; a never-written store is stable across calls.
+     */
+    public int version() {
+        var v = contentVersion;
+        if (v < 0) {
+            v = java.util.Objects.hash(readGlobal(), readProject());
+            contentVersion = v;
+        }
+        return v;
     }
 
     public Path globalFile() {
@@ -105,16 +127,21 @@ public class MemoryStore {
         if (content == null || content.isBlank()) {
             return "";
         }
-        // strip the markdown header/blank lines, keep only the durable bullet lines
-        final var sb = new StringBuilder();
+        // strip the markdown header/blank lines and the file header line (not a fact),
+        // keep only the durable bullet lines, deduplicated
+        final var seen = new LinkedHashSet<String>();
         for (final var line : content.lines().toList()) {
             final var s = line.strip();
-            if (s.isEmpty() || s.startsWith("#")) {
+            if (s.isEmpty()
+                    || s.startsWith("#")
+                    || HEADER_LINE.equals(s)
+                    || "Memory".equals(s)
+                    || ("-" + HEADER_LINE).equals(s)) {
                 continue;
             }
-            sb.append(s).append('\n');
+            seen.add(s);
         }
-        return sb.toString();
+        return String.join("\n", seen) + (seen.isEmpty() ? "" : "\n");
     }
 
     private static final int MARKUP_OVERHEAD = 57;
@@ -255,6 +282,10 @@ public class MemoryStore {
     private record ScopeSelection(String global, String project) {}
 
     public synchronized List<String> append(final boolean global, final List<String> facts) {
+        return append(global, facts, true);
+    }
+
+    synchronized List<String> append(final boolean global, final List<String> facts, final boolean touchVersion) {
         if (facts == null || facts.isEmpty()) {
             return List.of();
         }
@@ -280,6 +311,9 @@ public class MemoryStore {
             }
             if (!added.isEmpty()) {
                 write(file, existing);
+                if (touchVersion) {
+                    contentVersion = -1; // next version() recomputes from the fresh files
+                }
             }
             return added;
         } catch (final IOException e) {
@@ -325,7 +359,7 @@ public class MemoryStore {
             }
             return Files.readAllLines(file).stream()
                     .map(String::strip)
-                    .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                    .filter(l -> !l.isEmpty() && !l.startsWith("#") && !HEADER_LINE.equals(l))
                     .toList();
         } catch (final IOException e) {
             return List.of();

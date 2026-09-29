@@ -127,6 +127,53 @@ class ContextManagerTest {
     }
 
     @Test
+    void focusAndKeepLastAreForwardedToTheCompactor() {
+        // tiny tail budget + a weighty tail turn (as in the force test) so the compaction actually runs
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var captured = new ArrayList<List<Message>>();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) {
+                captured.add(List.copyOf(request.messages()));
+                return new ChatResult(Message.assistant("digest: custom focus", null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null,
+                        "s1"));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 5; i++) {
+            messages.add(Message.user("step " + i));
+        }
+        messages.add(Message.user("step 5 " + "y".repeat(4_000)));
+        final var result = manager.compact(messages, false, "my focus", 1);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        final var prompt = captured.get(0).stream()
+                .filter(m -> "user".equals(m.role()))
+                .map(m -> String.valueOf(m.content()))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(
+                prompt.contains("my focus"),
+                "the focus hint must be folded into the summarizer prompt so the summary emphasizes it");
+        assertTrue(
+                result.messages().size() >= 1
+                        && result.messages()
+                                .get(result.messages().size() - 1)
+                                .role()
+                                .equals("user"),
+                "keepLast=1 must keep the final user message verbatim");
+    }
+
+    @Test
     void compactKeepsTheDigestWholeWhenShrinkingTheTailOverflow() throws Exception {
         final var digest = "summary: " + "x".repeat(1_200);
         final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));

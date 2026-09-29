@@ -29,17 +29,51 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class CompletionEngineTest {
+    /** The same shape ConfigCommands registers for /model. */
+    private static final ArgCompletion MODEL_COMPLETION = (arg, token, env) -> {
+        if (arg == null || arg.isBlank()) {
+            return ArgCompletion.fuzzyResult("model", env.models(), token);
+        }
+        return ArgCompletion.fuzzyResult("variant", env.variants(arg.strip().split("\\s+")[0]), token);
+    };
+
+    /** The same shape ConfigCommands registers for /metrics. */
+    private static final ArgCompletion METRICS_COMPLETION = (arg, token, env) -> {
+        if ("session".equals(ArgCompletion.previousToken(arg))) {
+            return ArgCompletion.fuzzyResult("option", List.of("on", "off"), token);
+        }
+        return ArgCompletion.fuzzyResult("option", List.of("show", "hide", "compact", "full", "session"), token);
+    };
+
+    /** The same shape MaintainCommands registers for /mcp. */
+    private static final ArgCompletion MCP_COMPLETION = (arg, token, env) -> {
+        if ("reset".equals(ArgCompletion.previousToken(arg))) {
+            return ArgCompletion.fuzzyResult("server", env.servers(), token);
+        }
+        return ArgCompletion.fuzzyResult("option", List.of("status", "reset"), token);
+    };
+
     private static SlashRegistry registry() {
         final SlashCommandSet set = () -> List.of(
-                spec("/model", ArgCompletion.MODELS, SlashGroup.CONFIG),
-                spec("/provider", ArgCompletion.PROVIDERS, SlashGroup.CONFIG),
-                spec("/agent", ArgCompletion.AGENTS, SlashGroup.CONFIG),
-                spec("/resume", ArgCompletion.SESSIONS, SlashGroup.SESSION),
-                spec("/tools", ArgCompletion.TOOLS, SlashGroup.INSPECT),
-                spec("/mode", ArgCompletion.MODE, SlashGroup.CONFIG),
-                spec("/permissions", ArgCompletion.PERMISSIONS, SlashGroup.CONFIG),
-                spec("/thinking", ArgCompletion.SHOW_HIDE, SlashGroup.CONFIG),
-                spec("/tool-output", ArgCompletion.SHOW_COLLAPSE_HIDE, SlashGroup.CONFIG),
+                spec("/model", MODEL_COMPLETION, SlashGroup.CONFIG),
+                spec("/provider", ArgCompletion.from("provider", ArgCompletion.Env::providers), SlashGroup.CONFIG),
+                spec("/agent", ArgCompletion.from("agent", ArgCompletion.Env::agents), SlashGroup.CONFIG),
+                spec("/resume", ArgCompletion.from("session", ArgCompletion.Env::sessions), SlashGroup.SESSION),
+                spec("/tools", ArgCompletion.from("tool", ArgCompletion.Env::tools), SlashGroup.INSPECT),
+                spec("/mode", ArgCompletion.options("build", "plan"), SlashGroup.CONFIG),
+                spec(
+                        "/permissions",
+                        ArgCompletion.options("ask", "auto_edit", "yolo", "all", "none", "show"),
+                        SlashGroup.CONFIG),
+                spec("/thinking", ArgCompletion.options("show", "hide"), SlashGroup.CONFIG),
+                spec("/tool-output", ArgCompletion.options("show", "collapse", "hide"), SlashGroup.CONFIG),
+                spec("/metrics", METRICS_COMPLETION, SlashGroup.CONFIG),
+                spec("/mcp", MCP_COMPLETION, SlashGroup.MAINTAIN),
+                spec("/theme", ArgCompletion.options("light", "dark"), SlashGroup.CONFIG),
+                spec("/tabs", ArgCompletion.options("last", "+", "-"), SlashGroup.SESSION),
+                spec("/subagents", ArgCompletion.from("subagent", ArgCompletion.Env::subagents), SlashGroup.SESSION),
+                spec("/compact", ArgCompletion.options("force"), SlashGroup.MAINTAIN),
+                spec("/snapshot", ArgCompletion.options("save", "cancel", "restore", "status"), SlashGroup.MAINTAIN),
                 spec("/context", ArgCompletion.PATH, SlashGroup.INSPECT),
                 spec("/editplan", ArgCompletion.PATH, SlashGroup.MAINTAIN));
         return new SlashRegistry(List.of(set));
@@ -49,16 +83,52 @@ class CompletionEngineTest {
         return SlashCommand.of(new SlashCommandSpec(name, null, name + " cmd", group), completion, (arg, env) -> null);
     }
 
+    private static ArgCompletion.Env env() {
+        return new ArgCompletion.Env() {
+            @Override
+            public List<String> models() {
+                return List.of("gpt-5-mini", "gpt-5", "qwen3-coder");
+            }
+
+            @Override
+            public List<String> providers() {
+                return List.of("openai", "ollama");
+            }
+
+            @Override
+            public List<String> agents() {
+                return List.of("coder", "reviewer", "tester");
+            }
+
+            @Override
+            public List<String> sessions() {
+                return List.of("11111111-aaaa (2026-09-01 10:00)", "22222222-bbbb (2026-09-02 11:00)");
+            }
+
+            @Override
+            public List<String> tools() {
+                return List.of("read_file", "write_file", "bash");
+            }
+
+            @Override
+            public List<String> subagents() {
+                return List.of("subagent-1", "subagent-2");
+            }
+
+            @Override
+            public List<String> servers() {
+                return List.of("docs", "remote");
+            }
+
+            @Override
+            public List<String> variants(final String model) {
+                return "fast".equals(model) ? List.of("default", "deep") : List.of("default", "fast");
+            }
+        };
+    }
+
     private static CompletionEngine engine() {
-        return new CompletionEngine(
-                registry(),
-                () -> List.of("gpt-5-mini", "gpt-5", "qwen3-coder"),
-                () -> List.of("openai", "ollama"),
-                () -> List.of("reviewer", "tester"),
-                () -> List.of("11111111-aaaa (2026-09-01 10:00)", "22222222-bbbb (2026-09-02 11:00)"),
-                () -> List.of("read_file", "write_file", "bash"),
-                () -> List.of("coder", "writer"),
-                model -> List.<String>of("default", "fast".equals(model) ? "deep" : "fast"));
+        return new CompletionEngine(registry(), env());
     }
 
     @Test
@@ -95,9 +165,10 @@ class CompletionEngineTest {
     @Test
     void variantCompletionIsDrivenByTheTypedModel() {
         // "fast" typed model resolves a different variant set than "gpt-5"
-        final var forFast = engine().suggest("/model fast f", 12);
-        assertTrue(forFast.items().contains("deep"), "variant list must reflect the typed model");
-        final var forGpt5 = engine().suggest("/model gpt-5 f", 13);
+        final var forFast = engine().suggest("/model fast f", 13);
+        assertTrue(forFast.items().contains("default"), "variant list must reflect the typed model");
+        assertFalse(forFast.items().contains("fast"));
+        final var forGpt5 = engine().suggest("/model gpt-5 f", 14);
         assertTrue(forGpt5.items().contains("fast"), "gpt-5 typed model keeps its own variants");
         assertFalse(forGpt5.items().contains("deep"));
     }
@@ -134,6 +205,51 @@ class CompletionEngineTest {
         assertTrue(s.items().contains("show"));
         assertTrue(s.items().contains("collapse"));
         assertTrue(s.items().contains("hide"));
+    }
+
+    @Test
+    void completesMetricsFirstToken() {
+        final var s = engine().suggest("/metrics com", 12);
+        assertTrue(s.items().contains("compact"));
+        assertFalse(s.items().contains("show"), "the token filters the closed set");
+    }
+
+    @Test
+    void completesMetricsSessionSubcommand() {
+        final var s = engine().suggest("/metrics session o", 18);
+        assertTrue(s.items().contains("on"));
+        assertTrue(s.items().contains("off"));
+        assertFalse(s.items().contains("show"));
+    }
+
+    @Test
+    void completesSnapshots() {
+        final var s = engine().suggest("/snapshot s", 11);
+        assertTrue(s.items().contains("save"));
+        assertTrue(s.items().contains("status"));
+    }
+
+    @Test
+    void completesMcpStatusAndResetServer() {
+        final var status = engine().suggest("/mcp s", 6);
+        assertTrue(status.items().contains("status"));
+        final var reset = engine().suggest("/mcp reset r", 12);
+        assertTrue(reset.items().contains("remote"));
+    }
+
+    @Test
+    void completesThemeAndTabs() {
+        final var theme = engine().suggest("/theme l", 8);
+        assertTrue(theme.items().contains("light"));
+        final var tabs = engine().suggest("/tabs la", 8);
+        assertTrue(tabs.items().contains("last"));
+    }
+
+    @Test
+    void completesSubagentIds() {
+        final var s = engine().suggest("/subagents subagent-", 20);
+        assertTrue(s.items().contains("subagent-1"));
+        assertTrue(s.items().contains("subagent-2"));
     }
 
     @Test

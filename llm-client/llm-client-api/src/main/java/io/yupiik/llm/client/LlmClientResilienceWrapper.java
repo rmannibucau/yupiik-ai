@@ -147,15 +147,18 @@ public final class LlmClientResilienceWrapper {
             final BooleanSupplier cancelled,
             final Consumer<PauseEvent> listener) {
         final var pause = listener == null ? pauseListener : listener;
-        return acquire(pause).thenCompose(_unused -> {
-            final var setup = dialect.stream(request, cancelled);
-            setup.whenComplete((pub, error) -> {
-                if (error != null) {
-                    release();
-                }
-            });
-            return setup.thenApply(pub -> new ReleaseOnCompletePublisher<>(pub, semaphore));
-        });
+        // Failures while setting the stream up (headers/transport before the first fragment,
+        // HTTP 429/5xx...) are transient and safe to retry: nothing was delivered yet, same
+        // semantics as chat(). Once the publisher is handed out, mid-stream failures are the
+        // caller's concern (it owns the partial content and decides whether to replay).
+        return acquire(pause)
+                .thenCompose(_unused -> retryStream(dialect, request, cancelled, 1, pause)
+                        .whenComplete((publisher, error) -> {
+                            if (error != null) {
+                                release();
+                            }
+                        }))
+                .thenApply(publisher -> new ReleaseOnCompletePublisher<>(publisher, semaphore));
     }
 
     /**
@@ -258,14 +261,78 @@ public final class LlmClientResilienceWrapper {
         return false;
     }
 
-    private CompletionStage<LlmResponse> retryAfter(
+    /**
+     * Retries a failing stream setup (the {@code CompletionStage<Publisher>} itself failed before
+     * any event was delivered) with the same policy as {@link #retry(Dialect, LlmRequest,
+     * BooleanSupplier, int, Consumer)}: transient transport and 5xx/429 failures are retried with
+     * exponential backoff, typed context/dialect failures keep their own semantics. Once the
+     * publisher is produced the permit is handed to {@link ReleaseOnCompletePublisher}, and
+     * mid-stream failures belong to the caller (partial content makes a blind replay unsafe).
+     */
+    private CompletionStage<Flow.Publisher<LlmStreamEvent>> retryStream(
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final int attempt,
+            final Consumer<PauseEvent> listener) {
+        final var result = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
+        try {
+            dialect.stream(request, cancelled).whenComplete((publisher, error) -> {
+                try {
+                    if (error != null) {
+                        final var cause = unwrap(error);
+                        boolean retry = false;
+                        if (cause instanceof ContextWindowExceededException) {
+                            retry = config.retryOnContextOverflow() && attempt < config.retriesMaxAttempts();
+                        } else if (!(cause instanceof DialectNotSupportedException)) {
+                            retry = attempt < config.retriesMaxAttempts() && retryable(cause);
+                        }
+                        if (retry) {
+                            concurrencyLimitDetected(cause, listener);
+                            retryStreamAfter(attempt, cause, dialect, request, cancelled, listener)
+                                    .whenComplete((r, e) -> completeInto(result, r, e));
+                        } else {
+                            result.completeExceptionally(cause);
+                        }
+                    } else if (publisher == null) {
+                        result.completeExceptionally(new IOException("null stream"));
+                    } else {
+                        result.complete(publisher);
+                    }
+                } catch (final RuntimeException e) {
+                    result.completeExceptionally(e);
+                }
+            });
+        } catch (final RuntimeException e) {
+            result.completeExceptionally(e);
+        }
+        return result;
+    }
+
+    private CompletionStage<Flow.Publisher<LlmStreamEvent>> retryStreamAfter(
             final int attempt,
             final Throwable lastError,
             final Dialect dialect,
             final LlmRequest request,
             final BooleanSupplier cancelled,
             final Consumer<PauseEvent> listener) {
-        final var result = new CompletableFuture<LlmResponse>();
+        final var result = new CompletableFuture<Flow.Publisher<LlmStreamEvent>>();
+        final var wait = retryWait(attempt, lastError);
+        if (listener != null) {
+            listener.accept(new PauseEvent(
+                    attempt,
+                    lastError.getMessage() + " -> wait " + (wait.waitMs() / 1000) + "s (" + wait.reason() + ")",
+                    wait.waitMs()));
+        }
+        CompletableFuture.delayedExecutor(
+                        Math.max(1L, (long) (wait.waitMs() * config.waitScale())), TimeUnit.MILLISECONDS)
+                .execute(() -> retryStream(dialect, request, cancelled, attempt + 1, listener)
+                        .whenComplete((r, e) -> completeInto(result, r, e)));
+        return result;
+    }
+
+    /** Backoff (with jitter) and {@code retry-after}/{@code concurrency-limit} honoring for one wait. */
+    private RetryWait retryWait(final int attempt, final Throwable lastError) {
         final var jitter = (long) (ThreadLocalRandom.current().nextDouble(0.5d, 1.0d)
                 * config.retriesBaseDelayMs()
                 * Math.pow(2, attempt - 1));
@@ -283,11 +350,26 @@ public final class LlmClientResilienceWrapper {
                 waitReason = "concurrency-limit (no retry-after)";
             }
         }
-        final var reason = lastError.getMessage() + " -> wait " + (waitMs / 1000) + "s (" + waitReason + ")";
+        return new RetryWait(waitMs, waitReason);
+    }
+
+    private record RetryWait(long waitMs, String reason) {}
+
+    private CompletionStage<LlmResponse> retryAfter(
+            final int attempt,
+            final Throwable lastError,
+            final Dialect dialect,
+            final LlmRequest request,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> listener) {
+        final var result = new CompletableFuture<LlmResponse>();
+        final var wait = retryWait(attempt, lastError);
+        final var reason = lastError.getMessage() + " -> wait " + (wait.waitMs() / 1000) + "s (" + wait.reason() + ")";
         if (listener != null) {
-            listener.accept(new PauseEvent(attempt, reason, waitMs));
+            listener.accept(new PauseEvent(attempt, reason, wait.waitMs()));
         }
-        CompletableFuture.delayedExecutor(Math.max(1L, (long) (waitMs * config.waitScale())), TimeUnit.MILLISECONDS)
+        CompletableFuture.delayedExecutor(
+                        Math.max(1L, (long) (wait.waitMs() * config.waitScale())), TimeUnit.MILLISECONDS)
                 .execute(() -> retry(dialect, request, cancelled, attempt + 1, listener)
                         .whenComplete((r, e) -> completeInto(result, r, e)));
         return result;

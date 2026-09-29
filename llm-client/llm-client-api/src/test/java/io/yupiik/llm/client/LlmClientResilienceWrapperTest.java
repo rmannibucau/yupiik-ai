@@ -214,6 +214,73 @@ class LlmClientResilienceWrapperTest {
         assertEquals(1, dial.calls.get());
     }
 
+    @Test
+    void streamSetupTransportFailureIsRetried() throws Exception {
+        // a raw transport failure before any fragment (the JDK surfaces it as
+        // "HTTP/1.1 header parser received no bytes") is transient: like chat(),
+        // the stream setup must be retried instead of surfacing after the first attempt
+        final var dial = new ScriptedDialect(new IOException("HTTP/1.1 header parser received no bytes"));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+
+        wrapper.stream(dial, null, () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals(2, dial.calls.get(), "a transport stream-setup failure must be retried once");
+    }
+
+    @Test
+    void streamSetupRetriesStopAtMaxAttempts() {
+        final var dial = new ScriptedDialect(
+                new IOException("HTTP/1.1 header parser received no bytes"),
+                new IOException("HTTP/1.1 header parser received no bytes"),
+                new IOException("HTTP/1.1 header parser received no bytes"));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+
+        final var failure = assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> wrapper.stream(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(3, dial.calls.get(), "3 attempts max then give up");
+        assertTrue(
+                failure.getCause() instanceof IOException
+                        && failure.getCause().getMessage().contains("header parser received no bytes"),
+                "got: " + failure.getCause());
+    }
+
+    @Test
+    void streamSetupHttp400IsNotRetried() {
+        final var dial = new ScriptedDialect(new IOException("LLM request failed (400): bad request"));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+
+        final var failure = assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> wrapper.stream(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(1, dial.calls.get(), "a 400 must not be retried");
+        assertTrue(
+                failure.getCause() instanceof IOException
+                        && failure.getCause().getMessage().contains("(400): bad request"),
+                "got: " + failure.getCause());
+    }
+
+    @Test
+    void streamSetupTyped400IsNotRetried() {
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(400, "boom", null));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+
+        final var failure = assertThrows(
+                java.util.concurrent.CompletionException.class,
+                () -> wrapper.stream(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(1, dial.calls.get(), "a typed 400 must not be retried");
+        assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+    }
+
     private static LlmResponse response() {
         return new LlmResponse(
                 "id",
@@ -252,7 +319,29 @@ class LlmClientResilienceWrapperTest {
         @Override
         public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
                 final LlmRequest request, final BooleanSupplier cancelled) {
-            return failed(new UnsupportedOperationException());
+            final var call = calls.getAndIncrement();
+            if (call < failures.length) {
+                return failed(failures[call]);
+            }
+            // success: an SSE stream of a single "ok" fragment then end
+            final var buffers = java.nio.ByteBuffer.wrap("data: {\"id\":\"1\",\"model\":\"m\",\"choices\":[]}\n\n"
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return CompletableFuture.completedFuture(io.yupiik.llm.client.spi.Streams.toEvents(
+                    subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                        @Override
+                        public void request(final long n) {
+                            subscriber.onNext(List.of(buffers));
+                            subscriber.onComplete();
+                        }
+
+                        @Override
+                        public void cancel() {
+                            // no-op
+                        }
+                    }),
+                    () -> false,
+                    event -> List.of(new LlmStreamEvent.TextDelta("ok")),
+                    () -> new LlmStreamEvent.End("stop", null)));
         }
 
         @Override

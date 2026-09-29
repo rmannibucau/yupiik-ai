@@ -33,6 +33,8 @@ import java.util.Map;
 @ApplicationScoped
 public class ApplyPatchTool implements EmbeddedTool {
     private static final String DEV_NULL = "/dev/null";
+    /** How far a hunk may drift from its declared position before being rejected. */
+    private static final int ANCHOR_FUZZ = 5;
 
     private final CodingAgentConfiguration configuration;
 
@@ -138,58 +140,115 @@ public class ApplyPatchTool implements EmbeddedTool {
         return candidate;
     }
 
-    private static List<String> applyHunks(final List<String> original, final List<List<String>> hunks) {
-        return hunks.stream().reduce(new ArrayList<>(original), ApplyPatchTool::applyHunk, (a, b) -> b);
+    private static List<String> applyHunks(final List<String> original, final List<Hunk> hunks) {
+        final var lines = new ArrayList<>(original);
+        var drift = 0;
+        for (final var hunk : hunks) {
+            applyHunk(lines, hunk, drift);
+            drift += hunk.newCount - hunk.oldCount;
+        }
+        return lines;
     }
 
-    private static List<String> applyHunk(final List<String> original, final List<String> hunk) {
-        final var out = new ArrayList<String>(original.size() + 16);
-        var src = 0;
-        var matched = false;
-        // find a start offset where the hunk's context/remove lines match
-        for (var start = 0; start <= original.size(); start++) {
-            out.clear();
-            src = start;
-            var ok = true;
-            for (final var line : hunk) {
-                if (line.isEmpty()) {
-                    continue;
-                }
-                final var c = line.charAt(0);
-                final var content = line.substring(1);
-                if (c == ' ') {
-                    if (src >= original.size() || !original.get(src).equals(content)) {
-                        ok = false;
-                        break;
-                    }
-                    src++;
-                    out.add(content);
-                } else if (c == '-') {
-                    if (src >= original.size() || !original.get(src).equals(content)) {
-                        ok = false;
-                        break;
-                    }
-                    src++;
-                } else if (c == '+') {
-                    out.add(content);
-                } else {
-                    ok = false;
-                    break;
-                }
+    private static void applyHunk(final List<String> lines, final Hunk hunk, final int drift) {
+        final var start = resolveStart(lines, hunk, drift);
+        final var out = new ArrayList<String>(lines.size() + 8);
+        out.addAll(lines.subList(0, start));
+        var src = start;
+        var removedCount = 0;
+        var additionsCount = 0;
+        for (final var line : hunk.lines) {
+            if (line.isEmpty()) {
+                continue;
             }
-            if (ok) {
-                matched = true;
-                break;
+            final var c = line.charAt(0);
+            final var content = line.substring(1);
+            if (c == ' ') {
+                out.add(lines.get(src));
+                src++;
+            } else if (c == '-') {
+                if (src >= lines.size() || !lines.get(src).equals(content)) {
+                    throw new PatchException("Hunk context did not match the file contents");
+                }
+                src++;
+                removedCount++;
+            } else if (c == '+') {
+                out.add(content);
+                additionsCount++;
+            } else {
+                throw new PatchException("Malformed hunk line: " + line);
             }
         }
-        if (!matched) {
+        if (hunk.newCount != hunk.oldCount - removedCount + additionsCount) {
+            throw new PatchException("Hunk adds " + additionsCount + " lines and removes " + removedCount
+                    + " but the @@ header declares old " + hunk.oldCount + " new " + hunk.newCount);
+        }
+        out.addAll(lines.subList(src, lines.size()));
+        lines.clear();
+        lines.addAll(out);
+    }
+
+    /**
+     * Resolves where the hunk binds. Anchored hunks bind at their declared
+     * position (plus the drift of the previously applied hunks), with a small
+     * fuzz window; anything else is rejected instead of scanning the whole
+     * file - a hunk that matched far from its anchor used to silently drop the
+     * lines before the binding point (the head-truncation bug). Hunks without
+     * positions (bare {@code @@}) are only applied when their body matches at
+     * exactly one offset, so a repeated block can never be spliced at the
+     * wrong occurrence.
+     */
+    private static int resolveStart(final List<String> lines, final Hunk hunk, final int drift) {
+        if (hunk.oldStart != null) {
+            final var declared = Math.max(0, hunk.oldStart - 1 + drift);
+            if (matchesAt(lines, declared, hunk) == hunk.oldCount) {
+                return declared;
+            }
+            for (var offset = Math.max(0, declared - ANCHOR_FUZZ);
+                    offset <= Math.min(lines.size(), declared + ANCHOR_FUZZ);
+                    offset++) {
+                if (matchesAt(lines, offset, hunk) == hunk.oldCount) {
+                    return offset;
+                }
+            }
+            throw new PatchException("Hunk context did not match the file contents around line " + (declared + 1));
+        }
+        var found = -1;
+        for (var offset = 0; offset <= lines.size(); offset++) {
+            if (matchesAt(lines, offset, hunk) == hunk.oldCount) {
+                if (found >= 0) {
+                    throw new PatchException("Hunk context is ambiguous: it matches at lines " + (found + 1) + " and "
+                            + (offset + 1) + "; add explicit positions to the @@ header");
+                }
+                found = offset;
+            }
+        }
+        if (found < 0) {
             throw new PatchException("Hunk context did not match the file contents");
         }
-        // append remaining source lines
-        for (; src < original.size(); src++) {
-            out.add(original.get(src));
+        return found;
+    }
+
+    /** Returns how many context/removal lines of the hunk match at {@code start}, or -1 on mismatch. */
+    private static int matchesAt(final List<String> lines, final int start, final Hunk hunk) {
+        var consumed = 0;
+        var idx = start;
+        for (final var line : hunk.lines) {
+            if (line.isEmpty()) {
+                continue;
+            }
+            final var c = line.charAt(0);
+            if (c == ' ' || c == '-') {
+                if (idx >= lines.size() || !lines.get(idx).equals(line.substring(1))) {
+                    return -1;
+                }
+                idx++;
+                consumed++;
+            } else if (c != '+') {
+                return -1;
+            }
         }
-        return out;
+        return consumed;
     }
 
     private static List<Change> parse(final String patch) {
@@ -197,26 +256,29 @@ public class ApplyPatchTool implements EmbeddedTool {
         final var changes = new ArrayList<Change>();
         String oldPath = null;
         String newPath = null;
-        List<List<String>> hunks = null;
+        List<Hunk> hunks = null;
+        String currentHeader = null;
         List<String> current = null;
         for (final var line : lines) {
             if (line.startsWith("--- ")) {
                 if (oldPath != null) {
                     if (current != null) {
-                        hunks.add(current);
+                        hunks.add(Hunk.of(currentHeader, current));
                     }
                     changes.add(Change.of(oldPath, newPath, hunks));
                 }
                 oldPath = line.substring(4).strip();
                 newPath = null;
                 hunks = new ArrayList<>();
+                currentHeader = null;
                 current = null;
             } else if (line.startsWith("+++ ")) {
                 newPath = line.substring(4).strip();
             } else if (line.startsWith("@@")) {
                 if (current != null) {
-                    hunks.add(current);
+                    hunks.add(Hunk.of(currentHeader, current));
                 }
+                currentHeader = line;
                 current = new ArrayList<>();
             } else if (current != null) {
                 current.add(line);
@@ -225,15 +287,79 @@ public class ApplyPatchTool implements EmbeddedTool {
         }
         if (oldPath != null) {
             if (current != null) {
-                hunks.add(current);
+                hunks.add(Hunk.of(currentHeader, current));
             }
             changes.add(Change.of(oldPath, newPath, hunks));
         }
         return changes;
     }
 
-    private record Change(String path, boolean deleteOnly, boolean createOnly, List<List<String>> hunks) {
-        static Change of(final String oldPath, final String newPath, final List<List<String>> hunks) {
+    /**
+     * A parsed hunk. {@code oldStart}/{@code newStart} are 1-based line numbers
+     * from the {@code @@ -oldStart,oldCount +newStart,newCount @@} header;
+     * {@code oldStart} is null when the header carried no positions (bare
+     * {@code @@}), in which case the counts are derived from the body.
+     */
+    private record Hunk(Integer oldStart, int oldCount, int newCount, List<String> lines) {
+        static Hunk of(final String header, final List<String> body) {
+            final var parsed = header == null ? null : positions(header);
+            if (parsed != null) {
+                return new Hunk(parsed[0], parsed[1], parsed[2], List.copyOf(body));
+            }
+            var oldCount = 0;
+            var newCount = 0;
+            for (final var line : body) {
+                if (!line.isEmpty()) {
+                    final var c = line.charAt(0);
+                    if (c == ' ') { // context lines exist on both sides of the diff
+                        oldCount++;
+                        newCount++;
+                    } else if (c == '+') {
+                        newCount++;
+                    } else if (c == '-') {
+                        oldCount++;
+                    }
+                }
+            }
+            return new Hunk(null, oldCount, newCount, List.copyOf(body));
+        }
+
+        /** Returns {oldStart, oldCount, newCount}, or null when the header carries no positions. */
+        private static int[] positions(final String header) {
+            Integer oldStart = null;
+            Integer oldCount = null;
+            Integer newCount = null;
+            for (final var token : header.split(" ")) {
+                final var t = token.replace("@", "").strip();
+                if (t.isEmpty()) {
+                    continue;
+                }
+                final var isOld = t.startsWith("-");
+                final var isNew = t.startsWith("+");
+                if (!isOld && !isNew) {
+                    continue;
+                }
+                final var pair = t.substring(1).split(",", 2);
+                try {
+                    if (isOld) {
+                        oldStart = Integer.parseInt(pair[0]);
+                        oldCount = pair.length == 2 ? Integer.parseInt(pair[1]) : 1;
+                    } else {
+                        newCount = pair.length == 2 ? Integer.parseInt(pair[1]) : 1;
+                    }
+                } catch (final NumberFormatException nfe) {
+                    throw new PatchException("Malformed hunk header: " + header);
+                }
+            }
+            if (oldStart == null || oldCount == null || newCount == null) {
+                return null;
+            }
+            return new int[] {oldStart, oldCount, newCount};
+        }
+    }
+
+    private record Change(String path, boolean deleteOnly, boolean createOnly, List<Hunk> hunks) {
+        static Change of(final String oldPath, final String newPath, final List<Hunk> hunks) {
             final boolean deleteOnly = DEV_NULL.equals(newPath);
             final boolean createOnly = DEV_NULL.equals(oldPath);
             final var path = createOnly || deleteOnly ? (deleteOnly ? oldPath : newPath) : newPath;

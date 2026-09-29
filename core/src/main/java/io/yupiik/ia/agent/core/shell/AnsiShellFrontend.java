@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.cli.Spinner;
 import io.yupiik.ia.agent.core.cli.StreamTextBuffer;
 import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
+import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -114,6 +115,15 @@ public class AnsiShellFrontend implements ShellFrontend {
      */
     private final ReentrantLock eventLock = new ReentrantLock();
 
+    /**
+     * The single write path for every chunk this frontend renders: it routes
+     * through jline's {@code printAbove} while a prompt is live and writes to
+     * the raw streams otherwise, atomically with the read lifecycle. Never
+     * {@code null} - {@code null} is normalized to {@link PromptOutput#raw()}
+     * so no caller needs a fallback branch.
+     */
+    private final PromptOutput promptOutput;
+
     public ReentrantLock renderLock() {
         return renderLock;
     }
@@ -126,6 +136,18 @@ public class AnsiShellFrontend implements ShellFrontend {
             final boolean tty,
             final boolean showThinking,
             final ToolOutputVisibility showToolOutput) {
+        this(colorizer, symbols, presenter, verbosity, tty, showThinking, showToolOutput, null);
+    }
+
+    public AnsiShellFrontend(
+            final MarkdownColorizer colorizer,
+            final Symbols symbols,
+            final ToolPresenter presenter,
+            final CliVerbosity verbosity,
+            final boolean tty,
+            final boolean showThinking,
+            final ToolOutputVisibility showToolOutput,
+            final PromptOutput promptOutput) {
         this.colorizer = colorizer;
         this.symbols = symbols;
         this.presenter = presenter;
@@ -133,6 +155,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         this.tty = tty;
         this.showThinking = showThinking;
         this.showToolOutput = showToolOutput;
+        this.promptOutput = promptOutput == null ? PromptOutput.raw() : promptOutput;
         this.textBuffer = new StreamTextBuffer(colorizer::colorizeLine);
     }
 
@@ -270,13 +293,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             pendingLock.unlock();
         }
         if (tty && separate) {
-            renderLock.lock();
-            try {
-                System.out.println();
-                System.out.flush();
-            } finally {
-                renderLock.unlock();
-            }
+            println();
         }
         queued.forEach(this::onEvent);
         // Restart the thinking spinner only when the turn is still genuinely
@@ -333,6 +350,9 @@ public class AnsiShellFrontend implements ShellFrontend {
      */
     @Override
     public void endTurn() {
+        // a thinking round may have left an open newline-less stderr line: the
+        // trailing metrics/usage/prompt must not glue onto it
+        ensureStderrNewline();
         // Flip the turn flag BEFORE stopping: the flag write and any racing
         // beginSpinner are serialized by spinnerLock, so a spinner started by
         // a late event thread either fails the turnActive check or is seen and
@@ -553,8 +573,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         renderLock.lock();
         try {
             ensureStderrNewline();
-            System.err.println(
-                    MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
+            printlnErr(MarkdownColorizer.bold(prefix + symbols.toolMarker() + presenter.summarize(t.name(), t.args())));
         } finally {
             renderLock.unlock();
         }
@@ -571,25 +590,25 @@ public class AnsiShellFrontend implements ShellFrontend {
             ensureStderrNewline();
             if (verbosity == CliVerbosity.RAW) {
                 if (!t.success() && t.output() != null && !t.output().isBlank()) {
-                    System.err.println(MarkdownColorizer.error(prefix + t.output()));
+                    printlnErr(MarkdownColorizer.error(prefix + t.output()));
                 }
                 return;
             }
             final var result = presenter.result(t.name(), t.output(), t.success());
-            System.err.println(MarkdownColorizer.dim(prefix + indent + symbols.resultPrefix())
+            printlnErr(MarkdownColorizer.dim(prefix + indent + symbols.resultPrefix())
                     + (t.success() ? MarkdownColorizer.success(result) : MarkdownColorizer.error(result)));
             if (verbosity == CliVerbosity.VERBOSE) {
                 // show the full result for tools that did not stream their output live (e.g. bash streams,
                 // most other tools only surface their output through ToolFinished)
                 if (!toolStreamed && t.output() != null && !t.output().isBlank()) {
                     for (final var line : t.output().stripTrailing().split("\n")) {
-                        System.err.println(MarkdownColorizer.dim(prefix + indent + line));
+                        printlnErr(MarkdownColorizer.dim(prefix + indent + line));
                     }
                 }
             }
             if (verbosity == CliVerbosity.COMPACT) {
                 for (final var line : presenter.diff(t.name(), null, DIFF_MAX_LINES)) {
-                    System.err.println(prefix + indent + colorizeDiff(line));
+                    printlnErr(prefix + indent + colorizeDiff(line));
                 }
             }
         } finally {
@@ -665,7 +684,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             if (!turnActive || spinner != null) {
                 return;
             }
-            spinner = new Spinner(symbols, System.err, tty, renderLock);
+            spinner = new Spinner(symbols, promptOutput, tty, renderLock);
             spinner.start(label);
         } finally {
             spinnerLock.unlock();
@@ -707,36 +726,31 @@ public class AnsiShellFrontend implements ShellFrontend {
         thinkingRoundOwner = null;
     }
 
-    /** Renders on stdout under {@link #renderLock}: spinner frames are dropped for the whole write. */
+    /** Renders a blank line on stdout through the prompt sink. */
+    private void println() {
+        print("\n");
+    }
+
+    /**
+     * Renders on stdout through the single {@link PromptOutput} write path: the
+     * sink itself - not this class - decides between a raw write and a
+     * {@code printAbove} plus prompt repaint, atomically with the read
+     * lifecycle. Choosing here (a former {@code if (output.active()) ... else
+     * raw} split) is a check-then-act race: a late sub-agent, the async memory
+     * extraction or the turn cleanup could land on the row jline had just
+     * painted, leaving the prompt invisible until the next keystroke.
+     */
     private void print(final String text) {
-        renderLock.lock();
-        try {
-            System.out.print(text);
-            System.out.flush();
-        } finally {
-            renderLock.unlock();
-        }
+        promptOutput.print(text);
     }
 
-    /** Renders on stderr under {@link #renderLock}: spinner frames are dropped for the whole write. */
+    /** Renders on stderr through the single {@link PromptOutput} write path. */
     private void printErr(final String text) {
-        renderLock.lock();
-        try {
-            System.err.print(text);
-            System.err.flush();
-        } finally {
-            renderLock.unlock();
-        }
+        promptOutput.printErr(text);
     }
 
-    /** Renders a line on stderr under {@link #renderLock}: spinner frames are dropped for the whole write. */
+    /** Renders a line on stderr through the single {@link PromptOutput} write path. */
     private void printlnErr(final String text) {
-        renderLock.lock();
-        try {
-            System.err.println(text);
-            System.err.flush();
-        } finally {
-            renderLock.unlock();
-        }
+        promptOutput.printErr(text + "\n");
     }
 }

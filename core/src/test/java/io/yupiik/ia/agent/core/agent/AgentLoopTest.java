@@ -635,6 +635,12 @@ class AgentLoopTest {
 
             @Override
             public CompactionResult compact(final List<Message> messages, final String focus, final int keepLast) {
+                return compact(messages, false, focus, keepLast);
+            }
+
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages, final boolean force, final String focus, final int keepLast) {
                 compactRuns.incrementAndGet();
                 return new CompactionResult(
                         List.of(
@@ -685,6 +691,131 @@ class AgentLoopTest {
                 .filter(AgentEvent.Compacted.class::isInstance)
                 .map(AgentEvent.Compacted.class::cast)
                 .toList();
+    }
+
+    @Test
+    void toolOutputsAreCappedAtIngestionBeforeEnteringTheConversation() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(true, Map.of("yca.pruning.ingestionOutputCapChars", "2000")));
+
+        final var capped = loop.capIngestionOutput("x".repeat(50_000));
+        assertTrue(capped.contains("[... output truncated ("), "the oversized output must carry the marker");
+        assertTrue(capped.length() <= 2_200, "capped output must stay near the cap: " + capped.length());
+        assertTrue(capped.startsWith("xxxx"), "the head must be preserved");
+        assertTrue(capped.endsWith("xxxx"), "the tail must be preserved");
+
+        assertEquals("short", loop.capIngestionOutput("short"), "short outputs must stay untouched");
+
+        final var noCap = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(true, Map.of("yca.pruning.ingestionOutputCapChars", "0")));
+        assertEquals("y".repeat(5_000), noCap.capIngestionOutput("y".repeat(5_000)), "cap=0 must disable the cap");
+    }
+
+    @Test
+    void identicalToolCallsAreDeduplicatedKeepingTheLatest() {
+        final var loop = loop(scriptedToolClient(new ArrayList<>(), List.of()), null, configuration(true));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.assistant(
+                null, List.of(new ToolCall("c1", "function", new ToolCall.FunctionCall("same_tool", "{\"a\":1}"), 0))));
+        messages.add(Message.tool("c1", "out-1"));
+        messages.add(Message.assistant(
+                null, List.of(new ToolCall("c2", "function", new ToolCall.FunctionCall("same_tool", "{\"a\":1}"), 0))));
+        messages.add(Message.tool("c2", "out-2"));
+
+        assertEquals(1, loop.deduplicateToolCalls(messages));
+        assertTrue(
+                String.valueOf(messages.get(1).content()).startsWith("[duplicate tool call pruned"),
+                "the older identical result must be replaced by a marker");
+        assertEquals("out-2", String.valueOf(messages.get(3).content()), "the latest output must survive");
+    }
+
+    @Test
+    void protectedToolsAreNotDeduplicated() {
+        final var loop = loop(scriptedToolClient(new ArrayList<>(), List.of()), null, configuration(true));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.assistant(
+                null,
+                List.of(new ToolCall(
+                        "w1", "function", new ToolCall.FunctionCall("write_file", "{\"path\":\"a\"}"), 0))));
+        messages.add(Message.tool("w1", "written"));
+        messages.add(Message.assistant(
+                null,
+                List.of(new ToolCall(
+                        "w2", "function", new ToolCall.FunctionCall("write_file", "{\"path\":\"a\"}"), 0))));
+        messages.add(Message.tool("w2", "written"));
+
+        assertEquals(0, loop.deduplicateToolCalls(messages), "write_file must be protected from dedup");
+    }
+
+    @Test
+    void failedToolInputsArePurgedAfterTheConfiguredTurns() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(true, Map.of("yca.pruning.purgeFailedToolInputsTurns", "0")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.assistant(
+                null,
+                List.of(new ToolCall("t1", "function", new ToolCall.FunctionCall("fail_tool", "{\"big\":\"x\"}"), 0))));
+        messages.add(Message.tool("t1", "boom", true));
+
+        assertEquals(1, loop.purgeFailedToolInputs(messages));
+        assertEquals("{}", messages.get(0).toolCalls().get(0).function().arguments());
+        assertEquals("boom", String.valueOf(messages.get(1).content()), "the error result must survive");
+    }
+
+    @Test
+    void writesOverwrittenByLaterReadsAreSupersededWhenEnabled() {
+        final var loopOn = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(true, Map.of("yca.pruning.supersedeOverwrittenWrites", "true")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.assistant(
+                null,
+                List.of(new ToolCall(
+                        "w", "function", new ToolCall.FunctionCall("write_file", "{\"path\":\"a.txt\"}"), 0))));
+        messages.add(Message.tool("w", "written"));
+        messages.add(Message.assistant(
+                null,
+                List.of(new ToolCall(
+                        "r", "function", new ToolCall.FunctionCall("read_file", "{\"path\":\"a.txt\"}"), 0))));
+        messages.add(Message.tool("r", "content"));
+
+        assertEquals(1, loopOn.supersedeOverwrittenWrites(messages), "a write overwritten by a read is superseded");
+        assertTrue(
+                String.valueOf(messages.get(0).toolCalls().get(0).function().arguments())
+                        .startsWith("[write superseded"),
+                "the write input must be superseded");
+        assertEquals("content", String.valueOf(messages.get(3).content()), "the read output must survive");
+
+        // a write with no later read stays untouched
+        final var untouched = new ArrayList<Message>();
+        untouched.add(Message.assistant(
+                null,
+                List.of(new ToolCall(
+                        "w2", "function", new ToolCall.FunctionCall("write_file", "{\"path\":\"b.txt\"}"), 0))));
+        untouched.add(Message.tool("w2", "written"));
+        assertEquals(0, loopOn.supersedeOverwrittenWrites(untouched));
+        assertEquals(
+                "{\"path\":\"b.txt\"}",
+                untouched.get(0).toolCalls().get(0).function().arguments());
+    }
+
+    @Test
+    void softNudgeIsAppendedToTheSessionStateAboveTheThreshold() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(true, Map.of("yca.pruning.nudgeThresholdPercent", "0")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        // threshold 0 => no nudge regardless of iterations
+        assertEquals("", loop.nudgeBlock(messages));
     }
 
     @Test
@@ -1290,6 +1421,134 @@ class AgentLoopTest {
         assertFalse(cfg.isResumeAlias(null));
     }
 
+    @Test
+    void memoryIsNotResentInEveryRoundTail() {
+        final var cfg = configuration(true);
+        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        memory.append(true, List.of("a durable fact"));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(
+                requests,
+                List.of(new ToolCall(
+                        "c1", "function", new ToolCall.FunctionCall("read_file", "{\"path\":\"a.txt\"}"), 0)));
+        final var registry = registryOf(new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "read_file";
+            }
+
+            @Override
+            public String description() {
+                return "read a file";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of();
+            }
+
+            @Override
+            public boolean readonly() {
+                return true;
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                return ToolResult.ok("file content");
+            }
+        });
+        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null) {
+            @Override
+            public String build(final String prompt, final AgentConfiguration agent) {
+                return "system\n\n" + memorySection(prompt);
+            }
+        };
+        final var loop = loop(
+                client,
+                null,
+                cfg,
+                noPruningManager(),
+                new SessionStore() {},
+                null,
+                registry,
+                directExecutions(),
+                null,
+                builder);
+        loop.run("do the work", null, "s1", null, () -> false);
+        assertEquals(2, requests.size(), "prompt round + 1 tool round: " + requests);
+        final var firstSystem = String.valueOf(requests.get(0).get(0).content());
+        assertTrue(firstSystem.contains("a durable fact"), "memory must be in the stable prefix: " + firstSystem);
+        final var secondTail =
+                String.valueOf(requests.get(1).get(requests.get(1).size() - 1).content());
+        assertFalse(secondTail.contains("<memory>"), "round 2 must not re-send memory in the tail: " + secondTail);
+        assertFalse(secondTail.contains("a durable fact"), "round 2 tail must not carry memory facts: " + secondTail);
+    }
+
+    @Test
+    void memoryWriteMidTurnRefreshesTheTail() {
+        final var cfg = configuration(true);
+        final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
+        memory.append(true, List.of("fact before"));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(
+                requests,
+                List.of(new ToolCall(
+                        "c1",
+                        "function",
+                        new ToolCall.FunctionCall("memory_write", "{\"fact\":\"fact after\",\"scope\":\"global\"}"),
+                        0)));
+        final var registry = registryOf(new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(memory));
+        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null) {
+            @Override
+            public String build(final String prompt, final AgentConfiguration agent) {
+                return "system\n\n" + memorySection(prompt);
+            }
+        };
+        final var loop = loop(
+                client,
+                null,
+                cfg,
+                noPruningManager(),
+                new SessionStore() {},
+                null,
+                registry,
+                directExecutions(),
+                null,
+                builder);
+        loop.run("work", null, "s1", null, () -> false);
+        assertEquals(2, requests.size(), "prompt round + 1 tool round: " + requests);
+        final var secondTail =
+                String.valueOf(requests.get(1).get(requests.get(1).size() - 1).content());
+        assertTrue(
+                secondTail.contains("fact after"),
+                "a mid-turn memory_write must refresh the volatile tail: " + secondTail);
+        assertTrue(secondTail.contains("<memory>"), "the refreshed tail must carry the memory section: " + secondTail);
+    }
+
+    private ToolRegistry registryOf(final EmbeddedTool... tools) {
+        return new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                for (final var t : tools) {
+                    if (t.name().equals(name)) {
+                        return t;
+                    }
+                }
+                return null;
+            }
+        };
+    }
+
     private ChatClient scriptedToolClient(final List<List<Message>> requests, final List<ToolCall> firstReplyCalls) {
         final var calls = new AtomicInteger();
         return new ChatClient() {
@@ -1397,6 +1656,30 @@ class AgentLoopTest {
             final ToolRegistry registry,
             final ToolExecutionService executions,
             final VirtualThreadExecutor executor) {
+        return loop(
+                client,
+                todoStore,
+                config,
+                contextManager,
+                sessionStore,
+                contextView,
+                registry,
+                executions,
+                executor,
+                null);
+    }
+
+    private AgentLoop loop(
+            final ChatClient client,
+            final TodoStore todoStore,
+            final CodingAgentConfiguration config,
+            final ContextManager contextManager,
+            final SessionStore sessionStore,
+            final ContextView contextView,
+            final ToolRegistry registry,
+            final ToolExecutionService executions,
+            final VirtualThreadExecutor executor,
+            final SystemPromptBuilder promptBuilder) {
         events.clear();
         final var resolvedRegistry = registry == null
                 ? new ToolRegistry(null) {
@@ -1447,12 +1730,14 @@ class AgentLoopTest {
                 contextManager,
                 contextView,
                 sessionStore,
-                new SystemPromptBuilder() {
-                    @Override
-                    public String build(final String prompt, final AgentConfiguration agent) {
-                        return "system prompt";
-                    }
-                },
+                promptBuilder == null
+                        ? new SystemPromptBuilder() {
+                            @Override
+                            public String build(final String prompt, final AgentConfiguration agent) {
+                                return "system prompt";
+                            }
+                        }
+                        : promptBuilder,
                 new MemoryExtractor() {
                     @Override
                     public void maybeExtract(final List<Message> messages) {}

@@ -58,6 +58,7 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
@@ -82,6 +83,7 @@ import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -299,27 +301,68 @@ public class TuiCommand implements Runnable {
         this.glyphs = Glyphs.of(tuiConfiguration.glyphs());
         this.costEstimator = CostEstimator.parse(tuiConfiguration.pricing());
         this.persistHistory = tuiConfiguration.history();
-        this.completionEngine = new CompletionEngine(
-                slashRegistry,
-                completionCache::models,
-                () -> providerManager == null || providerManager.providers() == null
+        this.completionEngine = new CompletionEngine(slashRegistry, new ArgCompletion.Env() {
+            @Override
+            public List<String> models() {
+                return completionCache.models();
+            }
+
+            @Override
+            public List<String> providers() {
+                return providerManager == null || providerManager.providers() == null
                         ? List.of()
                         : providerManager.providers().stream()
-                                .map(io.yupiik.ia.agent.core.configuration.ProviderConfiguration::id)
-                                .toList(),
-                () -> agentProvider == null || agentProvider.agents() == null
+                                .map(ProviderConfiguration::id)
+                                .toList();
+            }
+
+            @Override
+            public List<String> agents() {
+                return agentProvider == null || agentProvider.agents() == null
                         ? List.of()
                         : agentProvider.agents().stream()
                                 .map(AgentConfiguration::name)
-                                .toList(),
-                completionCache::sessions,
-                completionCache::tools,
-                () -> agentProvider == null || agentProvider.agents() == null
+                                .toList();
+            }
+
+            @Override
+            public List<String> sessions() {
+                return completionCache.sessions();
+            }
+
+            @Override
+            public List<String> tools() {
+                return completionCache.tools();
+            }
+
+            @Override
+            public List<String> subagents() {
+                return subagentRegistry == null
                         ? List.of()
-                        : agentProvider.agents().stream()
-                                .map(AgentConfiguration::name)
-                                .toList(),
-                completionCache::variants);
+                        : subagentRegistry.listAll(null).stream()
+                                .map(SubagentRegistry.SubagentState::id)
+                                .toList();
+            }
+
+            @Override
+            public List<String> servers() {
+                return mcpManager == null
+                        ? List.of()
+                        : mcpManager.serverStatuses().stream()
+                                .map(status -> status.name())
+                                .toList();
+            }
+
+            @Override
+            public List<String> variants(final String model) {
+                return completionCache.variants(model);
+            }
+
+            @Override
+            public List<String> paths(final String token) {
+                return CompletionEngine.pathCandidates(token);
+            }
+        });
         this.promptHistory = new PromptHistory();
         applyTheme(persistedTheme() == null ? conf.theme() : persistedTheme());
         // warm the completion cache off the render thread so TAB never blocks on the network
@@ -947,7 +990,25 @@ public class TuiCommand implements Runnable {
             notify(state, n == 0 ? "queued prompt integrated" : (n + " queued prompts still pending"));
             return;
         }
-        state.model.onEvent(event);
+        if (event instanceof AgentEvent.Error error) {
+            // a failed turn (eg. transport error with all retries exhausted) must land in the
+            // red trailing error slot (right, Alt+E for details), never in the leading status
+            // text which stays on the short busy/ready state: recording it before the model
+            // event lets the shared transcript keep the "error: ..." line for history while
+            // the status strip shows it as an error (clearError runs on the next submit).
+            modelError(state, error.message());
+            state.model.onEvent(event);
+            state.model.status("ready");
+        } else if (event instanceof AgentEvent.Notice notice && notice.level() == AgentEvent.Notice.Level.ERROR) {
+            // ERROR notices (truncation give-up, compaction exhaustion...) are failures too:
+            // same red right slot, keeping the leading agent state (working) untouched
+            modelError(state, notice.message());
+            final var leading = state.model.status();
+            state.model.onEvent(event);
+            state.model.status(leading);
+        } else {
+            state.model.onEvent(event);
+        }
         if (event instanceof AgentEvent.ToolStarted started) {
             state.spinnerTick = 0;
             state.pendingToolArgs
@@ -2672,7 +2733,13 @@ public class TuiCommand implements Runnable {
 
     private void compact(final TuiRunner runner, final UiState state) {
         if (state.model.busy()) {
-            notify(state, "cannot compact while busy");
+            // deferred: the loop applies the operation at the next safe checkpoint, at most one per turn
+            final var queued = state.session.runtime().loop().requestUserContextOperation("compact", null, 0, false);
+            notify(
+                    state,
+                    queued
+                            ? "compaction scheduled - applied at the next agent checkpoint"
+                            : "a context operation is already pending this turn");
             return;
         }
         waiting(state, "compacting...", SpinnerStyle.BOUNCING_BALL);

@@ -16,12 +16,14 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Color;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
+import dev.tamboui.text.Span;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
@@ -138,6 +140,65 @@ class MarkdownLinesTest {
         assertEquals(
                 List.of("┌───┬────┐", "│ a │ bb │", "├───┼────┤", "│ 1 │ 22 │", "└───┴────┘"),
                 plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void tableCellInlineCodeIsKept() {
+        // inline code (`Code` nodes have no Text child) must not be dropped from cells
+        final var md = """
+                | Situation | Type résolu |
+                |---|---|
+                | Driver donne un type standard (`DECIMAL`, `VARCHAR`, ...) | Mapping direct (BigNumber/Integer/String/...) |
+                | Driver ne sait pas (`Types.NULL`, `OTHER`, exotique) | Fallback → String (`ValueMetaBase.java:5349`) |
+                | Règle dialecte explicite (SQLite expression, Oracle RAW...) | String voulu |
+                """;
+        final var text = String.join("\n", plain(renderer.render(md, 120, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        for (final var kept : List.of(
+                "DECIMAL",
+                "VARCHAR",
+                "Types.NULL",
+                "OTHER",
+                "ValueMetaBase.java:5349",
+                "SQLite expression",
+                "Oracle RAW",
+                "BigNumber/Integer/String",
+                "String voulu")) {
+            assertTrue(text.contains(kept), () -> "missing " + kept + " in:\n" + text);
+        }
+        assertFalse(text.contains("`"), text);
+    }
+
+    @Test
+    void tableCellInlineStylesKeepText() {
+        final var md = """
+                | a | b |
+                |---|---|
+                | **bold** *em* [link](https://example.com) | `code` |
+                """;
+        final var text = String.join("\n", plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        for (final var kept : List.of("bold", "em", "link", "code")) {
+            assertTrue(text.contains(kept), () -> "missing " + kept + " in:\n" + text);
+        }
+        for (final var gone : List.of("**", "`", "[link]")) {
+            assertFalse(text.contains(gone), () -> "unexpected " + gone + " in:\n" + text);
+        }
+    }
+
+    @Test
+    void tableCellInlineCodeKeepsItsStyle() {
+        final var md = """
+                | Situation | Type résolu |
+                |---|---|
+                | `DECIMAL` | Mapping `direct` |
+                """;
+        final var lines = renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final Span codeSpan = lines.stream()
+                .flatMap(l -> l.spans().stream())
+                .filter(s -> s.content().equals("DECIMAL"))
+                .findFirst()
+                .orElseThrow();
+        // the theme inline-code style (gray + dim) is preserved on the cell span
+        assertEquals(MarkdownStyles.DEFAULTS.inlineCode(), codeSpan.style());
     }
 
     @Test

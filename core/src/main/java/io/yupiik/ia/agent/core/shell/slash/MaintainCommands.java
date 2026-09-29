@@ -43,6 +43,15 @@ public class MaintainCommands implements SlashCommandSet {
     private final McpManager mcpManager;
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
 
+    /** /mcp completion: `reset` then completes the server names, the other forms are a closed set. */
+    private static final ArgCompletion MCP_COMPLETION = (arg, token, env) -> {
+        final var previous = ArgCompletion.previousToken(arg);
+        if ("reset".equals(previous)) {
+            return ArgCompletion.fuzzyResult("server", env.servers(), token);
+        }
+        return ArgCompletion.fuzzyResult("option", List.of("status", "reset"), token);
+    };
+
     public MaintainCommands(
             final AgentSessionService agentSessionService,
             final McpManager mcpManager,
@@ -61,6 +70,7 @@ public class MaintainCommands implements SlashCommandSet {
                                 "[force]",
                                 "compact the context window (/compact [force])",
                                 SlashGroup.MAINTAIN),
+                        List.of("force"),
                         SlashAction.sync(this::compact)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -68,6 +78,7 @@ public class MaintainCommands implements SlashCommandSet {
                                 "save|cancel|restore|status",
                                 "manage context checkpoints that survive compaction",
                                 SlashGroup.MAINTAIN),
+                        List.of("save", "cancel", "restore", "status"),
                         SlashAction.sync(this::snapshot)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -84,6 +95,7 @@ public class MaintainCommands implements SlashCommandSet {
                                 "<refresh [gav]|status>",
                                 "index local Maven artifacts so agents do not rediscover library usage",
                                 SlashGroup.MAINTAIN),
+                        List.of("refresh", "status"),
                         SlashAction.sync(this::mavenRepositoryKnowledge)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -91,6 +103,7 @@ public class MaintainCommands implements SlashCommandSet {
                                 "status|reset [server]",
                                 "show MCP server status, or reset (reconnect) a single server or all of them",
                                 SlashGroup.MAINTAIN),
+                        MCP_COMPLETION,
                         SlashAction.sync(this::mcp)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -102,12 +115,20 @@ public class MaintainCommands implements SlashCommandSet {
     }
 
     private ShellOutcome compact(final String arg, final ShellEnv env) {
-        if (env.session().busy()) {
-            return ShellOutcome.status("cannot compact while busy");
-        }
         final var trimmed = arg == null ? "" : arg.strip();
         if (!trimmed.isEmpty() && !trimmed.equalsIgnoreCase("force")) {
             return ShellOutcome.status("usage: /compact [force]");
+        }
+        if (env.session().busy()) {
+            // deferred: the loop applies the operation at the next safe checkpoint, at most one per turn
+            final var queued = env.session()
+                    .runtime()
+                    .loop()
+                    .requestUserContextOperation("compact", null, 0, trimmed.equalsIgnoreCase("force"));
+            return ShellOutcome.status(
+                    queued
+                            ? "compaction scheduled - applied at the next agent checkpoint"
+                            : "a context operation is already pending this turn");
         }
         try {
             final var result = agentSessionService.compact(

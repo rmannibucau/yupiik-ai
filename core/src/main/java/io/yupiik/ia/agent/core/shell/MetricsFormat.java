@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
+import io.yupiik.ia.agent.core.context.UsageTracker;
 import java.util.Locale;
 
 /**
@@ -52,5 +54,54 @@ public final class MetricsFormat {
             return String.format(Locale.ROOT, "real %.1f tok/s", reported);
         }
         return "";
+    }
+
+    /**
+     * The {@code /metrics} report, always exactly two lines: the current display
+     * configuration, then the last turn values (and the session totals when any
+     * request ran). The CLI prints it as-is and the TUI shows it through its
+     * notification channel, so both keep the same shape.
+     *
+     * @param metrics   the display configuration.
+     * @param transcript the conversation transcript holding the last turn metrics,
+     *                   {@code null} tolerated.
+     * @param usage     the session usage totals, {@code null} tolerated.
+     */
+    public static String report(
+            final MetricsConfiguration metrics, final ConversationTranscript transcript, final UsageTracker usage) {
+        final var sb = new StringBuilder();
+        sb.append("metrics: showPerTurn=")
+                .append(metrics.showPerTurn())
+                .append(" showSessionTotals=")
+                .append(metrics.showSessionTotals())
+                .append(" displayMode=")
+                .append(metrics.displayMode().name());
+        final var hasTurn = transcript != null
+                && (transcript.turnLlmCalls() > 0 || transcript.turnToolsRun() > 0 || transcript.turnDurationMs() > 0);
+        sb.append('\n');
+        if (hasTurn) {
+            sb.append(transcript.turnLlmCalls()).append(" LLM");
+            if (transcript.turnThinkingMs() > 0) {
+                sb.append(" (").append(transcript.turnThinkingMs()).append("ms think)");
+            }
+            sb.append(" · ")
+                    .append(transcript.turnToolsRun())
+                    .append(" tools (")
+                    .append(transcript.turnToolSumMs())
+                    .append('/')
+                    .append(transcript.turnToolWallMs())
+                    .append("ms)");
+            final var throughput = tokPerSec(transcript.turnThroughput());
+            if (!throughput.isEmpty()) {
+                sb.append(" · ").append(throughput);
+            }
+            sb.append(" · ").append(String.format(Locale.ROOT, "%.1fs", transcript.turnDurationMs() / 1000.0));
+        } else {
+            sb.append("(no turn yet)");
+        }
+        if (usage != null && usage.requests() > 0) {
+            sb.append(" · session: ").append(usage.requests()).append(" LLM calls");
+        }
+        return sb.toString();
     }
 }

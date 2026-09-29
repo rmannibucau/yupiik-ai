@@ -133,7 +133,12 @@ public record CodingAgentConfiguration(
         SlashCommandConfiguration slashcommands,
 
         @Property(documentation = "Interactive prompt line rendering (CLI REPL).")
-        PromptTemplateConfiguration prompt) {
+        PromptTemplateConfiguration prompt,
+
+        @Property(
+                documentation =
+                        "java.util.logging settings: root level, record decoration and whether the runtime takes over System.out/System.err so nothing can corrupt the interactive prompt.")
+        LoggingConfiguration logging) {
 
     /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
     public boolean isResumeAlias(final String input) {

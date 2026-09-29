@@ -49,9 +49,65 @@ class BashRulesTest {
         for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
             assertTrue(compiled.evaluate(agentMode, "git status --short").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "git diff HEAD~1").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "git log --oneline master -").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "ls -la").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "wc -l pom.xml").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "java -version").allowed(), agentMode.name());
+            // git read-only inspection families
+            assertTrue(compiled.evaluate(agentMode, "git show --stat 7483271").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git blame pom.xml").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git rev-parse HEAD").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "git merge-base HEAD master").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git ls-files pom.xml").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "git cat-file -p HEAD^{tree}").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git ls-tree HEAD").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git for-each-ref").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git name-rev HEAD").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git describe --always").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git stash list").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git submodule status").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "git remote -v").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "xargs git log --oneline -1").allowed(), agentMode.name());
+            // the write forms of these families are carved out
+            assertFalse(
+                    compiled.evaluate(agentMode, "git remote add origin https://x")
+                            .allowed(),
+                    agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "git remote remove origin").allowed(), agentMode.name());
+            assertFalse(
+                    compiled.evaluate(agentMode, "git remote set-url origin https://x")
+                            .allowed(),
+                    agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "git remote prune origin").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "git stash drop").allowed(), agentMode.name());
+            assertFalse(
+                    compiled.evaluate(agentMode, "git submodule update --init").allowed(), agentMode.name());
+            // read-only text processing and inspection families
+            assertTrue(compiled.evaluate(agentMode, "awk 'NR>=16' pom.xml").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "cat pom.xml | awk 'NR>=16'").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "cut -d: -f1 pom.xml").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "diff -u pom.xml pom.xml.orig").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "stat -c %Y pom.xml").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "date +%s").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "sha256sum pom.xml").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "basename pom.xml").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "dirname pom.xml").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "du -sh target").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "df -h .").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "id -u").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "uname -a").allowed(), agentMode.name());
+            // the write forms of these families are carved out
+            assertFalse(compiled.evaluate(agentMode, "diff -o out.txt a b").allowed(), agentMode.name());
+            assertFalse(
+                    compiled.evaluate(agentMode, "diff --output=out.txt a b").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "date -s '2026-01-01'").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "date --set=2026-01-01").allowed(), agentMode.name());
         }
     }
 

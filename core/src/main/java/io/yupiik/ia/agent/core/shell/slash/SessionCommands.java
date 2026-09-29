@@ -65,10 +65,10 @@ public class SessionCommands implements SlashCommandSet {
                         })),
                 SlashCommand.of(
                         new SlashCommandSpec("/resume", "<id>", "resume an existing session", SlashGroup.SESSION),
-                        ArgCompletion.SESSIONS,
+                        ArgCompletion.from("session", ArgCompletion.Env::sessions),
                         this::resume),
                 SlashCommand.of(
-                        new SlashCommandSpec("/quit", "[/exit]", "leave the session (or Ctrl-D)", SlashGroup.SESSION),
+                        new SlashCommandSpec("/quit", null, "leave the session (or Ctrl-D)", SlashGroup.SESSION),
                         SlashAction.sync((arg, env) -> ShellOutcome.quit())),
                 SlashCommand.of(
                         new SlashCommandSpec("/exit", null, "leave the session", SlashGroup.SESSION),
@@ -138,6 +138,26 @@ public class SessionCommands implements SlashCommandSet {
     }
 
     private ShellOutcome context(final String arg, final ShellEnv env) {
+        final var trimmed = arg == null ? "" : arg.strip();
+        // context operations: /context compact|prune triggers the user-level context operation,
+        // deferred when a turn is running
+        if (trimmed.equals("compact") || trimmed.equals("prune")) {
+            if (env.session().busy()) {
+                final var queued = env.session().runtime().loop().requestUserContextOperation(trimmed, null, 0, false);
+                return ShellOutcome.status(
+                        queued
+                                ? trimmed + " scheduled - applied at the next agent checkpoint"
+                                : "a context operation is already pending this turn");
+            }
+            final var sessionId = env.session().sessionId();
+            final var runtime = env.session().runtime();
+            if (trimmed.equals("prune")) {
+                final var applied = agentSessionService.prune(sessionId, runtime);
+                return ShellOutcome.status(applied.message());
+            }
+            final var applied = agentSessionService.compact(sessionId, false, runtime);
+            return ShellOutcome.status(applied.message());
+        }
         final var dump = agentSessionService.context(
                 env.session().sessionId(), env.session().runtime());
         final var sb = new StringBuilder();

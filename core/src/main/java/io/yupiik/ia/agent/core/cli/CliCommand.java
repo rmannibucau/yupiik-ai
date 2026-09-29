@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.cli.prompt.LinedPrompt;
 import io.yupiik.ia.agent.core.cli.prompt.Prompt;
 import io.yupiik.ia.agent.core.cli.prompt.PromptInterruptException;
+import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
@@ -47,6 +48,7 @@ import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.core.wiring.HackStdIo;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.lang.reflect.Proxy;
@@ -116,6 +118,16 @@ public class CliCommand implements Runnable {
     private Path contextPath;
     private final CliPromptTemplate promptTemplate;
     private final AtomicBoolean cleaned = new AtomicBoolean();
+    /**
+     * Line-editing sink for output landing while a prompt is live (jline
+     * {@code printAbove}); {@code null} on the plain-stdin backend. Turn-end
+     * writes (todos, usage) race the next {@code readLine} and late async
+     * events (subagents, memory extraction) can land on it: routing them
+     * through the sink keeps the prompt visible and redrawn.
+     */
+    private final PromptOutput externalOutput;
+
+    private final HackStdIo stdio;
 
     public CliCommand(
             final CliConf conf,
@@ -136,7 +148,8 @@ public class CliCommand implements Runnable {
             final CliPromptTemplate promptTemplate,
             final Prompt prompt,
             final Clock clock,
-            final CodingAgentConfiguration configuration) {
+            final CodingAgentConfiguration configuration,
+            final HackStdIo stdio) {
         this.conf = conf;
         this.sessionLifecycle = sessionLifecycle;
         this.sessionStore = sessionStore;
@@ -156,12 +169,14 @@ public class CliCommand implements Runnable {
         this.clock = clock;
         this.interruptor = new InterruptCoordinator(clock);
         this.configuration = configuration;
+        this.stdio = stdio;
         session.metrics(configuration.metrics());
         final var parsedToolOutput = ToolOutputVisibility.parse(conf.showToolOutput());
         final var showToolOutput = parsedToolOutput == null ? ToolOutputVisibility.COLLAPSED : parsedToolOutput;
         session.showThinking(conf.showThinking()).showToolOutput(showToolOutput);
         this.colorizer = new MarkdownColorizer(colorEnabled(conf.color()));
         this.symbols = new Symbols(conf.ascii());
+        this.externalOutput = prompt.externalOutput() == null ? PromptOutput.raw() : prompt.externalOutput();
         this.frontend = new AnsiShellFrontend(
                 colorizer,
                 symbols,
@@ -169,7 +184,8 @@ public class CliCommand implements Runnable {
                 CliVerbosity.parse(conf.presentation()),
                 System.console() != null,
                 conf.showThinking(),
-                showToolOutput);
+                showToolOutput,
+                externalOutput);
         this.io = new AnsiShellIO(
                 prompt,
                 symbols,
@@ -240,6 +256,11 @@ public class CliCommand implements Runnable {
     @Override
     public void run() {
         installInterruptHandler();
+        // from here on this command owns the terminal: every writer (ours, the JUL root
+        // handlers, a dependency) is funnelled through the prompt aware sink, so a log line
+        // or a stray print landing between two turns can no longer overwrite the row jline
+        // already painted and leave the prompt invisible until the next keystroke
+        stdio.streamTarget(externalOutput);
         sessionId = sessionLifecycle.resolveSessionId(conf.session(), conf.context());
         contextPath = sessionStore.path(sessionId);
         try {
@@ -287,6 +308,10 @@ public class CliCommand implements Runnable {
     private void cleanup() {
         if (!cleaned.compareAndSet(false, true)) {
             return;
+        }
+        // give the terminal back before the closing lines so they go straight out
+        if (stdio.streamTarget() == externalOutput) {
+            stdio.streamTarget(null);
         }
         frontend.idle();
         shellRegistry.unregister(env());
@@ -612,11 +637,13 @@ public class CliCommand implements Runnable {
     }
 
     /**
-     * Blocks until the turn completes, but for prompt backends that can detect a
-     * standalone {@code Esc} press while the turn runs (jline) it polls the
-     * prompt and interrupts the turn on Esc, keeping the REPL interruptible
-     * without a full second input lane. The plain stdin backend (ansi mode)
-     * stays fully blocking.
+     * Blocks until the turn completes so the divider and the next prompt are
+     * painted the moment the turn future is done. Backends that can detect a
+     * standalone {@code Esc} press without blocking (a pollable reader) are
+     * polled for it while waiting; the jline backend cannot - its reader parks
+     * in a native read until input arrives, which would hide the next prompt
+     * until the user types - so it reports no interrupt poll and takes the
+     * plain blocking wait like everyone else.
      */
     private void awaitTurn(final CompletableFuture<Boolean> future) {
         if (!prompt.isInterruptAvailable()) {
@@ -733,7 +760,7 @@ public class CliCommand implements Runnable {
             sb.append(" · ");
         }
         sb.append(String.format(Locale.ROOT, "%.1fs", elapsedMillis / 1000.0));
-        System.err.println(MarkdownColorizer.status(sb.toString()));
+        writeLineErr(MarkdownColorizer.status(sb.toString()));
     }
 
     /** The environment shared actions run against; the transcript is the shared one. */
@@ -797,7 +824,7 @@ public class CliCommand implements Runnable {
         switch (interruptor.interrupt(session.busy())) {
             case INTERRUPT -> {
                 cancelled.set(true);
-                System.err.println(
+                writeLineErr(
                         MarkdownColorizer.status("interrupting the current turn (ctrl-c again once idle to quit)..."));
             }
             case ARM_QUIT ->
@@ -821,10 +848,27 @@ public class CliCommand implements Runnable {
     }
 
     private void println() {
-        System.out.println();
+        writeLine("\n");
     }
 
     private void println(final String text) {
-        System.out.println(text);
+        writeLine(text + "\n");
+    }
+
+    /**
+     * Routes a completed line through the single prompt write path. Turn-end
+     * output (todos, usage, dividers) and late async events race the next
+     * prompt; the sink decides - atomically with the read lifecycle - between a
+     * raw stdout write and a {@code printAbove} plus prompt repaint, so the
+     * prompt stays visible without the user having to press a key for it to
+     * reappear.
+     */
+    private void writeLine(final String line) {
+        externalOutput.print(line);
+    }
+
+    /** Same as {@link #writeLine(String)} but on stderr (usage/metrics lines). */
+    private void writeLineErr(final String line) {
+        externalOutput.printErr(line + "\n");
     }
 }

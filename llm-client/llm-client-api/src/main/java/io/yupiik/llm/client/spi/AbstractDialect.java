@@ -237,7 +237,9 @@ public abstract class AbstractDialect implements Dialect {
      * @param builder the request builder to authenticate.
      */
     protected void authenticate(final HttpRequest.Builder builder) {
-        builder.header("authorization", "Bearer " + provider.apiKey());
+        if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
+            builder.header("authorization", "Bearer " + provider.apiKey());
+        }
         addHeaders(builder);
     }
 

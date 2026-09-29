@@ -16,9 +16,18 @@ all its segments pass. Deny entries win over everything else.
 
 Read-only commands do not need prompting: `yca.permissions.bash.rules` lists
 the commands that are silently allowed, in both `plan` and `build` modes.
-The defaults cover `git status`, `git diff`, `git log`, `git branch`, `ls`,
+The defaults cover `git status`, `git diff`, `git log`, `git branch`, `git show`,
+`git blame`, `git rev-parse`, `git merge-base`, `git ls-files`, `git cat-file`,
+`git ls-tree`, `git for-each-ref`, `git name-rev`, `git describe`, `git stash list`,
+`git submodule status`, `git remote` (except its write subcommands
+`add`, `remove`, `set-url`, `rename`, `prune`), `xargs git log`, `ls`,
 `cat`, `pwd`, `echo`, `find`, `grep`, `rg`, `wc`, `head`, `tail`, `test`,
-`tr`, `sort`, `uniq`, `sed -n` and `java -version`/`java -help`.
+`tr`, `sort`, `uniq`, `sed -n` and `java -version`/`java -help`, plus the
+read-only text processing and inspection families `awk`, `cut`, `diff` (except
+`-o`/`--output`), `basename`, `dirname`, `stat`, `file`, `which`, `readlink`,
+`realpath`, `du`, `df`, `id`, `uname`, `date` (except `-s`/`--set`), `env`,
+`printenv`, `printf`, `nl`, `paste`, `column`, `seq`, `cksum`, `sum`, `md5sum`
+and `sha256sum`.
 
 [cols="1,3", opts=headers]
 |===
