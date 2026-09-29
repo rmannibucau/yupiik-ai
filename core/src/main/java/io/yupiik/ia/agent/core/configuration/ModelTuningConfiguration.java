@@ -33,6 +33,12 @@ public record ModelTuningConfiguration(
         String reasoningEffort,
 
         @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode.AUTO",
+                documentation =
+                        "Whether tool call arguments emitted by this model are repaired (best effort) before being exposed and stored. AUTO repairs for any Qwen 27B variant (the effective model contains 'qwen' and '27b', case-insensitive) and is disabled otherwise; ENABLED always repairs; DISABLED never repairs. This fixes llama.cpp/ollama style backends that reject arguments carrying unescaped control characters or a truncated tail with an HTTP 500 (\"Failed to parse tool call arguments as JSON\") under a heavy context. The provider-level tuning value is used when this per-model facet is absent or AUTO.")
+        RepairToolCallArgumentsMode repairToolCallArguments,
+
+        @Property(
                 documentation =
                         "Default output token budget override for this model (put-if-absent too). Unset or zero/negative keeps the provider outputTokens default.")
         Integer outputTokens,
@@ -52,9 +58,4 @@ public record ModelTuningConfiguration(
                 defaultValue = "\"\"",
                 documentation =
                         "Optional raw JSON object merged (put-if-absent) into the payload of every request for this model, over the provider-level one. Empty is ignored.")
-        String providerSpecificOptions,
-
-        @Property(
-                documentation =
-                        "Anthropic wire dialect options (applied when the request is routed through the anthropic flavor). Unset keeps the dialect defaults: splitBlocks auto-resolves to enabled only for anthropic.com endpoints.")
-        AnthropicDialectConfiguration anthropic) {}
+        String providerSpecificOptions) {}

@@ -16,8 +16,10 @@
 package io.yupiik.ia.agent.core.wiring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -196,6 +198,60 @@ class ProviderManagerTest {
         final var first = manager.tuningOptions(tuning);
         final var second = manager.tuningOptions(tuning);
         assertSame(first, second, "parsed tuning providerSpecificOptions must be cached");
+    }
+
+    @Test
+    void repairToolCallArgumentsCascade() {
+        // behavior wins over provider tuning
+        final var withBehaviorEnabled = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "qwen3.8-27b"),
+                Map.entry("yca.provider.providers.0.tuning.repairToolCallArguments", "disabled"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "qwen3*"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.repairToolCallArguments", "enabled")));
+        final var provider = withBehaviorEnabled.providers().get(0);
+        assertTrue(
+                withBehaviorEnabled.repairToolCallArguments(provider, "qwen3.8-27b"),
+                "model behavior enabled must win over provider disabled");
+
+        // provider tuning wins over the auto heuristic when the model is not a qwen 27B
+        final var withProviderEnabled = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "gpt-5-mini"),
+                Map.entry("yca.provider.providers.0.tuning.repairToolCallArguments", "enabled")));
+        final var provider2 = withProviderEnabled.providers().get(0);
+        assertTrue(
+                withProviderEnabled.repairToolCallArguments(provider2, "gpt-5-mini"),
+                "provider enabled must apply to any model");
+
+        // provider disabled wins over auto
+        final var withProviderDisabled = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "qwen3.8-27b"),
+                Map.entry("yca.provider.providers.0.tuning.repairToolCallArguments", "disabled")));
+        final var provider3 = withProviderDisabled.providers().get(0);
+        assertFalse(
+                withProviderDisabled.repairToolCallArguments(provider3, "qwen3.8-27b"),
+                "provider disabled must win over auto qwen 27B");
+
+        // no config at all: auto heuristic on the model name
+        final var autoOnly = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "qwen3.8-27b")));
+        final var provider4 = autoOnly.providers().get(0);
+        assertTrue(autoOnly.repairToolCallArguments(provider4, "qwen3.8-27b"), "auto must enable for qwen 27B");
+        assertFalse(
+                autoOnly.repairToolCallArguments(provider4, "gpt-5-mini"),
+                "auto must stay disabled for non-qwen-27B models");
     }
 
     @Test

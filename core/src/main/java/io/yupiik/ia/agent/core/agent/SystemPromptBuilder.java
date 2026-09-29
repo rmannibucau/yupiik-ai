@@ -115,7 +115,7 @@ public class SystemPromptBuilder {
         sb.append("- Read files before editing them; keep edits minimal and focused.\n");
         sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
         sb.append(
-                "- Each request ends with a <session-state> block carrying the current todo list, mode, date and memory. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
+                "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative and a request may end without one when nothing changed. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
         sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
         sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
         sb.append(
@@ -202,7 +202,7 @@ public class SystemPromptBuilder {
 
     /**
      * Renders the volatile session state (mode, date, todo list): injected on the
-     * wire at the very end of the last message of every request - never part of the system prompt -
+     * wire as a trailing message of the request - never part of the system prompt -
      * so mutating state never invalidates the cached prefix. The mode line is the authoritative
      * per-request signal: it is re-rendered fresh regardless of how the mode was reached (slash
      * command, startup flag or session restore), so the model never has to infer it from stale

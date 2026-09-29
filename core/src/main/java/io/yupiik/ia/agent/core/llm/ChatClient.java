@@ -78,6 +78,7 @@ public class ChatClient implements AutoCloseable {
     private final JsonMapper mapper;
     private final ProviderManager providerManager;
     private final Clock clock;
+    private final ToolCallArgumentsRepairer toolCallArgumentsRepairer;
     private final ContextWindowCache contextWindowCache;
     private final ExtendedHttpClient httpClient;
     private final boolean ownsHttpClient;
@@ -95,8 +96,23 @@ public class ChatClient implements AutoCloseable {
             final JsonMapper mapper,
             final ProviderManager providerManager,
             final Clock clock,
+            final ExtendedHttpClient httpClient,
+            final ToolCallArgumentsRepairer toolCallArgumentsRepairer) {
+        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false);
+    }
+
+    /**
+     * Convenience constructor creating and owning a default {@link ExtendedHttpClient} delegating to a plain
+     * {@link HttpClient#newHttpClient()}. Reserved for tests and programmatic usage; the managed application
+     * path injects the shared client through the constructor above.
+     */
+    public ChatClient(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager,
+            final Clock clock,
             final ExtendedHttpClient httpClient) {
-        this(configuration, mapper, providerManager, clock, httpClient, false);
+        this(configuration, mapper, providerManager, clock, httpClient, new ToolCallArgumentsRepairer(mapper), false);
     }
 
     /**
@@ -109,7 +125,14 @@ public class ChatClient implements AutoCloseable {
             final JsonMapper mapper,
             final ProviderManager providerManager,
             final Clock clock) {
-        this(configuration, mapper, providerManager, clock, defaultClient(configuration), true);
+        this(
+                configuration,
+                mapper,
+                providerManager,
+                clock,
+                defaultClient(configuration),
+                new ToolCallArgumentsRepairer(mapper),
+                true);
     }
 
     private ChatClient(
@@ -118,11 +141,13 @@ public class ChatClient implements AutoCloseable {
             final ProviderManager providerManager,
             final Clock clock,
             final ExtendedHttpClient httpClient,
+            final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
             final boolean ownsHttpClient) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
         this.clock = clock;
+        this.toolCallArgumentsRepairer = toolCallArgumentsRepairer;
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
         this.httpClient = httpClient;
         this.ownsHttpClient = ownsHttpClient;
@@ -165,6 +190,7 @@ public class ChatClient implements AutoCloseable {
         this.mapper = null;
         this.providerManager = null;
         this.clock = null;
+        this.toolCallArgumentsRepairer = null;
         this.contextWindowCache = null;
         this.httpClient = null;
         this.ownsHttpClient = false;
@@ -600,13 +626,6 @@ public class ChatClient implements AutoCloseable {
         final var tuning = providerManager.tuning(provider, model);
         final var tuningOptions = providerManager.tuningOptions(tuning);
         deepMergePutIfAbsent(others, tuningOptions);
-        final var explicitSplitBlocks =
-                effectiveFlavor() == ApiFlavor.ANTHROPIC && tuning != null && tuning.anthropic() != null
-                        ? tuning.anthropic().explicitSplitBlocks()
-                        : null;
-        if (explicitSplitBlocks != null) {
-            others.put("anthropicSplitBlocks", explicitSplitBlocks);
-        }
         final var variant = selectedVariant(provider, model, settings);
         if (variant != null && variant.extra() != null && variant.extra().startsWith("{")) {
             deepMergePutIfAbsent(others, parseRaw(variant.extra()));
@@ -1263,6 +1282,53 @@ public class ChatClient implements AutoCloseable {
         return doWithFallback(request, null, () -> false, false, null);
     }
 
+    /**
+     * Applies the configured tool call arguments repair to an assistant message when the effective
+     * provider/model enable it. Never changes the message when nothing was repaired.
+     */
+    private Message repairToolCalls(final Message message, final ChatCompletionRequest effective) {
+        final var toolCalls = message.toolCalls();
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            return message;
+        }
+        final var provider = target();
+        final var model = effective.model();
+        if (provider == null || providerManager == null || !providerManager.repairToolCallArguments(provider, model)) {
+            return message;
+        }
+        var changed = false;
+        final var repaired = new ArrayList<ToolCall>(toolCalls.size());
+        for (final var call : toolCalls) {
+            final var fn = call == null ? null : call.function();
+            if (call == null || fn == null) {
+                repaired.add(call);
+                continue;
+            }
+            final var arguments = toolCallArgumentsRepairer.repair(fn.arguments(), true, model);
+            if (arguments.equals(fn.arguments())) {
+                repaired.add(call);
+            } else {
+                changed = true;
+                repaired.add(new ToolCall(
+                        call.id(), call.type(), new ToolCall.FunctionCall(fn.name(), arguments), call.index()));
+            }
+        }
+        return changed
+                ? new Message(
+                        message.role(),
+                        message.content(),
+                        message.name(),
+                        repaired,
+                        message.toolCallId(),
+                        message.others())
+                : message;
+    }
+
+    private ChatResult repairToolCalls(final ChatResult result, final ChatCompletionRequest effective) {
+        final var message = repairToolCalls(result.message(), effective);
+        return message == result.message() ? result : new ChatResult(message, result.usage());
+    }
+
     public Message stream(final ChatCompletionRequest request, final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
         return stream(request, onDelta, () -> false);
@@ -1316,10 +1382,12 @@ public class ChatClient implements AutoCloseable {
             if (stream) {
                 final var publisher =
                         LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled, libraryListener));
-                return (A) LlmWire.pump(publisher, onDeltaSafe, cancelled);
+                return (A) repairToolCalls(LlmWire.pump(publisher, onDeltaSafe, cancelled), effective);
             }
-            return (A) LlmWire.toChatResult(
-                    LlmWire.join(routing.chat(LlmWire.toLlmRequest(effective), cancelled, libraryListener)));
+            return (A) repairToolCalls(
+                    LlmWire.toChatResult(
+                            LlmWire.join(routing.chat(LlmWire.toLlmRequest(effective), cancelled, libraryListener))),
+                    effective);
         } catch (final DialectNotSupportedException e) {
             if (resolved != ApiFlavor.AUTO) {
                 throw e; // explicitly configured flavor: surface the incompatibility

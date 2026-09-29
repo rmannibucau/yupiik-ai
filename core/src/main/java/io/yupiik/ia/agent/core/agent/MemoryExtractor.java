@@ -106,8 +106,13 @@ public class MemoryExtractor {
     private void doExtract(final List<Message> messages) {
         final var sb = new StringBuilder();
         var count = 0;
-        for (var i = messages.size() - 1; i >= 0 && count < 20; i--, count++) {
+        for (var i = messages.size() - 1; i >= 0 && count < 20; i--) {
             final var m = messages.get(i);
+            final var others = m.others();
+            if (others != null && Boolean.TRUE.equals(others.get("volatileTail"))) {
+                continue; // synthetic session-state tail: never gain insights from it
+            }
+            count++;
             final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
             sb.insert(
                     0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');

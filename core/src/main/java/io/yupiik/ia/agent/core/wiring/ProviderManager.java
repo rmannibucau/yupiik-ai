@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
+import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -197,6 +198,30 @@ public class ProviderManager {
         }
         final var tuning = providerTuning(provider);
         return tuning != null && tuning.outputTokens() != null && tuning.outputTokens() > 0 ? tuning.outputTokens() : 0;
+    }
+
+    /**
+     * Resolve the effective tool call arguments repair mode for a model of a provider: the
+     * {@code behavior.repairToolCallArguments} of the first matching model entry when it is not AUTO,
+     * else the provider-level {@code tuning.repairToolCallArguments} when not AUTO, else the AUTO
+     * heuristic on the effective model name (enabled for any Qwen 27B variant).
+     */
+    public boolean repairToolCallArguments(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        final var perModel = entry == null || entry.behavior() == null
+                ? null
+                : entry.behavior().repairToolCallArguments();
+        if (perModel != null && perModel != RepairToolCallArgumentsMode.AUTO) {
+            return perModel == RepairToolCallArgumentsMode.ENABLED;
+        }
+        final var tuning = providerTuning(provider);
+        final var providerMode = tuning == null ? null : tuning.repairToolCallArguments();
+        if (providerMode != null && providerMode != RepairToolCallArgumentsMode.AUTO) {
+            return providerMode == RepairToolCallArgumentsMode.ENABLED;
+        }
+        final var auto =
+                perModel != null ? perModel : providerMode != null ? providerMode : RepairToolCallArgumentsMode.AUTO;
+        return auto.isAutoCandidate(model);
     }
 
     /**

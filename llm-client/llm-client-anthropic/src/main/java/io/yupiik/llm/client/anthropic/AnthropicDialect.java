@@ -37,7 +37,6 @@ import io.yupiik.llm.client.spi.Streams;
 import java.net.http.HttpRequest;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -299,11 +298,11 @@ public final class AnthropicDialect extends AbstractDialect {
     }
 
     /**
-     * Whether the volatile-tail block split is active for this request: an explicit
-     * {@code anthropicSplitBlocks} request extension (wired from {@code tuning.anthropic.splitBlocks})
-     * wins, otherwise {@code auto} resolves from the endpoint host - the split only engages for
-     * {@code anthropic.com} endpoints (block-granular caching benefits from the second breakpoint);
-     * token-level gateway caches are better served with the tail inline.
+     * Whether the volatile-tail block split is active for this request: only an explicit
+     * {@code anthropicSplitBlocks} request extension opts in (Boolean or string "true"/"false");
+     * without it the tail stays inline. The split is disabled by default and never auto-detected
+     * from the endpoint host: token-level gateways and anthropic.com are served the same way unless
+     * the caller explicitly requests the block-granular breakpoint.
      */
     private boolean isSplitBlocksEnabled(final Map<String, Object> extensions) {
         final var value = extensions.get("anthropicSplitBlocks");
@@ -319,32 +318,7 @@ public final class AnthropicDialect extends AbstractDialect {
                 return false;
             }
         }
-        return isAnthropicHost(provider.baseUrl());
-    }
-
-    /** {@code auto} split detection: true only for {@code anthropic.com} (or subdomain) endpoints. */
-    static boolean isAnthropicHost(final String baseUrl) {
-        if (baseUrl == null) {
-            return false;
-        }
-        var host = baseUrl.strip().toLowerCase(Locale.ROOT);
-        final var scheme = host.indexOf("://");
-        if (scheme >= 0) {
-            host = host.substring(scheme + 3);
-        }
-        final var at = host.indexOf('@');
-        if (at >= 0) {
-            host = host.substring(at + 1);
-        }
-        final var slash = host.indexOf('/');
-        if (slash >= 0) {
-            host = host.substring(0, slash);
-        }
-        final var colon = host.indexOf(':');
-        if (colon >= 0) {
-            host = host.substring(0, colon);
-        }
-        return host.equals("anthropic.com") || host.endsWith(".anthropic.com");
+        return false;
     }
 
     private Object parseRaw(final String raw) {

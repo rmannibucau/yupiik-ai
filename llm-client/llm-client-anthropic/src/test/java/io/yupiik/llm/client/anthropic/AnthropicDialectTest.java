@@ -324,21 +324,10 @@ class AnthropicDialectTest {
                 null);
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
-        // auto: non-anthropic.com host -> no split, tail inline, single system breakpoint
+        // no explicit splitBlocks extension -> no split, tail inline, single system breakpoint
         assertEquals(
                 1, body.split("cache_control", -1).length - 1, "expected a single cache breakpoint (system):\n" + body);
         assertTrue(body.contains("\"content\":\"prompt\\n\\n<session-state>\\nDate: x\\n</session-state>\""), body);
-    }
-
-    @Test
-    void autoSplitBlocksHostDetection() {
-        assertTrue(AnthropicDialect.isAnthropicHost("https://api.anthropic.com/v1/messages"));
-        assertTrue(AnthropicDialect.isAnthropicHost("https://anthropic.com/v1/messages"));
-        assertTrue(AnthropicDialect.isAnthropicHost("https://foo.anthropic.com"));
-        assertFalse(AnthropicDialect.isAnthropicHost("https://freeinference.org/anthropic/v1/messages"));
-        assertFalse(AnthropicDialect.isAnthropicHost("http://127.0.0.1:8643/anthropic/v1"));
-        assertFalse(AnthropicDialect.isAnthropicHost("https://anthropic.com.evil.io/v1/messages"));
-        assertFalse(AnthropicDialect.isAnthropicHost(null));
     }
 
     @Test

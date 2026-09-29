@@ -491,7 +491,7 @@ public class AgentLoop {
         }
         for (var i = history.size() - 1; i >= 0; i--) {
             final var m = history.get(i);
-            if (!"user".equals(m.role()) || !(m.content() instanceof String content)) {
+            if (isVolatileTail(m) || !"user".equals(m.role()) || !(m.content() instanceof String content)) {
                 continue;
             }
             if (content.contains("<compacted-context>")
@@ -718,20 +718,14 @@ public class AgentLoop {
                 consecutiveCompactions = 0;
             }
 
-            // wire-only view: the volatile session state is appended at the very end of the last
-            // message so it never mutates a single byte of the cached prefix; the working list
-            // stays raw for persistence, compaction and memory extraction
-            final var request = new ChatCompletionRequest(
-                    model,
-                    wireMessages(sessionId, messages, prompt, memoryVersionAtStart),
-                    null,
-                    null,
-                    null,
-                    tools,
-                    "auto",
-                    null,
-                    null,
-                    null);
+            // append-only volatile session state: the tail is its own trailing user message in the
+            // working list (deduplicated when unchanged), so every request is the previous request's
+            // exact bytes plus the tokens appended since. Nothing previously sent is ever moved or
+            // rewritten, so provider-side prefix caches (llama.cpp slot LCP with f_keep ~ 1.0,
+            // token-level gateways) keep matching instead of diverging mid-conversation.
+            appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart);
+            final var request =
+                    new ChatCompletionRequest(model, messages, null, null, null, tools, "auto", null, null, null);
             final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
             final var finishReason = new String[] {null};
             final Message assistant;
@@ -853,13 +847,15 @@ public class AgentLoop {
     }
 
     /**
-     * Wire-only view of the working messages: the volatile session state (date, todos, memory and
-     * the compaction snapshot) is appended at the very end of the last message - or as its own
-     * trailing user message when the conversation does not end on a user/tool message - so
-     * per-request freshness never mutates a byte of the cached prefix. The working list itself stays
-     * raw: persistence, compaction and memory extraction keep seeing the pristine conversation.
+     * Appends the volatile session state (date, todos, memory refresh, nudge and the compaction
+     * snapshot) as its own trailing user message in the working conversation, deduplicated against
+     * the newest state tail already present: when the rendered state is byte-identical, nothing is
+     * appended. Because the tail is part of the working list and is never moved nor rewritten once
+     * sent, every request is the previous request's exact bytes plus the assistant/tool messages
+     * and state changes appended since - so provider-side prefix caches (llama.cpp slot LCP, token
+     * gateways) keep matching with f_keep ~ 1.0 like opencode instead of diverging mid-conversation.
      */
-    private List<Message> wireMessages(
+    private void appendStateIfChanged(
             final String sessionId,
             final List<Message> messages,
             final String prompt,
@@ -870,28 +866,21 @@ public class AgentLoop {
                 + nudgeBlock(messages)
                 + snapshotBlock(sessionId)
                 + "</session-state>";
-        final var wire = new ArrayList<Message>(messages.size() + 1);
-        wire.addAll(messages);
-        final var last = wire.isEmpty() ? null : wire.get(wire.size() - 1);
-        if (last != null
-                && ("user".equals(last.role()) || "tool".equals(last.role()))
-                && last.content() instanceof String content) {
-            final var others =
-                    last.others() == null ? new LinkedHashMap<String, Object>() : new LinkedHashMap<>(last.others());
-            others.put("volatileTail", true);
-            wire.set(
-                    wire.size() - 1,
-                    new Message(
-                            last.role(),
-                            content + "\n\n" + state,
-                            last.name(),
-                            last.toolCalls(),
-                            last.toolCallId(),
-                            others));
-        } else {
-            wire.add(new Message("user", state, null, null, null, Map.of("volatileTail", true)));
+        // dedup: skip when the newest state tail already carries exactly this state
+        for (var i = messages.size() - 1; i >= 0; i--) {
+            final var m = messages.get(i);
+            if (isVolatileTail(m)) {
+                if (state.equals(String.valueOf(m.content()))) {
+                    return; // nothing changed since the last tail: keep the prefix byte-stable
+                }
+                break;
+            }
         }
-        return wire;
+        messages.add(new Message("user", state, null, null, null, Map.of("volatileTail", true)));
+    }
+
+    private static boolean isVolatileTail(final Message message) {
+        return message.others() != null && Boolean.TRUE.equals(message.others().get("volatileTail"));
     }
 
     /**
@@ -1080,7 +1069,8 @@ public class AgentLoop {
         try {
             sessionStore.replace(
                     sessionId,
-                    messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages);
+                    (messages.get(0).role().equals("system") ? messages.subList(1, messages.size()) : messages)
+                            .stream().filter(m -> !isVolatileTail(m)).toList());
         } catch (final RuntimeException e) {
             LOGGER.log(Level.WARNING, e, () -> "Could not persist the compacted session " + sessionId);
             emit(notice(AgentEvent.Notice.Level.WARN, "Compacted context could not be persisted: " + e.getMessage()));
@@ -1976,6 +1966,9 @@ public class AgentLoop {
         }
         var sinceLastUser = 0;
         for (var i = messages.size() - 1; i >= 0; i--) {
+            if (isVolatileTail(messages.get(i))) {
+                continue; // synthetic session-state tail: not a user turn and not a real iteration
+            }
             if ("user".equals(messages.get(i).role())) {
                 break;
             }

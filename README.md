@@ -173,13 +173,26 @@ ignored during the comparison - so `qwen3-coder` and `qwen*` both match
 `#rrggbb` tone (only the hue/chroma is taken, the shade still follows the
 model position) and `bold` is an optional `"true"`/`"false"` (as a string,
 so that an unset value falls back to the default). `behavior` is
-`{ reasoningEffort, outputTokens }`: `reasoningEffort` is a free-form string
+`{ reasoningEffort, outputTokens, repairToolCallArguments }`: `reasoningEffort` is a free-form string
 sent as `reasoning_effort` (blank means "not set") and `outputTokens` overrides
 the provider `outputTokens` for that model (`0` or a negative value means "use
 the provider default"). Unset fields fall back to the provider defaults
 (`outputTokens`, `reasoningEffort`, `color`) and then to the implicit rules.
 `reasoningEffort` is only injected when neither the request nor
 `providerSpecificOptions` already sets `reasoning_effort`.
+`repairToolCallArguments` (also available at the provider level under
+`tuning`, eg. `"tuning": { "repairToolCallArguments": "enabled" }`) controls
+the best-effort repair of tool call arguments emitted by the model before
+they are exposed and stored: some OpenAI compatible backends (llama.cpp /
+ollama style) reject whole turns with an HTTP 500
+(`Failed to parse tool call arguments as JSON:
+[json.exception.parse_error.101]`) when the arguments carry unescaped control
+characters (literal tabs/newlines in string values) or a truncated tail under
+a heavy context. Values are `enabled` (always repair the safe cases), `disabled`
+(never) and `auto` (the default): `auto` repairs for any Qwen 27B variant (the
+effective model contains `qwen` and `27b`, case-insensitive) and is disabled
+otherwise. The per-model `behavior` value wins over the provider `tuning`
+value, which wins over `auto`.
 
 Models are colour-coded in the CLI prompt and TUI so several models can be told
 apart: the first two models of a provider are bold and use bright colors, later

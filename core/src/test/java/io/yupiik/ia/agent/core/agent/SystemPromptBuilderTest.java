@@ -401,8 +401,12 @@ class SystemPromptBuilderTest {
                 "yca.mode", "build"));
         final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
         assertTrue(
-                prompt.contains("Each request ends with a <session-state> block carrying the current todo list"),
+                prompt.contains(
+                        "The conversation carries <session-state> blocks with the current todo list, mode, date and memory"),
                 "the rules must point at the session-state tail as the todo carrier");
+        assertTrue(
+                prompt.contains("the most recent one is authoritative"),
+                "the rules must teach that a request may end without a refreshed tail when nothing changed");
         assertTrue(
                 prompt.contains("pending items are the task queue - continue with them unless the user redirects"),
                 "the rules must order to follow pending items");
