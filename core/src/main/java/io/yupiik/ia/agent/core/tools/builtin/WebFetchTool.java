@@ -24,6 +24,7 @@ import io.yupiik.htmltomarkdown.HtmlLightParser;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -32,6 +33,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @ApplicationScoped
 public class WebFetchTool implements EmbeddedTool {
@@ -83,6 +86,11 @@ public class WebFetchTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var url = arg(args, "url");
         if (url == null || url.isBlank()) {
             return ToolResult.error("url is required");
@@ -105,30 +113,53 @@ public class WebFetchTool implements EmbeddedTool {
                 .GET()
                 .build();
         try {
-            final var response = client.send(request, HttpResponse.BodyHandlers.ofByteArray());
-            if (response.statusCode() >= 400) {
-                return ToolResult.error("HTTP " + response.statusCode() + " for " + url);
+            // the request is polled in small slices so a turn cancellation surfaces promptly
+            // instead of waiting for the whole fetch (which can take up to the timeout)
+            final var future = client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray());
+            final var deadline = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
+            while (true) {
+                if (context.isCancelled()) {
+                    future.cancel(true);
+                    return ToolResult.error("Interrupted while fetching " + url);
+                }
+                final var remaining = deadline - System.nanoTime();
+                if (remaining <= 0) {
+                    future.cancel(true);
+                    return ToolResult.error("Timed out fetching " + url);
+                }
+                try {
+                    final var response =
+                            future.get(Math.min(100, Math.max(1, remaining / 1_000_000)), TimeUnit.MILLISECONDS);
+                    if (response.statusCode() >= 400) {
+                        return ToolResult.error("HTTP " + response.statusCode() + " for " + url);
+                    }
+                    final var body = decode(response);
+                    final var contentType =
+                            response.headers().firstValue("content-type").orElse("text/html");
+                    final String out;
+                    if ("html".equals(format)) {
+                        out = body;
+                    } else if (!isHtml(contentType) && "text".equals(format)) {
+                        out = body.strip();
+                    } else if (!isHtml(contentType)) {
+                        out = body.strip();
+                    } else if ("text".equals(format)) {
+                        out = htmlParser.toText(body);
+                    } else {
+                        out = htmlParser.toMarkdown(body);
+                    }
+                    return ToolResult.ok(cap(out, MAX_OUTPUT));
+                } catch (final TimeoutException e) {
+                    // keep polling the cancellation flag until the deadline
+                }
             }
-            final var body = decode(response);
-            final var contentType =
-                    response.headers().firstValue("content-type").orElse("text/html");
-            final String out;
-            if ("html".equals(format)) {
-                out = body;
-            } else if (!isHtml(contentType) && "text".equals(format)) {
-                out = body.strip();
-            } else if (!isHtml(contentType)) {
-                out = body.strip();
-            } else if ("text".equals(format)) {
-                out = htmlParser.toText(body);
-            } else {
-                out = htmlParser.toMarkdown(body);
-            }
-            return ToolResult.ok(cap(out, MAX_OUTPUT));
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             return ToolResult.error("Interrupted while fetching " + url);
         } catch (final Exception e) {
+            if (context.isCancelled() || Thread.currentThread().isInterrupted()) {
+                return ToolResult.error("Interrupted while fetching " + url);
+            }
             return ToolResult.error("Cannot fetch " + url + ": " + e.getMessage());
         }
     }

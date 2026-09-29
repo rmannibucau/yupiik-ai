@@ -47,6 +47,7 @@ public class TuiTranscriptModel extends ConversationTranscript {
                 || event instanceof AgentEvent.ToolFinished
                 || event instanceof AgentEvent.PromptIntegrated
                 || event instanceof AgentEvent.TurnDone
+                || event instanceof AgentEvent.TurnCancelled
                 || event instanceof AgentEvent.Error) {
             // auto-follow only while the user has not scrolled away: streamed events
             // must never yank the viewport while reasoning/tool history is being read

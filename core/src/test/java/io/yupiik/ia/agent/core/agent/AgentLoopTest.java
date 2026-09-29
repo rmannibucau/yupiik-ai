@@ -471,6 +471,82 @@ class AgentLoopTest {
     }
 
     @Test
+    void cancellationBeforeToolExecutionSkipsTheTools() {
+        final var executions = new AtomicInteger();
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                if (calls.incrementAndGet() == 1) {
+                    return Message.assistant(
+                            null,
+                            List.of(new ToolCall(
+                                    "t1",
+                                    "function",
+                                    new ToolCall.FunctionCall("read_file", "{\"path\":\"/tmp/x\"}"),
+                                    0)));
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("all done", null);
+            }
+        };
+        final var tool = new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "read_file";
+            }
+
+            @Override
+            public String description() {
+                return "counted test tool";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of();
+            }
+
+            @Override
+            public boolean readonly() {
+                return true;
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                executions.incrementAndGet();
+                return ToolResult.ok("ran");
+            }
+        };
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true, Map.of("yca.mode", "build", "yca.permissions.mode", "yolo")),
+                        noPruningManager(),
+                        noopStore(),
+                        null,
+                        registryOf(tool),
+                        directExecutions(),
+                        new VirtualThreadExecutor())
+                .run(
+                        "do it",
+                        null,
+                        "s1",
+                        null,
+                        () -> calls.get() >= 1); // cancelled right after the tool-call reply lands
+        assertEquals(0, executions.get(), "the tool must not run when cancelled before its execution: " + result);
+    }
+
+    @Test
     void noTodosWarningInPlanMode() {
         final var todoStore = new TodoStore() {
             private List<TodoItem> todos = List.of(
@@ -560,7 +636,12 @@ class AgentLoopTest {
             }
 
             @Override
-            public CompactionResult compact(final List<Message> messages) {
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLastOverride,
+                    final java.util.function.BooleanSupplier cancelled) {
                 return new CompactionResult(
                         List.of(
                                 messages.get(0),

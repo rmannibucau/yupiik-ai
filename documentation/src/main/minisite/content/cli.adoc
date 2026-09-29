@@ -11,7 +11,12 @@ commands. The `cli` and `tui` commands each start a session in front of the same
 agent:
 
 * `cli` is a plain-terminal REPL: streamed ANSI-colored output, sessions, todos,
-  approval/feedback gates and slash commands.
+  approval/feedback gates and slash commands. `Ctrl-C` while a turn runs opens an
+  interrupt menu (`1`/`cancel` = cancel the current turn and stay in the REPL,
+  `2`/`exit` = quit); when idle, a second `Ctrl-C` within 2s quits, and `Ctrl-D`
+  exits as well. Cancelling is cooperative: the LLM stream stops within ~100ms,
+  in-flight `bash`/`web_fetch` tools are killed, and a pending compaction/retry
+  is aborted at its next checkpoint - the transcript is not marked as an error.
 * `tui` is a full-screen interface (TamboUI): markdown transcript, token gauges,
   a thinking stream, approval modals and an editable plan (`/editplan`).
 

@@ -74,6 +74,20 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void cancellationDoesNotWriteAnErrorLine() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("partial answer", "s1"));
+        t.onEvent(new AgentEvent.TurnCancelled("s1"));
+
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("partial answer"), "streamed content stays in the transcript");
+        assertFalse(md.contains("> error:"), "a user cancel is not an error: " + md);
+        assertFalse(t.busy(), "a cancelled turn must not stay busy");
+        assertEquals("cancelled", t.status(), "the transcript reports the cancellation status");
+    }
+
+    @Test
     void thinkTagAtTurnDoneBecomesThoughtRegion() {
         final var t = new ConversationTranscript();
         t.onEvent(new AgentEvent.TurnDone("<think>\nstep one\nstep two\n</think>\n\nThe answer", "s1"));

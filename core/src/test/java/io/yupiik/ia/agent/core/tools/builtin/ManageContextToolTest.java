@@ -39,7 +39,7 @@ class ManageContextToolTest {
     private final JsonMapper mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
 
     private ToolContext context(final ContextView view) {
-        return new ToolContext("s1", null, null, null, null, null, null, tracker(), view);
+        return new ToolContext("s1", null, null, null, null, null, null, tracker(), view, null);
     }
 
     @Test

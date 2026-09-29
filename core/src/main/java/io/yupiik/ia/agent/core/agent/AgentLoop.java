@@ -64,6 +64,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -141,6 +142,14 @@ public class AgentLoop {
      * wait up to minutes between attempts.
      */
     private volatile Consumer<PauseEvent> pauseListener;
+
+    /**
+     * Cancellation probe of the current turn. Set at the start of {@link #doRun} and cleared at
+     * turn end. It is not a loop field so concurrent subagent loops (each with their own instance)
+     * never share it; it only serves {@link #toolContext()} which is read strictly on the turn
+     * thread of this instance.
+     */
+    private volatile BooleanSupplier cancelled;
 
     // Per-turn metrics tracking (reset at start of each doRun)
     private int turnLlmCalls;
@@ -443,11 +452,18 @@ public class AgentLoop {
                             ? status(pause.message())
                             : notice(AgentEvent.Notice.Level.INFO, pause.message()));
         };
+        this.cancelled = cancelled;
 
         try {
             return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt, memoryVersionAtStart());
         } catch (final IOException e) {
-            emit(error(e.getMessage()));
+            if ("Cancelled".equals(e.getMessage())) {
+                // user interrupt surfaced through the stream/backoff paths: a normal end,
+                // not a failure - the transcript must not render it as an error
+                emit(new AgentEvent.TurnCancelled(currentSessionId, subagentId, subagentName));
+            } else {
+                emit(error(e.getMessage()));
+            }
             return null;
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -458,6 +474,7 @@ public class AgentLoop {
             emit(error("unexpected failure: " + e));
             return null;
         } finally {
+            this.cancelled = null;
             pauseListener = null;
             statusReporter.setSink(null);
             memoryExtractor.maybeExtract(messages);
@@ -508,7 +525,8 @@ public class AgentLoop {
                 todoStore,
                 statusReporter,
                 usageTracker,
-                contextView);
+                contextView,
+                cancelled);
     }
 
     // Event helpers that include the session and subagent info
@@ -676,7 +694,7 @@ public class AgentLoop {
                 }
             }
             if (contextManager.compactNeeded(messages, toolsTokens)) {
-                final var compacted = contextManager.compact(messages);
+                final var compacted = contextManager.compact(messages, false, null, 0, cancelled);
                 if (compacted.changed()) {
                     messages.clear();
                     messages.addAll(compacted.messages());
@@ -738,7 +756,7 @@ public class AgentLoop {
                         AgentEvent.Notice.Level.INFO,
                         "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
                                 + " tokens)."));
-                final var compacted = contextManager.compactForOverflow(messages);
+                final var compacted = contextManager.compactForOverflow(messages, cancelled);
                 if (compacted.changed() && !compacted.messages().isEmpty()) {
                     messages.clear();
                     messages.addAll(compacted.messages());
@@ -771,6 +789,11 @@ public class AgentLoop {
             }
 
             if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
+                // an interrupt pressed while a continuation (truncation or overflow retry) was
+                // about to re-ask the model must stop here, not spawn another request
+                if (cancelled.getAsBoolean()) {
+                    return str(assistant.content());
+                }
                 final var content = str(assistant.content());
                 final var reason = finishReason[0];
                 if (isTruncation(reason)) {
@@ -804,6 +827,12 @@ public class AgentLoop {
                 emitTurnMetrics(content, turnStartNanos);
                 return content;
             }
+            // an interrupt pressed while the model was generating must stop here: the flag is
+            // only polled at iteration boundaries, so without this check the whole tool batch
+            // would still run after the cancellation
+            if (cancelled.getAsBoolean()) {
+                break;
+            }
             executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens);
             toolsRanThisTurn = true;
             if (!toolDirectiveApplied && contextView != null) {
@@ -815,7 +844,7 @@ public class AgentLoop {
             }
         }
         if (cancelled.getAsBoolean()) {
-            emit(error("Cancelled"));
+            emit(new AgentEvent.TurnCancelled(currentSessionId, subagentId, subagentName));
         } else {
             emit(error("Maximum iterations reached (" + maxIterations + ")"));
         }
@@ -1371,7 +1400,11 @@ public class AgentLoop {
                 // the backoff is idle time: it must not be counted as generation time
                 final var backoffMs = streamRetryBackoffMs(attempt);
                 turnLlmPausedMs += backoffMs;
-                Thread.sleep(backoffMs);
+                // an interrupt pressed during the backoff must abort the retry immediately:
+                // the sleep is the only gap between two stream attempts, so check around it
+                if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {
+                    throw new IOException("Cancelled");
+                }
             }
         }
         throw last;
@@ -1386,6 +1419,28 @@ public class AgentLoop {
             delay *= 2;
         }
         return Math.min(delay, cap);
+    }
+
+    /**
+     * Sleeps in small slices so a turn cancellation is noticed promptly (a single
+     * {@code Thread.sleep} could park the loop through the whole backoff).
+     *
+     * @return {@code false} when the current thread was interrupted (caller aborts the retry).
+     */
+    private boolean interruptibleSleep(final long millis) {
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (true) {
+            final var remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return true;
+            }
+            try {
+                Thread.sleep(Math.min(100, Math.max(1, remaining / 1_000_000)));
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
     }
 
     private static String causeSummary(final MidStreamFailureException e) {
@@ -1485,6 +1540,12 @@ public class AgentLoop {
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
+            if (cancelled.getAsBoolean()) {
+                // a cancel pressed mid-batch: abort the remaining calls (the running tool stops
+                // cooperatively through its own probe); the loop sees the flag on its next
+                // iteration and unwinds the turn
+                return;
+            }
             if (isParallelizable(calls.get(i))) {
                 var end = i + 1;
                 while (end < calls.size() && isParallelizable(calls.get(end))) {

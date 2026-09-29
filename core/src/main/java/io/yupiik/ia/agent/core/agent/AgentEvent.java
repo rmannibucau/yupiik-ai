@@ -164,6 +164,12 @@ public sealed interface AgentEvent {
         }
     }
 
+    record TurnCancelled(String sessionId, String subagentId, String subagentName) implements AgentEvent {
+        public TurnCancelled(final String sessionId) {
+            this(sessionId, null, null);
+        }
+    }
+
     record Error(String message, String sessionId, String subagentId, String subagentName) implements AgentEvent {
         public Error(String message, final String sessionId) {
             this(message, sessionId, null, null);

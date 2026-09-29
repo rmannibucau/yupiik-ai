@@ -56,7 +56,7 @@ class AskUserToolTest {
     }
 
     private ToolContext context() {
-        return new ToolContext("s1", null, null, null, feedback, null, null, null, null);
+        return new ToolContext("s1", null, null, null, feedback, null, null, null, null, null);
     }
 
     @AfterEach

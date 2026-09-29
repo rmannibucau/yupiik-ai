@@ -126,12 +126,28 @@ public class BashTool implements EmbeddedTool {
         reader.setDaemon(true);
         reader.start();
         boolean finished;
-        try {
-            finished = process.waitFor(timeout, TimeUnit.SECONDS);
-        } catch (final InterruptedException e) {
-            process.destroyForcibly();
-            Thread.currentThread().interrupt();
-            return ToolResult.error("Interrupted");
+        // deadline loop: the command is killed as soon as the running turn is cancelled so an
+        // "interrupt" actually stops the subprocess instead of letting it run to completion
+        final var deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
+        while (true) {
+            if (context.isCancelled()) {
+                process.destroyForcibly();
+                return ToolResult.error("Interrupted");
+            }
+            final var remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                finished = false;
+                break;
+            }
+            try {
+                finished =
+                        process.waitFor(Math.min(100, Math.max(1, remainingNanos / 1_000_000)), TimeUnit.MILLISECONDS);
+                break;
+            } catch (final InterruptedException e) {
+                process.destroyForcibly();
+                Thread.currentThread().interrupt();
+                return ToolResult.error("Interrupted");
+            }
         }
         if (!finished) {
             process.destroyForcibly();

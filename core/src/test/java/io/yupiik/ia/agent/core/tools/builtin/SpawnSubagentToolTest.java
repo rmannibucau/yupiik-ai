@@ -135,7 +135,7 @@ class SpawnSubagentToolTest {
     }
 
     private ToolContext context(final TodoStore todos) {
-        return new ToolContext("s1", null, null, null, null, todos, null, null, null);
+        return new ToolContext("s1", null, null, null, null, todos, null, null, null, null);
     }
 
     private TodoStore noopTodoStore() {

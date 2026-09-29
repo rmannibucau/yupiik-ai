@@ -100,7 +100,21 @@ public class ContextManager {
         return coordinator.compact(messages, force, focus, keepLastOverride);
     }
 
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final java.util.function.BooleanSupplier cancelled) {
+        return coordinator.compact(messages, force, focus, keepLastOverride, cancelled);
+    }
+
     public CompactionResult compactForOverflow(final List<Message> messages) {
         return coordinator.compact(messages, true, null, 0);
+    }
+
+    public CompactionResult compactForOverflow(
+            final List<Message> messages, final java.util.function.BooleanSupplier cancelled) {
+        return coordinator.compact(messages, true, null, 0, cancelled);
     }
 }

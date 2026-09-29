@@ -54,7 +54,7 @@ class WriteTodoToolTest {
 
     /** The tool is stateless: the session's todo list and permissions arrive through the context. */
     private ToolContext context(final TodoStore todos, final PermissionService permissions) {
-        return new ToolContext("s1", null, null, permissions, null, todos, null, null, null);
+        return new ToolContext("s1", null, null, permissions, null, todos, null, null, null, null);
     }
 
     @Test

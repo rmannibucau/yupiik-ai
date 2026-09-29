@@ -27,6 +27,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
 
 /**
@@ -224,6 +225,15 @@ public class CompactionCoordinator {
      */
     public CompactionResult compact(
             final List<Message> messages, final boolean force, final String focus, final int keepLastOverride) {
+        return compact(messages, force, focus, keepLastOverride, null);
+    }
+
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final BooleanSupplier cancelled) {
         final var p = configuration.pruning();
         final var keepFloor =
                 Math.max(2, keepLastOverride > 0 ? keepLastOverride : force ? p.keepRecent() / 2 : p.keepRecent());
@@ -233,6 +243,9 @@ public class CompactionCoordinator {
         if (boundary <= from) {
             return new CompactionResult(messages, Mode.NONE, "");
         }
+        if (cancelled != null && cancelled.getAsBoolean()) {
+            return new CompactionResult(messages, Mode.NONE, "cancelled");
+        }
         final var prior = previousSummary(messages);
         final var chunks = chunkCompact(messages.subList(from, boundary));
         final var outcome = summarizeRolling(
@@ -241,7 +254,8 @@ public class CompactionCoordinator {
                 chunks,
                 prior,
                 focus,
-                configuration.model().compact());
+                configuration.model().compact(),
+                cancelled);
         if (!outcome.summary().isBlank()) {
             List<Message> out = new ArrayList<>();
             if (system != null) {
@@ -494,10 +508,14 @@ public class CompactionCoordinator {
             final List<String> chunks,
             final String priorSummary,
             final String focus,
-            final String modelOverride) {
+            final String modelOverride,
+            final BooleanSupplier cancelled) {
         final var summary = new StringBuilder();
         warnOnceWhenNoCompactModel();
         for (var c = 0; c < chunks.size(); c++) {
+            if (cancelled != null && cancelled.getAsBoolean()) {
+                return new Outcome("", label + " cancelled");
+            }
             final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus);
             String part = null;
             String error = null;
@@ -531,6 +549,9 @@ public class CompactionCoordinator {
                     return new Outcome("", error);
                 }
                 if (attempt + 1 < retries()) {
+                    if (cancelled != null && cancelled.getAsBoolean()) {
+                        return new Outcome("", label + " cancelled");
+                    }
                     sleep(backoff(attempt));
                 }
             }

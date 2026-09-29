@@ -440,6 +440,18 @@ public class ConversationTranscript {
             status = "ready";
             touch();
         } else if (event
+                instanceof AgentEvent.TurnCancelled(String sessionId, String subagentId, String subagentName)) {
+            // a user interrupt ends the turn cleanly: flush the streamed answer/thinking so it
+            // stays in the transcript, but do not write an error line nor mark the turn red -
+            // cancellation is a normal (user-driven) end, not a failure
+            flushThinking();
+            flushPending();
+            inlineThink.reset();
+            answerHeaderWritten = false;
+            busy = false;
+            status = "cancelled";
+            touch();
+        } else if (event
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {
             // keep the reasoning readable even when the turn fails
             flushThinking();

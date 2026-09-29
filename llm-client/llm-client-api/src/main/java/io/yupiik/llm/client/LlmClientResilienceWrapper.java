@@ -370,8 +370,16 @@ public final class LlmClientResilienceWrapper {
         }
         CompletableFuture.delayedExecutor(
                         Math.max(1L, (long) (wait.waitMs() * config.waitScale())), TimeUnit.MILLISECONDS)
-                .execute(() -> retry(dialect, request, cancelled, attempt + 1, listener)
-                        .whenComplete((r, e) -> completeInto(result, r, e)));
+                .execute(() -> {
+                    if (cancelled != null && cancelled.getAsBoolean()) {
+                        // do not restart a retry the user already cancelled: the delayed
+                        // executor is not interruptible, so the probe is checked here
+                        completeInto(result, null, new IOException("Cancelled"));
+                        return;
+                    }
+                    retry(dialect, request, cancelled, attempt + 1, listener)
+                            .whenComplete((r, e) -> completeInto(result, r, e));
+                });
         return result;
     }
 

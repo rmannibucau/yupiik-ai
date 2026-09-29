@@ -102,6 +102,19 @@ public class CliCommand implements Runnable {
     private static final long CLEANUP_AWAIT_NANOS = 1_000_000_000L;
 
     private final AtomicBoolean cancelled = new AtomicBoolean();
+    /**
+     * Whether an inline interaction read (approval, confirm, picker, feedback) owns the
+     * terminal: a Ctrl-C there must deny/cancel that interaction, never open the interrupt
+     * menu. Guarded by the AnsiShellIO interaction hooks.
+     */
+    private final AtomicBoolean interactionActive = new AtomicBoolean();
+    /**
+     * Set by the SIGINT handler when a turn runs and no interactive read is live; the REPL
+     * thread in {@link #awaitTurn} picks it up and renders the interrupt menu. Needed because
+     * the jline reader is not thread-safe: the menu cannot be painted from the signal thread.
+     */
+    private final AtomicBoolean menuPending = new AtomicBoolean();
+
     private final TurnRunner turnRunner;
     private final MarkdownColorizer colorizer;
     private final Symbols symbols;
@@ -190,8 +203,14 @@ public class CliCommand implements Runnable {
                 prompt,
                 symbols,
                 this::onInterrupt,
-                frontend::suspendOutput,
-                frontend::resumeOutput,
+                () -> {
+                    interactionActive.set(true);
+                    frontend.suspendOutput();
+                },
+                () -> {
+                    interactionActive.set(false);
+                    frontend.resumeOutput();
+                },
                 frontend.renderLock());
         this.queueing = prompt instanceof LinedPrompt lined && lined.queuing();
     }
@@ -425,7 +444,8 @@ public class CliCommand implements Runnable {
         if (model != null && !model.isBlank()) {
             sb.append(" · ").append(colorizer.isEnabled() ? styledModel(model) : model);
         }
-        sb.append(" · type /help for commands · 'go' resumes the last turn · ctrl-c interrupts, twice quits");
+        sb.append(
+                " · type /help for commands · 'go' resumes the last turn · ctrl-c opens the interrupt menu (cancel turn / exit)");
         println(MarkdownColorizer.status(sb.toString()));
     }
 
@@ -495,7 +515,18 @@ public class CliCommand implements Runnable {
         try {
             line = awaitLine("");
         } catch (final PromptInterruptException e) {
-            onInterrupt();
+            // Ctrl-C while waiting: render the interrupt menu (or fall back to the legacy
+            // immediate-cancel when the backend raises the exception without arming the menu)
+            if (menuPending.compareAndSet(true, false)) {
+                promptInterruptMenu();
+            } else {
+                onInterrupt();
+            }
+            return !quitRequested;
+        }
+        // a Ctrl-C woke the turn-lane read (wakeAll -> empty line): render the menu, keep looping
+        if (menuPending.compareAndSet(true, false)) {
+            promptInterruptMenu();
             return !quitRequested;
         }
         if (line.isEmpty() || quitRequested) {
@@ -638,21 +669,15 @@ public class CliCommand implements Runnable {
 
     /**
      * Blocks until the turn completes so the divider and the next prompt are
-     * painted the moment the turn future is done. Backends that can detect a
-     * standalone {@code Esc} press without blocking (a pollable reader) are
-     * polled for it while waiting; the jline backend cannot - its reader parks
-     * in a native read until input arrives, which would hide the next prompt
-     * until the user types - so it reports no interrupt poll and takes the
-     * plain blocking wait like everyone else.
+     * painted the moment the turn future is done. While waiting, a pending
+     * interrupt menu (armed by Ctrl-C on the signal thread) is rendered on this
+     * REPL thread and answered; this is what makes "interrupt without exiting"
+     * work even on the jline backend whose reader cannot be polled.
      */
     private void awaitTurn(final CompletableFuture<Boolean> future) {
-        if (!prompt.isInterruptAvailable()) {
-            future.join();
-            return;
-        }
         while (!future.isDone()) {
-            if (prompt.pollInterrupt()) {
-                onInterrupt();
+            if (menuPending.compareAndSet(true, false)) {
+                promptInterruptMenu();
             }
             try {
                 future.get(100, TimeUnit.MILLISECONDS);
@@ -662,7 +687,7 @@ public class CliCommand implements Runnable {
                 Thread.currentThread().interrupt();
                 throw new CompletionException(e);
             } catch (final TimeoutException e) {
-                // keep polling for Esc and the completion
+                // keep polling for the interrupt menu and the completion
             }
         }
     }
@@ -796,7 +821,8 @@ public class CliCommand implements Runnable {
         for (final var line : slashRegistry.helpMarkdown().split("\n", -1)) {
             println(colorizer.colorizeLine(line));
         }
-        println("  keys: Ctrl-C interrupts the running turn; pressed twice when idle (within 2s) it quits.");
+        println(
+                "  keys: Ctrl-C opens the interrupt menu (cancel the current turn / exit); pressed twice when idle it quits; Ctrl-D exits.");
     }
 
     private void installInterruptHandler() {
@@ -821,6 +847,15 @@ public class CliCommand implements Runnable {
     }
 
     private void onInterrupt() {
+        // while a turn runs with no interactive read live, SIGINT arms the menu; the menu is
+        // rendered on the REPL thread (the signal handler must not touch the jline reader)
+        if (session.busy() && !interactionActive.get()) {
+            menuPending.set(true);
+            // queueing mode: the REPL is blocked in a turn-lane read; wake it so it can render
+            // the menu. Non-queueing (jline) awaits the turn future and polls menuPending itself.
+            wakePrompt();
+            return;
+        }
         switch (interruptor.interrupt(session.busy())) {
             case INTERRUPT -> {
                 cancelled.set(true);
@@ -831,11 +866,52 @@ public class CliCommand implements Runnable {
                 println(MarkdownColorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
             case QUIT -> {
                 quitRequested = true;
-                if (prompt instanceof LinedPrompt lined) {
-                    lined.wakeAll();
-                }
+                wakePrompt();
                 println(MarkdownColorizer.status("bye"));
             }
+        }
+    }
+
+    /**
+     * Renders and answers the Ctrl-C interrupt menu: cancel the current turn (stays in the
+     * REPL) or exit. The read goes through the interaction lane so the answer is never handed
+     * to the turn queue; a Ctrl-C while the menu itself reads cancels the menu without effects.
+     */
+    private void promptInterruptMenu() {
+        try {
+            final var answer = interactionLine(
+                            MarkdownColorizer.accent("What do you want to do? [1=cancel current turn, 2=exit] "))
+                    .map(line -> line.strip().toLowerCase(Locale.ROOT))
+                    .orElse("");
+            if (answer.equals("1") || answer.equals("c") || answer.equals("cancel")) {
+                cancelled.set(true);
+                println(MarkdownColorizer.status("interrupting the current turn..."));
+            } else if (answer.equals("2") || answer.equals("e") || answer.equals("exit") || answer.equals("q")) {
+                // quitting also cancels a running turn so the REPL thread can actually exit
+                cancelled.set(true);
+                quitRequested = true;
+                wakePrompt();
+                println(MarkdownColorizer.status("bye"));
+            } else {
+                println(MarkdownColorizer.status("no change - turn keeps running"));
+            }
+        } catch (final PromptInterruptException e) {
+            println(MarkdownColorizer.status("interrupt cancelled"));
+        } catch (final IOException e) {
+            println(MarkdownColorizer.status("interrupt cancelled"));
+        }
+    }
+
+    /** Reads one line destined for an inline interaction (higher priority than a turn prompt). */
+    private Optional<String> interactionLine(final String promptText) throws IOException {
+        return prompt instanceof LinedPrompt lined
+                ? lined.readInteractionLine(promptText)
+                : prompt.readLine(promptText);
+    }
+
+    private void wakePrompt() {
+        if (prompt instanceof LinedPrompt lined) {
+            lined.wakeAll();
         }
     }
 

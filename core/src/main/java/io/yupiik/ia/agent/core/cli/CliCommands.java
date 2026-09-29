@@ -65,7 +65,7 @@ public class CliCommands implements SlashCommandSet {
                     """);
         }
         sb.append("""
-                - `Ctrl-C` interrupt the running turn; pressed twice when idle (within 2s) it quits
+                - `Ctrl-C` open the interrupt menu (cancel the current turn / exit); pressed twice when idle (within 2s) it quits
                 - `Ctrl-D` exit
                 """);
         return sb.toString();

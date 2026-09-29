@@ -38,7 +38,7 @@ class ToolExecutionServiceTest {
     private ToolContext context(final List<String> reports) {
         final var reporter = new StatusReporter();
         reporter.setSink(reports::add);
-        return new ToolContext("s1", null, null, null, null, null, reporter, null, null);
+        return new ToolContext("s1", null, null, null, null, null, reporter, null, null, null);
     }
 
     private ToolExecutionService service() {

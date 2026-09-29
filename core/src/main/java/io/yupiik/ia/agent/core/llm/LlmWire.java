@@ -34,7 +34,10 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -253,8 +256,25 @@ final class LlmWire {
             }
         });
         try {
-            return done.join();
-        } catch (final CompletionException e) {
+            // bounded wait: a cancel pressed while the provider streams must surface in ~100ms
+            // even when the publisher delivers no further frame (big chunks, silent generation);
+            // the onNext handler above already completes done when it sees the flag, this loop
+            // only covers the no-frame case
+            while (!done.isDone()) {
+                try {
+                    done.get(100, TimeUnit.MILLISECONDS);
+                } catch (final TimeoutException e) {
+                    if (cancelled != null && cancelled.getAsBoolean()) {
+                        done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                    }
+                    // keep waiting for the next frame (or the completion above)
+                }
+            }
+            return done.get();
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
+        } catch (final ExecutionException e) {
             final var cause = e.getCause() == null ? e : e.getCause();
             if (cause instanceof InterruptedException ie) {
                 Thread.currentThread().interrupt();

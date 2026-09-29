@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import java.util.function.BooleanSupplier;
 
 /**
  * The per-session services a tool may need, passed explicitly down the call
@@ -41,6 +42,9 @@ import io.yupiik.ia.agent.core.todo.TodoStore;
  * @param statusReporter the asking session's status reporter (optimization notices land in that tab)
  * @param usage          the asking session's usage tracker (subagent usage merges into it)
  * @param contextView    the asking session's context view (status/compact requests route to that tab)
+ * @param cancelled      cancellation probe of the running turn; a tool may poll it and stop its
+ *                       work early (killing a subprocess for example). {@code null} when no turn
+ *                       owns this context (standalone tool invocation).
  */
 public record ToolContext(
         String sessionId,
@@ -51,10 +55,16 @@ public record ToolContext(
         TodoStore todos,
         StatusReporter statusReporter,
         UsageTracker usage,
-        ContextView contextView) {
+        ContextView contextView,
+        BooleanSupplier cancelled) {
 
     /** A context without any session-scoped service, for standalone tool invocation. */
     public static ToolContext empty() {
-        return new ToolContext(null, null, null, null, null, null, null, null, null);
+        return new ToolContext(null, null, null, null, null, null, null, null, null, null);
+    }
+
+    /** Cancellation probe, never {@code null}: standalone contexts report "not cancelled". */
+    public boolean isCancelled() {
+        return cancelled != null && cancelled.getAsBoolean();
     }
 }

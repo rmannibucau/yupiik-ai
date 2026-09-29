@@ -72,9 +72,15 @@ the in-memory history, Alt-b/Alt-f move by word, Alt-Backspace and Ctrl-W delete
 a word, Ctrl-A/Ctrl-E/Ctrl-U/Ctrl-K edit the line, Left/Right/Delete move and
 Ctrl-L clears the screen. `Tab` completes slash command names and their
 arguments (models, providers, agents, sessions, tools, options and paths).
-`/shortcuts` lists the active keys. When only the
+`/shortcuts` lists the active keys. `Ctrl-C` opens an interrupt menu: cancel the
+current turn and stay in the REPL, or exit (when idle a second press quits);
+`Ctrl-D` exits too. Cancelling is cooperative but prompt: the running LLM stream
+is stopped within ~100ms, in-flight `bash`/`web_fetch` tools are killed, and a
+pending compaction/retry is aborted at its next checkpoint - the transcript is
+not marked as an error, only the streamed content stays. When only the
 `core` jar is on the classpath the prompt falls back to a plain, non-editing
-`stdin` reader (Ctrl-C/Ctrl-D still work).
+`stdin` reader (Ctrl-C/Ctrl-D still work; with the plain reader, Ctrl-C while a
+turn runs also opens the interrupt menu).
 
 Argument keys may be given with or without the `yca.` prefix, so both
 `--provider-model` and `--yca-provider-model` work.

@@ -286,7 +286,8 @@ public class AnsiShellFrontend implements ShellFrontend {
             queued = List.copyOf(pendingEvents);
             pendingEvents.clear();
             suspended = false;
-            turnEnded = queued.stream().anyMatch(AgentEvent.TurnDone.class::isInstance);
+            turnEnded = queued.stream()
+                    .anyMatch(e -> e instanceof AgentEvent.TurnDone || e instanceof AgentEvent.TurnCancelled);
             separate = pendingInteractionSeparation;
             pendingInteractionSeparation = false;
         } finally {
@@ -486,6 +487,10 @@ public class AnsiShellFrontend implements ShellFrontend {
             // natural terminator for the current actor (main turn or async subagent/tool
             // worker): a hidden-thinking spinner left running by a late event would otherwise
             // keep spinning forever once the turn ended
+            stopSpinner();
+            ensureStderrNewline();
+        } else if (event instanceof AgentEvent.TurnCancelled) {
+            // user interrupt: same clean close as a normal end, without an error line
             stopSpinner();
             ensureStderrNewline();
         }

@@ -1027,8 +1027,9 @@ public class TuiCommand implements Runnable {
                             finished.output(),
                             !finished.success(),
                             0));
-        } else if (event instanceof AgentEvent.TurnDone || event instanceof AgentEvent.Error) {
-            // tab icon: the last turn finished (done) until a new one starts
+        } else if (event instanceof AgentEvent.TurnDone || event instanceof AgentEvent.TurnCancelled) {
+            // tab icon: the last turn finished (done or cancelled) until a new one starts;
+            // a cancellation is not an error, only the end of the current turn
             state.turnCompleted = true;
             state.wait = null;
             if (!state.pendingPrompts.isEmpty()) {
