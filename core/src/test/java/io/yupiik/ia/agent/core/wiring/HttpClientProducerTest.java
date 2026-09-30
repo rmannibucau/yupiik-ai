@@ -35,7 +35,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
+/** This class mutates the JVM-wide {@code java.util.logging} hierarchy, see {@link #setUp()}. */
+@ResourceLock("java.util.logging")
 class HttpClientProducerTest {
 
     private HttpServer server;
@@ -58,6 +61,8 @@ class HttpClientProducerTest {
         server.start();
         logs = new ByteArrayOutputStream();
         logger = Logger.getLogger("yca.http");
+        // the handler is asserted on, so the logger must not leak records to the console: tests
+        // run in parallel and the JVM-wide hierarchy is not exclusive unless we ask for it
         handler = new Handler() {
             @Override
             public void publish(final LogRecord record) {

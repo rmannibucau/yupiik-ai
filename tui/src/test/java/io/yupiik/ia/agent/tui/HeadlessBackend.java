@@ -57,11 +57,28 @@ final class HeadlessBackend implements Backend {
 
     /**
      * Awaits a rendered frame so tests synchronize on real UI updates instead of sleeping.
+     * <p>
+     * The wait polls the permit finely instead of blocking for the whole timeout: a paint is
+     * already scheduled (the render thread repaints on the next tick), so a coarse wait would
+     * add up to {@code timeoutMillis} of pure latency to every assertion of every test. A real
+     * terminal blocks in {@code read()}, but here there is nothing to block on.
      *
      * @return {@code true} when a frame was rendered before the timeout.
      */
     boolean awaitFrame(final long timeoutMillis) throws InterruptedException {
-        return drawn.tryAcquire(timeoutMillis, TimeUnit.MILLISECONDS);
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (true) {
+            if (drawn.tryAcquire()) {
+                return true;
+            }
+            if (Thread.interrupted()) {
+                throw new InterruptedException();
+            }
+            if (System.nanoTime() >= deadline) {
+                return false;
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(200_000L);
+        }
     }
 
     @Override
@@ -101,6 +118,10 @@ final class HeadlessBackend implements Backend {
 
     @Override
     public int read(final int timeoutMillis) {
+        // a real backend blocks here for up to timeoutMillis; returning -2 straight away would
+        // turn the runner's input reader into a 100% cpu spin for the whole test (one core per
+        // running test, which then slows the agent loop down when tests run in parallel)
+        java.util.concurrent.locks.LockSupport.parkNanos(200_000L);
         return -2;
     }
 

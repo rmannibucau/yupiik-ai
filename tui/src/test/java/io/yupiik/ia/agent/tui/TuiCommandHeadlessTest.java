@@ -67,6 +67,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 /**
  * Boots the real fusion bean graph through autodiscovery (core + json + tui modules)
@@ -77,6 +78,14 @@ import org.junit.jupiter.api.io.TempDir;
  * created in {@code @BeforeAll} so the once-per-class wiring cost is never attributed
  * to a single test.
  */
+// TuiCommand redirects the JVM-wide "io.yupiik" java.util.logging logger to the UI by installing
+// its own handler, and it SKIPS that installation when the logger already has a handler or already
+// has useParentHandlers=false (TuiCommand.redirectLoggerToUi). Two TuiCommand instances booting
+// concurrently in the same JVM would therefore make the loser silently drop log redirection, which
+// breaks the assertions of both TUI test classes. The suite runs test classes concurrently (see
+// the surefire configurationParameters in the root pom), so both classes take the same lock and
+// never boot a TuiCommand at the same time.
+@ResourceLock("io.yupiik-jul-handler")
 class TuiCommandHeadlessTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
 
@@ -109,11 +118,26 @@ class TuiCommandHeadlessTest {
 
     private static RuntimeContainer bootContainer(final Map<String, String> extra) {
         final var config = new LinkedHashMap<>(Map.of(
-                "yca.storageHome", temp.resolve("home").toString(),
-                "yca.provider.baseUrl", llm.baseUrl(),
-                "yca.provider.apiKey", "test-key",
-                "yca.provider.model", "test-model",
-                "yca.structuralCodeGraph.enabled", "false"));
+                "yca.storageHome",
+                temp.resolve("home").toString(),
+                // YcaConfigurationProducer looks the file up in the configuration before falling
+                // back to the "yca.storage.home" system property, hence pointing it at a file
+                // that does not exist: this container wires the *real* agent graph, and reading
+                // the developer's ~/.yupiik/coding-agent/configuration.json would make the test
+                // call the configured provider (real tokens) and run real tools. No system
+                // property involved, and the listener registering the source below has a higher
+                // priority (Integer.MIN_VALUE) so the value is already visible when the producer
+                // asks for it.
+                "yca.configuration.json",
+                temp.resolve("configuration.json").toString(),
+                "yca.provider.baseUrl",
+                llm.baseUrl(),
+                "yca.provider.apiKey",
+                "test-key",
+                "yca.provider.model",
+                "test-model",
+                "yca.structuralCodeGraph.enabled",
+                "false"));
         config.putAll(extra);
         return ConfiguringContainer.of()
                 .register(new ProvidedInstanceBean<>(
@@ -124,6 +148,14 @@ class TuiCommandHeadlessTest {
                     @Override
                     public Type eventType() {
                         return ConfigurationRegistration.class;
+                    }
+
+                    @Override
+                    public int priority() {
+                        // before YcaConfigurationProducer (Integer.MIN_VALUE + 1): it reads
+                        // yca.configuration.json while the configuration is being built, so the
+                        // source above must already be registered when it does
+                        return Integer.MIN_VALUE;
                     }
 
                     @Override
@@ -398,11 +430,12 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitText(final String expected) throws InterruptedException {
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(2_500);
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         var screen = backend.text();
         while (!screen.contains(expected)) {
             if (System.nanoTime() > deadline) {
-                final var message = "did not see '" + expected + "' within 2.5s; last screen:\n" + screen;
+                final var message =
+                        "did not see '" + expected + "' within " + TIMEOUT_MS + "ms; last screen:\n" + screen;
                 throw new AssertionError(message);
             }
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "'");
@@ -411,11 +444,12 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitTextGone(final String expected) throws InterruptedException {
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(2_500);
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         var screen = backend.text();
         while (screen.contains(expected)) {
             if (System.nanoTime() > deadline) {
-                final var message = "'" + expected + "' never disappeared within 2.5s; last screen:\n" + screen;
+                final var message =
+                        "'" + expected + "' never disappeared within " + TIMEOUT_MS + "ms; last screen:\n" + screen;
                 throw new AssertionError(message);
             }
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + expected + "' to vanish");

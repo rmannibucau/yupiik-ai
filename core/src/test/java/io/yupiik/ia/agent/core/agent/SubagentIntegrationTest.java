@@ -76,6 +76,36 @@ class SubagentIntegrationTest {
 
     private final List<AgentEvent> events = new ArrayList<>();
 
+    /**
+     * Waits for a {@link AgentEvent.SubagentCompleted} to be published and returns the snapshot.
+     * The subagent runner completes the state (which is what {@code awaitResult()} waits for) <b>before</b> emitting the
+     * event, so asserting on the collected events right after the result is visible is a race.
+     */
+    private List<AgentEvent.SubagentCompleted> awaitCompletions(final long timeout, final TimeUnit unit)
+            throws InterruptedException {
+        final var deadline = System.nanoTime() + unit.toNanos(timeout);
+        List<AgentEvent.SubagentCompleted> completions;
+        do {
+            synchronized (events) {
+                completions = events.stream()
+                        .filter(AgentEvent.SubagentCompleted.class::isInstance)
+                        .map(AgentEvent.SubagentCompleted.class::cast)
+                        .toList();
+            }
+            if (!completions.isEmpty()) {
+                return completions;
+            }
+            Thread.sleep(5);
+        } while (System.nanoTime() < deadline);
+        return completions;
+    }
+
+    private List<AgentEvent> snapshot() {
+        synchronized (events) {
+            return List.copyOf(events);
+        }
+    }
+
     private CodingAgentConfiguration config(final Map<String, String> overrides) {
         final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
@@ -701,11 +731,8 @@ class SubagentIntegrationTest {
 
         // ... and reported as a cancellation, not as a failure: a cancelled child must never
         // render as a red "Subagent failed" card in the parent transcript
-        final var completions = events.stream()
-                .filter(AgentEvent.SubagentCompleted.class::isInstance)
-                .map(AgentEvent.SubagentCompleted.class::cast)
-                .toList();
-        assertEquals(1, completions.size(), "one completion event expected, got: " + events);
+        final var completions = awaitCompletions(10, TimeUnit.SECONDS);
+        assertEquals(1, completions.size(), "one completion event expected, got: " + snapshot());
         final var completion = completions.getFirst();
         assertTrue(completion.cancelled(), "a cancelled sub-agent must be flagged as cancelled: " + completion);
         assertFalse(completion.success(), "a cancelled sub-agent did not succeed");

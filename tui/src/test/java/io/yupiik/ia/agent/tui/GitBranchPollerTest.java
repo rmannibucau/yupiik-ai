@@ -78,8 +78,10 @@ class GitBranchPollerTest {
         final var changes = new LinkedBlockingQueue<String>();
         final var scheduler = testScheduler();
         try {
+            // fast polling: the detection logic is unchanged, only the tick is shortened so the
+            // test does not spend a full production interval waiting for the scheduler
             final var poller = new GitBranchPoller(
-                    scheduler, changes::add, temp.toAbsolutePath().toString());
+                    scheduler, changes::add, temp.toAbsolutePath().toString(), 15L);
             poller.start();
             assertEquals("main", changes.poll(5, TimeUnit.SECONDS), "initial poll must publish the branch");
             assertEquals("main", poller.branch());
@@ -91,7 +93,7 @@ class GitBranchPollerTest {
             // closing cancels the task: further changes must not notify anymore
             poller.close();
             Files.writeString(head, "ref: refs/heads/next\n");
-            assertNull(changes.poll(300, TimeUnit.MILLISECONDS), "closed poller must not notify");
+            assertNull(changes.poll(150, TimeUnit.MILLISECONDS), "closed poller must not notify");
         } finally {
             scheduler.shutdownNow();
         }

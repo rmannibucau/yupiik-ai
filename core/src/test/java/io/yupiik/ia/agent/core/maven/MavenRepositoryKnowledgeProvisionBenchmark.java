@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Realtime provisioning benchmark: boots the real yca container (real provider from the home
@@ -60,21 +61,19 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
     private static final String HOP_PROJECT = "/opt/rmannibucau/dev/Github/hop";
 
     @Test
-    void provisionHopProjectWithRealModel() throws Exception {
+    void provisionHopProjectWithRealModel(@TempDir final Path storageHome) throws Exception {
         final var m2 = Path.of(System.getProperty("user.home"), ".m2", "repository");
         final var hop = Path.of(HOP_PROJECT);
         assertTrue(Files.isDirectory(hop), "hop project missing: " + hop);
         assertTrue(Files.isDirectory(m2), "local repository missing: " + m2);
 
-        final var guard = System.getProperty("yca.mavenRepositoryKnowledge.localRepository");
-        // the surefire test-guard pinpoints this to target/test-guard-m2; this benchmark intentionally
-        // exercises the real repository, so override it for the duration of the run and restore after.
-        System.setProperty("yca.mavenRepositoryKnowledge.localRepository", m2.toString());
-
+        // the real local repository is a parameter of the map configuration source below, so no
+        // system property is mutated here: fusion resolves a registered source before the
+        // system properties, hence the source always wins.
         final var wipedBefore = cleanMarkers(m2);
         System.out.println("[bench] skill-empty precondition: wiped " + wipedBefore + " pre-existing marker(s)");
 
-        try (final var container = container(hop, m2)) {
+        try (final var container = container(hop, m2, storageHome)) {
             final var chatClient = container.lookup(ChatClient.class).instance();
             assertFalse(
                     chatClient.model() == null || chatClient.model().isBlank(),
@@ -154,20 +153,23 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
             System.out.printf("  generated SKILL.md total  : %d%n", countSkills(m2));
             System.out.println();
         } finally {
-            if (guard == null) {
-                System.clearProperty("yca.mavenRepositoryKnowledge.localRepository");
-            } else {
-                System.setProperty("yca.mavenRepositoryKnowledge.localRepository", guard);
-            }
             final var wipedAfter = cleanMarkers(m2);
             System.out.println("[bench] cleanup: wiped " + wipedAfter + " generated marker(s)");
         }
     }
 
-    private RuntimeContainer container(final Path projectDir, final Path localRepository) {
+    private RuntimeContainer container(final Path projectDir, final Path localRepository, final Path storageHome) {
         final var provider = readHomeProvider();
         final var config = new java.util.LinkedHashMap<String, String>();
-        config.put("yca.storageHome", storageHome().toString());
+        config.put("yca.storageHome", storageHome.toString());
+        // YcaConfigurationProducer looks this file up before falling back to the "yca.storage.home"
+        // system property: pointing it at a file that does not exist keeps the user home
+        // configuration out of the benchmark, the provider settings being injected explicitly
+        // above (readHomeProvider). Without it, the home file would be registered first and its
+        // keys would win over this map.
+        config.put(
+                "yca.configuration.json",
+                storageHome.resolve("configuration.json").toString());
         config.put("yca.projectDir", projectDir.toString());
         // real provider settings, read at runtime from the user home configuration (never committed)
         provider.forEach((key, value) -> config.put("yca.provider." + key, value));
@@ -186,6 +188,13 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
                     @Override
                     public Type eventType() {
                         return ConfigurationRegistration.class;
+                    }
+
+                    @Override
+                    public int priority() {
+                        // before YcaConfigurationProducer (Integer.MIN_VALUE + 1), which reads
+                        // yca.configuration.json while the configuration is being built
+                        return Integer.MIN_VALUE;
                     }
 
                     @Override
@@ -250,14 +259,6 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
             return java.util.Optional.empty();
         }
         return java.util.Optional.of(matcher.group(1) != null ? matcher.group(1) : matcher.group(2));
-    }
-
-    private Path storageHome() {
-        try {
-            return Files.createTempDirectory("yca-bench-home-");
-        } catch (final IOException e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     /**

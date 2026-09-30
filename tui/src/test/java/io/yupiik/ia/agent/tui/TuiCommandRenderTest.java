@@ -80,13 +80,20 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.ResourceLock;
 
 /**
  * Renders the TUI into a {@link HeadlessBackend} and asserts on the visible
  * screen while driving it with dispatched events.
  */
+// shares the "io.yupiik-jul-handler" lock with TuiCommandHeadlessTest: both boot a real
+// TuiCommand, which hijacks the JVM-wide "io.yupiik" java.util.logging logger and gives up when
+// another handler is already installed. See TuiCommand.redirectLoggerToUi.
+@ResourceLock("io.yupiik-jul-handler")
 class TuiCommandRenderTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
+    private static final Duration TICK_RATE = Duration.ofMillis(2);
+    private static final Duration POLL_TIMEOUT = Duration.ofMillis(2);
 
     @TempDir
     Path temp;
@@ -676,7 +683,16 @@ class TuiCommandRenderTest {
                         .alternateScreen(false)
                         .bracketedPaste(false)
                         .shutdownHook(false)
-                        .tickRate(Duration.ofMillis(20))
+                        // the tick *is* the latency of every assertion in this class: a mutation
+                        // posted from a background thread (runLater) only paints on the next tick,
+                        // so each awaitFrame below costs at least one tick. 20ms made the 48 tests
+                        // of this class cost seconds for no added coverage - the clock is a
+                        // MutableClock, so elapsed-time rendering does not depend on this value.
+                        .tickRate(TICK_RATE)
+                        // the event loop waits at most pollTimeout between two runs, so this is
+                        // also how long quit() takes to be noticed: the default 40ms was paid by
+                        // every single test when joining the ui thread
+                        .pollTimeout(POLL_TIMEOUT)
                         .build());
                 tuiRef.set(runner);
                 return runner;
@@ -2013,11 +2029,13 @@ class TuiCommandRenderTest {
     }
 
     /**
-     * Waits for a few frames and fails when {@code unexpected} is still on screen: for a segment
-     * that must disappear, one rendered frame without it is enough.
+     * Waits for {@code unexpected} to leave the screen and fails when it is still there at the
+     * deadline: the frames painted before the mutation are legitimately on screen for a while, so
+     * asserting on a fixed frame count would be a race (and a fast tick widens that race).
      */
     private void awaitNoText(final String unexpected) throws InterruptedException {
-        for (var i = 0; i < 3 && backend.text().contains(unexpected); i++) {
+        final var deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (backend.text().contains(unexpected) && System.nanoTime() < deadline) {
             assertTrue(
                     backend.awaitFrame(1_000), "no frame received while waiting for '" + unexpected + "' to be gone");
         }

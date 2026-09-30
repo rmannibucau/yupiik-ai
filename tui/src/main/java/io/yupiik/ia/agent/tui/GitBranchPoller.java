@@ -45,6 +45,7 @@ public class GitBranchPoller implements AutoCloseable {
 
     private final ScheduledExecutorService scheduler;
     private final String workingDirectory;
+    private final long pollIntervalMillis;
     private final Consumer<String> onBranchChanged;
     private final AtomicReference<String> branch = new AtomicReference<>();
     private ScheduledFuture<?> task;
@@ -58,9 +59,22 @@ public class GitBranchPoller implements AutoCloseable {
             final ScheduledExecutorService scheduler,
             final Consumer<String> onBranchChanged,
             final String workingDirectory) {
+        this(scheduler, onBranchChanged, workingDirectory, POLL_INTERVAL_MILLIS);
+    }
+
+    /**
+     * Full constructor: the interval is injectable so a test can poll fast instead of waiting a
+     * production tick, without duplicating the detection logic.
+     */
+    GitBranchPoller(
+            final ScheduledExecutorService scheduler,
+            final Consumer<String> onBranchChanged,
+            final String workingDirectory,
+            final long pollIntervalMillis) {
         this.scheduler = scheduler;
         this.onBranchChanged = onBranchChanged;
         this.workingDirectory = workingDirectory;
+        this.pollIntervalMillis = pollIntervalMillis;
     }
 
     /** Schedules the periodic poll; idempotent. */
@@ -68,7 +82,7 @@ public class GitBranchPoller implements AutoCloseable {
         if (task != null) {
             return;
         }
-        task = scheduler.scheduleWithFixedDelay(this::poll, 0, POLL_INTERVAL_MILLIS, TimeUnit.MILLISECONDS);
+        task = scheduler.scheduleWithFixedDelay(this::poll, 0, pollIntervalMillis, TimeUnit.MILLISECONDS);
     }
 
     /** Last polled branch (or {@code null} when not in a git repository yet). */

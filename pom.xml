@@ -154,9 +154,23 @@
           <artifactId>maven-surefire-plugin</artifactId>
           <version>3.6.0</version>
           <configuration>
+            <!-- Surefire's <parallel>/<threadCount> are TestNG/JUnit4-provider knobs and do
+                 nothing here (the suite runs on the JUnit Platform provider), and
+                 <forkCount> was measured to be a net loss: a fork per group of classes pays
+                 the JVM start + fusion CDI boot again, which costs more than the ~13s of test
+                 time it would overlap (core alone went from 11.4s to 16-18s).
+                 Configuration parameters are the surefire-native way to configure the JUnit
+                 Platform: classes run concurrently, methods of a class stay sequential so
+                 per-class fixtures keep their isolation, and the whole thing stays in this pom
+                 (no junit-platform.properties file). -->
+            <properties>
+              <configurationParameters>junit.jupiter.execution.parallel.enabled = true
+                junit.jupiter.execution.parallel.mode.default = same_thread
+                junit.jupiter.execution.parallel.mode.classes.default = concurrent
+                junit.jupiter.execution.parallel.config.strategy = fixed
+                junit.jupiter.execution.parallel.config.fixed.parallelism = 4</configurationParameters>
+            </properties>
             <systemPropertyVariables>
-              <yca.storage.home>${project.build.directory}/test-guard-misconfiguration</yca.storage.home>
-              <yca.mavenRepositoryKnowledge.localRepository>${project.build.directory}/test-guard-m2</yca.mavenRepositoryKnowledge.localRepository>
               <!-- jline 3.25: a real tty makes the system terminal spawn PosixPtyTerminal pump
                    threads that outlive the surefire fork JVM and delay its exit by 30s -->
               <org.jline.terminal.type>dumb</org.jline.terminal.type>

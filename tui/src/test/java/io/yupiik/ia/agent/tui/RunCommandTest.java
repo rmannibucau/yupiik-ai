@@ -60,9 +60,16 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.api.parallel.Isolated;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
+/**
+ * Runs isolated from all other classes: it swaps the JVM-global {@code System.out}/{@code System.err}
+ * and attaches handlers to the shared {@code java.util.logging} hierarchy, which is a JVM-wide contract
+ * no {@code @ResourceLock} can guard against classes that merely <em>write</em> to those streams.
+ */
+@Isolated
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
 @ResourceLock("java.util.logging")
@@ -178,7 +185,7 @@ class RunCommandTest {
 
         assertEquals("s-2", lastSessionIdUsed.get());
         assertTrue(error.getMessage().contains("boom"));
-        assertTrue(logs().contains("boom"));
+        assertTrue(logs().contains("boom"), "expected a 'boom' log record, got: [" + logs() + "]");
     }
 
     @Test

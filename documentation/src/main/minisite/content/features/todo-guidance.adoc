@@ -32,7 +32,49 @@ yca.provider.anthropic.baseUrl=https://api.anthropic.com
 yca.provider.anthropic.prompt.todo=Use write_todo every few steps to reflect current progress.
 ----
 
+To apply the same wording to every provider, set the global fallback instead: it
+is used for the providers leaving `prompt.todo` at `auto` (or unset), and each
+provider that sets its own value keeps it. The semantics are the same (a verbatim
+appendix, or `false` to disable).
+
+[source,properties]
+----
+yca.todos.guidance=Use write_todo every few steps to reflect current progress.
+----
+
 The resolved block is appended as a `<todo-guidance>` section in both `plan` and
 `build` modes. Leaving it at `auto` is the right choice for most setups: Anthropic
 and Google model families get their stronger wording automatically, anything else
 gets the balanced OpenAI guidance.
+
+== Never ending a turn with open todos
+
+Some model families (qwen and relatives are the usual suspects) are quite willing
+to stop mid-implementation: they run a couple of steps, write a progress report
+and end their turn even though the todo list still holds pending items. When that
+happens the loop emits a warning notice ("model ended its turn (finish_reason=...)
+with N/M todos still pending") and waits for you to send `continue`.
+
+`yca.todos.continueOnUnfinished` closes that loop: instead of returning, the turn
+asks the model to carry on with the next pending todo, up to
+`yca.todos.maxContinues` times per turn. Each continuation costs one LLM
+round-trip, counts against `yca.llm.maxIterations` and logs an informational
+notice; once the budget is spent the usual warning notice is emitted again and the
+turn ends as before. From the second continuation on the instruction also asks the
+model to change strategy (or to state what blocks it) instead of repeating its
+progress report, and `yca.todos.continuePrompt` replaces the built-in instruction
+if you want to word it yourself.
+
+[source,properties]
+----
+yca.todos.continueOnUnfinished=true
+yca.todos.maxContinues=25
+yca.todos.continuePrompt=Do not summarize: continue with the next pending todo now.
+----
+
+It is off by default, and deliberately conservative when on:
+
+- only in `build` mode, and only in a turn that already ran tools;
+- never for a sub-agent, which reports its own todo list back to its parent;
+- never in a turn carrying a prompt you typed while the loop was running: the model just answered that message, so its text-only end is not the "stopped too early" case;
+- never past `maxContinues`, so a model stuck in a loop cannot spin forever.
