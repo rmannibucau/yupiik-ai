@@ -176,28 +176,177 @@ public final class BashRules {
             if (i >= effective.size()) {
                 return new SegmentDecision(true, null); // pure env assignments
             }
-            if ("cd".equals(effective.get(i).text())) {
+
+            final var text = effective.get(i).text();
+            if ("cd".equals(text)) {
                 return new SegmentDecision(true, null); // directory change has no repository side effect
             }
+            if ("xargs".equals(text)) {
+                return evaluateXargs(effective, i, agentMode);
+            }
+
             final var tokens = new ArrayList<String>(effective.size() - i);
             for (var j = i; j < effective.size(); j++) {
                 tokens.add(effective.get(j).text());
             }
+            return evaluateCommandTokens(tokens, agentMode);
+        }
+
+        private SegmentDecision evaluateCommandTokens(final List<String> tokens, final AgentMode agentMode) {
+
             var allowed = false;
-            var bestStart = (String) null;
+            String bestStart = null;
             var bestLength = 0;
+
             for (final var rule : rules) {
-                if (rule.matches(tokens)) {
-                    if (bestStart == null || rule.commandStart().size() > bestLength) {
-                        bestStart = String.join(" ", rule.commandStart());
-                        bestLength = rule.commandStart().size();
-                    }
-                    if (rule.resolve(agentMode) == PermissionMode.YOLO) {
-                        allowed = true;
-                    }
+                if (!rule.matches(tokens)) {
+                    continue;
+                }
+                if (bestStart == null || rule.commandStart().size() > bestLength) {
+                    bestStart = String.join(" ", rule.commandStart());
+                    bestLength = rule.commandStart().size();
+                }
+                if (rule.resolve(agentMode) == PermissionMode.YOLO) {
+                    allowed = true;
                 }
             }
+
             return new SegmentDecision(allowed, bestStart);
+        }
+
+        private SegmentDecision evaluateXargs(
+                final List<Token> tokens, final int xargsIndex, final AgentMode agentMode) {
+
+            var i = xargsIndex + 1;
+
+            while (i < tokens.size()) {
+                final var option = tokens.get(i).text();
+
+                // `--` terminates xargs options.
+                if ("--".equals(option)) {
+                    i++;
+                    break;
+                }
+
+                // Not an option anymore: this is the command xargs will execute.
+                if (!option.startsWith("-") || "-".equals(option)) {
+                    break;
+                }
+
+                final var consumed = consumeXargsOption(tokens, i);
+                if (consumed < 0) {
+                    // Unknown/unsupported option or malformed option.
+                    // Fail closed rather than accidentally auto-allowing it.
+                    return new SegmentDecision(false, null);
+                }
+
+                i += consumed;
+            }
+
+            // Plain `xargs` executes `echo` by default. Don't treat that as
+            // an implicitly allowed command.
+            if (i >= tokens.size()) {
+                return new SegmentDecision(false, null);
+            }
+
+            final var command = new ArrayList<String>(tokens.size() - i);
+            for (; i < tokens.size(); i++) {
+                command.add(tokens.get(i).text());
+            }
+
+            // Do not allow xargs to hide a shell command from the evaluator.
+            if (isShellCommand(command.get(0))) {
+                return new SegmentDecision(false, null);
+            }
+
+            return evaluateCommandTokens(command, agentMode);
+        }
+
+        /**
+         * Parses one xargs option.
+         *
+         * @return the number of tokens consumed, or -1 for an unsupported/malformed option.
+         */
+        private int consumeXargsOption(final List<Token> tokens, final int index) {
+
+            final var option = tokens.get(index).text();
+
+            // Long options with separate arguments.
+            if (option.equals("--delimiter")
+                    || option.equals("--eof")
+                    || option.equals("--replace")
+                    || option.equals("--max-lines")
+                    || option.equals("--max-args")
+                    || option.equals("--max-chars")
+                    || option.equals("--max-procs")
+                    || option.equals("--arg-file")) {
+                return index + 1 < tokens.size() ? 2 : -1;
+            }
+
+            // Long options with attached arguments.
+            if (option.startsWith("--delimiter=")
+                    || option.startsWith("--eof=")
+                    || option.startsWith("--replace=")
+                    || option.startsWith("--max-lines=")
+                    || option.startsWith("--max-args=")
+                    || option.startsWith("--max-chars=")
+                    || option.startsWith("--max-procs=")
+                    || option.startsWith("--arg-file=")) {
+                return 1;
+            }
+
+            // Argument-less options.
+            if (option.equals("-0")
+                    || option.equals("--null")
+                    || option.equals("-r")
+                    || option.equals("--no-run-if-empty")
+                    || option.equals("-t")
+                    || option.equals("--verbose")
+                    || option.equals("-p")
+                    || option.equals("--interactive")
+                    || option.equals("-x")
+                    || option.equals("--exit")
+                    || option.equals("-o")
+                    || option.equals("--open-tty")) {
+                return 1;
+            }
+
+            // Short options with separate arguments.
+            if (option.equals("-d")
+                    || option.equals("-E")
+                    || option.equals("-I")
+                    || option.equals("-L")
+                    || option.equals("-n")
+                    || option.equals("-P")
+                    || option.equals("-s")
+                    || option.equals("-a")) {
+                return index + 1 < tokens.size() ? 2 : -1;
+            }
+
+            // Short options with attached arguments.
+            if (option.length() > 2) {
+                final var prefix = option.substring(0, 2);
+
+                if (prefix.equals("-d")
+                        || prefix.equals("-E")
+                        || prefix.equals("-I")
+                        || prefix.equals("-L")
+                        || prefix.equals("-n")
+                        || prefix.equals("-P")
+                        || prefix.equals("-s")) {
+                    return 1;
+                }
+            }
+
+            // Unknown xargs option -> fail closed.
+            return -1;
+        }
+
+        private boolean isShellCommand(final String command) {
+            return switch (command) {
+                case "sh", "bash", "dash", "zsh", "ksh", "fish", "csh", "tcsh" -> true;
+                default -> false;
+            };
         }
 
         // ------------------------------------------------------------------

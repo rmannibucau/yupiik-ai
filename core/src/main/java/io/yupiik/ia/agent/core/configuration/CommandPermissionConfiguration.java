@@ -53,15 +53,19 @@ public record CommandPermissionConfiguration(
 
     /**
      * Built-in read-only command families: recognized and allowed without prompting in both plan and build modes.
-     * State changing forms are carved out with {@code excludeOptions} (eg. {@code sed -i}, {@code find -delete},
-     * {@code git branch -d}, {@code git remote add}, {@code sort -o}, {@code diff -o}, {@code date -s}).
+     *
+     * State-changing forms are carved out with {@code excludeOptions} where the command itself is commonly
+     * used for both inspection and mutation (eg. {@code sed -i}, {@code find -delete}, {@code git branch -d},
+     * {@code git remote add}, {@code sort -o}, {@code diff -o}, {@code date -s}).
      */
     public static List<CommandPermissionConfiguration> defaultRules() {
         return List.of(
+                // -----------------------------------------------------------------
+                // Git: inspection / read-only operations
+                // -----------------------------------------------------------------
                 command("git status"),
                 command("git diff"),
                 command("git log"),
-                command("git branch", "-d", "-D", "--delete"),
                 command("git show"),
                 command("git blame"),
                 command("git rev-parse"),
@@ -74,12 +78,56 @@ public record CommandPermissionConfiguration(
                 command("git describe"),
                 command("git stash list"),
                 command("git submodule status"),
+                command("git reflog"),
+                command("git shortlog"),
+                command("git count-objects"),
+                command("git fsck"),
+                command("git verify-commit"),
+                command("git verify-tag"),
+                command("git rev-list"),
+                command("git cherry"),
+                command("git range-diff"),
+                command("git diff-tree"),
+                command("git diff-files"),
+                command("git diff-index"),
+                command("git patch-id"),
+                command("git check-ignore"),
+                command("git check-attr"),
+                command("git check-ref-format"),
+                command("git hash-object"),
+                command("git ls-remote"),
+
+                // Git command families with mutating forms explicitly excluded.
+                command("git branch", "-d", "-D", "--delete", "-m", "-M", "--move", "-c", "-C", "--copy"),
                 command("git remote", "add", "remove", "set-url", "rename", "prune"),
-                command("xargs git log"),
+                command("git stash", "push", "pop", "apply", "drop", "clear", "branch"),
+                command("git tag", "-d", "--delete", "-f", "--force"),
+                command("git submodule", "add", "update", "init", "deinit", "set-url", "sync"),
+
+                // -----------------------------------------------------------------
+                // Filesystem inspection
+                // -----------------------------------------------------------------
                 command("ls"),
-                command("cat"),
                 command("pwd"),
-                command("echo"),
+                command("cat"),
+                command("tac"),
+                command("head"),
+                command("tail"),
+                command("nl"),
+                command("wc"),
+                command("stat"),
+                command("file"),
+                command("readlink"),
+                command("realpath"),
+                command("basename"),
+                command("dirname"),
+                command("du"),
+                command("df"),
+                command("tree"),
+                command("lsattr"),
+                command("getfacl"),
+
+                // find is read-only unless one of these actions is requested.
                 command(
                         "find",
                         "-delete",
@@ -91,50 +139,124 @@ public record CommandPermissionConfiguration(
                         "-fprint",
                         "-fprint0",
                         "-fprintf"),
+
+                // -----------------------------------------------------------------
+                // Text processing / filtering
+                // -----------------------------------------------------------------
                 command("awk"),
                 command("cut"),
-                command("diff", "-o", "--output"),
-                command("basename"),
-                command("dirname"),
-                command("stat"),
-                command("file"),
-                command("which"),
-                command("readlink"),
-                command("realpath"),
-                command("du"),
-                command("df"),
-                command("id"),
-                command("uname"),
-                command("date", "-s", "--set"),
-                command("env"),
-                command("printenv"),
-                command("printf"),
-                command("nl"),
+                command("tr"),
+                command("grep"),
+                command("egrep"),
+                command("fgrep"),
+                command("rg"),
+                command("uniq"),
+                command("comm"),
+                command("join"),
                 command("paste"),
                 command("column"),
+                command("fold"),
+                command("fmt"),
+                command("expand"),
+                command("unexpand"),
+                command("od"),
+                command("xxd"),
+                command("strings"),
+                command("shuf"),
+                command("rev"),
+
+                // sed is read-only except for in-place editing.
+                command("sed", "-i", "--in-place"),
+
+                // sort is read-only except when an output file is explicitly requested.
+                command("sort", "-o", "--output"),
+
+                // diff is read-only except for output-file options.
+                command("diff", "-o", "--output"),
+                command("diff3"),
+                command("sdiff"),
+                command("cmp"),
+
+                // -----------------------------------------------------------------
+                // Search / predicates
+                // -----------------------------------------------------------------
+                command("which"),
+                command("whereis"),
+                command("locate"),
+                command("test"),
+                command("["),
+
+                // -----------------------------------------------------------------
+                // Shell-safe output / argument utilities
+                // -----------------------------------------------------------------
+                command("echo"),
+                command("printf"),
                 command("seq"),
+                command("yes"),
+
+                // -----------------------------------------------------------------
+                // Environment / identity / system inspection
+                // -----------------------------------------------------------------
+                command("env"),
+                command("printenv"),
+                command("id"),
+                command("groups"),
+                command("whoami"),
+                command("who"),
+                command("w"),
+                command("users"),
+                command("uname"),
+                command("hostname"),
+                command("uptime"),
+                command("ps"),
+                command("pgrep"),
+                command("lsof"),
+                command("free"),
+                command("vmstat"),
+                command("iostat"),
+                command("mpstat"),
+                command("lsblk"),
+                command("lsusb"),
+                command("lspci"),
+                command("mountpoint"),
+                command("dmesg"),
+
+                // -----------------------------------------------------------------
+                // Checksums / encoding / numeric utilities
+                // -----------------------------------------------------------------
                 command("cksum"),
                 command("sum"),
                 command("md5sum"),
+                command("sha1sum"),
+                command("sha224sum"),
                 command("sha256sum"),
-                command("grep"),
-                command("rg"),
-                command("wc"),
-                command("head"),
-                command("tail"),
-                command("test"),
-                command("tr"),
-                command("sort", "-o", "--output"),
-                command("uniq"),
-                command("sed", "-i", "--in-place"),
+                command("sha384sum"),
+                command("sha512sum"),
+                command("b2sum"),
+                command("base32"),
+                command("base64"),
+                command("bc"),
+                command("expr"),
+                command("factor"),
+                command("numfmt"),
+                command("cal"),
+
+                // date is read-only unless setting the system clock.
+                command("date", "-s", "--set"),
+
+                // -----------------------------------------------------------------
+                // Java
+                // -----------------------------------------------------------------
                 command("java -version"),
                 command("java -help"));
     }
 
     private static CommandPermissionConfiguration command(final String commandStart, final String... excludedOptions) {
+
         final var excludes = Arrays.stream(excludedOptions)
                 .map(option -> new CommandOptionsConfiguration(List.of(option)))
                 .toList();
+
         return new CommandPermissionConfiguration(
                 new CommandStartMatcherConfiguration(new CommandOptionsConfiguration(List.of(commandStart)), excludes),
                 PermissionMode.YOLO,
