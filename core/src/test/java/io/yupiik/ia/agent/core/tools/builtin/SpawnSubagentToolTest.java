@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.tools.builtin;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
@@ -24,6 +25,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -135,7 +137,7 @@ class SpawnSubagentToolTest {
     }
 
     private ToolContext context(final TodoStore todos) {
-        return new ToolContext("s1", null, null, null, null, todos, null, null, null, null);
+        return new ToolContext("s1", null, null, null, null, todos, null, null, null, Cancellations.NEVER);
     }
 
     private TodoStore noopTodoStore() {
@@ -181,6 +183,45 @@ class SpawnSubagentToolTest {
         final var result = tool.execute(Map.of(), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("task is required"));
+    }
+
+    @Test
+    void forwardsTheParentTurnCancellationProbe() {
+        // an interrupt on the parent turn must reach the sub-agent: it would otherwise keep
+        // burning tokens on an abandoned task (the registry latch stays available for a
+        // model-driven cancel_subagent)
+        final var cfg = config(Map.of());
+        final var reg = registry(cfg);
+        final var forwarded = new java.util.concurrent.atomic.AtomicReference<BooleanSupplier>();
+        final var runner =
+                new SubagentRunner(
+                        null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, reg) {
+                    @Override
+                    public void runAsync(
+                            final SubagentRegistry.SubagentState state,
+                            final SessionStore sessionStore,
+                            final SnapshotStore snapshotStore,
+                            final TodoStore todoStore,
+                            final ToolContext parentContext,
+                            final BooleanSupplier cancelled) {
+                        forwarded.set(cancelled);
+                        reg.complete(
+                                state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
+                    }
+                };
+        final var parentCancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var ctx =
+                new ToolContext("s1", null, null, null, null, noopTodoStore(), null, null, null, parentCancelled::get);
+
+        final var result = tool.execute(Map.of("task", "do work"), ctx);
+        assertTrue(result.success(), result.output());
+        final var probe = forwarded.get();
+        assertNotNull(probe, "the sub-agent must receive a probe");
+        assertFalse(probe.getAsBoolean(), "a running turn is not cancelled");
+
+        parentCancelled.set(true);
+        assertTrue(probe.getAsBoolean(), "the parent's interrupt must be visible to the sub-agent");
     }
 
     @Test

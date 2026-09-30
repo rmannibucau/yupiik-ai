@@ -123,4 +123,18 @@ public record ProviderConfiguration(
         final var p = prompt;
         return p == null || p.todo() == null || p.todo().isBlank() ? "auto" : p.todo();
     }
+
+    /**
+     * Whether this provider configures the todo guidance itself, as opposed to inheriting the global
+     * {@code yca.todos.guidance}. Blank and {@code auto} both mean unset: {@code auto} is the
+     * documented default of {@link PromptConfiguration#todo()} and only asks for the family block.
+     * Any other value (verbatim guidance, or {@code false} to opt out) is an explicit choice.
+     */
+    public boolean todoPromptConfigured() {
+        final var p = prompt;
+        if (p == null || p.todo() == null || p.todo().isBlank()) {
+            return false;
+        }
+        return !p.todo().trim().equalsIgnoreCase("auto");
+    }
 }

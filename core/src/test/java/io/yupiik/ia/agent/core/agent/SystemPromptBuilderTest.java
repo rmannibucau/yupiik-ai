@@ -393,6 +393,42 @@ class SystemPromptBuilderTest {
         assertFalse(prompt.contains("<todo-guidance>"), "false must disable the guidance appendix");
     }
 
+    /** A provider configuring no guidance inherits {@code yca.todos.guidance}. */
+    @Test
+    void todoGuidanceFallsBackToTheGlobalOne() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.todos.guidance", "never stop with an open todo",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "http://192.168.52.32:8000/v1",
+                "yca.provider.providers.0.model", "qwen3.6-27b"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(prompt.contains("<todo-guidance>"));
+        assertTrue(prompt.contains("never stop with an open todo"));
+        assertFalse(
+                prompt.contains("Do not batch up several todos"),
+                "the global guidance replaces the family block of a provider that configures none");
+    }
+
+    /** A provider configuring its own guidance keeps it: the global one is a fallback, not an override. */
+    @Test
+    void todoGuidanceProviderValueWinsOverTheGlobalOne() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build",
+                "yca.todos.guidance", "global guidance",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "http://192.168.52.32:8000/v1",
+                "yca.provider.providers.0.model", "qwen3.6-27b",
+                "yca.provider.providers.0.prompt.todo", "provider guidance"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(prompt.contains("provider guidance"));
+        assertFalse(prompt.contains("global guidance"), "the provider value must win");
+    }
+
     @Test
     void systemPromptTeachesReadingTheTodoQueue() {
         final var cfg = config(Map.of(

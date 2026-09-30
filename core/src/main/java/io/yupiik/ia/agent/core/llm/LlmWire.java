@@ -158,6 +158,7 @@ final class LlmWire {
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
+        java.util.Objects.requireNonNull(cancelled, "cancelled");
         final var done = new CompletableFuture<Message>();
         final var text = new StringBuilder();
         final var toolCalls = new ArrayList<ToolCall>();
@@ -191,7 +192,7 @@ final class LlmWire {
             @Override
             public void onNext(final LlmStreamEvent event) {
                 synchronized (mergeLock) {
-                    if (cancelled != null && cancelled.getAsBoolean()) {
+                    if (cancelled.getAsBoolean()) {
                         subscription.cancel();
                         done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
                         return;
@@ -264,7 +265,7 @@ final class LlmWire {
                 try {
                     done.get(100, TimeUnit.MILLISECONDS);
                 } catch (final TimeoutException e) {
-                    if (cancelled != null && cancelled.getAsBoolean()) {
+                    if (cancelled.getAsBoolean()) {
                         done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
                     }
                     // keep waiting for the next frame (or the completion above)

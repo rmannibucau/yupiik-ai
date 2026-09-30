@@ -491,11 +491,16 @@ public class ConversationTranscript {
                 AgentEvent.SubagentCompleted(
                         String summary,
                         boolean success,
+                        boolean cancelled,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
             final var label = subagentName == null || subagentName.isBlank() ? subagentId : subagentName;
-            transcript.append("\n\n> subagent `").append(label).append("` ").append(success ? "completed" : "failed");
+            transcript
+                    .append("\n\n> subagent `")
+                    .append(label)
+                    .append("` ")
+                    .append(success ? "completed" : cancelled ? "cancelled" : "failed");
             if (summary != null && !summary.isBlank()) {
                 transcript.append(": ").append(firstLine(summary));
             }

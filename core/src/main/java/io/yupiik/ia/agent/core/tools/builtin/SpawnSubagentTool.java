@@ -136,7 +136,10 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 : List.of();
 
         // TODO: pass allowedTools to subagentRunner to filter tool registry
-        subagentRunner.runAsync(state, sessionStore, snapshotStore, parentTodos, context, () -> false);
+        // the parent's probe, so an interrupt (Ctrl+C) or a cancelled turn stops the child too:
+        // it would otherwise keep burning tokens on an abandoned task. SubagentRunner also ORs the
+        // registry latch, so an explicit cancel_subagent keeps working.
+        subagentRunner.runAsync(state, sessionStore, snapshotStore, parentTodos, context, context::isCancelled);
 
         final var displayName = state.name() != null ? state.name() : state.id();
         return ToolResult.ok("Sub-agent started: " + displayName + " (task: " + task + ")");

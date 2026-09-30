@@ -19,8 +19,10 @@ import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -43,8 +45,8 @@ import java.util.function.BooleanSupplier;
  * @param usage          the asking session's usage tracker (subagent usage merges into it)
  * @param contextView    the asking session's context view (status/compact requests route to that tab)
  * @param cancelled      cancellation probe of the running turn; a tool may poll it and stop its
- *                       work early (killing a subprocess for example). {@code null} when no turn
- *                       owns this context (standalone tool invocation).
+ *                       work early (killing a subprocess for example). Never {@code null}: a
+ *                       context no turn owns passes {@link Cancellations#NEVER}.
  */
 public record ToolContext(
         String sessionId,
@@ -58,13 +60,19 @@ public record ToolContext(
         ContextView contextView,
         BooleanSupplier cancelled) {
 
+    public ToolContext {
+        // a probe is always a real supplier: polling a null one used to surface as an
+        // "unexpected failure" NullPointerException in the middle of a turn
+        cancelled = Objects.requireNonNull(cancelled, "cancelled");
+    }
+
     /** A context without any session-scoped service, for standalone tool invocation. */
     public static ToolContext empty() {
-        return new ToolContext(null, null, null, null, null, null, null, null, null, null);
+        return new ToolContext(null, null, null, null, null, null, null, null, null, Cancellations.NEVER);
     }
 
     /** Cancellation probe, never {@code null}: standalone contexts report "not cancelled". */
     public boolean isCancelled() {
-        return cancelled != null && cancelled.getAsBoolean();
+        return cancelled.getAsBoolean();
     }
 }

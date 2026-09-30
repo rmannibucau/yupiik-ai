@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -237,7 +238,9 @@ public class CompactionCoordinator {
      */
     public CompactionResult compact(
             final List<Message> messages, final boolean force, final String focus, final int keepLastOverride) {
-        return compact(messages, force, focus, keepLastOverride, null);
+        // no interrupt flag on this path (a synchronous /compact, a tool directive): the
+        // cancellation probe is a real never-true supplier rather than null
+        return compact(messages, force, focus, keepLastOverride, Cancellations.NEVER);
     }
 
     public CompactionResult compact(
@@ -246,6 +249,7 @@ public class CompactionCoordinator {
             final String focus,
             final int keepLastOverride,
             final BooleanSupplier cancelled) {
+        java.util.Objects.requireNonNull(cancelled, "cancelled");
         final var p = configuration.pruning();
         final var keepFloor =
                 Math.max(2, keepLastOverride > 0 ? keepLastOverride : force ? p.keepRecent() / 2 : p.keepRecent());
@@ -255,7 +259,7 @@ public class CompactionCoordinator {
         if (boundary <= from) {
             return new CompactionResult(messages, Mode.NONE, "");
         }
-        if (cancelled != null && cancelled.getAsBoolean()) {
+        if (cancelled.getAsBoolean()) {
             return new CompactionResult(messages, Mode.NONE, "cancelled");
         }
         final var prior = previousSummary(messages);
@@ -540,7 +544,7 @@ public class CompactionCoordinator {
         final var summary = new StringBuilder();
         warnOnceWhenNoCompactModel();
         for (var c = 0; c < chunks.size(); c++) {
-            if (cancelled != null && cancelled.getAsBoolean()) {
+            if (cancelled.getAsBoolean()) {
                 return new Outcome("", label + " cancelled");
             }
             final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus);
@@ -576,7 +580,7 @@ public class CompactionCoordinator {
                     return new Outcome("", error);
                 }
                 if (attempt + 1 < retries()) {
-                    if (cancelled != null && cancelled.getAsBoolean()) {
+                    if (cancelled.getAsBoolean()) {
                         return new Outcome("", label + " cancelled");
                     }
                     sleep(backoff(attempt));

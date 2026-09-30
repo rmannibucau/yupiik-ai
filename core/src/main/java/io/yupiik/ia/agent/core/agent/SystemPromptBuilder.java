@@ -289,13 +289,24 @@ public class SystemPromptBuilder {
                 + prompt.substring(prompt.length() - maxChars);
     }
 
+    /** The global {@code yca.todos.guidance}, or {@code auto} when unset. */
+    private String globalGuidance() {
+        if (configuration == null || configuration.todos() == null) {
+            return "auto";
+        }
+        final var guidance = configuration.todos().guidance();
+        return guidance == null || guidance.isBlank() ? "auto" : guidance;
+    }
+
     private void appendTodoGuidance(final StringBuilder sb) {
         if (todoPromptResolver == null) {
             return;
         }
         final var provider = providerManager == null ? null : providerManager.current();
         final var baseUrl = provider == null ? null : provider.baseUrl();
-        final var mode = provider == null ? "auto" : provider.todoPrompt();
+        // a provider configuring its own guidance wins; the providers configuring none inherit the
+        // global yca.todos.guidance (blank there means the usual 'auto' family detection)
+        final var mode = provider != null && provider.todoPromptConfigured() ? provider.todoPrompt() : globalGuidance();
         final var guidance = todoPromptResolver.resolve(mode, baseUrl);
         if (!guidance.isBlank()) {
             sb.append("<todo-guidance>\n").append(guidance).append("\n</todo-guidance>\n");

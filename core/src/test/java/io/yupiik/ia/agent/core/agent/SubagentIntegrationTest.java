@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.agent;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -697,6 +698,17 @@ class SubagentIntegrationTest {
         // Sub-agent should have been cancelled
         final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
         assertFalse(collect.success(), collect.output());
+
+        // ... and reported as a cancellation, not as a failure: a cancelled child must never
+        // render as a red "Subagent failed" card in the parent transcript
+        final var completions = events.stream()
+                .filter(AgentEvent.SubagentCompleted.class::isInstance)
+                .map(AgentEvent.SubagentCompleted.class::cast)
+                .toList();
+        assertEquals(1, completions.size(), "one completion event expected, got: " + events);
+        final var completion = completions.getFirst();
+        assertTrue(completion.cancelled(), "a cancelled sub-agent must be flagged as cancelled: " + completion);
+        assertFalse(completion.success(), "a cancelled sub-agent did not succeed");
     }
 
     @Test

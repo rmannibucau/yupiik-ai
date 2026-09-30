@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
@@ -126,6 +127,65 @@ class TurnRunnerTest {
         assertEquals("build", agentSession.lastMode());
         assertNull(session.pendingMode(), "the pending mode must be consumed");
         assertFalse(session.busy());
+    }
+
+    @Test
+    void interruptedTurnLatchesTheCancelOfItsSubagents() {
+        // the UI resets its interrupt flag when the next turn starts, so the cancel is pushed to
+        // the sub-agents here, at turn end, while the flag still reads true
+        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+        final var latched = new AtomicReference<String>();
+        final var interrupted = new AtomicBoolean(false);
+        final var loop = new RecordingLoop();
+        loop.onRun = () -> interrupted.set(true);
+        final var runner = new TurnRunner(
+                noIndexing(), new VirtualThreadExecutor(), agentSessionService(), recordingRegistry(latched));
+
+        runner.submit(new TurnRunner.TurnRequest(
+                        loop,
+                        env,
+                        "s1",
+                        "coder",
+                        "hi",
+                        () -> List.of(new Message("user", null, "old", null, null, null)),
+                        interrupted::get))
+                .toCompletableFuture()
+                .join();
+
+        assertEquals("s1", latched.get(), "the turn's own sub-agents must be latched cancelled");
+    }
+
+    @Test
+    void completedTurnLeavesSubagentsRunning() {
+        final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
+        final var latched = new AtomicReference<String>();
+        final var interrupted = new AtomicBoolean(false);
+        final var runner = new TurnRunner(
+                noIndexing(), new VirtualThreadExecutor(), agentSessionService(), recordingRegistry(latched));
+
+        runner.submit(new TurnRunner.TurnRequest(
+                        new RecordingLoop(),
+                        env,
+                        "s1",
+                        "coder",
+                        "hi",
+                        () -> List.of(new Message("user", null, "old", null, null, null)),
+                        interrupted::get))
+                .toCompletableFuture()
+                .join();
+
+        assertNull(latched.get(), "a turn which was not interrupted must not cancel sub-agents");
+    }
+
+    /** Registry recording the sessions whose children a turn-end cancel asked to latch. */
+    private static SubagentRegistry recordingRegistry(final AtomicReference<String> latched) {
+        return new SubagentRegistry(null, null) {
+            @Override
+            public int cancelByParentSession(final String parentSessionId) {
+                latched.set(parentSessionId);
+                return 1;
+            }
+        };
     }
 
     /** Recording AgentSessionService: setMode records the argument instead of mutating real state. */

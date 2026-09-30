@@ -152,14 +152,20 @@ public class SubagentRunner {
                 emitter.emit(new AgentEvent.SubagentCompleted(
                         result.summary() != null ? result.summary() : result.error(),
                         result.success(),
+                        result.cancelled(),
                         state.parentSessionId(),
                         state.id(),
                         name));
             } catch (final Exception e) {
+                final var message = "Subagent failed: " + e.getMessage();
+                final var wasCancelled = state.isCancelled() || cancelled.getAsBoolean();
                 subagentRegistry.complete(
-                        state.id(), SubagentRegistry.SubagentResult.error("Subagent failed: " + e.getMessage(), ""));
+                        state.id(),
+                        wasCancelled
+                                ? SubagentRegistry.SubagentResult.cancelled("")
+                                : SubagentRegistry.SubagentResult.error(message, ""));
                 emitter.emit(new AgentEvent.SubagentCompleted(
-                        "Subagent failed: " + e.getMessage(), false, state.parentSessionId(), state.id(), name));
+                        message, false, wasCancelled, state.parentSessionId(), state.id(), name));
             }
         });
     }
@@ -257,6 +263,11 @@ public class SubagentRunner {
         // Merge subagent usage into parent's auxiliary counters
         subagentUsageTracker.mergeToParent();
 
+        // a null result on a cancelled turn is a cancellation, not a failure: the loop returns null
+        // when the interrupt unwound it, and the parent transcript must render it as such
+        if (result == null && (state.isCancelled() || cancelled.getAsBoolean())) {
+            return SubagentRegistry.SubagentResult.cancelled(fullConversation.toString());
+        }
         return result != null
                 ? SubagentRegistry.SubagentResult.success(result, fullConversation.toString(), artifacts)
                 : SubagentRegistry.SubagentResult.error(

@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.optimize.GenericOutputProcessor;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -38,7 +39,7 @@ class ToolExecutionServiceTest {
     private ToolContext context(final List<String> reports) {
         final var reporter = new StatusReporter();
         reporter.setSink(reports::add);
-        return new ToolContext("s1", null, null, null, null, null, reporter, null, null, null);
+        return new ToolContext("s1", null, null, null, null, null, reporter, null, null, Cancellations.NEVER);
     }
 
     private ToolExecutionService service() {

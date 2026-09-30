@@ -117,6 +117,25 @@ class SubagentRegistryTest {
     }
 
     @Test
+    void cancelByParentSessionCancelsOnlyThatSessionsChildren() {
+        // the latch behind "the parent turn was interrupted": children of that session stop,
+        // children of other tabs keep running
+        final var registry =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "4")), providerManager(5));
+        final var mine = registry.start("s1", "t1").orElseThrow();
+        final var mineToo = registry.start("s1", "t2").orElseThrow();
+        final var other = registry.start("s2", "t3").orElseThrow();
+
+        assertEquals(2, registry.cancelByParentSession("s1"));
+        assertTrue(registry.get(mine.id()).isEmpty(), "a cancelled child is removed");
+        assertTrue(registry.get(mineToo.id()).isEmpty(), "a cancelled child is removed");
+        assertTrue(registry.get(other.id()).isPresent(), "another session's child is untouched");
+        assertEquals(1, registry.cancelByParentSession("s2"));
+        assertEquals(0, registry.cancelByParentSession(null), "a blank session id cancels nothing");
+        assertEquals(0, registry.cancelByParentSession(""), "a blank session id cancels nothing");
+    }
+
+    @Test
     void getReturnsStateWhenActive() {
         final var registry = new SubagentRegistry(config(Map.of()), providerManager(4));
         final var state = registry.start("parent", "task").orElseThrow();

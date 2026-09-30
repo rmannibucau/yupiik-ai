@@ -203,6 +203,7 @@ class McpManagerTest {
                 base.compaction(),
                 base.pruning(),
                 base.memory(),
+                base.todos(),
                 base.optimize(),
                 base.permissions(),
                 new McpConfiguration(true, servers, 10),

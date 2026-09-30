@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.DialectLlmClient;
 import io.yupiik.llm.client.DialectNotSupportedException;
@@ -1331,7 +1332,7 @@ public class ChatClient implements AutoCloseable {
 
     public Message stream(final ChatCompletionRequest request, final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
-        return stream(request, onDelta, () -> false);
+        return stream(request, onDelta, Cancellations.NEVER);
     }
 
     public Message stream(

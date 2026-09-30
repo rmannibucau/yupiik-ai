@@ -118,6 +118,28 @@ public class SubagentRegistry {
     }
 
     /**
+     * Latches the cancel of every sub-agent spawned by a session: called when that session's turn
+     * ends on an interrupt. Pushing it here (rather than only letting children poll the parent
+     * probe) matters because the UI resets its interrupt flag when the next turn starts, so a child
+     * polling afterwards would never see the cancel.
+     *
+     * @return the number of sub-agents cancelled
+     */
+    public int cancelByParentSession(final String parentSessionId) {
+        if (parentSessionId == null || parentSessionId.isBlank()) {
+            return 0;
+        }
+        var cancelled = 0;
+        for (final var entry : List.copyOf(subagents.entrySet())) {
+            if (parentSessionId.equals(entry.getValue().parentSessionId())) {
+                cancel(entry.getKey());
+                cancelled++;
+            }
+        }
+        return cancelled;
+    }
+
+    /**
      * The per-subagent transcript capture for the given id, lazily created. This
      * instance folds the subagent-tagged events (they are dropped from the parent
      * transcript) so the TUI can render the child conversation through
@@ -276,6 +298,7 @@ public class SubagentRegistry {
         private final String fullConversation;
         private final List<String> artifacts;
         private final boolean success;
+        private final boolean cancelled;
         private final String error;
 
         private SubagentResult(
@@ -283,21 +306,32 @@ public class SubagentRegistry {
                 final String fullConversation,
                 final List<String> artifacts,
                 final boolean success,
+                final boolean cancelled,
                 final String error) {
             this.summary = summary;
             this.fullConversation = fullConversation;
             this.artifacts = artifacts;
             this.success = success;
+            this.cancelled = cancelled;
             this.error = error;
         }
 
         public static SubagentResult success(
                 final String summary, final String fullConversation, final List<String> artifacts) {
-            return new SubagentResult(summary, fullConversation, artifacts, true, null);
+            return new SubagentResult(summary, fullConversation, artifacts, true, false, null);
         }
 
         public static SubagentResult error(final String error, final String fullConversation) {
-            return new SubagentResult(null, fullConversation, List.of(), false, error);
+            return new SubagentResult(null, fullConversation, List.of(), false, false, error);
+        }
+
+        /**
+         * The sub-agent stopped on a cancel (parent interrupt or an explicit
+         * {@code cancel_subagent}) instead of failing: the parent transcript must render it as a
+         * cancellation, not as a red "Subagent failed" card.
+         */
+        public static SubagentResult cancelled(final String fullConversation) {
+            return new SubagentResult(null, fullConversation, List.of(), false, true, "Sub-agent cancelled");
         }
 
         public String summary() {
@@ -314,6 +348,10 @@ public class SubagentRegistry {
 
         public boolean success() {
             return success;
+        }
+
+        public boolean cancelled() {
+            return cancelled;
         }
 
         public String error() {

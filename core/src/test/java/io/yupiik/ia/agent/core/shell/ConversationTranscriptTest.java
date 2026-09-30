@@ -509,6 +509,19 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void captureTranscriptReportsACancelledSubagentAsCancelled() {
+        // a sub-agent stopped on an interrupt is a cancellation, not a failure: the parent
+        // transcript must not paint it as a red error
+        final var t = new ConversationTranscript(true);
+        t.startUserTurn("go");
+        t.onEvent(new AgentEvent.SubagentStarted("do the thing", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.SubagentCompleted("Sub-agent cancelled", false, true, "s1", "sub-1", "child"));
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("> subagent `child` cancelled"), md);
+        assertFalse(md.contains("failed"), md);
+    }
+
+    @Test
     void captureTranscriptFoldsSubagentStreams() {
         final var t = new ConversationTranscript(true);
         t.startUserTurn("go");

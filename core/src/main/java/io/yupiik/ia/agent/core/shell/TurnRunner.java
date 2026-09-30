@@ -18,11 +18,13 @@ package io.yupiik.ia.agent.core.shell;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.function.BooleanSupplier;
@@ -42,20 +44,31 @@ public class TurnRunner {
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
     private final VirtualThreadExecutor executor;
     private final AgentSessionService agentSessionService;
+    private final SubagentRegistry subagentRegistry;
+
+    public TurnRunner(
+            final MavenRepositoryKnowledgeService mavenKnowledgeService,
+            final VirtualThreadExecutor executor,
+            final AgentSessionService agentSessionService,
+            final SubagentRegistry subagentRegistry) {
+        this.mavenKnowledgeService = mavenKnowledgeService;
+        this.executor = executor;
+        this.agentSessionService = agentSessionService;
+        this.subagentRegistry = subagentRegistry;
+    }
 
     public TurnRunner(
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final VirtualThreadExecutor executor,
             final AgentSessionService agentSessionService) {
-        this.mavenKnowledgeService = mavenKnowledgeService;
-        this.executor = executor;
-        this.agentSessionService = agentSessionService;
+        this(mavenKnowledgeService, executor, agentSessionService, null);
     }
 
     protected TurnRunner() {
         this.mavenKnowledgeService = null;
         this.executor = null;
         this.agentSessionService = null;
+        this.subagentRegistry = null;
     }
 
     /**
@@ -110,6 +123,9 @@ public class TurnRunner {
     private CompletionStage<Boolean> execute(final TurnRequest request) {
         final var env = request.env();
         final var loop = request.loop();
+        // a turn always carries a real probe (a shell with no interrupt flag passes
+        // Cancellations.NEVER): asserted here, at the boundary between the shell and the loop
+        final var cancelled = Objects.requireNonNull(request.cancelled(), "cancelled");
         final var history = request.history().get();
         env.frontend().beginTurn();
         env.session().busy(true);
@@ -117,24 +133,25 @@ public class TurnRunner {
         executor.execute(() -> {
             try {
                 if (request.prompt() == null) {
-                    loop.resume(
-                            request.agentName(),
-                            request.sessionId(),
-                            history,
-                            request.cancelled(),
-                            request.queuedPrompt());
+                    loop.resume(request.agentName(), request.sessionId(), history, cancelled, request.queuedPrompt());
                 } else {
                     loop.run(
                             request.prompt(),
                             request.agentName(),
                             request.sessionId(),
                             history,
-                            request.cancelled(),
+                            cancelled,
                             request.queuedPrompt());
                 }
             } catch (final Throwable t) {
                 done.completeExceptionally(t);
             } finally {
+                // an interrupt also stops the sub-agents this session spawned: their probe is
+                // latched here, while the flag still reads true - a child polling after the next
+                // turn reset it would otherwise never see the cancel
+                if (subagentRegistry != null && cancelled.getAsBoolean()) {
+                    subagentRegistry.cancelByParentSession(request.sessionId());
+                }
                 // a mode switch queued while the turn was running is applied now, before the next turn
                 // can start: the current turn kept its own mode and permissions throughout
                 final var pending = env.session().pendingMode();

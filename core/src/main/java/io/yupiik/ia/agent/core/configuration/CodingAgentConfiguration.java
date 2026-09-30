@@ -66,6 +66,9 @@ public record CodingAgentConfiguration(
 
         @Property(documentation = "Auto memory settings.") MemoryConfiguration memory,
 
+        @Property(documentation = "Todo list settings (guidance injection and auto-continuation on unfinished work).")
+        TodoConfiguration todos,
+
         @Property(documentation = "Tool output optimization settings (rtk style token reduction).")
         OptimizeConfiguration optimize,
 

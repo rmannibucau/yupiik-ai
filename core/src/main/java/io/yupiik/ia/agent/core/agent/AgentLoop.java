@@ -60,6 +60,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
@@ -91,6 +92,29 @@ public class AgentLoop {
                     + " it will hit the limit a second time. Change strategy: break the remaining work into smaller"
                     + " steps, use tools to write files or produce results in chunks, keep prose minimal and summarize"
                     + " instead of dumping full content.";
+
+    /**
+     * Nudge sent when the turn ended with todos still open and {@code yca.todos.continueOnUnfinished}
+     * is enabled: weaker model families (qwen and friends) tend to end their turn after a couple of
+     * steps with a progress report, so the instruction is explicit about acting rather than narrating.
+     */
+    private static final String UNFINISHED_TODO_CONTINUE_PROMPT =
+            "You ended your turn while the todo list still has pending or in_progress items, so the work you were"
+                    + " asked to do is not finished. Do not summarize your progress and do not wait for a new"
+                    + " instruction: re-read the todo list in the <session-state> block and continue with the next"
+                    + " pending item right now, using tools. End your turn only when every todo is completed or"
+                    + " explicitly cancelled, or when you are genuinely blocked - in that case state exactly what"
+                    + " blocks you and stop.";
+
+    /**
+     * Variant used from the second continuation on: a model repeating itself keeps answering with the
+     * same progress report, so it is asked to state the blocker instead of trying again.
+     */
+    private static final String UNFINISHED_TODO_BLOCKED_PROMPT =
+            " You already continued several times without closing the remaining todos, so continuing the same way"
+                    + " is not working: do not repeat your progress report. Either complete the next pending todo"
+                    + " with a tool call right now, or explicitly tell the user what exactly blocks you (missing"
+                    + " information, a failing command, a decision to make) and stop.";
 
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
@@ -418,6 +442,11 @@ public class AgentLoop {
             final List<Message> history,
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt) {
+        // a probe is always a real supplier: every downstream use (loop iterations, compaction,
+        // streaming, the tool context) dereferences it. A caller holding no interrupt flag passes
+        // Cancellations.NEVER; a null is a caller bug and fails here, at the boundary, rather than
+        // mid-turn as an "unexpected failure" NPE.
+        Objects.requireNonNull(cancelled, "cancelled: a turn must provide a cancellation probe");
         currentSessionId = sessionId == null || sessionId.isBlank() ? this.sessionId : sessionId;
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
                 ? null
@@ -629,8 +658,12 @@ public class AgentLoop {
         var consecutiveCompactions = 0;
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
+        var unfinishedTodoContinues = 0;
         var toolsRanThisTurn = false;
         var toolDirectiveApplied = false;
+        // a prompt typed while the loop was running was injected in this turn: the model answered
+        // it, so its text-only end answers that message and must not be treated as "stopped early"
+        var userInjected = false;
         final var repeats = new ToolRepeats();
         final var staleReads = new StaleReads(readsFromHistory(messages));
 
@@ -652,6 +685,7 @@ public class AgentLoop {
                 contextView.publish(snapshot(messages, toolsTokens));
             }
             if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                userInjected = true;
                 continue;
             }
             // user/tool-requested context operations (manage_context, /compact while busy) are
@@ -769,6 +803,7 @@ public class AgentLoop {
             emitUsage(messages, toolsTokens);
 
             if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                userInjected = true;
                 continue;
             }
 
@@ -804,9 +839,20 @@ public class AgentLoop {
                     emitTurnMetrics(content, turnStartNanos);
                     return content;
                 }
-                final var todos = unfinishedTodosNotice(toolsRanThisTurn, reason);
-                if (todos != null) {
-                    emit(todos);
+                final var pending = unfinishedTodos(toolsRanThisTurn);
+                if (pending != null) {
+                    final var maxContinues = todoMaxContinues();
+                    if (canAutoContinueUnfinished(userInjected) && unfinishedTodoContinues < maxContinues) {
+                        unfinishedTodoContinues++;
+                        emit(notice(
+                                AgentEvent.Notice.Level.INFO,
+                                "model ended its turn (finish_reason=" + reason + ") with " + pending.pending() + '/'
+                                        + pending.total() + " todos still pending; continuing automatically ("
+                                        + unfinishedTodoContinues + '/' + maxContinues + ")."));
+                        messages.add(Message.user(unfinishedTodoContinuePrompt(unfinishedTodoContinues)));
+                        continue;
+                    }
+                    emit(unfinishedTodosNotice(pending, reason));
                 }
                 emitTurnMetrics(content, turnStartNanos);
                 return content;
@@ -1478,13 +1524,16 @@ public class AgentLoop {
 
     /**
      * A turn that ran tools but ends text-only while the todo list still has pending items looks
-     * finished to the loop while the work is not: surface it so the user can resume explicitly
-     * instead of silently losing the remaining steps. The notice is emitted with the normalized
-     * {@code finish_reason} so a rich frontend can tell a deliberate, clean stop (the model chose
-     * to end its turn despite pending work) apart from a truncation or an error, which are reported
-     * by separate events.
+     * finished to the loop while the work is not: the same predicate drives both the optional
+     * auto-continuation (see {@code yca.todos.continueOnUnfinished}) and this notice, so the user
+     * can still resume explicitly - or review why the model stopped - once auto-continuation is
+     * exhausted. The notice is emitted with the normalized {@code finish_reason} so a rich frontend
+     * can tell a deliberate, clean stop (the model chose to end its turn despite pending work) apart
+     * from a truncation or an error, which are reported by separate events.
+     *
+     * @return the pending/total counts, or {@code null} when the todo list does not hold this turn open.
      */
-    private AgentEvent.Notice unfinishedTodosNotice(final boolean toolsRanThisTurn, final String finishReason) {
+    private PendingTodos unfinishedTodos(final boolean toolsRanThisTurn) {
         if (!toolsRanThisTurn || todoStore == null) {
             return null;
         }
@@ -1499,18 +1548,56 @@ public class AgentLoop {
         }
         final var pending =
                 todos.stream().filter(t -> !"completed".equals(t.status())).count();
-        if (pending == 0) {
-            return null;
-        }
+        return pending == 0 ? null : new PendingTodos((int) pending, todos.size());
+    }
+
+    private AgentEvent.Notice unfinishedTodosNotice(final PendingTodos pending, final String finishReason) {
         return new AgentEvent.Notice(
                 AgentEvent.Notice.Level.WARN,
-                "model ended its turn (finish_reason=" + finishReason + ") with " + pending + '/' + todos.size()
+                "model ended its turn (finish_reason=" + finishReason + ") with " + pending.pending() + '/'
+                        + pending.total()
                         + " todos still pending - send 'continue' to resume, or review why it stopped",
                 finishReason,
                 currentSessionId,
                 subagentId,
                 subagentName);
     }
+
+    /** Continuations allowed per turn ({@code yca.todos.maxContinues}), zero when not configured. */
+    private int todoMaxContinues() {
+        return configuration.todos() == null ? 0 : configuration.todos().maxContinues();
+    }
+
+    /**
+     * Whether a text-only end with pending todos may be turned into a continuation. Opt-in through
+     * {@code yca.todos.continueOnUnfinished} and deliberately conservative, because the model ending
+     * its turn is legitimate in three cases: a sub-agent reporting back to its parent (its todo list
+     * is its own), a turn carrying a prompt the user typed while the loop was running (the model just
+     * answered that message) and a positive continuation budget that must be honored as a stop.
+     */
+    private boolean canAutoContinueUnfinished(final boolean userInjected) {
+        return !userInjected
+                && subagentId == null
+                && configuration.todos() != null
+                && configuration.todos().continueOnUnfinished()
+                && todoMaxContinues() > 0;
+    }
+
+    /**
+     * The instruction sent to the model to continue instead of ending the turn, from the second
+     * continuation on enriched with a strategy-change clause: a model that already repeated itself
+     * keeps answering with the same progress report, so it is asked for the blocker instead.
+     */
+    private String unfinishedTodoContinuePrompt(final int continuations) {
+        final var configured = configuration.todos() == null
+                ? null
+                : configuration.todos().resolveContinuePrompt(UNFINISHED_TODO_CONTINUE_PROMPT);
+        final var base = configured == null || configured.isBlank() ? UNFINISHED_TODO_CONTINUE_PROMPT : configured;
+        return continuations >= 2 ? base + UNFINISHED_TODO_BLOCKED_PROMPT : base;
+    }
+
+    /** How many todos of the list are not completed yet, and how many the list holds. */
+    private record PendingTodos(int pending, int total) {}
 
     /**
      * Outcome of a single tool call, decoupled from message/session mutation so calls can run
@@ -1564,7 +1651,7 @@ public class AgentLoop {
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
-            if (cancelled != null && cancelled.getAsBoolean()) {
+            if (cancelled.getAsBoolean()) {
                 // a cancel pressed mid-batch: abort the remaining calls (the running tool stops
                 // cooperatively through its own probe); the loop sees the flag on its next
                 // iteration and unwinds the turn

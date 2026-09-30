@@ -22,6 +22,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoItem$FusionJsonCodec;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -54,7 +55,7 @@ class WriteTodoToolTest {
 
     /** The tool is stateless: the session's todo list and permissions arrive through the context. */
     private ToolContext context(final TodoStore todos, final PermissionService permissions) {
-        return new ToolContext("s1", null, null, permissions, null, todos, null, null, null, null);
+        return new ToolContext("s1", null, null, permissions, null, todos, null, null, null, Cancellations.NEVER);
     }
 
     @Test

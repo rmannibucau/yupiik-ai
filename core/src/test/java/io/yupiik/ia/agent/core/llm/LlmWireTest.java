@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.util.List;
 import java.util.concurrent.Flow;
@@ -58,7 +59,7 @@ class LlmWireTest {
                     }
                 },
                 ignored -> {},
-                null);
+                Cancellations.NEVER);
 
         final var calls = message.toolCalls();
         assertNotNull(calls);
@@ -117,7 +118,7 @@ class LlmWireTest {
                     }
                 },
                 ignored -> {},
-                null);
+                Cancellations.NEVER);
 
         final var calls = message.toolCalls();
         assertNotNull(calls);
@@ -167,7 +168,7 @@ class LlmWireTest {
                     }
                 },
                 ignored -> {},
-                null);
+                Cancellations.NEVER);
 
         final var calls = message.toolCalls();
         assertNotNull(calls);
@@ -219,7 +220,7 @@ class LlmWireTest {
                     }
                 },
                 ignored -> {},
-                null);
+                Cancellations.NEVER);
 
         final var calls = new java.util.TreeMap<Integer, ToolCall>();
         final var received = message.toolCalls();
@@ -252,7 +253,7 @@ class LlmWireTest {
                 new LlmStreamEvent.ToolCallDelta(0, "call_a", "grep", "{\"query\":\"foo\",\"max\":10}"),
                 new LlmStreamEvent.ToolCallDelta(0, "call_b", "read_file", "{\"path\":\"pom.xml\"}"));
 
-        final var message = LlmWire.pump(publisher(events), ignored -> {}, null);
+        final var message = LlmWire.pump(publisher(events), ignored -> {}, Cancellations.NEVER);
 
         final var calls = message.toolCalls();
         assertNotNull(calls);
@@ -277,7 +278,7 @@ class LlmWireTest {
                 new LlmStreamEvent.ToolCallDelta(0, "b", "read_file", "{\"path\":"),
                 new LlmStreamEvent.ToolCallDelta(0, null, null, "\"y\"}"));
 
-        final var message = LlmWire.pump(publisher(events), ignored -> {}, null);
+        final var message = LlmWire.pump(publisher(events), ignored -> {}, Cancellations.NEVER);
 
         final var calls = message.toolCalls();
         assertNotNull(calls);

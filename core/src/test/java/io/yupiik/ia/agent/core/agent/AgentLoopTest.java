@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -40,6 +41,7 @@ import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
@@ -469,6 +471,255 @@ class AgentLoopTest {
         } finally {
             permissionServiceOverride = null;
         }
+    }
+
+    /**
+     * A model stopping mid-implementation with pending todos is exactly what
+     * {@code yca.todos.continueOnUnfinished} exists for: instead of returning, the loop re-asks the
+     * model to act, and the turn only ends once the list is closed (here by the tool that completes
+     * the todos).
+     */
+    @Test
+    void unfinishedTodosAutoContinueReAsksTheModelUntilTheListIsClosed() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore = mutableTodoStore(
+                    new TodoItem("done step", "completed"),
+                    new TodoItem("running step", "in_progress"),
+                    new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("made progress", "stop", false),
+                    toolCallReply("t2", "close_todos"),
+                    new ScriptedReply("everything is done", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("everything is done", result);
+            assertEquals(4, requests.size(), "the loop re-asked the model once after the mid-turn stop");
+            assertTrue(
+                    requests.get(2).stream()
+                            .anyMatch(m -> "user".equals(m.role())
+                                    && String.valueOf(m.content())
+                                            .contains("todo list still has pending or in_progress items")),
+                    "the continuation must be sent as an explicit instruction, not a silent retry: " + requests.get(2));
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertEquals(1, notices.size(), "no warning notice: the turn ended on a closed list: " + notices);
+            assertEquals(AgentEvent.Notice.Level.INFO, notices.getFirst().level());
+            assertEquals(
+                    "model ended its turn (finish_reason=stop) with 2/3 todos still pending; continuing automatically (1/25).",
+                    notices.getFirst().message());
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    /** The continuation budget is bounded per turn: once exhausted, the warning notice is emitted again. */
+    @Test
+    void unfinishedTodosAutoContinueStopsAtTheConfiguredCap() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true",
+                        "yca.todos.maxContinues", "2"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore = mutableTodoStore(
+                    new TodoItem("running step", "in_progress"), new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("progress 1", "stop", false),
+                    toolCallReply("t2", "noop"),
+                    new ScriptedReply("progress 2", "stop", false),
+                    toolCallReply("t3", "noop"),
+                    new ScriptedReply("still not done", "stop", false)));
+            final var result =
+                    loop(chatClient(replies, requests), todoStore, config).run("do it", null, "s1", null, () -> false);
+
+            assertEquals("still not done", result, "the turn ends once the continuation budget is spent");
+            assertEquals(6, requests.size(), "2 continuations, each re-asking the model once");
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertEquals(3, notices.size(), notices.toString());
+            assertEquals(
+                    "model ended its turn (finish_reason=stop) with 2/2 todos still pending; continuing automatically (1/2).",
+                    notices.get(0).message());
+            assertEquals(
+                    "model ended its turn (finish_reason=stop) with 2/2 todos still pending; continuing automatically (2/2).",
+                    notices.get(1).message());
+            assertEquals(AgentEvent.Notice.Level.WARN, notices.get(2).level());
+            assertEquals(
+                    "model ended its turn (finish_reason=stop) with 2/2 todos still pending - send 'continue' to resume, or review why it stopped",
+                    notices.get(2).message());
+            assertTrue(
+                    requests.get(4).stream()
+                            .anyMatch(m -> "user".equals(m.role())
+                                    && String.valueOf(m.content()).contains("You already continued several times")),
+                    "from the second continuation on the instruction must change strategy: " + requests.get(4));
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
+     * A prompt typed while the loop was running wins over the auto-continuation: the model just
+     * answered that message, so its text-only end is not the "stopped mid-implementation" case.
+     */
+    @Test
+    void unfinishedTodosAutoContinueIsSkippedAfterAQueuedPromptWasInjected() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore = mutableTodoStore(new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(
+                    List.of(toolCallReply("t1", "noop"), new ScriptedReply("here is the answer", "stop", false)));
+            final var queued = new AtomicBoolean(true);
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run(
+                            "do it",
+                            null,
+                            "s1",
+                            null,
+                            () -> false,
+                            () -> queued.compareAndSet(true, false) ? "and what does the test cover?" : null);
+
+            assertEquals("here is the answer", result);
+            assertEquals(2, requests.size(), "the injected prompt is absorbed by the same turn: " + requests);
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertEquals(1, notices.size(), "only the warning notice, no continuation: " + notices);
+            assertEquals(AgentEvent.Notice.Level.WARN, notices.getFirst().level());
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    private static ScriptedReply toolCallReply(final String callId, final String tool) {
+        return new ScriptedReply(null, "tool_calls", false) {
+            @Override
+            Message toMessage() {
+                return new Message(
+                        "assistant",
+                        null,
+                        null,
+                        List.of(new ToolCall(callId, "function", new ToolCall.FunctionCall(tool, "{}"), 0)),
+                        null,
+                        null);
+            }
+        };
+    }
+
+    private static MutableTodoStore mutableTodoStore(final TodoItem... initial) {
+        return new MutableTodoStore(List.of(initial));
+    }
+
+    private static final class MutableTodoStore extends TodoStore {
+        private List<TodoItem> todos;
+
+        private MutableTodoStore(final List<TodoItem> todos) {
+            this.todos = List.copyOf(todos);
+        }
+
+        @Override
+        public List<TodoItem> all() {
+            return todos;
+        }
+
+        @Override
+        public synchronized List<TodoItem> replace(final List<TodoItem> items) {
+            todos = List.copyOf(items);
+            return all();
+        }
+    }
+
+    /** {@code noop} changes nothing, {@code close_todos} completes the whole list like a done write_todo. */
+    private static ToolRegistry todoToolsRegistry(final TodoStore todoStore) {
+        return new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                if (!"noop".equals(name) && !"close_todos".equals(name)) {
+                    return null;
+                }
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return name;
+                    }
+
+                    @Override
+                    public String description() {
+                        return "test tool";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.AGENT;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        if ("close_todos".equals(name)) {
+                            todoStore.replace(List.of(new TodoItem("done step", "completed")));
+                        }
+                        return ToolResult.ok("done");
+                    }
+                };
+            }
+        };
     }
 
     @Test
@@ -1613,6 +1864,138 @@ class AgentLoopTest {
         assertEquals(1, secondExecutions.get(), "the second turn's tool must run exactly once");
     }
 
+    /**
+     * A turn always carries a real cancellation probe: a caller with no interrupt flag passes
+     * {@link io.yupiik.ia.agent.core.runtime.Cancellations#NEVER}, and a {@code null} is a caller
+     * bug which must fail at the boundary - named, and not swallowed into the mid-turn
+     * {@code unexpected failure: java.lang.NullPointerException ... this.cancelled is null}.
+     */
+    @Test
+    void nullCancellationProbeIsRejectedAtTheBoundary() {
+        final var executions = new AtomicInteger();
+        final var seenContext = new AtomicReference<ToolContext>();
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo"));
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                if (!"ping".equals(name)) {
+                    throw new IllegalArgumentException(name);
+                }
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "ping";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "ping";
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.AGENT;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        throw new UnsupportedOperationException();
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                        executions.incrementAndGet();
+                        seenContext.set(context);
+                        return ToolResult.ok("pong");
+                    }
+                };
+            }
+        };
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                // the probe handed to the client must be usable too, not null
+                assertNotNull(cancelled, "the LLM client must receive a usable cancellation probe");
+                final var toolAlreadyRan = request.messages().stream().anyMatch(m -> "tool".equals(m.role()));
+                return toolAlreadyRan
+                        ? new Message("assistant", "all done", null, null, null, null)
+                        : new Message(
+                                "assistant",
+                                null,
+                                null,
+                                List.of(new ToolCall("1", "function", new ToolCall.FunctionCall("ping", "{}"), 0)),
+                                null,
+                                null);
+            }
+        };
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                config,
+                new ContextManager() {
+                    @Override
+                    public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+
+                    @Override
+                    public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+                },
+                noopStore(),
+                null,
+                registry,
+                new ToolExecutionService() {
+                    @Override
+                    public ToolResult execute(
+                            final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
+                        return tool.execute(args, context);
+                    }
+                },
+                new VirtualThreadExecutor());
+
+        final var answer = loop.run("hello", null, "s1", null, Cancellations.NEVER);
+
+        assertEquals("all done", answer, "the turn must run to its end");
+        assertEquals(1, executions.get(), "the tool must run exactly once");
+        assertNotNull(seenContext.get(), "the tool must receive a context");
+        assertFalse(seenContext.get().isCancelled(), "a never-cancelled probe reports false");
+        final var errors =
+                events.stream().filter(AgentEvent.Error.class::isInstance).toList();
+        assertTrue(errors.isEmpty(), "no error event, got: " + errors);
+
+        // a null probe fails fast at the boundary, naming the offending argument: the turn never
+        // starts, so nothing is rendered as an "unexpected failure"
+        events.clear();
+        final var thrown = assertThrows(NullPointerException.class, () -> loop.run("hello", null, "s1", null, null));
+        assertTrue(
+                thrown.getMessage().contains("cancelled"),
+                "the failure must name the probe, got: " + thrown.getMessage());
+        assertTrue(
+                events.stream().noneMatch(AgentEvent.Error.class::isInstance),
+                "a rejected probe must not be reported as a turn failure: " + events);
+    }
+
     @Test
     void resumeRerunsTheLoopWithoutAddingAnyUserMessage() {
         final var requests = new ArrayList<List<Message>>();
@@ -1908,26 +2291,30 @@ class AgentLoopTest {
     }
 
     private AgentLoop loop(final ChatClient client, final TodoStore todoStore, final CodingAgentConfiguration config) {
-        return loop(
-                client,
-                todoStore,
-                config,
-                new ContextManager() {
-                    @Override
-                    public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
-                        return false;
-                    }
+        return loop(client, todoStore, config, noContextManager(), noSessionStore(), null);
+    }
 
-                    @Override
-                    public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
-                        return false;
-                    }
-                },
-                new SessionStore() {
-                    @Override
-                    public void append(final String id, final SessionEntry entry) {}
-                },
-                null);
+    /** A context manager that never prunes nor compacts, for tests that do not exercise context work. */
+    private static ContextManager noContextManager() {
+        return new ContextManager() {
+            @Override
+            public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+
+            @Override
+            public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                return false;
+            }
+        };
+    }
+
+    /** A session store dropping every persisted entry, for tests that do not assert on the transcript. */
+    private static SessionStore noSessionStore() {
+        return new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {}
+        };
     }
 
     private AgentLoop loop(

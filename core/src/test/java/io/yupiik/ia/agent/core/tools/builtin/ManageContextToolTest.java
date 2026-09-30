@@ -25,6 +25,7 @@ import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
@@ -39,7 +40,7 @@ class ManageContextToolTest {
     private final JsonMapper mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
 
     private ToolContext context(final ContextView view) {
-        return new ToolContext("s1", null, null, null, null, null, null, tracker(), view, null);
+        return new ToolContext("s1", null, null, null, null, null, null, tracker(), view, Cancellations.NEVER);
     }
 
     @Test

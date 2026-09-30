@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayList;
@@ -56,7 +57,7 @@ class AskUserToolTest {
     }
 
     private ToolContext context() {
-        return new ToolContext("s1", null, null, null, feedback, null, null, null, null, null);
+        return new ToolContext("s1", null, null, null, feedback, null, null, null, null, Cancellations.NEVER);
     }
 
     @AfterEach

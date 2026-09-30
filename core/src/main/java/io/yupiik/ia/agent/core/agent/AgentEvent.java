@@ -185,11 +185,31 @@ public sealed interface AgentEvent {
             implements AgentEvent {}
 
     /**
-     * A sub-agent finished (success or failure). The parent transcript records a
+     * A sub-agent finished (success, failure or cancellation). The parent transcript records a
      * marker; the detailed conversation stays reachable through {@code /subagents}.
+     *
+     * @param cancelled the sub-agent stopped on a cancel (parent interrupt or an explicit
+     *                  {@code cancel_subagent}), not on a failure: reported separately so a
+     *                  cancelled child never renders as a red error card
      */
-    record SubagentCompleted(String summary, boolean success, String sessionId, String subagentId, String subagentName)
-            implements AgentEvent {}
+    record SubagentCompleted(
+            String summary,
+            boolean success,
+            boolean cancelled,
+            String sessionId,
+            String subagentId,
+            String subagentName)
+            implements AgentEvent {
+
+        public SubagentCompleted(
+                final String summary,
+                final boolean success,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName) {
+            this(summary, success, false, sessionId, subagentId, subagentName);
+        }
+    }
 
     /**
      * A queued prompt was injected into the running turn before it completed, so
