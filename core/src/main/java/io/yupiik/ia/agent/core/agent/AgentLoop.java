@@ -143,14 +143,6 @@ public class AgentLoop {
      */
     private volatile Consumer<PauseEvent> pauseListener;
 
-    /**
-     * Cancellation probe of the current turn. Set at the start of {@link #doRun} and cleared at
-     * turn end. It is not a loop field so concurrent subagent loops (each with their own instance)
-     * never share it; it only serves {@link #toolContext()} which is read strictly on the turn
-     * thread of this instance.
-     */
-    private volatile BooleanSupplier cancelled;
-
     // Per-turn metrics tracking (reset at start of each doRun)
     private int turnLlmCalls;
     private long turnThinkingMs;
@@ -445,14 +437,13 @@ public class AgentLoop {
         // surface provider throttles and retry backoffs: without this the UI only shows a
         // spinner while the resilience layer can silently wait up to minutes between attempts.
         // the wait is also accumulated so the throughput metric ignores it.
-        pauseListener = pause -> {
+        this.pauseListener = pause -> {
             turnLlmPausedMs += Math.max(0L, pause.durationMs());
             emit(
                     pause.kind() == PauseEvent.Pause.THROTTLE
                             ? status(pause.message())
                             : notice(AgentEvent.Notice.Level.INFO, pause.message()));
         };
-        this.cancelled = cancelled;
 
         try {
             return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt, memoryVersionAtStart());
@@ -474,7 +465,6 @@ public class AgentLoop {
             emit(error("unexpected failure: " + e));
             return null;
         } finally {
-            this.cancelled = null;
             pauseListener = null;
             statusReporter.setSink(null);
             memoryExtractor.maybeExtract(messages);
@@ -515,7 +505,7 @@ public class AgentLoop {
      * question or writing a todo always touches the state of the tab that
      * started the turn, never another concurrent session's.
      */
-    private ToolContext toolContext() {
+    private ToolContext toolContext(final BooleanSupplier cancelled) {
         return new ToolContext(
                 currentSessionId,
                 subagentId,
@@ -827,7 +817,7 @@ public class AgentLoop {
             if (cancelled.getAsBoolean()) {
                 break;
             }
-            executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens);
+            executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens, cancelled);
             toolsRanThisTurn = true;
             if (!toolDirectiveApplied && contextView != null) {
                 final var directive = contextView.poll();
@@ -1569,11 +1559,12 @@ public class AgentLoop {
             final List<ToolCall> calls,
             final ToolRepeats repeats,
             final StaleReads staleReads,
-            final int toolsTokens)
+            final int toolsTokens,
+            final BooleanSupplier cancelled)
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
-            if (cancelled.getAsBoolean()) {
+            if (cancelled != null && cancelled.getAsBoolean()) {
                 // a cancel pressed mid-batch: abort the remaining calls (the running tool stops
                 // cooperatively through its own probe); the loop sees the flag on its next
                 // iteration and unwinds the turn
@@ -1597,7 +1588,7 @@ public class AgentLoop {
                             emit(toolFinished(repeated.name(), repeated.output(), false));
                             futures.add(executor.submit(() -> repeated));
                         } else {
-                            futures.add(executor.submit(() -> runTool(call)));
+                            futures.add(executor.submit(() -> runTool(call, cancelled)));
                         }
                     }
                     for (final var future : futures) {
@@ -1608,26 +1599,26 @@ public class AgentLoop {
                     turnToolWallMs += batchWallMs;
                 } else {
                     for (var j = i; j < end; j++) {
-                        appendToolResult(sessionId, messages, runGuarded(calls.get(j), repeats), staleReads);
+                        appendToolResult(sessionId, messages, runGuarded(calls.get(j), repeats, cancelled), staleReads);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                 }
                 i = end;
             } else {
-                appendToolResult(sessionId, messages, runGuarded(calls.get(i), repeats), staleReads);
+                appendToolResult(sessionId, messages, runGuarded(calls.get(i), repeats, cancelled), staleReads);
                 checkRoundBudget(sessionId, messages, toolsTokens);
                 i++;
             }
         }
     }
 
-    private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats) {
+    private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats, final BooleanSupplier cancelled) {
         final var repeated = repeats.rejectIfRepeated(call);
         if (repeated != null) {
             emit(toolFinished(repeated.name(), repeated.output(), false));
             return repeated;
         }
-        return runTool(call);
+        return runTool(call, cancelled);
     }
 
     /** File tools whose results participate in stale-read invalidation. */
@@ -1825,7 +1816,7 @@ public class AgentLoop {
     }
 
     /** Runs one tool call (lookup, arguments parsing, permission gate, execution) without touching the conversation. */
-    private ToolOutcome runTool(final ToolCall call) {
+    private ToolOutcome runTool(final ToolCall call, final BooleanSupplier cancelled) {
         final var name = call.function() == null || call.function().name() == null
                 ? ""
                 : call.function().name();
@@ -1857,7 +1848,7 @@ public class AgentLoop {
             return new ToolOutcome(call.id(), name, denial, false, false);
         }
         final var toolStartNanos = System.nanoTime();
-        final ToolResult result = toolExecutionService.execute(tool, args, toolContext());
+        final ToolResult result = toolExecutionService.execute(tool, args, toolContext(cancelled));
         final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
         emit(toolFinished(name, result.output(), result.success()));
         return new ToolOutcome(

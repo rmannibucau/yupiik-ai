@@ -34,4 +34,13 @@ public record CompactionConfiguration(
                 defaultValue = "0",
                 documentation =
                         "Token budget of the verbatim recent tail kept by compaction (0 = auto: 25% of the usable window clamped to [2000, 15000]). The tail is extended or reduced at whole conversation turns and never splits an assistant tool call from its results.")
-        int tailBudgetTokens) {}
+        int tailBudgetTokens,
+
+        @Property(
+                defaultValue = "800",
+                documentation =
+                        "Character cap (head and tail) applied to tool call arguments when the compaction summarizer "
+                                + "serializes assistant history for summarization (0 disables the cap and keeps "
+                                + "arguments verbatim). Large arguments (bash scripts, big JSON payloads) dominate "
+                                + "the summarizer input and multiply the number of rolling-summary LLM calls.")
+        int toolArgumentsCapChars) {}

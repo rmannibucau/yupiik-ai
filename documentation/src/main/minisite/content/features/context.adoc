@@ -63,6 +63,12 @@ tool results, and `yca.pruning.keepRecent` acts as a floor on the tail size.
 The most recent user message is guaranteed to survive: it is either inside the
 tail or replayed verbatim after the summary.
 
+Tool call arguments are capped before the summarizer input is built
+(`yca.compaction.toolArgumentsCapChars`, default `800`, `0` = keep verbatim):
+a single bash or JSON argument blob can otherwise dominate the input and
+multiply the rolling-summary LLM calls for no digest value. The exact payload
+stays available in the verbatim tail for recent calls.
+
 If the summarizer fails, compaction degrades to a deterministic local
 truncation (`yca.pruning.toolOutputMaxChars` caps old message content) and
 reports the fallback honestly instead of a fake success.

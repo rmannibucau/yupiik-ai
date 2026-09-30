@@ -445,7 +445,7 @@ public class CompactionCoordinator {
     }
 
     /** Renders a message for the summarizer input, capping tool outputs at {@link #TOOL_OUTPUT_CAP_CHARS}. */
-    private static String renderForSummary(final Message m) {
+    private String renderForSummary(final Message m) {
         final var content = str(m.content());
         final var truncated = content.length() > TOOL_OUTPUT_CAP_CHARS
                 ? content.substring(0, TOOL_OUTPUT_CAP_CHARS) + " [truncated]"
@@ -462,13 +462,28 @@ public class CompactionCoordinator {
                     sb.append("\n[Assistant tool call]: ")
                             .append(tc.function().name())
                             .append('(')
-                            .append(tc.function().arguments())
+                            .append(capArguments(tc.function().arguments()))
                             .append(')');
                 }
             }
             return sb.toString();
         }
         return '[' + m.role() + "] " + truncated;
+    }
+
+    /**
+     * Head+tail splice of a tool call argument blob, honoring the configured cap
+     * ({@code yca.compaction.toolArgumentsCapChars}, 0 = no cap). The full arguments are never
+     * serialized into the summarizer input: they dominate it (a single bash command can carry tens
+     * of thousands of characters) and would multiply the rolling-summary LLM calls for no digest
+     * value - the exact payload stays available in the verbatim tail for recent calls.
+     */
+    private String capArguments(final String arguments) {
+        final var cap = configuration.compaction().toolArgumentsCapChars();
+        if (cap <= 0 || arguments == null || arguments.isBlank() || arguments.length() <= cap) {
+            return arguments;
+        }
+        return splice(arguments, cap);
     }
 
     /** Flattens old compact messages into chunks, each bounded by {@link #MAX_SUMMARY_INPUT_CHARS}. */

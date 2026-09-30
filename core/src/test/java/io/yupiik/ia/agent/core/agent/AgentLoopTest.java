@@ -67,6 +67,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -1404,6 +1405,209 @@ class AgentLoopTest {
                 sent.get(2).others() != null
                         && Boolean.TRUE.equals(sent.get(2).others().get("volatileTail")),
                 "the session-state message must be flagged volatileTail for cache breakpoint dialects");
+    }
+
+    /**
+     * Regression for the "this.cancelled is null" NPE: two turns running on the same
+     * {@code AgentLoop} instance must not share a mutable cancellation field (the probe is now a
+     * per-call parameter threaded down to the tools). The first turn blocks inside a tool while a
+     * second {@code run} starts on the same instance; after the first unwinds, the second completes
+     * its own tool without a NPE and with its own probe.
+     */
+    @Test
+    void concurrentTurnsOnSameLoopKeepIndependentCancellation() throws Exception {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo"));
+        final var started = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
+        final var chatCalls = new AtomicInteger();
+        final var blockingExecutions = new AtomicInteger();
+        final var secondExecutions = new AtomicInteger();
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                return switch (name) {
+                    case "blocking" ->
+                        new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "blocking";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "blocks";
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.AGENT;
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                throw new UnsupportedOperationException();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                                blockingExecutions.incrementAndGet();
+                                started.countDown();
+                                try {
+                                    release.await();
+                                } catch (final InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                                return ToolResult.ok("blocking done");
+                            }
+                        };
+                    case "simple" ->
+                        new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "simple";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "simple";
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.AGENT;
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                throw new UnsupportedOperationException();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                                secondExecutions.incrementAndGet();
+                                return ToolResult.ok("simple done");
+                            }
+                        };
+                    default -> throw new IllegalArgumentException(name);
+                };
+            }
+        };
+        // turn 1 asks for "blocking", turn 2 asks for "simple" (see scripted replies below)
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                chatCalls.incrementAndGet();
+                final var userMessage = request.messages().get(1) == null
+                        ? ""
+                        : String.valueOf(request.messages().get(1).content());
+                final var firstTurn = userMessage.contains("first");
+                // the first LLM call of a turn carries the tool call; later calls (after the tool
+                // result lands) return a plain answer so the turn ends
+                final var toolCall = firstTurn ? "blocking" : "simple";
+                if (request.messages().stream()
+                        .noneMatch(m -> "tool".equals(m.role())
+                                && String.valueOf(m.content()).contains(toolCall + " done"))) {
+                    return new Message(
+                            "assistant",
+                            null,
+                            null,
+                            List.of(new ToolCall(
+                                    firstTurn ? "1" : "2", "function", new ToolCall.FunctionCall(toolCall, "{}"), 0)),
+                            null,
+                            null);
+                }
+                return new Message("assistant", "done", null, null, null, null);
+            }
+        };
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                config,
+                new ContextManager() {
+                    @Override
+                    public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+
+                    @Override
+                    public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+                },
+                new SessionStore() {
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {}
+                },
+                null,
+                registry,
+                new ToolExecutionService(
+                        config,
+                        new Emitter() {
+                            @Override
+                            public <T> void emit(final T event) {}
+                        },
+                        List.of()) {
+                    @Override
+                    public ToolResult execute(
+                            final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
+                        return tool.execute(args, context);
+                    }
+                },
+                new VirtualThreadExecutor(),
+                null);
+
+        final var first = Thread.ofVirtual().start(() -> {
+            try {
+                loop.run("first", null, "s1", null, () -> false);
+            } catch (final Throwable t) {
+                throw new RuntimeException(t);
+            }
+        });
+        assertTrue(
+                started.await(5, TimeUnit.SECONDS),
+                "the first turn must reach its blocking tool; chatCalls=" + chatCalls);
+
+        final var second = Thread.ofVirtual().start(() -> {
+            try {
+                loop.run("second", null, "s1", null, () -> false);
+            } catch (final Throwable t) {
+                throw new RuntimeException(t);
+            }
+        });
+        // let the second turn start its own tool while the first is still blocked
+        Thread.sleep(100);
+        release.countDown();
+        first.join(10_000);
+        second.join(10_000);
+
+        assertFalse(first.isAlive(), "the first turn must complete");
+        assertFalse(second.isAlive(), "the second turn must complete");
+        assertEquals(1, blockingExecutions.get(), "the blocking tool must run exactly once");
+        assertEquals(1, secondExecutions.get(), "the second turn's tool must run exactly once");
     }
 
     @Test

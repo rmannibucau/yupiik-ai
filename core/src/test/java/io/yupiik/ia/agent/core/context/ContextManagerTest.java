@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
@@ -218,6 +219,58 @@ class ContextManagerTest {
         final var first = result.messages().get(0);
         assertEquals("system", first.role());
         assertEquals("system", first.content());
+    }
+
+    @Test
+    void summarizerInputCapsToolCallArgumentsGlobally() throws Exception {
+        final var digest = "summary: capped";
+        final var cfg = config(
+                2,
+                3_000,
+                Map.of(
+                        "yca.compaction.tailBudgetTokens", "1",
+                        "yca.compaction.toolArgumentsCapChars", "30"));
+        final var captured = new ArrayList<ChatCompletionRequest>();
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) {
+                captured.add(request);
+                return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null,
+                        "s1"));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 5; i++) {
+            messages.add(Message.user("step " + i));
+        }
+        final var bigArguments = "{\"command\":\"" + "x".repeat(2_000) + "\"}";
+        messages.add(Message.assistant(
+                "calling",
+                List.of(new ToolCall("call_1", "function", new ToolCall.FunctionCall("bash", bigArguments), 0))));
+        messages.add(Message.tool("call_1", "ok", false));
+        messages.add(Message.user("step 5 " + "y".repeat(4_000))); // lourd tail pour déclencher le compact
+
+        final var result = manager.compact(messages);
+        assertEquals(CompactionResult.Mode.SUMMARY, result.mode());
+        assertFalse(captured.isEmpty(), "the summarizer must have been called");
+        final var rendered = captured.get(0).messages().stream()
+                .filter(m -> "user".equals(m.role()))
+                .map(m -> String.valueOf(m.content()))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(rendered.contains("elided"), "long tool call arguments must be spliced for the summarizer");
+        assertFalse(rendered.contains("x".repeat(2_000)), "the full argument blob must not reach the summarizer");
+        assertTrue(rendered.contains("[Assistant tool call]: bash("), "tool name must stay visible");
     }
 
     @Test
