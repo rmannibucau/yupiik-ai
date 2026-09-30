@@ -647,7 +647,10 @@ class AgentLoopTest {
                         List.of(
                                 messages.get(0),
                                 Message.user(
-                                        "<compacted-context>\ndigest\n</compacted-context>\n\nContinue from this summary."),
+                                        "<compacted-context>\ndigest\n</compacted-context>\n\n"
+                                                + "When a compacted context is provided, treat it as historical state.\n"
+                                                + "Do not reload, reconstruct, or repeat actions already described in it.\n"
+                                                + "Continue from the state it represents; only call tools when needed for the current task."),
                                 messages.get(2)),
                         CompactionResult.Mode.SUMMARY,
                         "");

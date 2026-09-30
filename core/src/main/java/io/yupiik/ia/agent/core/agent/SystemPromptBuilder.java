@@ -116,6 +116,8 @@ public class SystemPromptBuilder {
         sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
         sb.append(
                 "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative and a request may end without one when nothing changed. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
+        sb.append(
+                "- The conversation may carry a <compacted-context> digest of earlier history: treat it as authoritative historical state; never reload, reconstruct or repeat actions already described in it - only call tools that serve the current task.\n");
         sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
         sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
         sb.append(

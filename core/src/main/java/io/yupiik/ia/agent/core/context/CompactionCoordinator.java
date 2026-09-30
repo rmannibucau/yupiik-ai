@@ -80,6 +80,18 @@ public class CompactionCoordinator {
 
     private static final String COMPACTED_MARKER = "<compacted-context>";
 
+    /**
+     * Guidance attached right after the digest so the consuming model treats the compacted context
+     * as historical state instead of re-running or re-verifying what is already described in it
+     * (small models in particular tend to loop on the same thoughts after a compaction without it).
+     * Deliberately placed after {@code </compacted-context>} so {@link #previousSummary} parsing and
+     * every digest detector (all keyed off the wrapper prefix) stay unaffected.
+     */
+    private static final String DIGEST_GUIDANCE = """
+            When a compacted context is provided, treat it as historical state.
+            Do not reload, reconstruct, or repeat actions already described in it.
+            Continue from the state it represents; only call tools when needed for the current task.""";
+
     /** Required output structure of the summarizer, kept stable so repeated compactions can merge cleanly. */
     private static final String SUMMARY_TEMPLATE = """
             Output this markdown structure exactly, keeping every section even when empty:
@@ -261,8 +273,8 @@ public class CompactionCoordinator {
             if (system != null) {
                 out.add(system);
             }
-            out.add(Message.user(COMPACTED_MARKER + "\n" + outcome.summary() + "\n</compacted-context>\n\n"
-                    + "Continue from this summary."));
+            out.add(Message.user(
+                    COMPACTED_MARKER + "\n" + outcome.summary() + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
             out.addAll(messages.subList(boundary, messages.size()));
             final var lastUser = lastUserMessageIndex(messages);
             if (lastUser >= 0 && lastUser < boundary) {

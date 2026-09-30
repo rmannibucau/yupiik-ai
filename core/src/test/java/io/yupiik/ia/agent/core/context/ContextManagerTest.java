@@ -125,6 +125,11 @@ class ContextManagerTest {
                 forced.messages().stream()
                         .anyMatch(m -> m.content() instanceof String s && s.contains("<compacted-context>")),
                 "forced compaction must produce a summary");
+        assertTrue(
+                forced.messages().stream()
+                        .anyMatch(m -> m.content() instanceof String s
+                                && s.contains("When a compacted context is provided, treat it as historical state.")),
+                "the digest must carry the historical-state guidance");
     }
 
     @Test
@@ -554,8 +559,10 @@ class ContextManagerTest {
         final var manager = manager(cfg, chatRecording("updated digest", captured));
         final var messages = new ArrayList<Message>();
         messages.add(Message.system("system"));
-        messages.add(
-                Message.user("<compacted-context>\nold summary\n</compacted-context>\n\nContinue from this summary."));
+        messages.add(Message.user("<compacted-context>\nold summary\n</compacted-context>\n\n"
+                + "When a compacted context is provided, treat it as historical state.\n"
+                + "Do not reload, reconstruct, or repeat actions already described in it.\n"
+                + "Continue from the state it represents; only call tools when needed for the current task."));
         messages.add(Message.user("new work " + "q".repeat(2_000)));
         messages.add(Message.assistant("done", null));
         messages.add(Message.user("more work " + "q".repeat(2_000)));

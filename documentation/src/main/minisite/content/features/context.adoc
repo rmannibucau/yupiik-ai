@@ -73,6 +73,14 @@ If the summarizer fails, compaction degrades to a deterministic local
 truncation (`yca.pruning.toolOutputMaxChars` caps old message content) and
 reports the fallback honestly instead of a fake success.
 
+The digest is delivered to the model as a user message wrapped in
+`<compacted-context>` followed by explicit guidance: it must treat the
+compacted context as _historical state_ and must not reload, reconstruct or
+repeat actions already described in it - only call tools that serve the
+current task. The system prompt carries the same rule as a durable static
+constraint, so sessions compacted before this guidance existed are covered
+too.
+
 == Persistence
 
 Every in-loop pruning or compaction is written back to the session store

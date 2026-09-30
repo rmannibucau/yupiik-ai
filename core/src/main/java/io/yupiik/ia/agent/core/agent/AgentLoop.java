@@ -487,7 +487,7 @@ public class AgentLoop {
             if (content.contains("<compacted-context>")
                     || content.contains("<pruned-context>")
                     || content.startsWith("... output truncated")
-                    || content.startsWith("Continue from this summary.")) {
+                    || content.startsWith("When a compacted context is provided")) {
                 continue;
             }
             return content;
