@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -66,7 +67,7 @@ class WriteTodoToolTest {
     }
 
     @Test
-    void planModeRejectsNewlyCompletedTodo() {
+    void planModeNormalizesNewlyCompletedTodo() {
         final var store = todoStore();
         final var tool = new WriteTodoTool();
         final var result = tool.execute(
@@ -76,20 +77,28 @@ class WriteTodoToolTest {
                                 Map.of("content", "step 1", "status", "completed"),
                                 Map.of("content", "step 2", "status", "pending"))),
                 context(store, permissions(AgentMode.PLAN)));
-        assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains("must be 'pending'"), result.output());
-        assertTrue(store.all().isEmpty(), "rejected update must not touch the store");
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().contains("[ ] step 1"),
+                "completed new item must be normalized to pending: " + store.render());
+        assertTrue(store.render().contains("[ ] step 2"), store.render());
+        assertTrue(
+                result.output().contains("normalized to pending"),
+                "the tool must report the normalization: " + result.output());
     }
 
     @Test
-    void planModeRejectsNewlyInProgressTodo() {
+    void planModeNormalizesNewlyInProgressTodo() {
         final var store = todoStore();
         final var tool = new WriteTodoTool();
         final var result = tool.execute(
                 Map.of("todos", List.of(Map.of("content", "step 1", "status", "in_progress"))),
                 context(store, permissions(AgentMode.PLAN)));
-        assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains("PLAN mode"), result.output());
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().contains("[ ] step 1"),
+                "in_progress new item must be normalized to pending: " + store.render());
+        assertTrue(result.output().contains("normalized to pending"), result.output());
     }
 
     @Test
@@ -146,7 +155,7 @@ class WriteTodoToolTest {
     }
 
     @Test
-    void planModeRejectsNewlyCancelledTodo() {
+    void planModeKeepsNewlyCancelledTodoAsScopeDecision() {
         final var store = todoStore();
         final var tool = new WriteTodoTool();
         final var result = tool.execute(
@@ -156,9 +165,11 @@ class WriteTodoToolTest {
                                 Map.of("content", "step 1", "status", "cancelled"),
                                 Map.of("content", "step 2", "status", "pending"))),
                 context(store, permissions(AgentMode.PLAN)));
-        assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains("must be 'pending'"), result.output());
-        assertTrue(store.all().isEmpty(), "rejected update must not touch the store");
+        assertTrue(result.success(), result.output());
+        assertTrue(
+                store.render().contains("[-] step 1"),
+                "cancelled new item is kept as a scope decision, not normalized: " + store.render());
+        assertTrue(store.render().contains("[ ] step 2"), store.render());
     }
 
     @Test
@@ -184,6 +195,43 @@ class WriteTodoToolTest {
         final var result = tool.execute(Map.of("todos", "not an array"), context(store, permissions(AgentMode.BUILD)));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("got String"), result.output());
+    }
+
+    @Test
+    void descriptionCarriesPlanModeRuleAndAtomicRejection() {
+        final var tool = new WriteTodoTool();
+        final var description = tool.description();
+        assertTrue(
+                description.contains("PLAN mode (the default)"),
+                "the description must lead with the plan-mode contract (default mode): " + description);
+        assertTrue(
+                description.contains("new items must stay 'pending'"),
+                "the description must state the all-pending plan rule: " + description);
+        assertTrue(
+                description.contains("nothing is written"),
+                "the description must state the atomic-rejection wording: " + description);
+        assertTrue(
+                description.contains("one or several may be in_progress at once"),
+                "the description must allow parallel in_progress in build mode: " + description);
+        assertFalse(
+                description.contains("exactly one in_progress"),
+                "the description must not carry the relaxed single-in_progress rule anymore: " + description);
+    }
+
+    @Test
+    void schemaStatusIsAnEnumWithPlanHint() {
+        final var tool = new WriteTodoTool();
+        @SuppressWarnings("unchecked")
+        final var todos = (Map<String, Object>) tool.schema().get("properties");
+        @SuppressWarnings("unchecked")
+        final var items = (Map<String, Object>) ((Map<String, Object>) todos.get("todos")).get("items");
+        @SuppressWarnings("unchecked")
+        final var status = (Map<String, Object>) ((Map<String, Object>) items.get("properties")).get("status");
+        assertEquals("string", status.get("type"));
+        assertEquals(List.of("pending", "in_progress", "completed", "cancelled"), status.get("enum"));
+        assertTrue(
+                String.valueOf(status.get("description")).contains("PLAN mode new items"),
+                "the status schema must carry the plan-mode hint");
     }
 
     @Test

@@ -38,4 +38,24 @@ public interface PromptHandlebarsHelper {
      * @return the helper output (may be null to render nothing).
      */
     Object apply(HelperContext context);
+
+    /**
+     * The {@code systemProperty} helper as a lambda: reads a system property from 1 positional argument
+     * ({@code {{systemProperty "user.name"}}}, null when the key is absent) or 2 arguments (key + default,
+     * {@code {{systemProperty "user.name" "You"}}}). Registered alongside the bean helpers so it is available
+     * to every template compiled with this SPI (CLI prompt line and speaker labels).
+     */
+    static java.util.function.Function<HelperContext, Object> systemProperty() {
+        return context -> {
+            if (context.args().size() < 1 || context.args().size() > 2) {
+                throw new IllegalArgumentException("systemProperty expects 1 or 2 arguments (key [default])");
+            }
+            final var key = String.valueOf(context.args().get(0));
+            final var value = System.getProperty(key);
+            if (value != null) {
+                return value;
+            }
+            return context.args().size() == 2 ? String.valueOf(context.args().get(1)) : null;
+        };
+    }
 }

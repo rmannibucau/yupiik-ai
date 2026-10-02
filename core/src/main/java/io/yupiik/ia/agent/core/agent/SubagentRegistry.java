@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.agent;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
 import java.util.Map;
@@ -36,16 +37,26 @@ public class SubagentRegistry {
     private final AtomicInteger activeCount = new AtomicInteger(0);
     private volatile Semaphore semaphore;
     private volatile int maxConcurrent;
+    private final SpeakerLabels speakerLabels;
 
     public SubagentRegistry(final CodingAgentConfiguration configuration, final ProviderManager providerManager) {
+        this(configuration, providerManager, null);
+    }
+
+    public SubagentRegistry(
+            final CodingAgentConfiguration configuration,
+            final ProviderManager providerManager,
+            final SpeakerLabels speakerLabels) {
         this.configuration = configuration;
         this.providerManager = providerManager;
+        this.speakerLabels = speakerLabels;
         updateSemaphore();
     }
 
     protected SubagentRegistry() {
         this.configuration = null;
         this.providerManager = null;
+        this.speakerLabels = null;
     }
 
     public void updateSemaphore() {
@@ -146,7 +157,26 @@ public class SubagentRegistry {
      * {@code /subagents <id>} without mixing two model voices in one pane.
      */
     public ConversationTranscript transcriptOf(final String subagentId) {
-        return subagentTranscripts.computeIfAbsent(subagentId, _ -> new ConversationTranscript(true));
+        return subagentTranscripts.computeIfAbsent(subagentId, id -> {
+            final var t = new ConversationTranscript(true);
+            if (speakerLabels != null) {
+                final var current = providerManager == null ? null : providerManager.current();
+                final var ctx = new SpeakerLabels.Ctx(
+                        current == null || current.model() == null ? null : current.model(),
+                        providerManager == null ? null : providerManager.currentProviderId(),
+                        id,
+                        null,
+                        null,
+                        null);
+                t.setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
+                t.setLabelResolver((identity, user) -> {
+                    final var ictx = new SpeakerLabels.Ctx(
+                            identity.model(), identity.provider(), identity.agent(), null, null, null);
+                    return user ? speakerLabels.userLabel(ictx) : speakerLabels.assistantLabel(ictx);
+                });
+            }
+            return t;
+        });
     }
 
     /** Drops the transient subagent captures that already completed; bounded by the LRU cleanup. */

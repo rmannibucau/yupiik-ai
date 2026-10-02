@@ -243,6 +243,7 @@ class McpManagerTest {
                 base.resumeAliases(),
                 base.slashcommands(),
                 base.prompt(),
+                base.labels(),
                 base.logging());
     }
 

@@ -54,6 +54,7 @@ import io.yupiik.ia.agent.core.shell.SessionLifecycle;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
@@ -174,12 +175,15 @@ class TuiCommandRenderTest {
         awaitText("ready");
 
         // a labelled turn opens with a role-colored label and a rule running to the panel
-        // edge; this is what keeps the "You"/"Assistant" boundary readable while scrolling
+        // edge; this is what keeps the user/assistant boundary readable while scrolling.
+        // the default user label is the OS user name ("You" when unavailable)
+        final var userName = System.getProperty("user.name");
+        final var userLabel = userName == null || userName.isBlank() ? "You" : userName;
         assertTrue(
-                anyRowContaining("\u258c You \u2500"),
+                anyRowContaining("\u258c " + userLabel + " \u2500"),
                 "the user turn header and rule should be rendered:\n" + backend.text());
         assertTrue(
-                anyRowContaining("\u258c Assistant \u2500"),
+                anyRowContaining("\u258c default::test-model \u2500"),
                 "the assistant turn header and rule should be rendered:\n" + backend.text());
 
         quit();
@@ -787,6 +791,7 @@ class TuiCommandRenderTest {
                 new SessionLifecycle(sessionStore),
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
+                new SpeakerLabels(configuration, chatClient, new ProviderManager(configuration, formatMapper)),
                 mcpManager,
                 new VirtualThreadExecutor(),
                 providerManager,

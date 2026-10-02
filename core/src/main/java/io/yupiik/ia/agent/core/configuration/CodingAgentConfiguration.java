@@ -140,6 +140,11 @@ public record CodingAgentConfiguration(
 
         @Property(
                 documentation =
+                        "Speaker labels rendered in the terminal transcript headers (CLI, TUI, run). UI only: the LLM conversation always keeps its hardcoded user/assistant roles regardless of these templates.")
+        LabelsConfiguration labels,
+
+        @Property(
+                documentation =
                         "java.util.logging settings: root level, record decoration and whether the runtime takes over System.out/System.err so nothing can corrupt the interactive prompt.")
         LoggingConfiguration logging) {
 

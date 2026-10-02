@@ -107,17 +107,21 @@ public class TuiTranscriptModel extends ConversationTranscript {
 
     /**
      * Splits plain transcript markdown into speaker turns. A line holding nothing but a
-     * {@code **You**} or {@code **Assistant**} heading opens a new segment ({@code user}
-     * tells them apart) and marks it {@code labelled}. The heading is the boundary on its
-     * own: {@link io.yupiik.ia.agent.core.shell.ConversationTranscript} writes the user
-     * marker after a {@code ---} thematic break but the assistant marker without one, so
-     * requiring the break would leave every assistant answer glued to the user turn that
-     * preceded it. A {@code ---} introducing a heading (blank padding included) is swallowed
-     * with the boundary; standalone breaks stay inside the current segment. Content before
-     * the first heading is assistant and is <em>not</em> labelled. Code fences never reach
-     * this method (extracted before rendering).
+     * {@code **<userLabel>**} or {@code **<assistantLabel>**} heading opens a new segment
+     * ({@code user} tells them apart) and marks it {@code labelled}. The heading is the
+     * boundary on its own: {@link io.yupiik.ia.agent.core.shell.ConversationTranscript}
+     * writes the user marker after a {@code ---} thematic break but the assistant marker
+     * without one, so requiring the break would leave every assistant answer glued to the
+     * user turn that preceded it. A {@code ---} introducing a heading (blank padding
+     * included) is swallowed with the boundary; standalone breaks stay inside the current
+     * segment. Content before the first heading is assistant and is <em>not</em> labelled.
+     * Code fences never reach this method (extracted before rendering).
+     *
+     * @param userMarker       the user marker line ({@code **label**}), default {@code **You**}
+     * @param assistantMarker  the assistant marker line ({@code **label**}), default {@code **Assistant**}
      */
-    public static java.util.List<TurnSegment> splitTurns(final String text) {
+    public static java.util.List<TurnSegment> splitTurns(
+            final String text, final String userMarker, final String assistantMarker) {
         final var lines = text.split("\n", -1);
         final var out = new java.util.ArrayList<TurnSegment>();
         var start = 0;
@@ -127,7 +131,9 @@ public class TuiTranscriptModel extends ConversationTranscript {
         var labelled = false;
         for (var i = 0; i < lines.length; i++) {
             final var speaker = lines[i].strip();
-            if (!"**You**".equals(speaker) && !"**Assistant**".equals(speaker)) {
+            final var isUser = userMarker != null && userMarker.equals(speaker);
+            final var isAssistant = assistantMarker != null && assistantMarker.equals(speaker);
+            if (!isUser && !isAssistant) {
                 continue;
             }
             // the thematic break introducing this heading is chrome for the same boundary,
@@ -145,7 +151,7 @@ public class TuiTranscriptModel extends ConversationTranscript {
                 out.add(new TurnSegment(
                         String.join("\n", java.util.Arrays.asList(lines).subList(start, from)), user, labelled));
             }
-            user = "**You**".equals(speaker);
+            user = isUser;
             start = i;
             labelled = true;
         }
@@ -154,6 +160,11 @@ public class TuiTranscriptModel extends ConversationTranscript {
                     String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)), user, labelled));
         }
         return out;
+    }
+
+    /** {@link #splitTurns(String, String, String)} with the historic default markers. */
+    public static java.util.List<TurnSegment> splitTurns(final String text) {
+        return splitTurns(text, "**You**", "**Assistant**");
     }
 
     public int anchorRow() {

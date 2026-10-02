@@ -70,6 +70,73 @@ public class ConversationTranscript {
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
     /**
+     * Speaker labels rendered in the transcript headers (defaults match the historic
+     * {@code **You**}/{@code **Assistant**} markers). Set through
+     * {@link #setLabels(String, String)} (UI only: the LLM conversation keeps its
+     * hardcoded {@code user}/{@code assistant} roles, these only change the rendered
+     * markdown of this transcript, from the next written block on).
+     */
+    private volatile String userLabel = "You";
+
+    private volatile String assistantLabel = "Assistant";
+
+    /**
+     * Sets the speaker labels used for the next blocks written to this transcript.
+     * Already-rendered content keeps the labels it was written with (history is
+     * never rewritten); {@link #replay} re-renders persisted sessions with the
+     * current labels. Blank values restore the defaults.
+     */
+    public synchronized void setLabels(final String user, final String assistant) {
+        this.userLabel = user == null || user.isBlank() ? "You" : user;
+        this.assistantLabel = assistant == null || assistant.isBlank() ? "Assistant" : assistant;
+        // markers are only embedded on the next write: no contentVersion bump (rendered
+        // headers label history as it was written, never retrofitting the new name)
+    }
+
+    /** The current user speaker label (default "You"). */
+    public String userLabel() {
+        return userLabel;
+    }
+
+    /** The current assistant speaker label (default "Assistant"). */
+    public String assistantLabel() {
+        return assistantLabel;
+    }
+
+    /** The markdown marker opening a user block: {@code **<label>**}. */
+    public String userMarker() {
+        return "**" + userLabel + "**";
+    }
+
+    /** The markdown marker opening an assistant block: {@code **<label>**}. */
+    public String assistantMarker() {
+        return "**" + assistantLabel + "**";
+    }
+
+    /**
+     * Optional resolver re-rendering a stored {@link Message.Identity} (provider/model/agent)
+     * into speaker labels during {@link #replay}. Lets template changes and session resumes
+     * rebuild each block's label from what actually produced it; when unset (or when a message
+     * carries no identity) replay falls back to the current {@link #setLabels} values.
+     */
+    private volatile java.util.function.BiFunction<Message.Identity, Boolean, String> labelResolver;
+
+    public void setLabelResolver(final java.util.function.BiFunction<Message.Identity, Boolean, String> resolver) {
+        this.labelResolver = resolver;
+    }
+
+    private String markerFor(final Message message, final boolean user) {
+        final var identity = Message.identityOf(message);
+        if (identity != null && labelResolver != null) {
+            final var label = labelResolver.apply(identity, user);
+            if (label != null && !label.isBlank()) {
+                return "**" + label + "**";
+            }
+        }
+        return user ? userMarker() : assistantMarker();
+    }
+
+    /**
      * Monotonic counter bumped on every mutation that can change what
      * {@link #markdown(String, String)} renders (the transcript, the pending
      * answer tail, the thinking buffer or the running tools). {@code markdown()}
@@ -391,7 +458,10 @@ public class ConversationTranscript {
             flushPending();
             thinking.setLength(0);
             inlineThink.reset();
-            transcript.append("\n\n---\n\n**You**\n\n").append(text).append('\n');
+            transcript
+                    .append("\n\n---\n\n" + userMarker() + "\n\n")
+                    .append(text)
+                    .append('\n');
             status = "queued prompt integrated";
             touch();
         } else if (event
@@ -436,7 +506,7 @@ public class ConversationTranscript {
             // so the label is only re-emitted when the turn never streamed text
             if (!answerHeaderWritten) {
                 answerHeaderWritten = true;
-                transcript.append("\n\n**Assistant**\n\n");
+                transcript.append("\n\n" + assistantMarker() + "\n\n");
             } else {
                 transcript.append("\n\n");
             }
@@ -568,7 +638,7 @@ public class ConversationTranscript {
         transcript.append("\n\n");
         if (!answerHeaderWritten) {
             answerHeaderWritten = true;
-            transcript.append("**Assistant**\n\n");
+            transcript.append(assistantMarker() + "\n\n");
         }
         transcript.append(text).append('\n');
         touch();
@@ -591,7 +661,7 @@ public class ConversationTranscript {
             sb.append("\n\n");
             if (!answerHeaderWritten) {
                 // same turn-scoped label as flushPending(): a turn streams one answer
-                sb.append("**Assistant**\n\n");
+                sb.append(assistantMarker() + "\n\n");
             }
             sb.append(pending);
         }
@@ -760,7 +830,7 @@ public class ConversationTranscript {
             switch (message.role()) {
                 case "user" ->
                     transcript
-                            .append("\n\n---\n\n**You**\n\n")
+                            .append("\n\n---\n\n" + markerFor(message, true) + "\n\n")
                             .append(String.valueOf(message.content()))
                             .append('\n');
                 case "assistant" -> {
@@ -778,7 +848,7 @@ public class ConversationTranscript {
                                 .append('\n');
                     }
                     transcript
-                            .append("\n\n---\n\n**Assistant**\n\n")
+                            .append("\n\n---\n\n" + markerFor(message, false) + "\n\n")
                             .append(parts.visible())
                             .append('\n');
                 }
@@ -808,7 +878,7 @@ public class ConversationTranscript {
     }
 
     public synchronized void startUserTurn(final String text) {
-        transcript.append("\n\n---\n\n**You**\n\n").append(text).append('\n');
+        transcript.append("\n\n---\n\n" + userMarker() + "\n\n").append(text).append('\n');
         pending.setLength(0);
         thinking.setLength(0);
         inlineThink.reset();

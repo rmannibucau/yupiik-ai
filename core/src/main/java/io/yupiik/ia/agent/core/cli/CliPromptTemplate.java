@@ -57,6 +57,7 @@ public class CliPromptTemplate {
             final JsonMapper mapper) {
         this.helpers = List.copyOf(helpers);
         final Map<String, Function<HelperContext, Object>> functions = new LinkedHashMap<>();
+        functions.put("systemProperty", PromptHandlebarsHelper.systemProperty());
         for (final var helper : this.helpers) {
             functions.put(helper.name(), helper::apply);
         }

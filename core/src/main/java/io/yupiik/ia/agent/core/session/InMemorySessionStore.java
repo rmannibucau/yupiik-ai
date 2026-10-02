@@ -64,7 +64,7 @@ public class InMemorySessionStore implements SessionStore {
         }
         return entries.stream()
                 .filter(e -> e.role() != null)
-                .map(e -> new Message(e.role(), e.content(), e.name(), e.toolCalls(), e.toolCallId(), null))
+                .map(e -> new Message(e.role(), e.content(), e.name(), e.toolCalls(), e.toolCallId(), e.others()))
                 .toList();
     }
 
@@ -77,7 +77,8 @@ public class InMemorySessionStore implements SessionStore {
                         m.content(),
                         m.toolCalls(),
                         m.toolCallId(),
-                        m.name()))
+                        m.name(),
+                        m.others()))
                 .toList();
         sessions.put(id, new ArrayList<>(entries));
     }

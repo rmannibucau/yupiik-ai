@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -43,10 +44,19 @@ public class WriteTodoTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Replace the current todo list (content + status: pending, in_progress, completed or cancelled). "
-                + "Keep exactly one in_progress item. Keep completed and cancelled items in the list: they are the "
-                + "progress history, only drop one when the task itself disappears. In plan mode every new item must be "
-                + "'pending': the plan is not implemented yet.";
+        return "Create and maintain the session's structured todo list (content + status). "
+                + "Use it for multi-step work (3+ distinct steps): record the plan, track progress and keep the user "
+                + "informed. Skip it for purely informational requests or single trivial steps.\n"
+                + "PLAN mode (the default): the list IS the plan - new items must stay 'pending'. New items sent as "
+                + "'in_progress' or 'completed' are written back as 'pending' automatically (the update still "
+                + "succeeds, nothing is lost); new 'cancelled' items are kept as-is (scope decisions). Only "
+                + "structurally invalid payloads (empty list, unknown status) are rejected wholesale: nothing is "
+                + "written.\n"
+                + "BUILD mode: mark items 'in_progress' as you start them - one or several may be in_progress at "
+                + "once when worked in parallel - 'completed' only once actually done (including verification), "
+                + "'cancelled' for dropped steps. Do not batch up several todos before marking them completed. "
+                + "Completed and cancelled items stay in the list: they are the progress history, only drop one "
+                + "when the task itself disappears.";
     }
 
     @Override
@@ -64,7 +74,16 @@ public class WriteTodoTool implements EmbeddedTool {
                                 Schemas.object(
                                         Map.of(
                                                 "content", Schemas.str("Task description."),
-                                                "status", Schemas.str("pending, in_progress, completed or cancelled.")),
+                                                "status",
+                                                        Schemas.strEnum(
+                                                                "One of pending, in_progress, completed, cancelled. In PLAN mode new items "
+                                                                        + "must be 'pending': in_progress/completed are written back as pending "
+                                                                        + "automatically, cancelled is kept (scope decision), and items already "
+                                                                        + "advanced in a previous build session keep their status.",
+                                                                "pending",
+                                                                "in_progress",
+                                                                "completed",
+                                                                "cancelled")),
                                         "content",
                                         "status"))),
                 "todos");
@@ -101,10 +120,13 @@ public class WriteTodoTool implements EmbeddedTool {
             }
         }
         if (perms != null && perms.mode() == AgentMode.PLAN) {
-            final var error = validatePlanStatuses(store, todos);
-            if (error != null) {
-                return ToolResult.error(error);
-            }
+            final var normalized = normalizePlanStatuses(store, todos);
+            store.replace(todos);
+            final var note = normalized.isEmpty()
+                    ? ""
+                    : " (plan mode: '" + String.join("', '", normalized)
+                            + "' normalized to pending - statuses advance in build mode only)";
+            return ToolResult.ok("Todo list updated" + note + ":\n" + store.render());
         }
         store.replace(todos);
         return ToolResult.ok("Todo list updated:\n" + store.render());
@@ -113,22 +135,29 @@ public class WriteTodoTool implements EmbeddedTool {
     /**
      * In PLAN mode the todo list is the plan, not a progress report: items describe future work and must stay
      * 'pending'. Items already advanced in a previous build-mode session keep their status so a plan/build
-     * mode switch never loses real progress.
+     * mode switch never loses real progress. New items sent as 'in_progress' or 'completed' are normalized back
+     * to 'pending' (the update still succeeds); new 'cancelled' items are kept as-is because they encode a scope
+     * decision ("we will not do X") that is meaningful in a plan. Only structurally invalid payloads are rejected.
+     *
+     * @return the contents of the items that were normalized to 'pending' (empty when nothing changed).
      */
-    private String validatePlanStatuses(final TodoStore store, final List<TodoItem> todos) {
+    private List<String> normalizePlanStatuses(final TodoStore store, final List<TodoItem> todos) {
         final var alreadyAdvanced = store.all().stream()
                 .map(t -> t.status() == null || "pending".equals(t.status()) ? null : t.content() + '|' + t.status())
                 .filter(Objects::nonNull)
                 .collect(Collectors.toSet());
-        for (final var t : todos) {
-            if ("pending".equals(t.status()) || alreadyAdvanced.contains(t.content() + '|' + t.status())) {
+        final var normalized = new ArrayList<String>();
+        for (int i = 0; i < todos.size(); i++) {
+            final var t = todos.get(i);
+            if ("pending".equals(t.status())
+                    || "cancelled".equals(t.status())
+                    || alreadyAdvanced.contains(t.content() + '|' + t.status())) {
                 continue;
             }
-            return "In PLAN mode todos are the plan and every item must be 'pending': '" + t.content() + "' cannot be '"
-                    + t.status()
-                    + "' before implementation. Switch to build mode (/mode build or --yca-run-mode build) to execute and complete steps.";
+            normalized.add(t.content());
+            todos.set(i, new TodoItem(t.content(), "pending"));
         }
-        return null;
+        return normalized;
     }
 
     private static String typeName(final Object o) {

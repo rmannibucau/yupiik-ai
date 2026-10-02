@@ -252,7 +252,7 @@ public class FileSessionStore implements SessionStore {
                         toolCallId = candidates.poll();
                     }
                 }
-                out.add(new Message(e.role(), e.content(), e.name(), e.toolCalls(), toolCallId, null));
+                out.add(new Message(e.role(), e.content(), e.name(), e.toolCalls(), toolCallId, e.others()));
             }
             return out;
         } catch (final IOException e) {
@@ -265,8 +265,8 @@ public class FileSessionStore implements SessionStore {
         synchronized (fileLock) {
             final var sb = new StringBuilder();
             for (final var m : messages) {
-                sb.append(mapper.toString(
-                                SessionEntry.of(now(), m.role(), m.content(), m.toolCalls(), m.toolCallId(), m.name())))
+                sb.append(mapper.toString(SessionEntry.of(
+                                now(), m.role(), m.content(), m.toolCalls(), m.toolCallId(), m.name(), m.others())))
                         .append('\n');
             }
             final var target = path(id);

@@ -79,6 +79,7 @@ import io.yupiik.ia.agent.core.shell.ShellIO;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
@@ -145,6 +146,7 @@ public class TuiCommand implements Runnable {
     private final SessionLifecycle sessionLifecycle;
     private final ChatClient chatClient;
     private final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService;
+    private final SpeakerLabels speakerLabels;
     private final McpManager mcpManager;
     private final VirtualThreadExecutor executor;
     private final ProviderManager providerManager;
@@ -248,6 +250,7 @@ public class TuiCommand implements Runnable {
             final SessionLifecycle sessionLifecycle,
             final ChatClient chatClient,
             final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService,
+            final SpeakerLabels speakerLabels,
             final McpManager mcpManager,
             final VirtualThreadExecutor executor,
             final ProviderManager providerManager,
@@ -276,6 +279,7 @@ public class TuiCommand implements Runnable {
         this.sessionLifecycle = sessionLifecycle;
         this.chatClient = chatClient;
         this.modelStyleService = modelStyleService;
+        this.speakerLabels = speakerLabels;
         this.mcpManager = mcpManager;
         this.executor = executor;
         this.providerManager = providerManager;
@@ -666,6 +670,7 @@ public class TuiCommand implements Runnable {
         runtime.permissions().setGate(gate(tui, state));
         runtime.feedback().setGate(feedbackGate(tui, state));
         runtime.permissions().setPermitAll(conf.permitAll());
+        refreshLabels(state);
         state.model.status("ready");
         shellRegistry.register(env(tui, state));
         tabManager.add(state);
@@ -1861,7 +1866,7 @@ public class TuiCommand implements Runnable {
         // the user prompt is transcribed as plain markdown (no backticks): wrapping it in
         // an inline-code span made slash commands look exactly like `code`; plain text (under
         // the You bar) stays visually distinct from code tokens
-        state.model.appendTranscript("\n\n---\n\n**You**\n\n" + text + "\n");
+        state.model.appendTranscript("\n\n---\n\n" + state.model.userMarker() + "\n\n" + text + "\n");
         // the TUI keeps its modal-driven plan editor (Enter/Esc handling needs the widget stack)
         if ("editplan".equals(parts[0].toLowerCase(Locale.ROOT))) {
             editPlan(parts.length > 1 ? parts[1].strip() : "", runner, state);
@@ -2027,7 +2032,30 @@ public class TuiCommand implements Runnable {
     }
 
     private ShellEnv env(final TuiRunner runner, final UiState state) {
+        refreshLabels(state);
         return new ShellEnv(frontend(runner, state), io(runner, state), state.session, state.model);
+    }
+
+    /**
+     * Re-renders the speaker labels from {@code yca.labels} into the current transcript,
+     * using the effective model (per-session override included), provider, active agent,
+     * mode and session id. Called at every turn boundary (tab creation, dispatch) so a
+     * model/provider/agent switch is picked up by the next written block; already-written
+     * blocks keep the label they were written with.
+     */
+    private void refreshLabels(final UiState state) {
+        final var settings = state.session.chatSettings();
+        final var mode = state.session.runtime() == null
+                ? null
+                : String.valueOf(state.session.runtime().permissions().mode());
+        final var ctx = speakerLabels.minimalistCtx(
+                chatClient == null ? null : chatClient.model(settings), state.activeAgent, mode, state.sessionId);
+        state.model.setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
+        state.model.setLabelResolver((identity, user) -> {
+            final var ictx =
+                    new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null);
+            return user ? speakerLabels.userLabel(ictx) : speakerLabels.assistantLabel(ictx);
+        });
     }
 
     private ShellFrontend frontend(final TuiRunner runner, final UiState state) {
@@ -3611,7 +3639,8 @@ public class TuiCommand implements Runnable {
                 anySegment = false;
             }
             if (seg.type() == SyntaxHighlighter.Segment.Type.TEXT) {
-                for (final var turn : TuiTranscriptModel.splitTurns(seg.text())) {
+                for (final var turn : TuiTranscriptModel.splitTurns(
+                        seg.text(), state.model.userMarker(), state.model.assistantMarker())) {
                     if (turn.text().isBlank()) {
                         continue;
                     }
@@ -3628,7 +3657,7 @@ public class TuiCommand implements Runnable {
                     final var lines = new ArrayList<>(
                             withBar(transcriptRenderer.renderRegion(body, width, Style.EMPTY, markdownStyles), bar));
                     if (turn.labelled()) {
-                        lines.add(0, turnHeader(turn.user(), width));
+                        lines.add(0, turnHeader(turn.user(), width, state.model));
                         // spacer row above the header: two turns must never read as one
                         lines.add(0, Line.from(bar));
                     }
@@ -3957,9 +3986,9 @@ public class TuiCommand implements Runnable {
      * @param user {@code true} for a user turn
      * @param width content width available to the turn (bar already excluded)
      */
-    private Line turnHeader(final boolean user, final int width) {
+    private Line turnHeader(final boolean user, final int width, final TuiTranscriptModel model) {
         final var color = user ? palette.primary() : palette.accent();
-        final var label = user ? "You" : "Assistant";
+        final var label = user ? model.userLabel() : model.assistantLabel();
         final var head = (palette.mono() ? glyphs.roleMark(user) : glyphs.turnMark()) + " " + label;
         // the rule fills whatever the label left, never overflowing the panel
         final var rule = glyphs.rule().repeat(Math.max(0, width - head.length() - 1));

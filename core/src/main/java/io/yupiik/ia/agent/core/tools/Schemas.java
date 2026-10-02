@@ -29,6 +29,11 @@ public final class Schemas {
         return Map.of("type", "string", "description", description);
     }
 
+    /** A string property with an enum constraint: {@code enum} values are listed in the schema. */
+    public static Map<String, Object> strEnum(final String description, final String... values) {
+        return Map.of("type", "string", "description", description, "enum", List.of(values));
+    }
+
     public static Map<String, Object> intProp(final String description) {
         return Map.of("type", "integer", "description", description);
     }

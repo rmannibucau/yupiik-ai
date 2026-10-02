@@ -55,12 +55,19 @@ and Google model families get their stronger wording automatically, anything els
 gets the balanced OpenAI guidance.
 
 In `plan` mode the canned blocks are swapped for a plan variant. Where the build
-wording pushes completion tracking (mark completed as soon as done, keep one
-`in_progress`, work the queue), the plan variant pushes keeping the list in sync
-with the discussion: every item stays `pending` - statuses only advance in build
-mode - and whenever a follow-up message changes the plan (scope, steps, approach,
-trade-offs) the model must update the list with `write_todo` in the same turn so
-it always mirrors the latest agreed plan.
+wording pushes completion tracking (mark completed as soon as done, keep one or
+several `in_progress`, work the queue), the plan variant pushes keeping the list
+in sync with the discussion: every item stays `pending` - statuses only advance
+in build mode - and whenever a follow-up message changes the plan (scope, steps,
+approach, trade-offs) the model must update the list with `write_todo` in the
+same turn so it always mirrors the latest agreed plan.
+
+New items sent to `write_todo` in `plan` mode are normalized: an `in_progress`
+or `completed` status on a new item is written back as `pending` (the update
+still succeeds and the tool reports the normalization), while a `cancelled` new
+item is kept as-is because it encodes a scope decision ("we will not do X").
+Items already advanced in a previous build session keep their status, so a
+plan/build switch never loses real progress.
 
 The same message is reinforced twice per turn in `plan` mode. First in the
 mode tail of the system prompt, which orders recording the plan with `write_todo`
@@ -76,10 +83,10 @@ Some model families (qwen and relatives are the usual suspects) are quite willin
 to stop mid-implementation: they run a couple of steps, write a progress report
 and end their turn even though the todo list still holds pending items. When that
 happens the loop emits a warning notice ("model ended its turn (finish_reason=...)
-with N/M todos still pending") and waits for you to send `continue`.
+with N/M todos still unfinished") and waits for you to send `continue`.
 
 `yca.todos.continueOnUnfinished` closes that loop: instead of returning, the turn
-asks the model to carry on with the next pending todo, up to
+asks the model to carry on with the next unfinished todo, up to
 `yca.todos.maxContinues` continuations. Each continuation starts a fresh iteration
 window: `yca.llm.maxIterations` bounds one continuation loop, not the whole turn, so
 a long implementation is bounded by `maxContinues` rather than by a single iteration
@@ -103,7 +110,7 @@ never gives up because of scattered empty or truncated replies.
 ----
 yca.todos.continueOnUnfinished=true
 yca.todos.maxContinues=25
-yca.todos.continuePrompt=Do not summarize: continue with the next pending todo now.
+yca.todos.continuePrompt=Do not summarize: continue with the next unfinished todo now.
 ----
 
 It is off by default, and deliberately conservative when on:
@@ -118,6 +125,6 @@ returns an empty completion (no content and no tool call, for example a local mo
 that emitted reasoning then stopped), the loop retries the request up to that budget.
 The retry runs before the todo auto-continue check, so while retries remain an empty
 completion is never misread as a deliberate "stopped mid-implementation" end; once the
-budget is exhausted and todos are still pending the turn falls through to the todo
+budget is exhausted and todos are still unfinished the turn falls through to the todo
 continuation (when enabled) instead of ending with a blank answer. Setting it to 0
 disables the retry.

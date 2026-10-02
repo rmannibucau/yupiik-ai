@@ -35,7 +35,7 @@ public record TodoConfiguration(
         @Property(
                 defaultValue = "false",
                 documentation =
-                        "When a turn ends text-only while the todo list still has pending or in_progress items, automatically ask the model to continue instead of ending the turn (up to maxContinues continuations per turn, then the turn is ended with the usual warning notice). The continuation is also attempted before giving up on an exhausted iteration window, a truncated reply or an empty completion, so pending todos keep the turn going across those mid-turn stops. Applies to build mode, to the top-level turns only (never to sub-agents) and is skipped in a turn where a prompt typed while the loop was running was injected.")
+                        "When a turn ends text-only while the todo list still has unfinished items (pending or in_progress - a todo is unfinished until it is completed or cancelled), automatically ask the model to continue instead of ending the turn (up to maxContinues continuations per turn, then the turn is ended with the usual warning notice). The continuation is also attempted before giving up on an exhausted iteration window, a truncated reply or an empty completion, so unfinished todos keep the turn going across those mid-turn stops. Applies to build mode, to the top-level turns only (never to sub-agents) and is skipped in a turn where a prompt typed while the loop was running was injected.")
         boolean continueOnUnfinished,
 
         @Property(
@@ -46,7 +46,7 @@ public record TodoConfiguration(
 
         @Property(
                 documentation =
-                        "Instruction sent to the model when continueOnUnfinished fires; empty or unset uses a built-in continuation instruction telling it to act on the next pending todo instead of narrating. From the second continuation on, a strategy-change clause is appended.")
+                        "Instruction sent to the model when continueOnUnfinished fires; empty or unset uses a built-in continuation instruction telling it to act on the next unfinished todo (pending or in_progress, finishing or cancelling the in_progress ones it started) instead of narrating. From the second continuation on, a strategy-change clause is appended. Note: a custom value replaces the whole built-in instruction, so keep the unfinished-todo wording and the finish-or-cancel guidance in your text if you override it.")
         String continuePrompt) {
 
     /** The continuation instruction to use, or the built-in one when none is configured. */

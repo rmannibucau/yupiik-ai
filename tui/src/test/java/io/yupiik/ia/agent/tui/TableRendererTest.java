@@ -179,6 +179,21 @@ class TableRendererTest {
     }
 
     @Test
+    void doubleSpaceInsideBoldCellSurvivesRendering() {
+        // a double space inside a bold/styled cell is kept by commonmark and must not
+        // collapse in the table word wrapper: the rendered grid carries "a  b" and the
+        // column width counts both spaces, so the borders stay aligned
+        final var bold = Style.EMPTY.bold();
+        final var cell = Cell.of(Span.styled("a  b", bold));
+        final var lines =
+                renderer.render(List.of(Cell.of("h")), List.of(List.of(cell)), 80, List.of(), List.of(), Style.EMPTY);
+        final var plain = lines.stream().map(TableRendererTest::plain).toList();
+        assertTrue(plain.stream().anyMatch(l -> l.contains("a  b")), plain.toString());
+        // widths align: 4 content cells ("a"," "," ","b") + 2 padding + 2 borders = 8
+        assertTrue(plain.stream().allMatch(l -> l.length() == 8), plain.toString());
+    }
+
+    @Test
     void cellInlineStyleSurvivesRendering() {
         final var codeStyle = Style.EMPTY.fg(Color.GRAY).dim();
         final var lines = renderer.render(

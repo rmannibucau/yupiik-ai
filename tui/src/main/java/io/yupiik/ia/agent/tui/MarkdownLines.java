@@ -857,7 +857,12 @@ public final class MarkdownLines {
 
     /**
      * Splits {@code content} into whitespace-separated word tokens, each a list of
-     * styled spans (a word never mixes source spans across a space).
+     * styled spans (a word never mixes source spans across a space). Consecutive
+     * spaces survive: commonmark keeps them (inside inline formatting and in plain
+     * prose alike) and the wrapper joins tokens with a single space, so each extra
+     * space of a run becomes its own empty token which the joining space turns back
+     * into the original run length. Leading/trailing runs stay dropped - they are
+     * invisible and commonmark strips them at line boundaries anyway.
      */
     private static List<List<Span>> words(final List<Span> content) {
         final var tokens = new ArrayList<List<Span>>();
@@ -868,8 +873,14 @@ public final class MarkdownLines {
             }
             final var parts = span.content().split(" ", -1);
             for (var i = 0; i < parts.length; i++) {
-                if (!parts[i].isEmpty()) {
-                    current.add(Span.styled(parts[i], span.style()));
+                final var part = parts[i];
+                if (!part.isEmpty()) {
+                    current.add(Span.styled(part, span.style()));
+                } else if (i > 0 && i < parts.length - 1 && !tokens.isEmpty()) {
+                    // interior space run: one empty token per extra space, so the
+                    // wrappers' single joining space keeps the original run length
+                    // (a lone space-only span with no word ever renders nothing)
+                    tokens.add(List.of());
                 }
                 if (i < parts.length - 1 && !current.isEmpty()) {
                     tokens.add(current);

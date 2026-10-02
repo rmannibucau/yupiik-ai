@@ -26,6 +26,7 @@ import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 class MarkdownLinesTest {
@@ -129,6 +130,37 @@ class MarkdownLinesTest {
                 List.of("the bold italic gone and code here"),
                 plain(renderer.render(
                         "the **bold** *italic* ~~gone~~ and `code` here", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void consecutiveSpacesInsideInlineFormattingAreKept() {
+        // commonmark preserves 2+ spaces inside/around inline formatting, and the
+        // word wrapper must too: a run of k spaces renders as k spaces (the wrapper
+        // joins tokens with a single space, so each extra space needs its own empty
+        // word token, even when the whole run lives inside one styled span)
+        final var cases = Map.of(
+                "**a  b**", "a  b",
+                "*a  b*", "a  b",
+                "~~a  b~~", "a  b",
+                "`a  b`", "a  b",
+                "**a**  **b**", "a  b",
+                "**a**   **b**", "a   b",
+                "a  **b**  c", "a  b  c");
+        for (final var entry : cases.entrySet()) {
+            assertEquals(
+                    List.of(entry.getValue()),
+                    plain(renderer.render(entry.getKey(), 80, Style.EMPTY, MarkdownStyles.DEFAULTS)),
+                    () -> "double space must survive '" + entry.getKey() + "'");
+        }
+    }
+
+    @Test
+    void consecutiveSpacesKeepLengthAtTheWrapBoundary() {
+        // the extra space is its own zero-width word: it must neither vanish nor push
+        // the next word onto the next row when the line nearly fills the width
+        assertEquals(
+                List.of("aa b  tail"),
+                plain(renderer.render("aa **b**  tail", 10, Style.EMPTY, MarkdownStyles.DEFAULTS)));
     }
 
     @Test

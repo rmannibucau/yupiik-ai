@@ -50,4 +50,15 @@ public record SessionEntry(
             final String name) {
         return new SessionEntry(at, role, content, toolCalls, toolCallId, name, null, null);
     }
+
+    public static SessionEntry of(
+            final long at,
+            final String role,
+            final Object content,
+            final List<ToolCall> toolCalls,
+            final String toolCallId,
+            final String name,
+            final Map<String, Object> others) {
+        return new SessionEntry(at, role, content, toolCalls, toolCallId, name, null, others);
+    }
 }

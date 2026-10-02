@@ -84,7 +84,17 @@ final class LlmWire {
                                 .map(LlmWire::toLlmToolCall)
                                 .toList(),
                 message.toolCallId(),
-                message.others() == null ? Map.of() : message.others());
+                stripIdentity(message.others()));
+    }
+
+    /** The {@code others} map without the reserved speaker-identity key (UI metadata never reaches the LLM). */
+    static Map<String, Object> stripIdentity(final Map<String, Object> others) {
+        if (others == null || others.isEmpty() || !others.containsKey(Message.IDENTITY_KEY)) {
+            return others == null ? Map.of() : others;
+        }
+        final var out = new java.util.LinkedHashMap<>(others);
+        out.remove(Message.IDENTITY_KEY);
+        return out;
     }
 
     static LlmTool toLlmTool(final Tool tool) {

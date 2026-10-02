@@ -56,7 +56,7 @@ public class TodoPromptResolver {
     private static final String OPENAI = """
             Task Management:
             Use the write_todo tool to manage and plan tasks. Use it frequently so your todos track your progress and give the user visibility into it. It is also very useful to break a larger task down into smaller concrete steps.
-            It is critical that you mark a todo as completed as soon as the task it describes is actually done, including any verification. Do not batch up several todos before marking them completed, and keep exactly one todo in_progress while work remains. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
+            It is critical that you mark a todo as completed as soon as the task it describes is actually done, including any verification. Do not batch up several todos before marking them completed, and keep the in_progress statuses accurate - one or several may be in_progress at once when you work them in parallel. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
             Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String OPENAI_PLAN = """
@@ -81,7 +81,7 @@ public class TodoPromptResolver {
 
     private static final String GEMINI = """
             Task Management:
-            Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress as you start it and completed as soon as it is really done; keep a single in_progress item and do not batch completion updates. Prefer writing a todo when the request involves several distinct steps. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
+            Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress as you start it and completed as soon as it is really done - several items may be in_progress at once when you work them in parallel, and do not batch completion updates. Prefer writing a todo when the request involves several distinct steps. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
             Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String GEMINI_PLAN = """

@@ -43,6 +43,7 @@ import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
@@ -120,6 +121,7 @@ public class CliCommand implements Runnable {
     private final Symbols symbols;
     private final AnsiShellFrontend frontend;
     private final AnsiShellIO io;
+    private final SpeakerLabels speakerLabels;
     private final boolean queueing;
     private final Deque<String> pendingPrompts = new ConcurrentLinkedDeque<>();
     private final AtomicInteger activeTurns = new AtomicInteger();
@@ -162,6 +164,7 @@ public class CliCommand implements Runnable {
             final Prompt prompt,
             final Clock clock,
             final CodingAgentConfiguration configuration,
+            final SpeakerLabels speakerLabels,
             final HackStdIo stdio) {
         this.conf = conf;
         this.sessionLifecycle = sessionLifecycle;
@@ -182,6 +185,7 @@ public class CliCommand implements Runnable {
         this.clock = clock;
         this.interruptor = new InterruptCoordinator(clock);
         this.configuration = configuration;
+        this.speakerLabels = speakerLabels;
         this.stdio = stdio;
         session.metrics(configuration.metrics());
         final var parsedToolOutput = ToolOutputVisibility.parse(conf.showToolOutput());
@@ -892,7 +896,32 @@ public class CliCommand implements Runnable {
 
     /** The environment shared actions run against; the transcript is the shared one. */
     private ShellEnv env() {
+        refreshLabels();
         return new ShellEnv(frontend, io, session, coordinator.transcript());
+    }
+
+    /**
+     * Renders the current speaker labels (from {@code yca.labels}) into the shared
+     * transcript before each interaction. Labels change with the active model, provider
+     * and agent, so they are refreshed at every turn boundary: already-written blocks
+     * keep the label they were written with, the next ones use the fresh render.
+     */
+    private void refreshLabels() {
+        final var ctx = new SpeakerLabels.Ctx(
+                chatClient.model(session.chatSettings()),
+                providerManager == null ? null : providerManager.currentProviderId(),
+                activeAgent,
+                session.runtime() == null
+                        ? null
+                        : String.valueOf(session.runtime().permissions().mode()),
+                session.sessionId(),
+                null);
+        coordinator.transcript().setLabels(speakerLabels.userLabel(ctx), speakerLabels.assistantLabel(ctx));
+        coordinator.transcript().setLabelResolver((identity, user) -> {
+            final var ictx =
+                    new SpeakerLabels.Ctx(identity.model(), identity.provider(), identity.agent(), null, null, null);
+            return user ? speakerLabels.userLabel(ictx) : speakerLabels.assistantLabel(ictx);
+        });
     }
 
     private void slash(final String text) {

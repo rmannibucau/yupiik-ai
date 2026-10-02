@@ -145,7 +145,27 @@ class TodoPromptResolverTest {
     }
 
     @Test
+    void buildBlocksAllowParallelInProgress() {
+        for (final var url :
+                java.util.List.of("https://mystery.example/v1", "https://generativelanguage.googleapis.com/v1")) {
+            final var block = resolver.resolve("auto", url, AgentMode.BUILD);
+            assertFalse(
+                    block.contains("exactly one"),
+                    "the build guidance must not carry the single-in_progress rule: " + block);
+            assertFalse(
+                    block.contains("single in_progress"),
+                    "the build guidance must not carry the single-in_progress rule: " + block);
+            assertTrue(
+                    block.contains("in parallel"),
+                    "the build guidance must allow working several todos in parallel: " + block);
+        }
+    }
+
+    @Test
     void twoArgResolveDefaultsToBuildModeVariant() {
+        final var openai = resolver.resolve("auto", "https://mystery.example/v1");
+        assertTrue(openai.contains("Do not batch up several todos"));
+        assertTrue(openai.contains("in parallel"), "openai build block must allow parallel in_progress: " + openai);
         assertEquals(
                 resolver.resolve("auto", "https://mystery.example/v1"),
                 resolver.resolve("auto", "https://mystery.example/v1", AgentMode.BUILD),

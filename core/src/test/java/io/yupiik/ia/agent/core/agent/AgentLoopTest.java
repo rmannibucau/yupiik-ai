@@ -534,7 +534,7 @@ class AgentLoopTest {
             final var notice = (AgentEvent.Notice) notices.getFirst();
             assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
             assertEquals(
-                    "model ended its turn (finish_reason=stop) with 2/3 todos still pending - send 'continue' to resume, or review why it stopped",
+                    "model ended its turn (finish_reason=stop) with 2/3 todos still unfinished - send 'continue' to resume, or review why it stopped",
                     notice.message());
             assertEquals("stop", notice.finishReason());
         } finally {
@@ -587,7 +587,7 @@ class AgentLoopTest {
                     requests.get(2).stream()
                             .anyMatch(m -> "user".equals(m.role())
                                     && String.valueOf(m.content())
-                                            .contains("todo list still has pending or in_progress items")),
+                                            .contains("todo list still has unfinished items (pending or in_progress)")),
                     "the continuation must be sent as an explicit instruction, not a silent retry: " + requests.get(2));
             final var notices = events.stream()
                     .filter(AgentEvent.Notice.class::isInstance)
@@ -596,8 +596,56 @@ class AgentLoopTest {
             assertEquals(1, notices.size(), "no warning notice: the turn ended on a closed list: " + notices);
             assertEquals(AgentEvent.Notice.Level.INFO, notices.getFirst().level());
             assertEquals(
-                    "model ended its turn (finish_reason=stop) with 2/3 todos still pending; continuing automatically (1/25).",
+                    "model ended its turn (finish_reason=stop) with 2/3 todos still unfinished; continuing automatically (1/25).",
                     notices.getFirst().message());
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
+     * A single in_progress todo (no pending item at all) also holds the turn open: an item is
+     * unfinished until it is completed or cancelled, so a text-only end with only in_progress
+     * items must trigger the continuation too.
+     */
+    @Test
+    void unfinishedTodosAutoContinueFiresWithOnlyInProgressItems() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore = mutableTodoStore(new TodoItem("running step", "in_progress"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("made progress", "stop", false),
+                    toolCallReply("t2", "close_todos"),
+                    new ScriptedReply("everything is done", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("everything is done", result);
+            assertEquals(4, requests.size(), "the loop must re-ask once after the mid-turn stop: " + requests);
+            assertTrue(
+                    requests.get(2).stream()
+                            .anyMatch(m -> "user".equals(m.role())
+                                    && String.valueOf(m.content())
+                                            .contains("todo list still has unfinished items (pending or in_progress)")),
+                    "the continuation must tell the model about the unfinished in_progress item: " + requests.get(2));
         } finally {
             permissionServiceOverride = null;
         }
@@ -637,14 +685,14 @@ class AgentLoopTest {
                     .toList();
             assertEquals(3, notices.size(), notices.toString());
             assertEquals(
-                    "model ended its turn (finish_reason=stop) with 2/2 todos still pending; continuing automatically (1/2).",
+                    "model ended its turn (finish_reason=stop) with 2/2 todos still unfinished; continuing automatically (1/2).",
                     notices.get(0).message());
             assertEquals(
-                    "model ended its turn (finish_reason=stop) with 2/2 todos still pending; continuing automatically (2/2).",
+                    "model ended its turn (finish_reason=stop) with 2/2 todos still unfinished; continuing automatically (2/2).",
                     notices.get(1).message());
             assertEquals(AgentEvent.Notice.Level.WARN, notices.get(2).level());
             assertEquals(
-                    "model ended its turn (finish_reason=stop) with 2/2 todos still pending - send 'continue' to resume, or review why it stopped",
+                    "model ended its turn (finish_reason=stop) with 2/2 todos still unfinished - send 'continue' to resume, or review why it stopped",
                     notices.get(2).message());
             assertTrue(
                     requests.get(4).stream()

@@ -81,6 +81,66 @@ public record Message(
         return out;
     }
 
+    /** Reserved {@code others} key holding the producer identity of a message ({@link Identity}). */
+    public static final String IDENTITY_KEY = "yca";
+
+    /**
+     * The provider/model/agent identity a user or assistant block was written under.
+     * Captured per block at persistence time so replay and template changes can
+     * re-render each block's speaker label from what actually produced it. Never
+     * sent to the LLM (stripped at every wire boundary).
+     */
+    public record Identity(String provider, String model, String agent) {}
+
+    /**
+     * Returns a copy of {@code message} carrying the producer identity in its
+     * {@code others} map (under {@link #IDENTITY_KEY}); null identity members are
+     * skipped. The original message is not modified.
+     */
+    public static Message withIdentity(
+            final Message message, final String provider, final String model, final String agent) {
+        if (message == null) {
+            return null;
+        }
+        final var identity = new java.util.LinkedHashMap<String, Object>();
+        putIfPresent(identity, "provider", provider);
+        putIfPresent(identity, "model", model);
+        putIfPresent(identity, "agent", agent);
+        if (identity.isEmpty()) {
+            return message;
+        }
+        final var others = new java.util.LinkedHashMap<String, Object>();
+        if (message.others() != null) {
+            others.putAll(message.others());
+        }
+        others.put(IDENTITY_KEY, identity);
+        return new Message(
+                message.role(), message.content(), message.name(), message.toolCalls(), message.toolCallId(), others);
+    }
+
+    /** The producer identity stored on {@code message}, or null when none was captured. */
+    @SuppressWarnings("unchecked")
+    public static Identity identityOf(final Message message) {
+        if (message == null || message.others() == null) {
+            return null;
+        }
+        final var raw = message.others().get(IDENTITY_KEY);
+        if (!(raw instanceof Map<?, ?> map)) {
+            return null;
+        }
+        return new Identity(str(map.get("provider")), str(map.get("model")), str(map.get("agent")));
+    }
+
+    private static String str(final Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    private static void putIfPresent(final Map<String, Object> map, final String key, final String value) {
+        if (value != null && !value.isBlank()) {
+            map.put(key, value);
+        }
+    }
+
     /**
      * Resolves the tool name of a persisted message: prefers the stored name,
      * falls back to the assistant tool call of the same id, {@code null} when

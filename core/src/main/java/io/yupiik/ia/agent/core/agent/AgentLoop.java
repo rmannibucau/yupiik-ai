@@ -100,10 +100,11 @@ public class AgentLoop {
      * steps with a progress report, so the instruction is explicit about acting rather than narrating.
      */
     private static final String UNFINISHED_TODO_CONTINUE_PROMPT =
-            "You ended your turn while the todo list still has pending or in_progress items, so the work you were"
+            "You ended your turn while the todo list still has unfinished items (pending or in_progress), so the work you were"
                     + " asked to do is not finished. Do not summarize your progress and do not wait for a new"
                     + " instruction: re-read the todo list in the <session-state> block and continue with the next"
-                    + " pending item right now, using tools. End your turn only when every todo is completed or"
+                    + " unfinished item right now, using tools - finish or cancel the in_progress todos you already"
+                    + " started before opening new ones. End your turn only when every todo is completed or"
                     + " explicitly cancelled, or when you are genuinely blocked - in that case state exactly what"
                     + " blocks you and stop.";
 
@@ -113,9 +114,10 @@ public class AgentLoop {
      */
     private static final String UNFINISHED_TODO_BLOCKED_PROMPT =
             " You already continued several times without closing the remaining todos, so continuing the same way"
-                    + " is not working: do not repeat your progress report. Either complete the next pending todo"
-                    + " with a tool call right now, or explicitly tell the user what exactly blocks you (missing"
-                    + " information, a failing command, a decision to make) and stop.";
+                    + " is not working: do not repeat your progress report. Either complete or cancel the unfinished"
+                    + " todo with a tool call right now, finish the in_progress todos you started instead of leaving"
+                    + " them open, or explicitly tell the user what exactly blocks you (missing information, a"
+                    + " failing command, a decision to make) and stop.";
 
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
@@ -154,6 +156,8 @@ public class AgentLoop {
      * the run argument. Event helpers tag with this value.
      */
     private volatile String currentSessionId;
+    /** Effective agent of the current turn (set at {@code doRun} start), used for identity capture. */
+    private volatile String currentAgentName;
     /**
      * Per-session model selection (model/variant/sampling). Explicitly passed to every
      * {@link ChatClient} call made by this loop's turns so concurrent tabs never share
@@ -512,6 +516,7 @@ public class AgentLoop {
         // mid-turn as an "unexpected failure" NPE.
         Objects.requireNonNull(cancelled, "cancelled: a turn must provide a cancellation probe");
         currentSessionId = sessionId == null || sessionId.isBlank() ? this.sessionId : sessionId;
+        currentAgentName = agentName;
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
                 ? null
                 : agentProvider.byName(agentName);
@@ -524,7 +529,9 @@ public class AgentLoop {
         }
         if (userMessage != null) {
             messages.add(Message.user(userMessage));
-            sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", userMessage, null, null));
+            sessionStore.append(
+                    sessionId,
+                    SessionEntry.of(clock.millis(), "user", userMessage, null, null, null, identityOthers(agentName)));
         }
         statusReporter.setSink(message -> emitter.emit(status(message)));
         // surface provider throttles and retry backoffs: without this the UI only shows a
@@ -878,7 +885,13 @@ public class AgentLoop {
                 sessionStore.append(
                         sessionId,
                         SessionEntry.of(
-                                clock.millis(), "assistant", str(assistant.content()), assistant.toolCalls(), null));
+                                clock.millis(),
+                                "assistant",
+                                str(assistant.content()),
+                                assistant.toolCalls(),
+                                null,
+                                null,
+                                identityOthers(currentAgentName)));
                 emitUsage(messages, toolsTokens);
 
                 if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
@@ -1136,7 +1149,9 @@ public class AgentLoop {
         }
         final var text = prompt.strip();
         messages.add(Message.user(text));
-        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "user", text, null, null));
+        sessionStore.append(
+                sessionId,
+                SessionEntry.of(clock.millis(), "user", text, null, null, null, identityOthers(currentAgentName)));
         emit(promptIntegrated(text));
         return true;
     }
@@ -1216,6 +1231,52 @@ public class AgentLoop {
      * prompt, which is regenerated every turn) so the next turn reloads the compacted history
      * instead of re-compacting the same full transcript. Failures never break the turn.
      */
+    /**
+     * Builds the {@code others} map carrying the producer identity (provider, effective model,
+     * agent) of the block about to be persisted. The identity is captured at write time so a
+     * replay or a template change can re-render the block's speaker label from what actually
+     * produced it. Never sent to the LLM (stripped at wire boundaries).
+     */
+    private Map<String, Object> identityOthers(final String agentName) {
+        try {
+            if (providerManager == null || chatSettings == null) {
+                // no provider wiring (unit tests, bootstrapping): no identity to capture
+                return null;
+            }
+            final var provider = providerManager.currentProviderId();
+            String model = null;
+            if (chatSettings.model() != null && !chatSettings.model().isBlank()) {
+                model = chatSettings.model();
+            } else {
+                final var current = providerManager.current();
+                if (current != null
+                        && current.model() != null
+                        && !current.model().isBlank()) {
+                    model = current.model();
+                }
+            }
+            final var identity = new java.util.LinkedHashMap<String, Object>();
+            if (provider != null && !provider.isBlank()) {
+                identity.put("provider", provider);
+            }
+            if (model != null && !model.isBlank()) {
+                identity.put("model", model);
+            }
+            final var agent = agentName == null || agentName.isBlank() ? null : agentName;
+            if (agent != null) {
+                identity.put("agent", agent);
+            }
+            if (identity.isEmpty()) {
+                return null;
+            }
+            return java.util.Map.of(Message.IDENTITY_KEY, identity);
+        } catch (final RuntimeException e) {
+            // identity capture is best-effort: a provider manager without real wiring
+            // (unit tests, bootstrapping) must never break a turn
+            return null;
+        }
+    }
+
     private void persistContext(final String sessionId, final List<Message> messages) {
         if (sessionStore == null || sessionId == null || messages.isEmpty()) {
             return;
@@ -1675,7 +1736,7 @@ public class AgentLoop {
                 AgentEvent.Notice.Level.WARN,
                 "model ended its turn (finish_reason=" + finishReason + ") with " + pending.pending() + '/'
                         + pending.total()
-                        + " todos still pending - send 'continue' to resume, or review why it stopped",
+                        + " todos still unfinished - send 'continue' to resume, or review why it stopped",
                 finishReason,
                 currentSessionId,
                 subagentId,
@@ -1709,7 +1770,7 @@ public class AgentLoop {
         emit(notice(
                 AgentEvent.Notice.Level.INFO,
                 "model ended its turn (finish_reason=" + finishReason + ") with " + pending.pending() + '/'
-                        + pending.total() + " todos still pending; continuing automatically ("
+                        + pending.total() + " todos still unfinished; continuing automatically ("
                         + unfinishedTodoContinues + '/' + maxContinues + ")."));
         messages.add(Message.user(unfinishedTodoContinuePrompt(unfinishedTodoContinues)));
         return true;

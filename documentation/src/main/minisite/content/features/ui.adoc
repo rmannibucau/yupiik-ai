@@ -16,6 +16,46 @@ For automation, the xref:../cli/run.adoc[`run`] command executes a single
 headless prompt and prints the result on stdout. It exits non-zero on failure,
 making it easy to call from scripts and CI.
 
+== Speaker labels
+
+The transcript headers (the `▌` line opening every user and assistant turn) are
+configurable through `yca.labels`:
+
+[source,json]
+----
+"labels": {
+  "userTemplate": "{{systemProperty \"user.name\" \"You\"}}",
+  "assistantTemplate": "{{model.provider}}::{{model.name}}"
+}
+----
+
+Both are Handlebars templates. The context keys are `userName`
+(`System.getProperty("user.name")`, missing values are skipped), `modelName`,
+`model` (`name`, `provider`), `provider`, `agent` (the active custom agent or
+empty), `mode` (`plan`/`build`), `sessionId` and `configuration` (the whole yca
+configuration map). The `systemProperty` helper reads a system property with an
+optional default: 1 argument ({`{{systemProperty "user.name"}}`}) renders the
+value or nothing when the key is absent, 2 arguments
+(`{{systemProperty "user.name" "You"}}`) add the fallback. A template rendering
+blank falls back to `You`/`Assistant`.
+
+[IMPORTANT]
+====
+Speaker labels are strictly a UI feature: they only decorate the rendered
+transcript headers. The LLM conversation always keeps its hardcoded
+`user`/`assistant` roles (the session store and the wire payload stay
+label-free), the compaction summaries keep their `[Assistant]:` /
+`[Assistant tool call]:` prefixes and subagents keep `Assistant: ` regardless of
+these templates. Changing the active model only changes what headers display,
+never what the model receives.
+
+The producing identity (provider, effective model, agent) is captured on every
+written block (main loop and subagents alike) and stored with the session
+entry. A `/resume` or a template change re-renders each block from its own
+identity, so a block written under `M1` is never relabeled `M2` when the model
+is switched later.
+====
+
 == Side questions (/btw)
 
 While a turn runs, `/btw <question>` asks a side question without interrupting

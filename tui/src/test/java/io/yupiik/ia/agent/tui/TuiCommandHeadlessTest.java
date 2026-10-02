@@ -47,6 +47,7 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
+import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
@@ -368,6 +369,7 @@ class TuiCommandHeadlessTest {
                     d.sessionLifecycle(),
                     d.chatClient(),
                     d.modelStyleService(),
+                    new SpeakerLabels(d.configuration(), d.chatClient(), d.providerManager()),
                     d.mcpManager(),
                     d.executor(),
                     d.providerManager(),
