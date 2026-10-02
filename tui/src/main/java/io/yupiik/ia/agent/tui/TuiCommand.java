@@ -1628,7 +1628,6 @@ public class TuiCommand implements Runnable {
      */
     private void copySelection(final TuiRunner runner, final UiState state) {
         final var text = state.selection.copy(state.screenGrid);
-        System.err.println("DEBUG copySelection text=[" + text + "] overlay=" + (state.toolOverlay != null));
         if (text == null || text.length() <= 1 || text.isBlank()) {
             return;
         }
