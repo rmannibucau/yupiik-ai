@@ -577,6 +577,45 @@ class TuiCommandHeadlessTest {
     }
 
     @Test
+    void initialPromptSlashEntryDoesNotStallTheQueue() throws Exception {
+        // {@code /mode build} is a slash command: it starts no turn (no TurnDone event), so the
+        // following entry must be released when the command outcome is applied, not when a turn ends
+        try (final var isolated = bootContainer()) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var requestsBefore = llm.requests().size();
+            final var command = newUiCommand(
+                    isolated,
+                    isolatedDeps,
+                    new TuiCommand.TuiConf(
+                            "",
+                            "",
+                            KeyBindingPreset.STANDARD,
+                            true,
+                            "dark",
+                            true,
+                            List.of("/mode build", "hello from the script")));
+
+            uiThread = new Thread(command::run, "tui-headless-initial-slash");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("mode: build");
+            awaitText("hello from the script");
+            awaitText("ready");
+
+            final var sent = List.copyOf(
+                    llm.requests().subList(requestsBefore, llm.requests().size()));
+            assertFalse(sent.isEmpty(), "the prompt following the slash command never reached the model: " + sent);
+            assertTrue(
+                    sent.stream().anyMatch(it -> it.contains("hello from the script")),
+                    "the queue must advance past a slash command - got: " + sent);
+
+            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+            uiThread.join(TIMEOUT_MS);
+        }
+    }
+
+    @Test
     void tabsSlashOpensOverlayThroughRealRegistry() throws Exception {
         // the shared container's executor is shut down when a TUI run quits, so this
         // test boots its own container like errorBannerUsesErrorColoredBorder

@@ -409,7 +409,8 @@ public class TuiCommand implements Runnable {
                     documentation =
                             "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
                                     + "script a soft resume, e.g. continue re-runs the agent on the persisted history "
-                                    + "without sending any message. Values are comma separated; prefix with "
+                                    + "without sending any message. A slash-prefixed entry is dispatched as a usual "
+                                    + "slash command. Values are comma separated; prefix with "
                                     + "sep=<char>, to split on another single character when a value itself contains "
                                     + "commas.")
             List<String> initialPrompt) {
@@ -1876,6 +1877,8 @@ public class TuiCommand implements Runnable {
             } catch (final RuntimeException e) {
                 final var cause = e.getCause() == null ? e : e.getCause();
                 runLater(state, () -> modelError(state, "command failed: " + cause.getMessage()));
+                // a failed queued command must not stall the following --initial-prompt entries
+                runLater(state, () -> submitNextInitialPrompt(state));
             }
         });
     }
@@ -1997,6 +2000,14 @@ public class TuiCommand implements Runnable {
             lastCompletionProviderId = providerId;
             completionCache.invalidateModels();
             refreshCompletionCache();
+        }
+        // a queued initial prompt may be a slash command: unlike a turn it never emits TurnDone,
+        // so the next entry is released here once the command outcome has been applied
+        if (!(outcome instanceof ShellOutcome.Quit)
+                && !state.initialPrompts.isEmpty()
+                && state.runner != null
+                && !state.model.busy()) {
+            runLater(state, () -> submitNextInitialPrompt(state));
         }
     }
 

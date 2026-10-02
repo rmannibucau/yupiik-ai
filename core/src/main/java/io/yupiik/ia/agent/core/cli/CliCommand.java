@@ -277,7 +277,8 @@ public class CliCommand implements Runnable {
                     documentation =
                             "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
                                     + "script a soft resume, e.g. continue re-runs the agent on the persisted history "
-                                    + "without sending any message. Values are comma separated; prefix with "
+                                    + "without sending any message. A slash-prefixed entry is dispatched as a usual "
+                                    + "slash command. Values are comma separated; prefix with "
                                     + "sep=<char>, to split on another single character when a value itself contains "
                                     + "commas.")
             List<String> initialPrompt) {
@@ -530,19 +531,9 @@ public class CliCommand implements Runnable {
                 if (text.isBlank()) {
                     continue;
                 }
-                if (text.equals("exit")) {
-                    println(MarkdownColorizer.status("bye"));
+                if (!runLine(text)) {
                     break;
                 }
-                if (text.startsWith("/")) {
-                    slash(text);
-                    if (quitRequested) {
-                        break;
-                    }
-                    continue;
-                }
-                runInput(text);
-                println();
             }
         } catch (final IOException e) {
             println(MarkdownColorizer.error("cli read failed: " + e.getMessage()));
@@ -550,12 +541,34 @@ public class CliCommand implements Runnable {
     }
 
     /**
+     * Dispatches one non-blank user line exactly like the REPL: {@code exit} leaves the shell,
+     * a slash command is dispatched through {@link #slash(String)} and anything else runs a
+     * resume alias or a regular turn ({@link #runInput(String)}).
+     *
+     * @return {@code false} when the shell should exit.
+     */
+    private boolean runLine(final String text) {
+        if (text.equals("exit")) {
+            println(MarkdownColorizer.status("bye"));
+            return false;
+        }
+        if (text.startsWith("/")) {
+            slash(text);
+            return !quitRequested;
+        }
+        runInput(text);
+        println();
+        return !quitRequested;
+    }
+
+    /**
      * Submits the {@code --initial-prompt} entries before the REPL takes over, in order, through
-     * the very same dispatch as a typed line (see {@link #runInput(String)}): a resume alias such
-     * as {@code continue} restarts the loop on the persisted history without sending any message
-     * and anything else runs a regular turn. Entries are sequential, so in queueing mode
-     * (interactive terminal) each one waits for the previous turn to complete instead of being
-     * integrated into it as a typed-ahead prompt.
+     * the very same dispatch as a typed line (see {@link #runLine(String)}): a resume alias such
+     * as {@code continue} restarts the loop on the persisted history without sending any message,
+     * a slash-prefixed entry is dispatched as a usual slash command and anything else runs a
+     * regular turn. Entries are sequential, so in queueing mode (interactive terminal) each turn
+     * waits for the previous one to complete instead of being integrated into it as a typed-ahead
+     * prompt; slash entries at startup start no turn and have nothing to wait for.
      */
     private void submitInitialPrompts() {
         final var prompts = conf.initialPrompt();
@@ -566,11 +579,16 @@ public class CliCommand implements Runnable {
             if (prompt == null || prompt.isBlank()) {
                 continue;
             }
-            runInput(prompt.strip());
-            println();
-            final var future = inFlight;
-            if (queueing && future != null) {
-                awaitTurn(future);
+            final var text = prompt.strip();
+            final var slash = text.startsWith("/");
+            if (!runLine(text)) {
+                break;
+            }
+            if (!slash && queueing) {
+                final var future = inFlight;
+                if (future != null) {
+                    awaitTurn(future);
+                }
             }
         }
     }
