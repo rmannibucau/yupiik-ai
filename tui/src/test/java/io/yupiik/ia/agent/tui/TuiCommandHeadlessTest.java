@@ -487,6 +487,96 @@ class TuiCommandHeadlessTest {
     }
 
     @Test
+    void initialPromptResumeAliasRestartsTheLoopOnThePersistedHistory() throws Exception {
+        try (final var isolated = bootContainer()) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var sessionId = "sinitialresume";
+            isolatedDeps.sessionStore().append(sessionId, SessionEntry.of(1, "user", "already asked", null, null));
+            isolatedDeps
+                    .sessionStore()
+                    .append(sessionId, SessionEntry.of(2, "assistant", "already answered", null, null));
+            final var requestsBefore = llm.requests().size();
+            // `continue` is a resume alias by default (yca.resumeAliases): the turn restarts the
+            // loop on the persisted history, so it reaches the model without any new user message
+            final var command = newUiCommand(
+                    isolated,
+                    isolatedDeps,
+                    new TuiCommand.TuiConf(
+                            sessionId, "", KeyBindingPreset.STANDARD, true, "dark", true, List.of("continue")));
+
+            uiThread = new Thread(command::run, "tui-headless-initial-resume");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("already answered");
+            // the loop ran again on its own: the mock is called and its answer joins the transcript
+            awaitText("hello from mock");
+
+            final var sent =
+                    llm.requests().subList(requestsBefore, llm.requests().size());
+            assertFalse(sent.isEmpty(), "the injected resume turn must call the model");
+            assertTrue(
+                    sent.stream().anyMatch(it -> it.contains("already asked")),
+                    "the resumed turn must replay the persisted history");
+            assertTrue(
+                    isolatedDeps.sessionStore().load(sessionId).stream()
+                            .noneMatch(e ->
+                                    "user".equals(e.role()) && "continue".contentEquals(String.valueOf(e.content()))),
+                    "a resume turn must not persist the alias as a user message");
+
+            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+            uiThread.join(TIMEOUT_MS);
+        }
+    }
+
+    @Test
+    void initialPromptListIsSubmittedInOrder() throws Exception {
+        try (final var isolated = bootContainer()) {
+            final var isolatedDeps = lookupDeps(isolated);
+            final var requestsBefore = llm.requests().size();
+            // two prompts: the first one starts a turn and the second one waits for that turn
+            // to end, so they are two turns and not one merged type-ahead turn
+            final var command = newUiCommand(
+                    isolated,
+                    isolatedDeps,
+                    new TuiCommand.TuiConf(
+                            "",
+                            "",
+                            KeyBindingPreset.STANDARD,
+                            true,
+                            "dark",
+                            true,
+                            List.of("injected first", "injected second")));
+
+            uiThread = new Thread(command::run, "tui-headless-initial-list");
+            uiThread.setDaemon(true);
+            uiThread.start();
+            awaitTui();
+            awaitText("injected second");
+            awaitText("ready");
+
+            final var sent = List.copyOf(
+                    llm.requests().subList(requestsBefore, llm.requests().size()));
+            final var firstTurn = sent.stream()
+                    .filter(it -> it.contains("injected first"))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("the first injected prompt never reached the model"));
+            final var secondTurn = sent.stream()
+                    .filter(it -> it.contains("injected second"))
+                    .findFirst()
+                    .orElseThrow(() -> new AssertionError("the queued prompt was never submitted: " + sent));
+            assertTrue(
+                    sent.indexOf(firstTurn) < sent.indexOf(secondTurn), "injected prompts must run in the given order");
+            assertFalse(
+                    firstTurn.contains("injected second"),
+                    "the second prompt must run as its own turn, not merged into the first one");
+
+            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+            uiThread.join(TIMEOUT_MS);
+        }
+    }
+
+    @Test
     void tabsSlashOpensOverlayThroughRealRegistry() throws Exception {
         // the shared container's executor is shut down when a TUI run quits, so this
         // test boots its own container like errorBannerUsesErrorColoredBorder

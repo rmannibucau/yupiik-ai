@@ -270,7 +270,57 @@ public class CliCommand implements Runnable {
             boolean showUsage,
 
             @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.")
-            boolean permitAll) {}
+            boolean permitAll,
+
+            @Property(
+                    defaultValue = "java.util.List.of()",
+                    documentation =
+                            "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
+                                    + "script a soft resume, e.g. continue re-runs the agent on the persisted history "
+                                    + "without sending any message. Values are comma separated; prefix with "
+                                    + "sep=<char>, to split on another single character when a value itself contains "
+                                    + "commas.")
+            List<String> initialPrompt) {
+
+        /**
+         * Convenience constructor for the common case: no prompt injected at startup.
+         *
+         * @param session resume an existing session id
+         * @param context session context file
+         * @param agent default custom agent name
+         * @param color enable ANSI colors
+         * @param ascii force ASCII-only symbols
+         * @param presentation tool output verbosity
+         * @param showThinking show the reasoning stream
+         * @param showToolOutput tool output verbosity on stderr
+         * @param showUsage print the context usage after each turn
+         * @param permitAll bypass permission checks
+         */
+        public CliConf(
+                final String session,
+                final String context,
+                final String agent,
+                final boolean color,
+                final boolean ascii,
+                final String presentation,
+                final boolean showThinking,
+                final String showToolOutput,
+                final boolean showUsage,
+                final boolean permitAll) {
+            this(
+                    session,
+                    context,
+                    agent,
+                    color,
+                    ascii,
+                    presentation,
+                    showThinking,
+                    showToolOutput,
+                    showUsage,
+                    permitAll,
+                    List.of());
+        }
+    }
 
     @Override
     public void run() {
@@ -309,6 +359,7 @@ public class CliCommand implements Runnable {
         final var shutdownHook = new Thread(this::shutdownCleanup, "yca-cli-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
         try {
+            submitInitialPrompts();
             repLoop();
         } finally {
             cleanup();
@@ -490,16 +541,49 @@ public class CliCommand implements Runnable {
                     }
                     continue;
                 }
-                if (agentSessionService.isResumeAlias(text)) {
-                    runResume();
-                    println();
-                    continue;
-                }
-                runTurn(text);
+                runInput(text);
                 println();
             }
         } catch (final IOException e) {
             println(MarkdownColorizer.error("cli read failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * Submits the {@code --initial-prompt} entries before the REPL takes over, in order, through
+     * the very same dispatch as a typed line (see {@link #runInput(String)}): a resume alias such
+     * as {@code continue} restarts the loop on the persisted history without sending any message
+     * and anything else runs a regular turn. Entries are sequential, so in queueing mode
+     * (interactive terminal) each one waits for the previous turn to complete instead of being
+     * integrated into it as a typed-ahead prompt.
+     */
+    private void submitInitialPrompts() {
+        final var prompts = conf.initialPrompt();
+        if (prompts == null || prompts.isEmpty()) {
+            return;
+        }
+        for (final var prompt : prompts) {
+            if (prompt == null || prompt.isBlank()) {
+                continue;
+            }
+            runInput(prompt.strip());
+            println();
+            final var future = inFlight;
+            if (queueing && future != null) {
+                awaitTurn(future);
+            }
+        }
+    }
+
+    /**
+     * Runs one line of user input: a resume alias ({@code continue}, ...) re-runs the agent loop on
+     * the persisted history, anything else is a regular (possibly queued) turn.
+     */
+    private void runInput(final String text) {
+        if (agentSessionService.isResumeAlias(text)) {
+            runResume();
+        } else {
+            runTurn(text);
         }
     }
 

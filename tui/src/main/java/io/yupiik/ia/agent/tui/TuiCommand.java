@@ -402,7 +402,38 @@ public class TuiCommand implements Runnable {
                     defaultValue = "false",
                     documentation =
                             "Bypass permission prompts and allow all tool calls (not persisted to the transcript).")
-            boolean permitAll) {}
+            boolean permitAll,
+
+            @Property(
+                    defaultValue = "java.util.List.of()",
+                    documentation =
+                            "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
+                                    + "script a soft resume, e.g. continue re-runs the agent on the persisted history "
+                                    + "without sending any message. Values are comma separated; prefix with "
+                                    + "sep=<char>, to split on another single character when a value itself contains "
+                                    + "commas.")
+            List<String> initialPrompt) {
+
+        /**
+         * Convenience constructor for the common case: no prompt injected at startup.
+         *
+         * @param session resume an existing session id
+         * @param context session context file
+         * @param bindings key binding preset
+         * @param showThinking show the reasoning stream
+         * @param theme UI theme
+         * @param permitAll bypass permission prompts
+         */
+        public TuiConf(
+                final String session,
+                final String context,
+                final KeyBindingPreset bindings,
+                final boolean showThinking,
+                final String theme,
+                final boolean permitAll) {
+            this(session, context, bindings, showThinking, theme, permitAll, List.of());
+        }
+    }
 
     private Path themeStoragePath() {
         final var root = Path.of(configuration.resolveStorageHome()).toAbsolutePath();
@@ -505,6 +536,7 @@ public class TuiCommand implements Runnable {
                 }
             }
             newTab(tui, initialSessionId);
+            submitInitialPrompts();
             if (gitBranchPoller != null) {
                 gitBranchPoller.start();
             }
@@ -546,6 +578,43 @@ public class TuiCommand implements Runnable {
     /** The tab currently rendered and receiving the keyboard. */
     private UiState active() {
         return tabManager.active();
+    }
+
+    /**
+     * Submits the {@code --initial-prompt} entries right after the first tab is opened, in order,
+     * through the very same path as a typed line (see {@link #submit(String, TuiRunner, UiState, boolean)}):
+     * a resume alias such as {@code continue} restarts the loop on the persisted history without
+     * sending any message, a slash command is dispatched as usual and anything else is sent as a
+     * user prompt. Each entry gets its own turn: the following ones wait for the turn to end
+     * ({@link #submitNextInitialPrompt}) instead of being merged into the running turn as a
+     * type-ahead prompt. Once the last one is in, the UI is back to its regular interactive input.
+     */
+    private void submitInitialPrompts() {
+        final var prompts = conf.initialPrompt();
+        final var state = active();
+        if (prompts == null || prompts.isEmpty() || state == null) {
+            return;
+        }
+        for (final var prompt : prompts) {
+            if (prompt != null && !prompt.isBlank()) {
+                state.initialPrompts.addLast(prompt.strip());
+            }
+        }
+        runLater(state, () -> submitNextInitialPrompt(state));
+    }
+
+    /**
+     * Submits the next queued {@code --initial-prompt} entry on the render thread, if any is left
+     * and no turn is running.
+     */
+    private void submitNextInitialPrompt(final UiState state) {
+        if (state.model.busy() || state.interrupted) {
+            return;
+        }
+        final var next = state.initialPrompts.pollFirst();
+        if (next != null) {
+            submit(next, state.runner, state, true);
+        }
     }
 
     private void activate(final int index) {
@@ -1085,6 +1154,10 @@ public class TuiCommand implements Runnable {
                     runLater(state, () -> submit(next, state.runner, state, false));
                 }
             }
+            // startup prompts run one turn each: the next one starts now that this turn ended
+            if (!state.initialPrompts.isEmpty() && state.runner != null && !state.model.busy()) {
+                runLater(state, () -> submitNextInitialPrompt(state));
+            }
         }
     }
 
@@ -1101,6 +1174,7 @@ public class TuiCommand implements Runnable {
                 || activeWait(state) != null
                 || state.model.thinkingLength() > 0
                 || !state.pendingPrompts.isEmpty()
+                || !state.initialPrompts.isEmpty()
                 || state.toast != null
                 || state.dirty;
     }
@@ -6429,6 +6503,14 @@ public class TuiCommand implements Runnable {
         private volatile long toastShownAt;
         private volatile TuiRunner runner;
         private final java.util.Deque<String> pendingPrompts = new java.util.concurrent.ConcurrentLinkedDeque<>();
+
+        /**
+         * Startup prompts ({@code --initial-prompt}) not yet submitted: each one waits for the
+         * previous turn to end so they run one after the other, one turn each, instead of being
+         * merged into a running turn like a type-ahead prompt.
+         */
+        private final java.util.Deque<String> initialPrompts = new java.util.concurrent.ConcurrentLinkedDeque<>();
+
         private volatile String errorMessage;
         private volatile ErrorDetail errorDetail;
         private volatile boolean errorOpen;

@@ -61,6 +61,15 @@ java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatja
 java --enable-native-access=ALL-UNNAMED -jar tui/target/tui-1.0.0-SNAPSHOT-fatjar.jar help
 ```
 
+`tui` and `cli` accept a repeatable `--initialPrompt` option (comma separated
+values): each value is submitted at startup, in order, exactly as if it had been
+typed, then the app returns to normal input. It is handy for scripts and soft
+resumes: `--initialPrompt continue` on a resumed session (`--session <session-id>`)
+re-runs the agent on the persisted history without sending any new message
+(soft resume, honoring the same resume aliases as typing `continue`). Prefix a
+value with `sep=<char>,` to split on another single character when a value
+itself contains commas.
+
 Plan mode is the default for every command. `run` is read-only by default; pass
 `--yca-run-mode build` to allow applying changes, or `--yca-run-permitAll`
 (`--yca-tui-permitAll` for the `tui` command) to bypass permission prompts and
