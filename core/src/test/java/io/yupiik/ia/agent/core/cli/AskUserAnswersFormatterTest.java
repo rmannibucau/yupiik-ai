@@ -18,27 +18,21 @@ package io.yupiik.ia.agent.core.cli;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import java.util.List;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterEach;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class AskUserAnswersFormatterTest {
-    private JsonMapperImpl mapper;
+    private JsonMapper mapper;
     private AskUserAnswersFormatter formatter;
 
     @BeforeEach
-    void setUp() {
-        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    void setUp(final JsonMapper mapper) {
+        this.mapper = mapper;
         formatter = new AskUserAnswersFormatter(mapper);
-    }
-
-    @AfterEach
-    void tearDown() {
-        mapper.close();
-        mapper = null;
     }
 
     @Test

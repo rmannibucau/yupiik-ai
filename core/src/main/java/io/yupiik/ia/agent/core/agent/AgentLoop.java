@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
+import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
@@ -167,6 +168,32 @@ public class AgentLoop {
      */
     private volatile Consumer<PauseEvent> pauseListener;
 
+    /**
+     * Immutable snapshot of the last request this loop handed to the provider: what the
+     * model really receives, which is not what the session store keeps (the leading
+     * system message and the volatile session-state tail are never persisted, and the
+     * list is rewritten by prune/compaction before every call). Captured for
+     * {@code /context llm-payload}. {@code protected} so tests can seed a loop without
+     * running a turn.
+     *
+     * @param sessionId session the request was built for
+     * @param model model the request was sent with
+     * @param messages the exact message list sent (system prompt included)
+     * @param tools the wire tool schemas sent
+     * @param toolChoice the tool choice sent
+     * @param toolsTokens estimated tokens of {@code tools}, used to report the total footprint
+     */
+    public record LlmPayload(
+            String sessionId,
+            String model,
+            List<Message> messages,
+            List<Tool> tools,
+            String toolChoice,
+            int toolsTokens) {}
+
+    /** Last captured payload, {@code null} until this session sent its first request. */
+    protected volatile LlmPayload lastLlmPayload;
+
     // Per-turn metrics tracking (reset at start of each doRun)
     private int turnLlmCalls;
     private long turnThinkingMs;
@@ -181,6 +208,8 @@ public class AgentLoop {
     private long turnLlmPausedMs;
     private int turnOutputTokens;
     private long turnLlmReportedMs;
+    // todo auto-continuation budget consumed by the current turn (bounded by yca.todos.maxContinues)
+    private int unfinishedTodoContinues;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -379,6 +408,41 @@ public class AgentLoop {
      */
     public ChatSettings chatSettings() {
         return chatSettings;
+    }
+
+    /**
+     * The last request sent to the provider for this session, {@code null} when none was
+     * sent yet. Backed by {@code /context llm-payload}; the snapshot is immutable so a
+     * later prune/compaction of the live list cannot change it.
+     */
+    public LlmPayload lastLlmPayload() {
+        return lastLlmPayload;
+    }
+
+    /**
+     * Rebuilds - without calling the provider - the request the next round would carry right now:
+     * the same system prefix {@code doRun} assembles, the persisted transcript and a freshly
+     * computed volatile tail. It is a preview and not a history: the memory refresh, the context
+     * usage line and the nudge block depend on the state at this instant and the persisted
+     * transcript has none of them, so {@code /context next-request} says so while
+     * {@link #lastLlmPayload()} stays the exact bytes of the last call.
+     */
+    public LlmPayload previewLlmPayload(final String sessionId) {
+        final var tools = toolRegistry.toWireTools();
+        final var toolsTokens = toolTokens(tools);
+        final var history = sessionStore.load(sessionId);
+        final var prompt = lastUserPrompt(history);
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system(systemPromptBuilder.build(prompt, null) + snapshotBlock(sessionId)));
+        messages.addAll(history);
+        appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart(), toolsTokens);
+        return new LlmPayload(
+                sessionId,
+                providerManager.resolveDefault().model(),
+                List.copyOf(messages),
+                List.copyOf(tools),
+                "auto",
+                toolsTokens);
     }
 
     public String run(
@@ -658,7 +722,8 @@ public class AgentLoop {
         var consecutiveCompactions = 0;
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
-        var unfinishedTodoContinues = 0;
+        var emptyCompletionRetries = 0;
+        unfinishedTodoContinues = 0;
         var toolsRanThisTurn = false;
         var toolDirectiveApplied = false;
         // a prompt typed while the loop was running was injected in this turn: the model answered
@@ -680,213 +745,264 @@ public class AgentLoop {
         thinkingActive = false;
         thinkingStartNanos = 0;
         turnStartNanos = System.nanoTime();
-        for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
-            if (contextView != null) {
-                contextView.publish(snapshot(messages, toolsTokens));
-            }
-            if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
-                userInjected = true;
-                continue;
-            }
-            // user/tool-requested context operations (manage_context, /compact while busy) are
-            // applied at the first safe checkpoint of the turn, at most one per turn
-            if (!toolDirectiveApplied && contextView != null) {
-                final var directive = contextView.poll();
-                if (directive != null) {
-                    toolDirectiveApplied = true;
-                    applyToolDirective(sessionId, messages, directive, toolsTokens);
+        // A "window" is one bounded run of the round loop. Every todo auto-continuation starts a fresh
+        // window with a new maxIterations budget - yca.todos.maxContinues bounds the number of windows -
+        // while empty-completion and truncation retries keep sharing the current window's budget. Without
+        // this one long turn would be capped at maxIterations (250 by default) regardless of how many
+        // todo continuations remain, making large --todos-maxContinues values unreachable.
+        windowLoop:
+        while (!cancelled.getAsBoolean()) {
+            for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
+                if (contextView != null) {
+                    contextView.publish(snapshot(messages, toolsTokens));
                 }
-            }
-            // zero-LLM DCP-style strategies (dedup, write superseding, error-input purge) run only at
-            // the automatic-prune check point: like the prune, they mutate already-sent messages, so
-            // running them on every iteration would invalidate the prompt prefix cache for no gain.
-            // When they change something the result is persisted and the usage anchor cleared.
-            var compactedThisTurn = false;
-            if (contextManager.pruneNeeded(messages, toolsTokens)) {
-                final var zeroLlmChanged = applyZeroLlmStrategies(messages);
-                if (zeroLlmChanged) {
-                    persistContext(sessionId, messages);
-                    usageTracker.clearAnchor();
-                }
-                final var pruned = contextManager.prune(messages);
-                if (pruned.changed()) {
-                    messages.clear();
-                    messages.addAll(pruned.messages());
-                    emit(compacted("prune", pruned.mode().name()));
-                    persistContext(sessionId, messages);
-                    compactedThisTurn = true;
-                }
-            }
-            if (contextManager.compactNeeded(messages, toolsTokens)) {
-                final var compacted = contextManager.compact(messages, false, null, 0, cancelled);
-                if (compacted.changed()) {
-                    messages.clear();
-                    messages.addAll(compacted.messages());
-                    emit(compacted("compact", compacted.mode().name()));
-                    persistContext(sessionId, messages);
-                    compactedThisTurn = true;
-                }
-            }
-            if (compactedThisTurn) {
-                consecutiveCompactions++;
-                if (consecutiveCompactions >= maxConsecutiveCompactions
-                        && usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens))
-                                >= configuration.compaction().thresholdPercent()) {
-                    emit(notice(
-                            AgentEvent.Notice.Level.ERROR,
-                            "Context keeps filling up right after compaction after " + consecutiveCompactions
-                                    + " attempts. Consider /compact manually, a larger model, or splitting the task."));
-                    break;
-                }
-            } else {
-                consecutiveCompactions = 0;
-            }
-
-            // append-only volatile session state: the tail is its own trailing user message in the
-            // working list (deduplicated when unchanged), so every request is the previous request's
-            // exact bytes plus the tokens appended since. Nothing previously sent is ever moved or
-            // rewritten, so provider-side prefix caches (llama.cpp slot LCP with f_keep ~ 1.0,
-            // token-level gateways) keep matching instead of diverging mid-conversation.
-            appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart);
-            final var request =
-                    new ChatCompletionRequest(model, messages, null, null, null, tools, "auto", null, null, null);
-            final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
-            final var finishReason = new String[] {null};
-            final Message assistant;
-            final long llmStartNanos;
-            final long pausedBeforeMs = turnLlmPausedMs;
-            try {
-                llmStartNanos = System.nanoTime();
-                assistant = streamWithRetry(request, usage, finishReason, cancelled);
-            } catch (final ContextWindowExceededException e) {
-                if (!retryOnOverflow || overflowRetried) {
-                    throw e;
-                }
-                if (usageTracker.lastResolutionWasAuto() && !autoNoticeEmitted) {
-                    emit(
-                            notice(
-                                    AgentEvent.Notice.Level.INFO,
-                                    "Context window auto-detected: no exact figure was available, using a conservative default and learning on overflow."));
-                    autoNoticeEmitted = true;
-                }
-                final var shrunken = usageTracker.rememberShrinkOnOverflow();
-                emit(notice(
-                        AgentEvent.Notice.Level.INFO,
-                        "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
-                                + " tokens)."));
-                final var compacted = contextManager.compactForOverflow(messages, cancelled);
-                if (compacted.changed() && !compacted.messages().isEmpty()) {
-                    messages.clear();
-                    messages.addAll(compacted.messages());
-                    emit(compacted("compact-retry", compacted.mode().name()));
-                    persistContext(sessionId, messages);
-                    overflowRetried = true;
+                if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                    userInjected = true;
                     continue;
                 }
-                emit(notice(
-                        AgentEvent.Notice.Level.ERROR,
-                        "Context window exceeded and compacting did not free enough context: " + e.getMessage()));
-                throw e;
-            }
-            usageTracker.record(usage[0]);
-            // throughput: time spent generating, idle time excluded. A request refused because the
-            // context window is too small contributes nothing (it is a preflight, not a generation).
-            recordThroughput(assistant, usage[0], (System.nanoTime() - llmStartNanos) / 1_000_000, pausedBeforeMs);
-            // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
-            // estimate at the same moment calibrates later deltas until the next observation
-            usageTracker.anchor(usage[0].promptTokens(), usageTracker.estimateContext(messages, toolsTokens));
-            messages.add(assistant);
-            sessionStore.append(
-                    sessionId,
-                    SessionEntry.of(
-                            clock.millis(), "assistant", str(assistant.content()), assistant.toolCalls(), null));
-            emitUsage(messages, toolsTokens);
-
-            if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
-                userInjected = true;
-                continue;
-            }
-
-            if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
-                // an interrupt pressed while a continuation (truncation or overflow retry) was
-                // about to re-ask the model must stop here, not spawn another request
-                if (cancelled.getAsBoolean()) {
-                    return str(assistant.content());
+                // user/tool-requested context operations (manage_context, /compact while busy) are
+                // applied at the first safe checkpoint of the turn, at most one per turn
+                if (!toolDirectiveApplied && contextView != null) {
+                    final var directive = contextView.poll();
+                    if (directive != null) {
+                        toolDirectiveApplied = true;
+                        applyToolDirective(sessionId, messages, directive, toolsTokens);
+                    }
                 }
-                final var content = str(assistant.content());
-                final var reason = finishReason[0];
-                if (isTruncation(reason)) {
-                    final var maxTruncationContinues = configuration.llm().truncationContinuesMax();
-                    if (configuration.llm().continueOnTruncation() && truncationContinues < maxTruncationContinues) {
-                        truncationContinues++;
-                        emit(notice(
-                                AgentEvent.Notice.Level.WARN,
-                                "Response truncated by the output token limit (finish_reason="
-                                        + reason + "); asking the model to continue (" + truncationContinues + '/'
-                                        + maxTruncationContinues + ")."));
-                        messages.add(Message.user(
-                                truncationContinues >= 2 ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
+                // zero-LLM DCP-style strategies (dedup, write superseding, error-input purge) run only at
+                // the automatic-prune check point: like the prune, they mutate already-sent messages, so
+                // running them on every iteration would invalidate the prompt prefix cache for no gain.
+                // When they change something the result is persisted and the usage anchor cleared.
+                var compactedThisTurn = false;
+                if (contextManager.pruneNeeded(messages, toolsTokens)) {
+                    final var zeroLlmChanged = applyZeroLlmStrategies(messages);
+                    if (zeroLlmChanged) {
+                        persistContext(sessionId, messages);
+                        usageTracker.clearAnchor();
+                    }
+                    final var pruned = contextManager.prune(messages);
+                    if (pruned.changed()) {
+                        messages.clear();
+                        messages.addAll(pruned.messages());
+                        emit(compacted("prune", pruned.mode().name()));
+                        persistContext(sessionId, messages);
+                        compactedThisTurn = true;
+                    }
+                }
+                if (contextManager.compactNeeded(messages, toolsTokens)) {
+                    final var compacted = contextManager.compact(messages, false, null, 0, cancelled);
+                    if (compacted.changed()) {
+                        messages.clear();
+                        messages.addAll(compacted.messages());
+                        emit(compacted("compact", compacted.mode().name()));
+                        persistContext(sessionId, messages);
+                        compactedThisTurn = true;
+                    }
+                }
+                if (compactedThisTurn) {
+                    consecutiveCompactions++;
+                    if (consecutiveCompactions >= maxConsecutiveCompactions
+                            && usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens))
+                                    >= configuration.compaction().thresholdPercent()) {
+                        emit(
+                                notice(
+                                        AgentEvent.Notice.Level.ERROR,
+                                        "Context keeps filling up right after compaction after "
+                                                + consecutiveCompactions
+                                                + " attempts. Consider /compact manually, a larger model, or splitting the task."));
+                        break;
+                    }
+                } else {
+                    consecutiveCompactions = 0;
+                }
+
+                // append-only volatile session state: the tail is its own trailing user message in the
+                // working list (deduplicated when unchanged), so every request is the previous request's
+                // exact bytes plus the tokens appended since. Nothing previously sent is ever moved or
+                // rewritten, so provider-side prefix caches (llama.cpp slot LCP with f_keep ~ 1.0,
+                // token-level gateways) keep matching instead of diverging mid-conversation.
+                appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart, toolsTokens);
+                // snapshot of what goes on the wire, for /context llm-payload: taken here so it
+                // carries the pruned/compacted list and the volatile tail, and copied because the
+                // live list keeps growing (messages/tools are immutable, so a shallow copy is enough)
+                lastLlmPayload = new LlmPayload(
+                        sessionId, model, List.copyOf(messages), List.copyOf(tools), "auto", toolsTokens);
+                final var request =
+                        new ChatCompletionRequest(model, messages, null, null, null, tools, "auto", null, null, null);
+                final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
+                final var finishReason = new String[] {null};
+                final Message assistant;
+                final long llmStartNanos;
+                final long pausedBeforeMs = turnLlmPausedMs;
+                try {
+                    llmStartNanos = System.nanoTime();
+                    assistant = streamWithRetry(request, usage, finishReason, cancelled);
+                } catch (final ContextWindowExceededException e) {
+                    if (!retryOnOverflow || overflowRetried) {
+                        throw e;
+                    }
+                    if (usageTracker.lastResolutionWasAuto() && !autoNoticeEmitted) {
+                        emit(
+                                notice(
+                                        AgentEvent.Notice.Level.INFO,
+                                        "Context window auto-detected: no exact figure was available, using a conservative default and learning on overflow."));
+                        autoNoticeEmitted = true;
+                    }
+                    final var shrunken = usageTracker.rememberShrinkOnOverflow();
+                    emit(notice(
+                            AgentEvent.Notice.Level.INFO,
+                            "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
+                                    + " tokens)."));
+                    final var compacted = contextManager.compactForOverflow(messages, cancelled);
+                    if (compacted.changed() && !compacted.messages().isEmpty()) {
+                        messages.clear();
+                        messages.addAll(compacted.messages());
+                        emit(compacted("compact-retry", compacted.mode().name()));
+                        persistContext(sessionId, messages);
+                        overflowRetried = true;
                         continue;
                     }
                     emit(notice(
                             AgentEvent.Notice.Level.ERROR,
-                            "Response truncated by the output token limit (finish_reason="
-                                    + reason + "); the reply may be incomplete."
-                                    + (configuration.llm().continueOnTruncation()
-                                            ? " Gave up after " + truncationContinues + " continuation"
-                                                    + (truncationContinues == 1 ? "" : "s") + "."
-                                            : " Enable yca.llm.continueOnTruncation to auto-continue.")));
+                            "Context window exceeded and compacting did not free enough context: " + e.getMessage()));
+                    throw e;
+                }
+                usageTracker.record(usage[0]);
+                // throughput: time spent generating, idle time excluded. A request refused because the
+                // context window is too small contributes nothing (it is a preflight, not a generation).
+                recordThroughput(assistant, usage[0], (System.nanoTime() - llmStartNanos) / 1_000_000, pausedBeforeMs);
+                // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
+                // estimate at the same moment calibrates later deltas until the next observation
+                usageTracker.anchor(usage[0].promptTokens(), usageTracker.estimateContext(messages, toolsTokens));
+                messages.add(assistant);
+                sessionStore.append(
+                        sessionId,
+                        SessionEntry.of(
+                                clock.millis(), "assistant", str(assistant.content()), assistant.toolCalls(), null));
+                emitUsage(messages, toolsTokens);
+
+                if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                    userInjected = true;
+                    continue;
+                }
+
+                if (assistant.toolCalls() == null || assistant.toolCalls().isEmpty()) {
+                    // an interrupt pressed while a continuation (truncation or overflow retry) was
+                    // about to re-ask the model must stop here, not spawn another request
+                    if (cancelled.getAsBoolean()) {
+                        return str(assistant.content());
+                    }
+                    final var content = str(assistant.content());
+                    final var reason = finishReason[0];
+                    if (isTruncation(reason)) {
+                        final var maxTruncationContinues = configuration.llm().truncationContinuesMax();
+                        if (configuration.llm().continueOnTruncation()
+                                && truncationContinues < maxTruncationContinues) {
+                            truncationContinues++;
+                            emit(notice(
+                                    AgentEvent.Notice.Level.WARN,
+                                    "Response truncated by the output token limit (finish_reason="
+                                            + reason + "); asking the model to continue (" + truncationContinues + '/'
+                                            + maxTruncationContinues + ")."));
+                            messages.add(Message.user(
+                                    truncationContinues >= 2 ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
+                            continue;
+                        }
+                        if (tryTodoAutoContinue(messages, reason, toolsRanThisTurn, userInjected)) {
+                            continue windowLoop;
+                        }
+                        emit(notice(
+                                AgentEvent.Notice.Level.ERROR,
+                                "Response truncated by the output token limit (finish_reason="
+                                        + reason + "); the reply may be incomplete."
+                                        + (configuration.llm().continueOnTruncation()
+                                                ? " Gave up after " + truncationContinues + " continuation"
+                                                        + (truncationContinues == 1 ? "" : "s") + "."
+                                                : " Enable yca.llm.continueOnTruncation to auto-continue.")));
+                        emitTurnMetrics(content, turnStartNanos);
+                        return content;
+                    }
+                    if (content.isBlank()) {
+                        final var maxRetries = configuration.llm().emptyCompletionRetriesMax();
+                        if (maxRetries > 0 && emptyCompletionRetries < maxRetries) {
+                            emptyCompletionRetries++;
+                            emit(notice(
+                                    AgentEvent.Notice.Level.WARN,
+                                    "model returned an empty completion (finish_reason=" + reason + "); retrying ("
+                                            + emptyCompletionRetries + '/' + maxRetries + ')'));
+                            continue;
+                        }
+                        if (tryTodoAutoContinue(messages, reason, toolsRanThisTurn, userInjected)) {
+                            continue windowLoop;
+                        }
+                        emit(notice(
+                                AgentEvent.Notice.Level.ERROR,
+                                "model returned an empty completion (finish_reason=" + reason + ')'
+                                        + (maxRetries <= 0
+                                                ? " (yca.llm.emptyCompletionRetriesMax is 0, no retry)"
+                                                : "; gave up after " + emptyCompletionRetries + " retries")));
+                        emitTurnMetrics(content, turnStartNanos);
+                        return content;
+                    }
+                    // a real, non-truncated text reply is progress: empty-completion and truncation retries must
+                    // not accumulate across productive rounds, only across consecutive stuck replies
+                    emptyCompletionRetries = 0;
+                    truncationContinues = 0;
+                    if (tryTodoAutoContinue(messages, reason, toolsRanThisTurn, userInjected)) {
+                        continue windowLoop;
+                    }
+                    final var pending = unfinishedTodos(toolsRanThisTurn);
+                    if (pending != null) {
+                        emit(unfinishedTodosNotice(pending, reason));
+                    }
                     emitTurnMetrics(content, turnStartNanos);
                     return content;
                 }
-                final var pending = unfinishedTodos(toolsRanThisTurn);
-                if (pending != null) {
-                    final var maxContinues = todoMaxContinues();
-                    if (canAutoContinueUnfinished(userInjected) && unfinishedTodoContinues < maxContinues) {
-                        unfinishedTodoContinues++;
-                        emit(notice(
-                                AgentEvent.Notice.Level.INFO,
-                                "model ended its turn (finish_reason=" + reason + ") with " + pending.pending() + '/'
-                                        + pending.total() + " todos still pending; continuing automatically ("
-                                        + unfinishedTodoContinues + '/' + maxContinues + ")."));
-                        messages.add(Message.user(unfinishedTodoContinuePrompt(unfinishedTodoContinues)));
-                        continue;
+                // an interrupt pressed while the model was generating must stop here: the flag is
+                // only polled at iteration boundaries, so without this check the whole tool batch
+                // would still run after the cancellation
+                if (cancelled.getAsBoolean()) {
+                    break;
+                }
+                executeToolCalls(
+                        sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens, cancelled);
+                toolsRanThisTurn = true;
+                // a tool round is progress too: a later empty/truncated reply starts its retry budget fresh
+                emptyCompletionRetries = 0;
+                truncationContinues = 0;
+                if (!toolDirectiveApplied && contextView != null) {
+                    final var directive = contextView.poll();
+                    if (directive != null) {
+                        toolDirectiveApplied = true;
+                        applyToolDirective(sessionId, messages, directive, toolsTokens);
                     }
-                    emit(unfinishedTodosNotice(pending, reason));
                 }
-                emitTurnMetrics(content, turnStartNanos);
-                return content;
             }
-            // an interrupt pressed while the model was generating must stop here: the flag is
-            // only polled at iteration boundaries, so without this check the whole tool batch
-            // would still run after the cancellation
+            // the window's iteration budget ran out while the turn was still running: when todos are
+            // pending and auto-continuation is allowed, start a fresh window instead of stopping, so a
+            // model that keeps calling tools is not capped by the per-window budget alone
             if (cancelled.getAsBoolean()) {
-                break;
+                emit(new AgentEvent.TurnCancelled(currentSessionId, subagentId, subagentName));
+                emitTurnMetrics(null, turnStartNanos);
+                return null;
             }
-            executeToolCalls(sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens, cancelled);
-            toolsRanThisTurn = true;
-            if (!toolDirectiveApplied && contextView != null) {
-                final var directive = contextView.poll();
-                if (directive != null) {
-                    toolDirectiveApplied = true;
-                    applyToolDirective(sessionId, messages, directive, toolsTokens);
-                }
+            if (tryTodoAutoContinue(messages, "max_iterations", toolsRanThisTurn, userInjected)) {
+                continue windowLoop;
             }
-        }
-        if (cancelled.getAsBoolean()) {
-            emit(new AgentEvent.TurnCancelled(currentSessionId, subagentId, subagentName));
-        } else {
             emit(error("Maximum iterations reached (" + maxIterations + ")"));
+            emitTurnMetrics(null, turnStartNanos);
+            return null;
         }
+        emit(new AgentEvent.TurnCancelled(currentSessionId, subagentId, subagentName));
         emitTurnMetrics(null, turnStartNanos);
         return null;
     }
 
     /**
-     * Appends the volatile session state (date, todos, memory refresh, nudge and the compaction
-     * snapshot) as its own trailing user message in the working conversation, deduplicated against
-     * the newest state tail already present: when the rendered state is byte-identical, nothing is
-     * appended. Because the tail is part of the working list and is never moved nor rewritten once
+     * Appends the volatile session state (date, todos, memory refresh, context usage, nudge and the
+     * compaction snapshot) as its own trailing user message in the working conversation, deduplicated
+     * against the newest state tail already present: when the rendered state is byte-identical, nothing
+     * is appended. Because the tail is part of the working list and is never moved nor rewritten once
      * sent, every request is the previous request's exact bytes plus the assistant/tool messages
      * and state changes appended since - so provider-side prefix caches (llama.cpp slot LCP, token
      * gateways) keep matching with f_keep ~ 1.0 like opencode instead of diverging mid-conversation.
@@ -895,11 +1011,13 @@ public class AgentLoop {
             final String sessionId,
             final List<Message> messages,
             final String prompt,
-            final int memoryVersionAtTurnStart) {
+            final int memoryVersionAtTurnStart,
+            final int toolsTokens) {
         final var state = "<session-state>\n"
                 + systemPromptBuilder.sessionState(prompt)
                 + memoryRefresh(prompt, memoryVersionAtTurnStart)
-                + nudgeBlock(messages)
+                + contextUsageLine(messages, toolsTokens)
+                + nudgeBlock(messages, toolsTokens)
                 + snapshotBlock(sessionId)
                 + "</session-state>";
         // dedup: skip when the newest state tail already carries exactly this state
@@ -1546,8 +1664,9 @@ public class AgentLoop {
         if (todos.isEmpty()) {
             return null;
         }
-        final var pending =
-                todos.stream().filter(t -> !"completed".equals(t.status())).count();
+        final var pending = todos.stream()
+                .filter(t -> !"completed".equals(t.status()) && !"cancelled".equals(t.status()))
+                .count();
         return pending == 0 ? null : new PendingTodos((int) pending, todos.size());
     }
 
@@ -1566,6 +1685,34 @@ public class AgentLoop {
     /** Continuations allowed per turn ({@code yca.todos.maxContinues}), zero when not configured. */
     private int todoMaxContinues() {
         return configuration.todos() == null ? 0 : configuration.todos().maxContinues();
+    }
+
+    /**
+     * Turns a stop the model did not really choose - an empty completion, a truncation, a window whose
+     * iteration budget ran out, or a plain text-only end - into a todo auto-continuation when pending
+     * todos and {@code yca.todos.continueOnUnfinished} hold. Shared by every stop path so the
+     * continuation budget ({@code yca.todos.maxContinues}) and the strategy-change prompt are honored
+     * uniformly. Returns whether the caller must start a fresh iteration window ({@code continue} on
+     * the labelled {@code windowLoop}).
+     */
+    private boolean tryTodoAutoContinue(
+            final List<Message> messages,
+            final String finishReason,
+            final boolean toolsRanThisTurn,
+            final boolean userInjected) {
+        final var pending = unfinishedTodos(toolsRanThisTurn);
+        final var maxContinues = todoMaxContinues();
+        if (pending == null || !canAutoContinueUnfinished(userInjected) || unfinishedTodoContinues >= maxContinues) {
+            return false;
+        }
+        unfinishedTodoContinues++;
+        emit(notice(
+                AgentEvent.Notice.Level.INFO,
+                "model ended its turn (finish_reason=" + finishReason + ") with " + pending.pending() + '/'
+                        + pending.total() + " todos still pending; continuing automatically ("
+                        + unfinishedTodoContinues + '/' + maxContinues + ")."));
+        messages.add(Message.user(unfinishedTodoContinuePrompt(unfinishedTodoContinues)));
+        return true;
     }
 
     /**
@@ -2073,13 +2220,26 @@ public class AgentLoop {
      * must survive compaction) to the system prompt, when any exist.
      */
     /**
+     * Unconditional context-usage line rendered in every volatile session-state tail: the model always
+     * sees the current usage estimate and the prune/compaction thresholds, whether or not the nudge
+     * fires. Kept out of the stable system prefix so prompt caching is unaffected.
+     */
+    String contextUsageLine(final List<Message> messages, final int toolsTokens) {
+        final var percent =
+                (int) Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens)));
+        return "Context usage: ~" + percent + "% of the usable window (prune at "
+                + configuration.pruning().thresholdPercent() + "%, compaction at "
+                + configuration.compaction().thresholdPercent() + "%).\n";
+    }
+
+    /**
      * Soft context-usage nudge appended to the volatile session state (never to the stable prefix, so
      * prompt caching is unaffected). Only fires when {@code nudgeThresholdPercent} is non-zero, the
-     * estimated usage is above it and at least {@code nudgeIterationThreshold} iterations ran since
-     * the last user message: the model is invited to finish or to compress instead of waiting for the
-     * hard compaction wall.
+     * estimated usage is above it, the estimate is large enough (see {@code nudgeMinTokens}) and at
+     * least {@code nudgeIterationThreshold} iterations ran since the last user message. The wording
+     * escalates once usage reaches the prune threshold.
      */
-    String nudgeBlock(final List<Message> messages) {
+    String nudgeBlock(final List<Message> messages, final int toolsTokens) {
         final var p = configuration.pruning();
         final var threshold = p.nudgeThresholdPercent();
         if (threshold <= 0) {
@@ -2098,14 +2258,50 @@ public class AgentLoop {
         if (sinceLastUser < p.nudgeIterationThreshold()) {
             return "";
         }
-        final var percent = (int) Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, 0)));
+        final var tokens = usageTracker.effectiveContext(messages, toolsTokens);
+        if (tokens < minNudgeTokens()) {
+            return "";
+        }
+        final var percent = (int) Math.round(usageTracker.contextPercent(tokens));
         if (percent < threshold) {
             return "";
         }
-        final var template = p.nudgeTemplate() == null || p.nudgeTemplate().isBlank()
-                ? "Context is at ~%USAGE%% of the usable window. Consider finishing the task soon, or running manage_context with action=compact or action=prune."
-                : p.nudgeTemplate();
-        return "\n<nudge>" + template.replace("%USAGE%", String.valueOf(percent)) + "</nudge>";
+        final var urgent = percent >= p.thresholdPercent();
+        final var template = urgent ? p.nudgeUrgentTemplate() : p.nudgeTemplate();
+        final var resolved = template == null || template.isBlank()
+                ? urgent
+                        ? "Context is at ~%USAGE%% and above the prune threshold (%PRUNE%%). Do not start new work - %ACTIONS% now to avoid the hard compaction wall."
+                        : "Context is at ~%USAGE%% of the usable window. Prefer wrapping this step up, or compact soon."
+                : template;
+        return "\n<nudge>"
+                + resolved.replace("%USAGE%", String.valueOf(percent))
+                        .replace("%PRUNE%", String.valueOf(p.thresholdPercent()))
+                        .replace(
+                                "%COMPACT%",
+                                String.valueOf(configuration.compaction().thresholdPercent()))
+                        .replace("%ACTIONS%", manageContextActions())
+                + "</nudge>";
+    }
+
+    /**
+     * Effective absolute-token floor below which the nudge is suppressed: the smaller of 90% of the
+     * usable window and {@code nudgeMinTokens}, so small-window providers are only nudged close to the
+     * compaction wall while large ones get an absolute cap; 0 disables the floor (the percentage then
+     * remains the only usage gate).
+     */
+    private int minNudgeTokens() {
+        final var configured = configuration.pruning().nudgeMinTokens();
+        if (configured <= 0) {
+            return 0;
+        }
+        return (int) Math.min(usageTracker.usableWindow() * 0.9, configured);
+    }
+
+    private String manageContextActions() {
+        return configuration.tools().manageContext() != null
+                        && configuration.tools().manageContext().enabled()
+                ? "run manage_context with action=prune or action=compact"
+                : "interrupt with a short summary of the remaining steps";
     }
 
     private String snapshotBlock(final String sessionId) {

@@ -20,29 +20,30 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class AskUserToolTest {
-    private JsonMapperImpl mapper;
+    private JsonMapper mapper;
     private UserFeedbackService feedback;
     private AskUserTool tool;
 
     @BeforeEach
-    void setUp() {
-        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    void setUp(final JsonMapper mapper) {
+        this.mapper = mapper;
         feedback = new UserFeedbackService() {
             @Override
             public Map<String, Object> ask(final List<Question> questions) {
@@ -58,14 +59,6 @@ class AskUserToolTest {
 
     private ToolContext context() {
         return new ToolContext("s1", null, null, null, feedback, null, null, null, null, Cancellations.NEVER);
-    }
-
-    @AfterEach
-    void tearDown() {
-        if (mapper != null) {
-            mapper.close();
-            mapper = null;
-        }
     }
 
     @Test

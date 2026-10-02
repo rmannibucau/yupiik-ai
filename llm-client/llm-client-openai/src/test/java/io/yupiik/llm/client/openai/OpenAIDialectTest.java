@@ -23,7 +23,6 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.llm.client.DialectNotSupportedException;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
@@ -31,36 +30,9 @@ import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.Usage;
-import io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatChunk$ChunkToolCall$Function$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatChunk$ChunkToolCall$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.CompletionsTool$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ErrorResponse$Error$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ErrorResponse$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ModelsResponse$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ModelsResponse$Model$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesResponse$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesResponse$IncompleteDetails$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesResponse$OutputContent$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesResponse$OutputItem$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesResponse$ResponsesUsage$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesStreamEvent$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec;
-import io.yupiik.llm.client.openai.model.WireTool$WireToolFunction$FusionJsonCodec;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
+import io.yupiik.llm.client.test.TestJsonMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
@@ -76,9 +48,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class OpenAIDialectTest {
     private HttpServer server;
+    private HttpClient delegate;
+    private ExtendedHttpClient client;
     private final AtomicReference<String> reqHeaders = new AtomicReference<>();
     private final AtomicReference<String> reqBody = new AtomicReference<>();
     private final CopyOnWriteArrayList<String> streamTexts = new CopyOnWriteArrayList<>();
@@ -87,54 +63,25 @@ class OpenAIDialectTest {
     void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        delegate = HttpClient.newBuilder().build();
+        client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
     }
 
     @AfterEach
     void stop() {
-        if (server != null) {
+        if (server != null) { // close the server first so pooled keep-alive connections die before the client
             server.stop(0);
+            server = null;
         }
-    }
-
-    private static JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new ChatChunk$ChunkToolCall$Function$FusionJsonCodec(),
-                        new ChatChunk$ChunkToolCall$FusionJsonCodec(),
-                        new ChatChunk$FusionJsonCodec(),
-                        new ChatCompletionRequest$FusionJsonCodec(),
-                        new ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new ChatCompletionResponse$FusionJsonCodec(),
-                        new CompletionsTool$FusionJsonCodec(),
-                        new ErrorResponse$Error$FusionJsonCodec(),
-                        new ErrorResponse$FusionJsonCodec(),
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new OpenAIUsage$FusionJsonCodec(),
-                        new ResponsesInput$FusionJsonCodec(),
-                        new ResponsesRequest$FusionJsonCodec(),
-                        new ResponsesResponse$FusionJsonCodec(),
-                        new ResponsesResponse$IncompleteDetails$FusionJsonCodec(),
-                        new ResponsesResponse$OutputContent$FusionJsonCodec(),
-                        new ResponsesResponse$OutputItem$FusionJsonCodec(),
-                        new ResponsesResponse$ResponsesUsage$FusionJsonCodec(),
-                        new ResponsesStreamEvent$FusionJsonCodec(),
-                        new ResponsesTool$FusionJsonCodec(),
-                        new WireMessage$FusionJsonCodec(),
-                        new WireMessage$WireFunction$FusionJsonCodec(),
-                        new WireMessage$WireToolCall$FusionJsonCodec(),
-                        new WireTool$FusionJsonCodec(),
-                        new WireTool$WireToolFunction$FusionJsonCodec()),
-                key -> Optional.empty());
-    }
-
-    private static final HttpClient WARM_HTTP_CLIENT =
-            HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
-
-    private static ExtendedHttpClient client() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
+        if (client != null) {
+            client.close();
+            // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+            // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+            delegate.shutdownNow();
+            delegate.close();
+            client = null;
+            delegate = null;
+        }
     }
 
     private static LlmRequest request(final boolean stream) {
@@ -209,7 +156,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectPostsToChatCompletions() throws Exception {
+    void completionsDialectPostsToChatCompletions(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/chat/completions", exchange -> {
             reqHeaders.set(exchange.getRequestHeaders().getFirst("authorization"));
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
@@ -222,8 +169,8 @@ class OpenAIDialectTest {
         });
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -236,7 +183,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectReadsTheProviderSideGenerationTime() throws Exception {
+    void completionsDialectReadsTheProviderSideGenerationTime(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/chat/completions",
                 exchange -> respond(
@@ -247,8 +194,8 @@ class OpenAIDialectTest {
                                 + "\"completion_tokens\":100,\"total_tokens\":103,\"generation_time\":2.5}}"));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -258,7 +205,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectDerivesTheGenerationTimeFromAReportedRate() throws Exception {
+    void completionsDialectDerivesTheGenerationTimeFromAReportedRate(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/chat/completions",
                 exchange -> respond(
@@ -269,8 +216,8 @@ class OpenAIDialectTest {
                                 + "\"completion_tokens\":100,\"total_tokens\":103,\"tokens_per_second\":50}}"));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -279,7 +226,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectHasNoGenerationTimeWhenTheProviderReportsNone() throws Exception {
+    void completionsDialectHasNoGenerationTimeWhenTheProviderReportsNone(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/chat/completions",
                 exchange -> respond(
@@ -290,8 +237,8 @@ class OpenAIDialectTest {
                                 + "\"completion_tokens\":1,\"total_tokens\":4}}"));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -302,7 +249,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectStreamsTextDeltas() throws Exception {
+    void completionsDialectStreamsTextDeltas(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
                 "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hel\"},"
@@ -316,8 +263,8 @@ class OpenAIDialectTest {
         server.createContext("/v1/chat/completions", exchange -> respond(exchange, 200, "text/event-stream", sse));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var publisher =
@@ -332,7 +279,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsStreamAsksForIncludedUsage() throws Exception {
+    void completionsStreamAsksForIncludedUsage(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
                 "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},"
@@ -349,8 +296,8 @@ class OpenAIDialectTest {
         });
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var publisher =
@@ -364,7 +311,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsStreamUsageCanBeDisabledOrOverridden() throws Exception {
+    void completionsStreamUsageCanBeDisabledOrOverridden(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
                 "data: {\"id\":\"s1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},"
@@ -386,8 +333,8 @@ class OpenAIDialectTest {
         });
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         dialect.stream(request(true, java.util.Map.of("includeUsage", false)), () -> false)
@@ -410,7 +357,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectListsModelsFromDerivedEndpoint() throws Exception {
+    void completionsDialectListsModelsFromDerivedEndpoint(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/models",
                 exchange -> respond(
@@ -419,8 +366,8 @@ class OpenAIDialectTest {
                         "{\"data\":[{\"id\":\"a\",\"owned_by\":\"x\"},{\"id\":\"b\",\"owned_by\":\"y\"}]}"));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -428,12 +375,12 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectMaps404ToDialectNotSupported() {
+    void completionsDialectMaps404ToDialectNotSupported(final JsonMapper mapper) {
         server.createContext("/v1/chat/completions", exchange -> respond(exchange, 404, "not found"));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var completion = dialect.chat(request(false)).toCompletableFuture();
@@ -447,15 +394,15 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void completionsDialectSurfacesProviderErrorBodyOnFlavorMissing() {
+    void completionsDialectSurfacesProviderErrorBodyOnFlavorMissing(final JsonMapper mapper) {
         server.createContext(
                 "/v1/chat/completions",
                 exchange ->
                         respond(exchange, 404, "{\"error\":{\"message\":\"Model ' deepseek-v4-flash' not found\"}}"));
         server.start();
         final var dialect = new OpenAICompletionsDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
         final var completion = dialect.chat(request(false)).toCompletableFuture();
@@ -478,7 +425,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void responsesDialectPostsToResponses() throws Exception {
+    void responsesDialectPostsToResponses(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/responses", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -489,8 +436,8 @@ class OpenAIDialectTest {
         });
         server.start();
         final var dialect = new OpenAIResponsesDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final LlmResponse response =
                 dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -499,15 +446,15 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void responsesDialectRequestsReasoningSummary() throws Exception {
+    void responsesDialectRequestsReasoningSummary(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/responses", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(exchange, 200, "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
         });
         server.start();
         final var dialect = new OpenAIResponsesDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         // reasoningEffort is the 10th component of LlmRequest (before stream/extensions)
         final var request = new LlmRequest(
@@ -530,7 +477,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void responsesDialectKeepsAllNonStreamToolCalls() throws Exception {
+    void responsesDialectKeepsAllNonStreamToolCalls(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/responses",
                 exchange -> respond(
@@ -542,8 +489,8 @@ class OpenAIDialectTest {
                                 + "\"usage\":{}}"));
         server.start();
         final var dialect = new OpenAIResponsesDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final LlmResponse response =
                 dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -556,7 +503,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void responsesDialectStreamsTextDeltas() throws Exception {
+    void responsesDialectStreamsTextDeltas(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
                 "event: response.output_text.delta",
@@ -572,8 +519,8 @@ class OpenAIDialectTest {
         server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
         server.start();
         final var dialect = new OpenAIResponsesDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final var publisher =
                 dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -587,7 +534,7 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void responsesDialectStreamsReasoningSummaryDeltas() throws Exception {
+    void responsesDialectStreamsReasoningSummaryDeltas(final JsonMapper mapper) throws Exception {
         // gateways commonly stream only the reasoning summary, not the full reasoning text
         final var sse = String.join(
                 "\n",
@@ -607,8 +554,8 @@ class OpenAIDialectTest {
         server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
         server.start();
         final var dialect = new OpenAIResponsesDialect(
-                mapper(),
-                client(),
+                mapper,
+                client,
                 ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
         final var publisher =
                 dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -623,9 +570,9 @@ class OpenAIDialectTest {
     }
 
     @Test
-    void namesMatchRoutingKeys() {
-        final Dialect completions = new OpenAICompletionsDialect(mapper(), client(), ProviderSpec.of("http://x", "k"));
-        final Dialect responses = new OpenAIResponsesDialect(mapper(), client(), ProviderSpec.of("http://x", "k"));
+    void namesMatchRoutingKeys(final JsonMapper mapper) {
+        final Dialect completions = new OpenAICompletionsDialect(mapper, client, ProviderSpec.of("http://x", "k"));
+        final Dialect responses = new OpenAIResponsesDialect(mapper, client, ProviderSpec.of("http://x", "k"));
         assertEquals("openai-completions", completions.name());
         assertEquals("openai-responses", responses.name());
     }

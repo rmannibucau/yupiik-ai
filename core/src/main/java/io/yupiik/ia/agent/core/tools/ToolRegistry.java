@@ -51,6 +51,20 @@ public class ToolRegistry {
     }
 
     public List<Tool> toWireTools() {
+        return toWireTools(t -> true);
+    }
+
+    /**
+     * Like {@link #toWireTools()} but keeps only the tools matching {@code filter} once the
+     * code-resolve pruning and visibility rules have been applied, before the final
+     * {@code usable()} check. The {@code filter} therefore sees the same candidates the main
+     * agent sees - restricted subsets such as the read-only tools a /btw answer may call -
+     * without ever re-exposing a pruned tool.
+     *
+     * @param filter the subset predicate applied to the visible, non-pruned tools.
+     * @return the wire tool declarations for the matching tools.
+     */
+    public List<Tool> toWireTools(final java.util.function.Predicate<EmbeddedTool> filter) {
         final var all = tools();
         // The merged code_resolve tool subsumes the granular structural/share tools. When it is registered we
         // expose only it (plus on-demand maven_knowledge_content); when registered but no data source is live we
@@ -69,7 +83,8 @@ public class ToolRegistry {
                     }
                     return !CodeResolveTool.prunedRichToolNames().contains(t.name()) && !(t instanceof CodeResolveTool);
                 });
-        return stream.filter(EmbeddedTool::usable)
+        return stream.filter(filter)
+                .filter(EmbeddedTool::usable)
                 .map(t -> Tool.function(t.name(), t.description(), t.schema()))
                 .toList();
     }

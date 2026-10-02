@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import dev.tamboui.markdown.MarkdownStyles;
 import dev.tamboui.style.Color;
+import dev.tamboui.style.Modifier;
 import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
@@ -199,6 +200,53 @@ class MarkdownLinesTest {
                 .orElseThrow();
         // the theme inline-code style (gray + dim) is preserved on the cell span
         assertEquals(MarkdownStyles.DEFAULTS.inlineCode(), codeSpan.style());
+    }
+
+    @Test
+    void codeYieldsToTheRegionForegroundWhileLinkKeepsItsColor() {
+        final var base = Style.EMPTY.fg(Color.rgb(0x11, 0x22, 0x33));
+        final var lines = renderer.render("`code` and [docs](https://example.com)", 80, base, MarkdownStyles.DEFAULTS);
+        final var spans = lines.stream().flatMap(l -> l.spans().stream()).toList();
+        final var code = spans.stream()
+                .filter(s -> s.content().equals("code"))
+                .findFirst()
+                .orElseThrow();
+        // same composition rule as strong: the code accent fills in only on a plain base,
+        // inside a colored region the region fg wins (only the dim/italic modifiers stay)
+        assertEquals(base.fg(), code.style().fg(), "code fg must yield to a colored base");
+        final var link = spans.stream()
+                .filter(s -> s.content().equals("docs"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(MarkdownStyles.DEFAULTS.link().fg(), link.style().fg(), "link fg must survive a colored base");
+    }
+
+    @Test
+    void strongKeepsTheRegionColorOverAColoredBase() {
+        final var base = Style.EMPTY.fg(Color.rgb(0x6b, 0x6b, 0x6b)).dim().italic();
+        final var lines = renderer.render("**bold** plain", 80, base, MarkdownStyles.DEFAULTS);
+        final var spans = lines.stream().flatMap(l -> l.spans().stream()).toList();
+        final var bold = spans.stream()
+                .filter(s -> s.content().equals("bold"))
+                .findFirst()
+                .orElseThrow();
+        // inside a colored region bold keeps the region tone (bold but dimmed) instead of
+        // overriding it with the strong accent color
+        assertEquals(base.fg(), bold.style().fg(), "bold must keep the region color");
+        assertTrue(bold.style().effectiveModifiers().contains(Modifier.BOLD), "bold must stay bold");
+    }
+
+    @Test
+    void strongInAColoredBaseCellKeepsTheRegionColor() {
+        final var base = Style.EMPTY.fg(Color.rgb(0x6b, 0x6b, 0x6b)).dim();
+        final var lines = renderer.render("| a |\n|---|\n| **bold** |\n", 40, base, MarkdownStyles.DEFAULTS);
+        final var bold = lines.stream()
+                .flatMap(l -> l.spans().stream())
+                .filter(s -> s.content().equals("bold"))
+                .findFirst()
+                .orElseThrow();
+        assertEquals(base.fg(), bold.style().fg(), "cell bold must keep the region color");
+        assertTrue(bold.style().effectiveModifiers().contains(Modifier.BOLD), "cell bold must stay bold");
     }
 
     @Test

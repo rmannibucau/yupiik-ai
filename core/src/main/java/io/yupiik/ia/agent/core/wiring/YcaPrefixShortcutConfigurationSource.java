@@ -21,12 +21,15 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 
 /**
  * Convenience wrapper around the {@link ArgsConfigSource} that lets CLI arguments drop the
- * {@code yca.} prefix: {@code --yca-storageHome}, {@code --yca-provider-model}, ... can be written
- * {@code --storageHome}, {@code --provider-model}, ...
+ * {@code yca.} prefix and use dashes instead of dots: {@code --yca.storage.home},
+ * {@code --yca.provider.model}, ... can be written {@code --storage-home}, {@code --provider-model},
+ * {@code --storage.home}, {@code --provider.model}, ... without any transformation elsewhere.
  *
- * <p>For any requested {@code yca.<key>} it first looks up the stripped {@code <key>} in the wrapped
- * args source (from {@code --<key>}), falling back to the prefixed {@code yca.<key>} (from
- * {@code --yca-<key>}). Keys outside the {@code yca.} namespace are delegated unchanged.</p>
+ * <p>For any requested {@code yca.<key>} it resolves the value from the wrapped args source with, in
+ * order: the dotted stripped form ({@code <key>}, from {@code --<key>}), the dashed stripped form
+ * ({@code <key>} with {@code .} replaced by {@code -}, from {@code --<key-with-dashes>}), then the
+ * prefixed form ({@code yca.<key>}, from {@code --yca.<key>}). Keys outside the {@code yca.}
+ * namespace are delegated unchanged.</p>
  */
 @DefaultScoped
 public class YcaPrefixShortcutConfigurationSource implements ConfigurationSource {
@@ -45,6 +48,13 @@ public class YcaPrefixShortcutConfigurationSource implements ConfigurationSource
             final var strippedValue = delegate.get(stripped);
             if (strippedValue != null) {
                 return strippedValue;
+            }
+            final var dashed = stripped.replace('.', '-');
+            if (!dashed.equals(stripped)) {
+                final var dashedValue = delegate.get(dashed);
+                if (dashedValue != null) {
+                    return dashedValue;
+                }
             }
             return delegate.get(key);
         }

@@ -19,27 +19,34 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.todo.TodoItem;
-import io.yupiik.ia.agent.core.todo.TodoItem$FusionJsonCodec;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class WriteTodoToolTest {
     @TempDir
     Path storageHome;
 
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
+
     private TodoStore todoStore() {
-        final JsonMapper mapper =
-                new JsonMapperImpl(List.of(new TodoItem$FusionJsonCodec()), key -> java.util.Optional.empty());
         return new TodoStore(
                 io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
                         Map.of("yca.storageHome", storageHome.toString())),
@@ -125,6 +132,49 @@ class WriteTodoToolTest {
                 context(store, permissions(AgentMode.BUILD)));
         assertTrue(result.success(), result.output());
         assertTrue(store.render().contains("[x] step 1"), store.render());
+    }
+
+    @Test
+    void buildModeAcceptsCancelledTodos() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of("todos", List.of(Map.of("content", "step 1", "status", "cancelled"))),
+                context(store, permissions(AgentMode.BUILD)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[-] step 1"), store.render());
+    }
+
+    @Test
+    void planModeRejectsNewlyCancelledTodo() {
+        final var store = todoStore();
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "cancelled"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains("must be 'pending'"), result.output());
+        assertTrue(store.all().isEmpty(), "rejected update must not touch the store");
+    }
+
+    @Test
+    void planModeToleratesItemsAlreadyCancelledInBuildMode() {
+        final var store = todoStore();
+        store.replace(List.of(new TodoItem("step 1", "cancelled")));
+        final var tool = new WriteTodoTool();
+        final var result = tool.execute(
+                Map.of(
+                        "todos",
+                        List.of(
+                                Map.of("content", "step 1", "status", "cancelled"),
+                                Map.of("content", "step 2", "status", "pending"))),
+                context(store, permissions(AgentMode.PLAN)));
+        assertTrue(result.success(), result.output());
+        assertTrue(store.render().contains("[-] step 1"), store.render());
     }
 
     @Test

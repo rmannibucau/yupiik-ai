@@ -37,9 +37,11 @@ import io.yupiik.fusion.framework.api.container.bean.ProvidedInstanceBean;
 import io.yupiik.fusion.framework.api.container.configuration.ConfigurationRegistration;
 import io.yupiik.fusion.framework.api.main.ArgsConfigSource;
 import io.yupiik.fusion.framework.api.scope.DefaultScoped;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
@@ -48,6 +50,7 @@ import io.yupiik.ia.agent.core.shell.ShellRegistry;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
@@ -66,6 +69,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
@@ -86,6 +90,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 // the surefire configurationParameters in the root pom), so both classes take the same lock and
 // never boot a TuiCommand at the same time.
 @ResourceLock("io.yupiik-jul-handler")
+@ExtendWith(TestJsonMapper.class)
 class TuiCommandHeadlessTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
 
@@ -177,20 +182,12 @@ class TuiCommandHeadlessTest {
         }
     }
 
-    private io.yupiik.fusion.json.internal.JsonMapperImpl formatMapper;
+    private JsonMapper formatMapper;
 
     @BeforeEach
-    void start() {
+    void start(final JsonMapper mapper) {
         backend = new HeadlessBackend();
-        formatMapper = new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> java.util.Optional.empty());
-    }
-
-    @AfterEach
-    void closeFormatMapper() {
-        if (formatMapper != null) {
-            formatMapper.close();
-            formatMapper = null;
-        }
+        formatMapper = mapper;
     }
 
     @AfterEach
@@ -391,6 +388,9 @@ class TuiCommandHeadlessTest {
                             d.configuration(),
                             d.executor(),
                             new ToolCallMarkupStripper(),
+                            new ToolCallMarkupParser(),
+                            null,
+                            null,
                             null,
                             null,
                             null),

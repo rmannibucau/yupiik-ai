@@ -21,42 +21,37 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
-import io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
-import io.yupiik.ia.agent.core.session.SessionEntry$FusionJsonCodec;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class SessionLifecycleTest {
     @TempDir
     Path dir;
 
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
+
     private SessionStore newStore() {
-        final JsonMapper mapper = new JsonMapperImpl(
-                List.of(
-                        new SessionEntry$FusionJsonCodec(),
-                        new Message$FusionJsonCodec(),
-                        new ToolCall$FusionJsonCodec(),
-                        new ToolCall$FunctionCall$FusionJsonCodec(),
-                        new Usage$FusionJsonCodec()),
-                key -> Optional.empty());
         return new FileSessionStore(
                 TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString())), mapper, Clock.systemUTC());
     }

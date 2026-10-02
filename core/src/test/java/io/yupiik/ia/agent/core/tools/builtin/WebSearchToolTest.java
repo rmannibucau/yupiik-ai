@@ -22,48 +22,64 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.framework.api.ConfiguringContainer;
-import io.yupiik.fusion.framework.api.container.FusionBean;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.framework.JsonModule;
-import io.yupiik.fusion.json.serialization.JsonCodec;
-import io.yupiik.ia.agent.core.YcaCoreModule;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.configuration.WebSearchProvider;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.mcp.WebSearchManager;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class WebSearchToolTest {
 
     private static final String NO_RESULTS = "No search results found. Please try a different query.";
 
-    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
-            .version(java.net.http.HttpClient.Version.HTTP_1_1)
-            .build();
-
     @TempDir
     Path tempDir;
 
+    private JsonMapper mapper;
+    private HttpClient delegate;
+    private ExtendedHttpClient client;
+
+    @BeforeEach
+    void boot(final JsonMapper mapper) {
+        this.mapper = mapper;
+        this.delegate = HttpClient.newBuilder().build();
+        this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+    }
+
+    @AfterEach
+    void stop() {
+        client.close();
+        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+        delegate.shutdownNow();
+        delegate.close();
+        client = null;
+        delegate = null;
+    }
+
     @Test
     void formatsResultsWithPublishDate() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(parallelPayload())) {
             final var config = TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url()));
-            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, httpClient()), config);
+            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
             final var result = tool.execute(Map.of("query", "apache maven build tool"));
             assertTrue(result.success());
             assertTrue(result.output().contains("- First (https://example.com/a, published 2026-06-30)"));
@@ -74,10 +90,9 @@ class WebSearchToolTest {
 
     @Test
     void noResultsMessageOnEmptyAnswer() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload("{\"search_id\":\"s1\",\"results\":[]}")) {
             final var config = TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url()));
-            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, httpClient()), config);
+            final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
             final var result = tool.execute(Map.of("query", "apache maven build tool"));
             assertTrue(result.success());
             assertEquals(NO_RESULTS, result.output());
@@ -87,7 +102,7 @@ class WebSearchToolTest {
     @Test
     void queryIsRequired() {
         final var config = TestConfigs.codingAgent(defaultConfig());
-        final var tool = new WebSearchTool(new WebSearchManager(mapper(), config, httpClient()), config);
+        final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
         final var result = tool.execute(Map.of());
         assertFalse(result.success());
         assertEquals("query is required", result.output());
@@ -97,9 +112,9 @@ class WebSearchToolTest {
     void toolIsHiddenWhenNoProviderIsEnabled() {
         final var config = TestConfigs.codingAgent(
                 Map.of("yca.storageHome", tempDir.toString(), "yca.tools.websearch.providers.length", "0"));
-        final var tool = new WebSearchTool(new WebSearchManager(mapper(), config, httpClient()), config);
+        final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
         assertFalse(tool.usable());
-        final var mcpManager = new McpManager(config, mapper(), List.of(tool), httpClient());
+        final var mcpManager = new McpManager(config, mapper, List.of(tool), client);
         mcpManager.start();
         final var registry = new ToolRegistry(mcpManager);
         assertFalse(registry.describe().contains("websearch"));
@@ -113,9 +128,9 @@ class WebSearchToolTest {
     @Test
     void toolIsVisibleWithDefaultProviders() {
         final var config = TestConfigs.codingAgent(defaultConfig());
-        final var tool = new WebSearchTool(new WebSearchManager(mapper(), config, httpClient()), config);
+        final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
         assertTrue(tool.usable());
-        final var mcpManager = new McpManager(config, mapper(), List.of(tool), httpClient());
+        final var mcpManager = new McpManager(config, mapper, List.of(tool), client);
         mcpManager.start();
         final var registry = new ToolRegistry(mcpManager);
         assertTrue(registry.describe().contains("websearch"));
@@ -174,31 +189,6 @@ class WebSearchToolTest {
                 + "{\"url\":\"https://example.com/a\",\"title\":\"First\",\"publish_date\":\"2026-06-30\",\"excerpts\":[\"part one\",\"part two\"]},"
                 + "{\"url\":\"https://example.com/b\",\"title\":\"Second\",\"publish_date\":null,\"excerpts\":[]}"
                 + "]}";
-    }
-
-    private static JsonMapper mapper() {
-        final var codecBeans = new YcaCoreModule()
-                .beans()
-                .filter(b -> JsonCodec.class.isAssignableFrom(raw(b.type())))
-                .toArray(FusionBean[]::new);
-        try (final var container = ConfiguringContainer.of()
-                .disableAutoDiscovery(true)
-                .register(codecBeans)
-                .register(new JsonModule())
-                .start()) {
-            return container.lookup(JsonMapper.class).instance();
-        }
-    }
-
-    private static Class<?> raw(final Type type) {
-        if (type instanceof ParameterizedType parameterized) {
-            return (Class<?>) parameterized.getRawType();
-        }
-        return (Class<?>) type;
-    }
-
-    private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     /** Minimal MCP endpoint: initialize + notifications succeed, tools/call returns a configurable text. */

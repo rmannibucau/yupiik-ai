@@ -39,6 +39,7 @@ final class HeadlessBackend implements Backend {
     private final Object lock = new Object();
     private final Buffer buffer = Buffer.empty(new Rect(0, 0, WIDTH, HEIGHT));
     private final Semaphore drawn = new Semaphore(0);
+    private final StringBuilder raw = new StringBuilder();
 
     @Override
     public Size size() {
@@ -53,6 +54,22 @@ final class HeadlessBackend implements Backend {
             }
         }
         drawn.release();
+    }
+
+    /** Records what the app writes outside of the cell grid: clipboard OSC 52 payloads. */
+    @Override
+    public void writeRaw(final String text) {
+        synchronized (lock) {
+            raw.append(text);
+        }
+        drawn.release();
+    }
+
+    /** Everything written through {@link #writeRaw(String)} so far, ie. clipboard payloads. */
+    String raw() {
+        synchronized (lock) {
+            return raw.toString();
+        }
     }
 
     /**

@@ -232,7 +232,8 @@ neutral scaffolder: it does not index an unrelated structural code graph and
 does not inject an unrelated repository README/AGENTS.md, scoping to the
 target directory the way a tool like opencode does. UI colors (under `tui`,
 e.g. `permitAll` for the red highlight shown when permissions are set to
-`all`) are themeable hex values.
+`all`) are themeable hex values; markdown bold and inline-code colors are
+themeable as well (`strongColor`, `inlineCodeColor`, each `auto` or a hex).
 
 Context usage is estimated locally against `provider.contextWindow` and,
 before each turn, the conversation is pruned at `pruning.thresholdPercent`
@@ -333,7 +334,14 @@ Project instructions and skills are loaded into the system prompt:
 - Transcript and prompt have a mode-colored left bar (thin orange in `plan`,
   heavy bold purple in `build`, red when permissions are `all`
   (`tui.permitAll`, default `#ff5555`)); transcript renders as
-  markdown with long lines wrapped at the panel width. Thinking streams inline
+  markdown with long lines wrapped at the panel width. Bold (`**strong**`)
+  prose is a colored bold following `yca.tui.strongColor` (default `auto`,
+  resolving to the primary `#fab283`) and inline `code` spans follow
+  `yca.tui.inlineCodeColor` (default `auto`, resolving to the active code
+  theme) on a subtle panel chip, so emphasis and inline code stay visible on
+  both the dark and the light theme; inside dimmed regions (thinking, tool
+  output) bold keeps the region tone (bold but dimmed) while inline code and
+  links keep their own colors. Thinking streams inline
   in the same conversation panel, dimmed (text blended over the panel
   background at `yca.tui.thinkingOpacity`, default `0.6`) and marked with a
   thin dim left bar, and is always written into the transcript before each
@@ -343,6 +351,15 @@ Project instructions and skills are loaded into the system prompt:
   default `0.35`) so assistant answers stand out. Terminal colors have no
   alpha channel, so both opacities express how much the color is faded toward
   the panel background: 0 keeps the text color, 1 would hide it entirely
+- Every speaker turn opens with a labeled header: a blank separator row, then a
+  role-colored mark and label (`▌ You` in the primary color, `▌ Assistant` in
+  the accent color) followed by a rule running out to the panel edge, so the
+  boundary between a question and an answer stays readable while scrolling back
+  instead of dissolving into the prose. Under `NO_COLOR` (mono palette) the
+  colors collapse to the terminal default, so the mark switches to a distinct
+  shape per role (`▌` user, `▐` assistant; `>`/`<` with `tui.glyphs=ascii`) and
+  the rule becomes a plain line. The leading welcome block carries no marker and
+  is left unlabeled.
 - `Ctrl+T` toggles all thinking blocks (live stream + transcript history):
   hides every block when shown, shows them all back when hidden - nothing is
   lost, blocks stay in memory (same as `/thinking show|hide`, kept in sync)
@@ -390,7 +407,7 @@ Project instructions and skills are loaded into the system prompt:
   structural code graph); the status bar shows the same animated feedback
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [path]` (show the resolved context, write it to path when given, or `compact|prune` to trigger an idempotent context operation), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

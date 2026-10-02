@@ -18,21 +18,22 @@ package io.yupiik.ia.agent.core.cli;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.charset.StandardCharsets;
-import java.util.List;
-import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
+@ExtendWith(TestJsonMapper.class)
 class CliCommandTest {
     private java.io.PrintStream originalOut;
     private java.io.PrintStream originalErr;
@@ -54,8 +55,8 @@ class CliCommandTest {
     }
 
     @Test
-    void verbosePrintsFullOutputForNonStreamedTool() throws Exception {
-        final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN);
+    void verbosePrintsFullOutputForNonStreamedTool(final JsonMapper mapper) throws Exception {
+        final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN, mapper);
 
         dispatcher.accept(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
         dispatcher.accept(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, "s1"));
@@ -66,8 +67,8 @@ class CliCommandTest {
     }
 
     @Test
-    void verboseDoesNotReprintStreamedToolOutput() throws Exception {
-        final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN);
+    void verboseDoesNotReprintStreamedToolOutput(final JsonMapper mapper) throws Exception {
+        final var dispatcher = dispatcher("verbose", ToolOutputVisibility.SHOWN, mapper);
 
         dispatcher.accept(new AgentEvent.ToolStarted("bash", "{}", "s1"));
         dispatcher.accept(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
@@ -85,11 +86,11 @@ class CliCommandTest {
     }
 
     private static java.util.function.Consumer<AgentEvent> dispatcher(
-            final String presentation, final ToolOutputVisibility showToolOutput) {
+            final String presentation, final ToolOutputVisibility showToolOutput, final JsonMapper mapper) {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
-                new ToolPresenter(new JsonMapperImpl(List.of(), key -> Optional.empty())),
+                new ToolPresenter(mapper),
                 CliVerbosity.parse(presentation),
                 false,
                 false,

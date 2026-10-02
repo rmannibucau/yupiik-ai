@@ -21,8 +21,8 @@ import dev.tamboui.style.Style;
 /**
  * Resolved color palette. In "dark" theme the configured values are used
  * verbatim; in "light" theme the base foreground/background/border colors are
- * inverted so the interface stays readable, while the accent/status colors
- * keep the configured values.
+ * inverted for readability and the accent/status colors are remapped to darker
+ * WCAG-safe variants, because the dark-theme tones are too pale on white.
  *
  * <p>When the {@code NO_COLOR} environment variable is set (any non-empty
  * value, see https://no-color.org/), the palette turns monochrome: every
@@ -65,13 +65,16 @@ public record Palette(
                     c.permitAll(),
                     mono);
         }
+        // on light backgrounds the theme's dark accent tones are too pale to read (the dark
+        // peach/brown-orange sit under 3:1 on white), so the light palette remaps every status
+        // color to a darker, WCAG-safe variant while text/border/panel are inverted as today
         return new Palette(
-                c.accent(),
-                c.primary(),
-                c.success(),
-                c.warning(),
-                c.error(),
-                c.info(),
+                "#7c5cd6",
+                "#b55227",
+                "#2f7a43",
+                "#8a621f",
+                "#d1383d",
+                "#1f7a88",
                 "#1a1a1a",
                 "#6b6b6b",
                 "#c0c0c0",

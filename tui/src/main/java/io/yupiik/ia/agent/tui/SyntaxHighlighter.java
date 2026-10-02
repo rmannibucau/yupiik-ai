@@ -545,7 +545,7 @@ public class SyntaxHighlighter {
             out.add(new Segment(
                     Segment.Type.CODE,
                     m.group("lang") == null ? "" : m.group("lang").strip(),
-                    m.group("body")));
+                    codeBody(m.group("body"))));
             last = m.end();
         }
         if (last < markdown.length()) {
@@ -559,6 +559,16 @@ public class SyntaxHighlighter {
             splitCache.put(markdown, immutable);
         }
         return immutable;
+    }
+
+    /**
+     * The captured fence body ends with the newline that terminates its last line; highlighting it
+     * verbatim renders a phantom blank row under the block, so that single terminator is dropped.
+     * An intentional empty last code line ({@code "code\n\n"}) keeps its own row, and the blank row
+     * that really separates the block from its neighbours is the one the segment walk inserts.
+     */
+    private static String codeBody(final String body) {
+        return body != null && body.endsWith("\n") ? body.substring(0, body.length() - 1) : body;
     }
 
     public Text highlight(final String lang, final String code) {

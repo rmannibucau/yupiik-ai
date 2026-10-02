@@ -19,28 +19,23 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import java.util.List;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterEach;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.test.TestJsonMapper;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class ToolArgsPreviewTest {
-    private JsonMapperImpl mapper;
+    private JsonMapper mapper;
 
-    private ToolArgsPreview preview() {
-        if (mapper == null) {
-            mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
-        }
-        return new ToolArgsPreview(new ToolOutputFormat(mapper), new SyntaxHighlighter(), new DiffRenderer());
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
     }
 
-    @AfterEach
-    void closeMapper() {
-        if (mapper != null) {
-            mapper.close();
-            mapper = null;
-        }
+    private ToolArgsPreview preview() {
+        return new ToolArgsPreview(new ToolOutputFormat(mapper), new SyntaxHighlighter(), new DiffRenderer());
     }
 
     @Test

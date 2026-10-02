@@ -19,36 +19,42 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.framework.api.ConfiguringContainer;
-import io.yupiik.fusion.framework.api.container.FusionBean;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.serialization.JsonCodec;
-import io.yupiik.ia.agent.core.YcaCoreModule;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class StructuralCodeGraphTest {
     private static final long TIMEOUT_MS = java.time.Duration.ofSeconds(5).toMillis();
 
     @TempDir
     Path temp;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     private final List<ChatClient> chatClients = new java.util.ArrayList<>();
     private final List<StructuralCodeGraph> graphs = new java.util.ArrayList<>();
@@ -56,9 +62,18 @@ class StructuralCodeGraphTest {
 
     @AfterEach
     void tearDown() {
-        graphs.forEach(StructuralCodeGraph::close);
+        for (var g : graphs) {
+            try {
+                g.close();
+            } catch (final Exception ignored) {
+                // no-op
+            }
+        }
+        graphs.clear();
         schedulers.forEach(ScheduledExecutorService::shutdownNow);
+        schedulers.clear();
         chatClients.forEach(ChatClient::close);
+        chatClients.clear();
     }
 
     private StructuralCodeGraph newGraph(final CodingAgentConfiguration config, final JsonMapper mapper) {
@@ -105,7 +120,6 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
 
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
 
         graph.ensureReady();
@@ -197,7 +211,6 @@ class StructuralCodeGraphTest {
         Files.writeString(outside.resolve("Bar.java"), "package outside;\npublic class Bar { public void run() {} }\n");
 
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
         assertEquals(2, graph.graph().symbols().size());
@@ -225,7 +238,6 @@ class StructuralCodeGraphTest {
         final var project = Files.createDirectory(temp.resolve("plain"));
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
         assertTrue(
@@ -237,7 +249,6 @@ class StructuralCodeGraphTest {
     void skipsIndexingForEmptyTargetProjectDir() throws Exception {
         final var project = Files.createDirectory(temp.resolve("scaffold"));
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
         assertTrue(
@@ -275,7 +286,6 @@ class StructuralCodeGraphTest {
                 """);
 
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
@@ -314,7 +324,6 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of("yca.structuralCodeGraph.ignoreGlobs", "custom/**"));
 
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
@@ -332,7 +341,6 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("pom.xml"), "<project/>");
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
@@ -386,45 +394,32 @@ class StructuralCodeGraphTest {
 
         final var config = config(project, Map.of());
 
-        // Bootstrap the JSON wiring exactly like production: JsonModule's JsonMapperBean collects
-        // every JsonCodec bean registered by YcaCoreModule, which includes the generated Kind/EdgeType
-        // enum json codecs. Only the codec beans are registered so no eager app listeners run.
-        final var codecBeans = new YcaCoreModule()
-                .beans()
-                .filter(b -> JsonCodec.class.isAssignableFrom(raw(b.type())))
-                .toArray(FusionBean[]::new);
-        try (final var container = ConfiguringContainer.of()
-                .disableAutoDiscovery(true)
-                .register(codecBeans)
-                .register(new io.yupiik.fusion.json.internal.framework.JsonModule())
-                .start()) {
-            final JsonMapper mapper = container.lookup(JsonMapper.class).instance();
+        // the generated Kind/EdgeType enum json codecs are registered by YcaCoreModule and picked up by
+        // the shared TestJsonMapper container, so enum-backed graphs work without manual codecs.
+        final var graph = newGraph(config, mapper);
 
-            final var graph = newGraph(config, mapper);
+        final String status = graph.resync();
+        graph.flushPersist();
 
-            final String status = graph.resync();
-            graph.flushPersist();
+        assertTrue(status.startsWith("symbols="), "expected status to report symbols, got: " + status);
+        assertTrue(status.contains("files="), "expected status to report parsed files, got: " + status);
 
-            assertTrue(status.startsWith("symbols="), "expected status to report symbols, got: " + status);
-            assertTrue(status.contains("files="), "expected status to report parsed files, got: " + status);
+        // the canonical compact binary index must be persisted
+        final var indexFile = project.resolve(".yca/generated/graph/index.bin");
+        assertTrue(Files.isRegularFile(indexFile), "expected binary code graph index to be persisted");
 
-            // the canonical compact binary index must be persisted
-            final var indexFile = project.resolve(".yca/generated/graph/index.bin");
-            assertTrue(Files.isRegularFile(indexFile), "expected binary code graph index to be persisted");
+        // the enum-backed graph must round-trip through the binary index (no codec / graph.json involved)
+        final var idx = io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex.load(indexFile);
+        final var stored = idx.toStore();
+        assertTrue(
+                stored.symbols().stream().anyMatch(s -> s.kind() == GraphModel.Kind.ENUM),
+                "expected an enum symbol to round-trip through the binary index");
+        assertEquals(graph.graph().symbols().size(), stored.symbols().size());
 
-            // the enum-backed graph must round-trip through the binary index (no codec / graph.json involved)
-            final var idx = io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex.load(indexFile);
-            final var stored = idx.toStore();
-            assertTrue(
-                    stored.symbols().stream().anyMatch(s -> s.kind() == GraphModel.Kind.ENUM),
-                    "expected an enum symbol to round-trip through the binary index");
-            assertEquals(graph.graph().symbols().size(), stored.symbols().size());
-
-            // a fresh instance re-loaded from the same binary index must reproduce the same symbols
-            final var reloaded = newGraph(config, mapper);
-            reloaded.ensureReady();
-            assertEquals(stored.symbols().size(), reloaded.graph().symbols().size());
-        }
+        // a fresh instance re-loaded from the same binary index must reproduce the same symbols
+        final var reloaded = newGraph(config, mapper);
+        reloaded.ensureReady();
+        assertEquals(stored.symbols().size(), reloaded.graph().symbols().size());
     }
 
     @Test
@@ -445,7 +440,6 @@ class StructuralCodeGraphTest {
                         "yca.structuralCodeGraph.model", "test-model",
                         "yca.structuralCodeGraph.deep", "true"));
 
-        final JsonMapper mapper = newMapper();
         final var storeRoot = Path.of(config.structuralCodeGraph().resolvedStoreDir(project.toString()))
                 .toAbsolutePath()
                 .normalize();
@@ -537,7 +531,6 @@ class StructuralCodeGraphTest {
                 project.resolve("other/Bar.java"), "package demo.sub;\npublic class Bar { public void go() {} }\n");
 
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
         graph.flushPersist();
@@ -583,7 +576,6 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
 
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var built = newGraph(config, mapper);
         built.ensureReady();
 
@@ -611,7 +603,6 @@ class StructuralCodeGraphTest {
         Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
 
         final var config = config(project, Map.of());
-        final JsonMapper mapper = newMapper();
         final var built = newGraph(config, mapper);
         built.ensureReady();
         built.flushPersist();
@@ -670,35 +661,6 @@ class StructuralCodeGraphTest {
         }
     }
 
-    private static Class<?> raw(final java.lang.reflect.Type type) {
-        if (type instanceof Class<?> c) {
-            return c;
-        }
-        if (type instanceof java.lang.reflect.ParameterizedType pt) {
-            return raw(pt.getRawType());
-        }
-        throw new IllegalArgumentException("unsupported type " + type);
-    }
-
-    private static JsonMapper newMapper() {
-        return new io.yupiik.fusion.json.internal.JsonMapperImpl(
-                List.of(
-                        new GraphStore$FusionJsonCodec(),
-                        new GraphModel$Symbol$FusionJsonCodec(),
-                        new GraphModel$Edge$FusionJsonCodec(),
-                        new DocEnricherCache$FileEntry$FusionJsonCodec(),
-                        new DocEnricherCache$SymbolEntry$FusionJsonCodec(),
-                        new DocEnricherCache$Data$FusionJsonCodec(),
-                        new DocEnricher$ConceptDtos$FusionJsonCodec(),
-                        new DocEnricher$ConceptDto$FusionJsonCodec(),
-                        new DocEnricher$ConceptLinkDto$FusionJsonCodec(),
-                        new io.yupiik.fusion.json.internal.codec.EnumJsonCodec<>(
-                                GraphModel.Kind.class, List.of(GraphModel.Kind.values()), Enum::name),
-                        new io.yupiik.fusion.json.internal.codec.EnumJsonCodec<>(
-                                GraphModel.EdgeType.class, List.of(GraphModel.EdgeType.values()), Enum::name)),
-                key -> Optional.empty());
-    }
-
     private static CodingAgentConfiguration config(final Path project, final Map<String, String> structuralOverrides) {
         final var map = new HashMap<String, String>();
         map.put("yca.storageHome", project.toString());
@@ -719,6 +681,9 @@ class StructuralCodeGraphTest {
         map.put("yca.llm.retryOnContextOverflow", "true");
         map.put("yca.llm.maxIterations", "250");
         map.put("yca.structuralCodeGraph.maxFileBytes", String.valueOf(10_000_000));
+        // no background WatchService in tests: its keys would still pin the @TempDir when JUnit
+        // deletes it, and these tests do not need live external file watching
+        map.put("yca.structuralCodeGraph.watch", "false");
         map.putAll(structuralOverrides);
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(map);
     }

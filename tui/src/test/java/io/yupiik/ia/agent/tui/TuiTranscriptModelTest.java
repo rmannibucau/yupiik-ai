@@ -152,6 +152,46 @@ class TuiTranscriptModelTest {
         final var userFirst = TuiTranscriptModel.splitTurns("---\n\n**You**\n\nquestion");
         assertEquals(1, userFirst.size());
         assertTrue(userFirst.get(0).user());
+        // the thematic break introduced the heading: it is chrome, not content
+        assertFalse(userFirst.get(0).text().contains("---"));
+    }
+
+    @Test
+    void splitTurnsSplitsOnSpeakerHeadingWithoutThematicBreak() {
+        // this is the shape ConversationTranscript actually writes: the user marker gets a
+        // `---` break, the assistant marker does not. The assistant answer must still start
+        // its own segment, otherwise it renders inside the user turn.
+        final var md = "---\n\n**You**\n\nquestion\n\n\n**Assistant**\n\nanswer";
+        final var turns = TuiTranscriptModel.splitTurns(md);
+        assertEquals(2, turns.size());
+        assertTrue(turns.get(0).user());
+        assertEquals("**You**\n\nquestion", turns.get(0).text());
+        assertFalse(turns.get(1).user());
+        assertTrue(turns.get(1).labelled());
+        assertEquals("**Assistant**\n\nanswer", turns.get(1).text());
+    }
+
+    @Test
+    void splitTurnsLabelsOnlyMarkerOpenedTurns() {
+        // the leading welcome block carries no marker: it must not draw a speaker header,
+        // while every turn opened by a real **You**/**Assistant** marker must
+        final var md = "welcome text\n\n---\n\n**You**\n\nquestion\n\n---\n\n**Assistant**\n\nanswer";
+        final var turns = TuiTranscriptModel.splitTurns(md);
+        assertEquals(3, turns.size());
+        assertFalse(turns.get(0).labelled(), "leading content has no marker and must stay unlabelled");
+        assertTrue(turns.get(1).labelled());
+        assertTrue(turns.get(1).user());
+        assertTrue(turns.get(2).labelled());
+        assertFalse(turns.get(2).user());
+    }
+
+    @Test
+    void splitTurnsMarksMarkerOpenedFirstSegmentAsLabelled() {
+        // a transcript starting directly on a marker still opened a labelled turn
+        final var turns = TuiTranscriptModel.splitTurns("**You**\n\nquestion");
+        assertEquals(1, turns.size());
+        assertTrue(turns.get(0).labelled());
+        assertTrue(turns.get(0).user());
     }
 
     @Test

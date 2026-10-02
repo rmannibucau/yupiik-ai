@@ -20,28 +20,22 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 
 import dev.tamboui.text.Line;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
-import java.util.List;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterEach;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class AskUserCardRendererTest {
-    private JsonMapperImpl mapper;
+    private JsonMapper mapper;
     private AskUserCardRenderer renderer;
 
     @BeforeEach
-    void setUp() {
-        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    void setUp(final JsonMapper mapper) {
+        this.mapper = mapper;
         renderer = new AskUserCardRenderer(new AskUserAnswersFormatter(mapper));
-    }
-
-    @AfterEach
-    void tearDown() {
-        mapper.close();
-        mapper = null;
     }
 
     @Test

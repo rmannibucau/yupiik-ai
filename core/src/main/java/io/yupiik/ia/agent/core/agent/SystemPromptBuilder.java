@@ -113,11 +113,18 @@ public class SystemPromptBuilder {
         sb.append("Rules:\n");
         sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
         sb.append("- Read files before editing them; keep edits minimal and focused.\n");
-        sb.append("- Use write_todo to track multi-step work and keep it up to date.\n");
+        sb.append(
+                "- Use write_todo to track multi-step work and keep it up to date; completed and cancelled items stay in the list until the user asks to clear it.\n");
         sb.append(
                 "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative and a request may end without one when nothing changed. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
         sb.append(
                 "- The conversation may carry a <compacted-context> digest of earlier history: treat it as authoritative historical state; never reload, reconstruct or repeat actions already described in it - only call tools that serve the current task.\n");
+        if (configuration.pruning().nudgeThresholdPercent() > 0
+                && configuration.tools().manageContext() != null
+                && configuration.tools().manageContext().enabled()) {
+            sb.append(
+                    "- The <session-state> tail reports the current context usage percentage and the prune/compaction thresholds; when it gets high, proactively call manage_context (action=prune or action=compact) instead of waiting for the hard limit.\n");
+        }
         sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
         sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
         sb.append(
@@ -198,6 +205,8 @@ public class SystemPromptBuilder {
                     "Todos are the plan, not a progress report: every item stays 'pending' - statuses only advance in build mode, once a step is actually executed.\n");
             sb.append(
                     "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
+            sb.append(
+                    "Record the plan with write_todo and keep the list in sync with the discussion: whenever a follow-up changes the plan (scope, steps, approach, trade-offs), update it in the same turn so it always mirrors the latest agreed plan. Completed or cancelled items from earlier build sessions are progress history: keep them.\n");
         }
         return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
     }
@@ -220,6 +229,10 @@ public class SystemPromptBuilder {
         sb.append("Date: ").append(LocalDate.now()).append('\n');
         if (permissionService != null) {
             sb.append("Mode: ").append(permissionService.mode().name()).append('\n');
+            if (permissionService.mode() == AgentMode.PLAN) {
+                sb.append(
+                        "Plan mode: if this turn changes the plan, call write_todo to sync the todo list before answering.\n");
+            }
         }
         sb.append("Current todo list:\n")
                 .append(todoStore == null ? "(empty)" : todoStore.render())
@@ -307,7 +320,8 @@ public class SystemPromptBuilder {
         // a provider configuring its own guidance wins; the providers configuring none inherit the
         // global yca.todos.guidance (blank there means the usual 'auto' family detection)
         final var mode = provider != null && provider.todoPromptConfigured() ? provider.todoPrompt() : globalGuidance();
-        final var guidance = todoPromptResolver.resolve(mode, baseUrl);
+        final var agentMode = permissionService == null ? null : permissionService.mode();
+        final var guidance = todoPromptResolver.resolve(mode, baseUrl, agentMode);
         if (!guidance.isBlank()) {
             sb.append("<todo-guidance>\n").append(guidance).append("\n</todo-guidance>\n");
         }

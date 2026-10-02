@@ -21,11 +21,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.SessionConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.FileTime;
@@ -33,27 +33,28 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class SessionStoreTest {
     @TempDir
     Path dir;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     private SessionStore newStore() {
         return newStore(new SessionConfiguration(30, 15));
     }
 
     private SessionStore newStore(final SessionConfiguration sessions) {
-        final JsonMapper mapper = new JsonMapperImpl(
-                List.of(
-                        new SessionEntry$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec()),
-                key -> Optional.empty());
         return new FileSessionStore(
                 io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),

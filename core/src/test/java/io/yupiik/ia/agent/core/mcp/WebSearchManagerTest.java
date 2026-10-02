@@ -23,20 +23,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.framework.api.ConfiguringContainer;
-import io.yupiik.fusion.framework.api.container.FusionBean;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.framework.JsonModule;
-import io.yupiik.fusion.json.serialization.JsonCodec;
-import io.yupiik.ia.agent.core.YcaCoreModule;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.configuration.WebSearchProvider;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
-import java.lang.reflect.ParameterizedType;
-import java.lang.reflect.Type;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -45,21 +40,42 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class WebSearchManagerTest {
-
-    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
-            .version(java.net.http.HttpClient.Version.HTTP_1_1)
-            .build();
 
     @TempDir
     Path tempDir;
 
+    private JsonMapper mapper;
+    private HttpClient delegate;
+    private ExtendedHttpClient client;
+
+    @BeforeEach
+    void boot(final JsonMapper mapper) {
+        this.mapper = mapper;
+        this.delegate = HttpClient.newBuilder().build();
+        this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+    }
+
+    @AfterEach
+    void stop() {
+        client.close();
+        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+        delegate.shutdownNow();
+        delegate.close();
+        client = null;
+        delegate = null;
+    }
+
     @Test
     void parsesExaTextBlocks() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(exaPayload())) {
             final var manager = manager(mapper, singleProvider(WebSearchProvider.EXA, mock.url()));
             final var results = manager.search("apache maven build tool", 8);
@@ -79,7 +95,6 @@ class WebSearchManagerTest {
 
     @Test
     void parsesParallelPayload() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(parallelPayload())) {
             final var manager = manager(mapper, singleProvider(WebSearchProvider.PARALLEL, mock.url()));
             final var results = manager.search("apache maven build tool", 8);
@@ -97,7 +112,6 @@ class WebSearchManagerTest {
 
     @Test
     void parsesFirecrawlPayload() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(firecrawlPayload())) {
             final var manager = manager(mapper, singleProvider(WebSearchProvider.FIRECRAWL, mock.url()));
             final var results = manager.search("apache maven build tool", 8);
@@ -111,7 +125,6 @@ class WebSearchManagerTest {
 
     @Test
     void parsesTinyfishPayload() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(tinyfishPayload())) {
             final var manager = manager(mapper, singleProvider(WebSearchProvider.TINYFISH, mock.url()));
             final var results = manager.search("apache maven build tool", 8);
@@ -125,7 +138,6 @@ class WebSearchManagerTest {
 
     @Test
     void rawTextIsKeptWhenPayloadIsNotJson() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload("definitely not json")) {
             final var manager = manager(mapper, singleProvider(WebSearchProvider.PARALLEL, mock.url()));
             final var results = manager.search("apache maven build tool", 8);
@@ -138,7 +150,6 @@ class WebSearchManagerTest {
 
     @Test
     void fallsBackToNextProviderOnError() throws Exception {
-        final var mapper = mapper();
         try (final var failing = Mock.start(mapper).error(500, null);
                 final var healthy = Mock.start(mapper).payload(parallelPayload())) {
             final var manager = manager(
@@ -152,7 +163,6 @@ class WebSearchManagerTest {
 
     @Test
     void fallsBackWhenFirecrawlReportsFailure() throws Exception {
-        final var mapper = mapper();
         try (final var failing = Mock.start(mapper).payload("{\"success\":false,\"data\":null}");
                 final var healthy = Mock.start(mapper).payload(tinyfishPayload())) {
             final var manager = manager(
@@ -167,7 +177,6 @@ class WebSearchManagerTest {
 
     @Test
     void rateLimitedProviderIsCooledDownAndRetried() throws Exception {
-        final var mapper = mapper();
         try (final var limited = Mock.start(mapper).error(429, "2");
                 final var healthy = Mock.start(mapper).payload(parallelPayload())) {
             final var now = new long[] {1_000_000};
@@ -175,7 +184,7 @@ class WebSearchManagerTest {
                     mapper,
                     TestConfigs.codingAgent(twoProviders(
                             WebSearchProvider.EXA, limited.url(), WebSearchProvider.PARALLEL, healthy.url())),
-                    httpClient(),
+                    client,
                     name -> null,
                     () -> now[0]);
             assertEquals(2, manager.search("apache maven build tool", 8).size());
@@ -194,7 +203,6 @@ class WebSearchManagerTest {
 
     @Test
     void disabledProvidersAreSkipped() throws Exception {
-        final var mapper = mapper();
         try (final var disabled = Mock.start(mapper).payload(parallelPayload());
                 final var active = Mock.start(mapper).payload(tinyfishPayload())) {
             final var manager = manager(
@@ -214,7 +222,6 @@ class WebSearchManagerTest {
 
     @Test
     void tinyfishAnonymousRequestsAreKeyless() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(tinyfishPayload())) {
             final var manager = manager(mapper, singleProvider(WebSearchProvider.TINYFISH, mock.url()));
             assertEquals(1, manager.search("apache maven build tool", 8).size());
@@ -226,7 +233,6 @@ class WebSearchManagerTest {
 
     @Test
     void tinyfishApiKeyUsesHeaderAndNoKeyless() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(tinyfishPayload())) {
             final var manager = manager(
                     mapper,
@@ -241,7 +247,6 @@ class WebSearchManagerTest {
 
     @Test
     void exaApiKeyIsUrlParameterNotBearer() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(exaPayload())) {
             final var manager = manager(
                     mapper,
@@ -255,7 +260,6 @@ class WebSearchManagerTest {
 
     @Test
     void parallelApiKeyUsesBearer() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(parallelPayload())) {
             final var env = new AtomicInteger();
             final Function<String, String> envFunction = name -> {
@@ -265,7 +269,7 @@ class WebSearchManagerTest {
             final var manager = new WebSearchManager(
                     mapper,
                     TestConfigs.codingAgent(singleProvider(WebSearchProvider.PARALLEL, mock.url())),
-                    httpClient(),
+                    client,
                     envFunction,
                     System::currentTimeMillis);
             assertEquals(2, manager.search("apache maven build tool", 8).size());
@@ -278,7 +282,6 @@ class WebSearchManagerTest {
 
     @Test
     void firecrawlApiKeyUsesBearer() throws Exception {
-        final var mapper = mapper();
         try (final var mock = Mock.start(mapper).payload(firecrawlPayload())) {
             final var manager = manager(
                     mapper,
@@ -291,7 +294,6 @@ class WebSearchManagerTest {
 
     @Test
     void numResultsMapToProviderArguments() throws Exception {
-        final var mapper = mapper();
         try (final var exa = Mock.start(mapper).payload(exaPayload());
                 final var firecrawl = Mock.start(mapper).payload(firecrawlPayload())) {
             manager(mapper, singleProvider(WebSearchProvider.EXA, exa.url())).search("maven", 5);
@@ -304,7 +306,6 @@ class WebSearchManagerTest {
 
     @Test
     void noProviderEnabledFailsFast() throws Exception {
-        final var mapper = mapper();
         final var manager = manager(mapper, config("yca.tools.websearch.providers.length", "0"));
         assertFalse(manager.hasEnabledProviders());
         final var error = assertThrows(IOException.class, () -> manager.search("apache maven build tool", 8));
@@ -318,7 +319,7 @@ class WebSearchManagerTest {
     private WebSearchManager manager(
             final JsonMapper mapper, final Map<String, String> overrides, final Function<String, String> environment) {
         return new WebSearchManager(
-                mapper, TestConfigs.codingAgent(overrides), httpClient(), environment, System::currentTimeMillis);
+                mapper, TestConfigs.codingAgent(overrides), client, environment, System::currentTimeMillis);
     }
 
     private Map<String, String> singleProvider(
@@ -398,31 +399,6 @@ class WebSearchManagerTest {
         return "{\"query\":\"apache maven\",\"results\":["
                 + "{\"position\":1,\"site_name\":\"Example\",\"snippet\":\"Snippet text\",\"title\":\"Example Title\",\"url\":\"https://example.com\"}"
                 + "],\"total_results\":1,\"page\":1}";
-    }
-
-    private static JsonMapper mapper() {
-        final var codecBeans = new YcaCoreModule()
-                .beans()
-                .filter(b -> JsonCodec.class.isAssignableFrom(raw(b.type())))
-                .toArray(FusionBean[]::new);
-        try (final var container = ConfiguringContainer.of()
-                .disableAutoDiscovery(true)
-                .register(codecBeans)
-                .register(new JsonModule())
-                .start()) {
-            return container.lookup(JsonMapper.class).instance();
-        }
-    }
-
-    private static Class<?> raw(final Type type) {
-        if (type instanceof ParameterizedType parameterized) {
-            return (Class<?>) parameterized.getRawType();
-        }
-        return (Class<?>) type;
-    }
-
-    private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     /** Minimal MCP endpoint: initialize + notifications succeed, tools/call answer is configurable. */

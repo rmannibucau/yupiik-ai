@@ -106,6 +106,8 @@ class ScrollServiceTest {
                 "#606060",
                 "#141414",
                 "#ff5555",
+                "auto",
+                "auto",
                 4000L,
                 3500L,
                 true,
@@ -116,6 +118,7 @@ class ScrollServiceTest {
                 null,
                 true,
                 scrollLines,
-                scrollPageLines);
+                scrollPageLines,
+                "");
     }
 }

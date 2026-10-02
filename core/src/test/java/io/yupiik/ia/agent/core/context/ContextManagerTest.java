@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
@@ -28,16 +29,26 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.function.BooleanSupplier;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class ContextManagerTest {
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     private static CodingAgentConfiguration config(final int keepRecent) {
         return config(keepRecent, 128000);
@@ -585,7 +596,7 @@ class ContextManagerTest {
                 "the summarizer system prompt must describe the role");
     }
 
-    private static ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {
+    private ContextManager manager(final CodingAgentConfiguration cfg, final ChatClient chat) {
         return new ContextManager(
                 cfg,
                 new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
@@ -617,8 +628,7 @@ class ContextManagerTest {
         };
     }
 
-    private static ProviderManager providerManager(final CodingAgentConfiguration cfg) {
-        return new ProviderManager(
-                cfg, new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> Optional.empty()));
+    private ProviderManager providerManager(final CodingAgentConfiguration cfg) {
+        return new ProviderManager(cfg, mapper);
     }
 }

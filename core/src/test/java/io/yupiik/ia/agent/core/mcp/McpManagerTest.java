@@ -23,7 +23,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
@@ -33,26 +32,48 @@ import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class McpManagerTest {
 
     private com.sun.net.httpserver.HttpServer server;
+
+    private JsonMapper mapper;
+    private HttpClient delegate;
+    private ExtendedHttpClient httpClient;
+
+    @BeforeEach
+    void boot(final JsonMapper mapper) {
+        this.mapper = mapper;
+        this.delegate = HttpClient.newBuilder().build();
+        this.httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+    }
 
     @AfterEach
     void stop() {
         if (server != null) {
             server.stop(0);
         }
+        httpClient.close();
+        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+        delegate.shutdownNow();
+        delegate.close();
+        httpClient = null;
+        delegate = null;
     }
 
     @Test
@@ -109,9 +130,9 @@ class McpManagerTest {
                                 List.of(),
                                 false,
                                 List.of()))),
-                mapper(),
+                mapper,
                 List.of(),
-                httpClient());
+                httpClient);
 
         manager.start();
         assertEquals(1, initializations.get());
@@ -145,7 +166,7 @@ class McpManagerTest {
         final var base = TestConfigs.codingAgent(Map.of());
         final var manager = new McpManager(
                 base,
-                mapper(),
+                mapper,
                 List.of(new EmbeddedTool() {
                     @Override
                     public String name() {
@@ -172,7 +193,7 @@ class McpManagerTest {
                         return ToolResult.error("File not found: nope.txt. Did you mean: nope.md?");
                     }
                 }),
-                httpClient());
+                httpClient);
 
         manager.start();
         final var tools = manager.tools();
@@ -223,18 +244,6 @@ class McpManagerTest {
                 base.slashcommands(),
                 base.prompt(),
                 base.logging());
-    }
-
-    private static JsonMapper mapper() {
-        return new JsonMapperImpl(List.of(), key -> Optional.empty());
-    }
-
-    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
-            .version(java.net.http.HttpClient.Version.HTTP_1_1)
-            .build();
-
-    private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     private static void respond(

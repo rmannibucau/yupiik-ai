@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -56,6 +57,7 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import java.io.IOException;
@@ -77,12 +79,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class AgentLoopTest {
     @TempDir
     Path storageHome;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     private final List<AgentEvent> events = new ArrayList<>();
     private final AtomicReference<Consumer<PauseEvent>> pauseListenerReference = new AtomicReference<>();
@@ -185,6 +197,63 @@ class AgentLoopTest {
         assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
         assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("Gave up after 1 continuation."));
         assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+    }
+
+    /**
+     * A truncation give-up with pending todos falls through to the todo auto-continue instead of ending
+     * the turn: hitting the output limit is an accident, not a reason to abandon unfinished work.
+     */
+    @Test
+    void truncationGiveUpFallsThroughToTodoAutoContinue() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true",
+                        "yca.llm.truncationContinuesMax", "1"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore =
+                    mutableTodoStore(new TodoItem("done step", "completed"), new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("truncated 0", "length", false),
+                    new ScriptedReply("truncated 1", "length", false),
+                    toolCallReply("t2", "close_todos"),
+                    new ScriptedReply("all done", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("all done", result, "the truncation give-up must continue the pending todos");
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertTrue(
+                    notices.stream()
+                            .anyMatch(n -> n.level() == AgentEvent.Notice.Level.INFO
+                                    && n.message().contains("continuing automatically (1/25)")),
+                    "the truncation give-up must trigger a todo continuation: " + notices);
+            assertTrue(
+                    notices.stream()
+                            .noneMatch(n -> n.level() == AgentEvent.Notice.Level.ERROR
+                                    && n.message().contains("Gave up after")),
+                    "no truncation give-up error when pending todos can continue: " + notices);
+        } finally {
+            permissionServiceOverride = null;
+        }
     }
 
     @Test
@@ -638,6 +707,280 @@ class AgentLoopTest {
         }
     }
 
+    /** An empty completion (no content, no tool call) must be retried, not silently turned into a stop. */
+    @Test
+    void emptyCompletionIsRetriedUpToTheBudgetThenSucceeds() {
+        final var replies = new ArrayDeque<>(
+                List.of(new ScriptedReply("", "stop", false), new ScriptedReply("actually done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "2")))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("actually done", result);
+        assertEquals(2, requests.size(), "the empty completion must re-ask the model once");
+        final var notices =
+                events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
+        assertEquals(1, notices.size(), notices.toString());
+        assertEquals(AgentEvent.Notice.Level.WARN, ((AgentEvent.Notice) notices.getFirst()).level());
+        assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("empty completion"));
+        assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("retrying (1/2)"));
+        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+    }
+
+    /** After the configured budget the empty-completion retry gives up with an error notice, not a blank stop. */
+    @Test
+    void emptyCompletionGivesUpAfterTheBudgetWithAnErrorNotice() {
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply("", "stop", false),
+                new ScriptedReply("", "stop", false),
+                new ScriptedReply("", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "2")))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("", result, "the turn ends once the empty-completion budget is spent");
+        assertEquals(3, requests.size(), "2 retries then a final call");
+        final var notices =
+                events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
+        assertEquals(3, notices.size(), "2 retry warnings then the give-up error");
+        assertEquals(AgentEvent.Notice.Level.WARN, ((AgentEvent.Notice) notices.get(0)).level());
+        assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getLast()).level());
+        assertTrue(((AgentEvent.Notice) notices.getLast()).message().contains("gave up after 2 retries"));
+        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+    }
+
+    /**
+     * An empty-completion give-up with pending todos falls through to the todo auto-continue: a blank
+     * reply is a provider hiccup, so when work is unfinished the loop keeps going rather than stopping.
+     */
+    @Test
+    void emptyCompletionGiveUpFallsThroughToTodoAutoContinue() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true",
+                        "yca.llm.emptyCompletionRetriesMax", "1"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore =
+                    mutableTodoStore(new TodoItem("done step", "completed"), new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("", "stop", false),
+                    new ScriptedReply("", "stop", false),
+                    toolCallReply("t2", "close_todos"),
+                    new ScriptedReply("all done", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("all done", result, "the empty-completion give-up must continue the pending todos");
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertTrue(
+                    notices.stream()
+                            .anyMatch(n -> n.level() == AgentEvent.Notice.Level.INFO
+                                    && n.message().contains("continuing automatically (1/25)")),
+                    "the empty-completion give-up must trigger a todo continuation: " + notices);
+            assertTrue(
+                    notices.stream()
+                            .noneMatch(n -> n.level() == AgentEvent.Notice.Level.ERROR
+                                    && n.message().contains("gave up after")),
+                    "no empty-completion give-up error when pending todos can continue: " + notices);
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
+     * The empty-completion retry budget is per stuck streak, not per turn: a tool round in between
+     * resets it, so a long turn no longer dies after scattered empty replies (the production failure).
+     */
+    @Test
+    void emptyCompletionRetryBudgetResetsAfterToolProgress() {
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply("", "stop", false),
+                toolCallReply("t1", "noop"),
+                new ScriptedReply("", "stop", false),
+                new ScriptedReply("actually done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "1")),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        todoToolsRegistry(null),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("actually done", result, "each stuck streak gets its own retry budget");
+        assertEquals(4, requests.size(), "empty (retry) -> tool -> empty (retry, budget reset) -> done");
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertEquals(2, notices.size(), "one retry warning per stuck streak: " + notices);
+        assertTrue(
+                notices.stream().allMatch(n -> n.level() == AgentEvent.Notice.Level.WARN),
+                "both notices are retries, no give-up error: " + notices);
+    }
+
+    /** Setting the knob to 0 disables the retry: the error notice is emitted on the first empty completion. */
+    @Test
+    void emptyCompletionRetryCanBeDisabled() {
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var result = loop(
+                        chatClient(replies, requests),
+                        null,
+                        configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "0")))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("", result);
+        assertEquals(1, requests.size(), "no re-ask when the knob is 0");
+        final var notices =
+                events.stream().filter(AgentEvent.Notice.class::isInstance).toList();
+        assertEquals(1, notices.size());
+        assertEquals(AgentEvent.Notice.Level.ERROR, ((AgentEvent.Notice) notices.getFirst()).level());
+        assertTrue(((AgentEvent.Notice) notices.getFirst()).message().contains("emptyCompletionRetriesMax is 0"));
+        assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
+    }
+
+    /**
+     * The empty-completion retry runs before the todo auto-continue: a blank reply is a provider
+     * hiccup, not a deliberate "stopped mid-implementation" stop the auto-continue is made for.
+     */
+    @Test
+    void emptyCompletionRetryWinsOverTodoAutoContinue() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore =
+                    mutableTodoStore(new TodoItem("done step", "completed"), new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("", "stop", false),
+                    toolCallReply("t2", "close_todos"),
+                    new ScriptedReply("done", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("done", result);
+            assertEquals(4, requests.size(), "the empty completion goes through the retry, not the auto-continue");
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertEquals(1, notices.size(), "only the retry warning, no todo auto-continue notice: " + notices);
+            assertEquals(AgentEvent.Notice.Level.WARN, notices.getFirst().level());
+            assertTrue(
+                    notices.getFirst().message().contains("empty completion"),
+                    notices.getFirst().message());
+            assertTrue(
+                    notices.stream().noneMatch(n -> n.message().contains("continuing automatically")),
+                    "the empty completion must not be reported as a deliberate todo stop: " + notices);
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
+     * A window that burns its whole iteration budget on tool calls does not end the turn while todos
+     * are pending: the todo auto-continue starts a fresh budget, so a large --todos-maxContinues is
+     * actually reachable instead of being capped by yca.llm.maxIterations (10 in this test's config).
+     */
+    @Test
+    void iterationBudgetExhaustionRestartsViaTodoAutoContinue() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.todos.continueOnUnfinished", "true"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var todoStore =
+                    mutableTodoStore(new TodoItem("done step", "completed"), new TodoItem("later step", "pending"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<ScriptedReply>();
+            // maxIterations is 10: exhaust the first window with tool-only rounds, then let the restart close
+            for (var i = 0; i < 11; i++) {
+                replies.add(toolCallReply("t" + i, "noop"));
+            }
+            replies.add(toolCallReply("close", "close_todos"));
+            replies.add(new ScriptedReply("all done", "stop", false));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("all done", result, "iteration exhaustion must not end the turn with pending todos");
+            assertEquals(13, requests.size(), "10 rounds, then a fresh window of 3 more calls");
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertTrue(
+                    notices.stream()
+                            .anyMatch(n -> n.level() == AgentEvent.Notice.Level.INFO
+                                    && n.message().contains("finish_reason=max_iterations")
+                                    && n.message().contains("continuing automatically (1/25)")),
+                    "iteration exhaustion must be reported as a todo continuation: " + notices);
+            assertTrue(
+                    notices.stream().noneMatch(n -> n.message().contains("Maximum iterations reached")),
+                    "no hard iteration error while a todo continuation remains: " + notices);
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
     private static ScriptedReply toolCallReply(final String callId, final String tool) {
         return new ScriptedReply(null, "tool_calls", false) {
             @Override
@@ -870,6 +1213,45 @@ class AgentLoopTest {
                 0,
                 events.stream().filter(AgentEvent.Notice.class::isInstance).count(),
                 "completed todos and a no-tool turn must stay silent");
+    }
+
+    @Test
+    void noTodosWarningWhenOnlyCancelledItemsRemain() {
+        final var todoStore = new TodoStore() {
+            private List<TodoItem> todos = List.of(new TodoItem("dropped step", "cancelled"));
+
+            @Override
+            public List<TodoItem> all() {
+                return todos;
+            }
+
+            @Override
+            public synchronized List<TodoItem> replace(final List<TodoItem> items) {
+                todos = List.copyOf(items);
+                return all();
+            }
+        };
+        final var replies = new ArrayDeque<>(List.of(
+                new ScriptedReply(null, "tool_calls", false) {
+                    @Override
+                    Message toMessage() {
+                        return new Message(
+                                "assistant",
+                                null,
+                                null,
+                                List.of(new ToolCall("t1", "function", new ToolCall.FunctionCall("bash", "{}"), 0)),
+                                null,
+                                null);
+                    }
+                },
+                new ScriptedReply("adjusted", "stop", false)));
+        loop(chatClient(replies, new ArrayList<>()), todoStore, configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals(
+                0,
+                events.stream().filter(AgentEvent.Notice.class::isInstance).count(),
+                "cancelled todos count as closed: no unfinished-todos warning");
     }
 
     @Test
@@ -1143,7 +1525,7 @@ class AgentLoopTest {
     }
 
     @Test
-    void softNudgeIsAppendedToTheSessionStateAboveTheThreshold() {
+    void softNudgeIsSuppressedWhenThresholdIsZero() {
         final var loop = loop(
                 scriptedToolClient(new ArrayList<>(), List.of()),
                 null,
@@ -1151,7 +1533,165 @@ class AgentLoopTest {
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("u"));
         // threshold 0 => no nudge regardless of iterations
-        assertEquals("", loop.nudgeBlock(messages));
+        assertEquals("", loop.nudgeBlock(messages, 0));
+    }
+
+    @Test
+    void softNudgeFiresInTheSoftBandWithUsageAndThresholds() {
+        // the loop() helper injects a stub UsageTracker (contextPercent=1, estimateContext=100):
+        // threshold 1 fires the nudge, prune threshold 65 keeps it in the soft band
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.pruning.nudgeThresholdPercent", "1",
+                                "yca.pruning.nudgeIterationThreshold", "1",
+                                "yca.pruning.nudgeMinTokens", "0")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        messages.add(Message.tool("t1", "some result"));
+        final var nudge = loop.nudgeBlock(messages, 0);
+        assertTrue(nudge.startsWith("\n<nudge>"), nudge);
+        assertTrue(nudge.endsWith("</nudge>"), nudge);
+        assertTrue(nudge.contains("~1"), "must carry the usage percent, got " + nudge);
+        assertFalse(nudge.contains("Do not start new work"), "usage below the prune threshold must keep the soft band");
+    }
+
+    @Test
+    void urgentNudgeFiresOnceUsageReachesThePruneThreshold() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.pruning.nudgeThresholdPercent", "1",
+                                "yca.pruning.nudgeIterationThreshold", "1",
+                                "yca.pruning.nudgeMinTokens", "0",
+                                // stub percent is 1 -> >= 1 makes the urgent band fire
+                                "yca.pruning.thresholdPercent", "1",
+                                "yca.tools.manageContext.enabled", "true")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        messages.add(Message.tool("t1", "some result"));
+        final var nudge = loop.nudgeBlock(messages, 0);
+        assertTrue(nudge.contains("Do not start new work"), nudge);
+        assertTrue(nudge.contains("above the prune threshold"), nudge);
+        assertTrue(
+                nudge.contains("manage_context with action=prune or action=compact"),
+                "the %ACTIONS% placeholder must be resolved to the tool suggestion when enabled, got: " + nudge);
+    }
+
+    @Test
+    void nudgeActionsFallbackWhenManageContextIsDisabled() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.pruning.nudgeThresholdPercent", "1",
+                                "yca.pruning.nudgeIterationThreshold", "1",
+                                "yca.pruning.nudgeMinTokens", "0",
+                                "yca.pruning.thresholdPercent", "1",
+                                "yca.tools.manageContext.enabled", "false")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        messages.add(Message.tool("t1", "some result"));
+        final var nudge = loop.nudgeBlock(messages, 0);
+        assertTrue(nudge.contains("interrupt with a short summary"), nudge);
+        assertFalse(nudge.contains("manage_context"), "must not reference a disabled tool, got: " + nudge);
+    }
+
+    @Test
+    void nudgeIsSuppressedUntilTheIterationThresholdIsReached() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.pruning.nudgeThresholdPercent", "1",
+                                "yca.pruning.nudgeIterationThreshold", "3",
+                                "yca.pruning.nudgeMinTokens", "0")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        messages.add(Message.tool("t1", "some result"));
+        assertEquals("", loop.nudgeBlock(messages, 0));
+    }
+
+    @Test
+    void nudgeIsSuppressedBelowTheMinTokenFloor() {
+        // stub estimateContext is 100 tokens: the default floor (64000, capped at 90% of the usable
+        // window) is far above it, so even with a triggering percent the nudge stays silent
+        final var floored = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.pruning.nudgeThresholdPercent", "1",
+                                "yca.pruning.nudgeIterationThreshold", "1")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        messages.add(Message.tool("t1", "some result"));
+        assertEquals(
+                "", floored.nudgeBlock(messages, 0), "the default floor must suppress the nudge on a small context");
+
+        // a low floor (below the 100-token estimate) lets the percentage alone gate it
+        final var lowFloor = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.pruning.nudgeThresholdPercent", "1",
+                                "yca.pruning.nudgeIterationThreshold", "1",
+                                "yca.pruning.nudgeMinTokens", "50")));
+        assertTrue(lowFloor.nudgeBlock(messages, 0).startsWith("\n<nudge>"));
+    }
+
+    @Test
+    void contextUsageLineIsAlwaysRenderedInTheSessionState() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.provider.providers.0.contextWindow", "2000",
+                                "yca.pruning.thresholdPercent", "90")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.user("u"));
+        messages.add(Message.tool("t1", "x".repeat(2500)));
+        final var line = loop.contextUsageLine(messages, 0);
+        assertTrue(line.startsWith("Context usage: ~"), line);
+        assertTrue(line.contains("(prune at 90%, compaction at 80%)"), line);
+        // the line is unconditional: rendered even when the nudge stays silent (iteration guard)
+        assertTrue(loop.nudgeBlock(messages, 15).isEmpty());
+    }
+
+    @Test
+    void appendStateIfChangedKeepsTheContextUsageLineInTheTail() {
+        final var requests = new ArrayList<List<Message>>();
+        final var loop = loop(
+                scriptedToolClient(
+                        requests,
+                        List.of(new ToolCall("t1", "function", new ToolCall.FunctionCall("inline_read", "{}"), 0))),
+                null,
+                configuration(
+                        true,
+                        Map.of(
+                                "yca.provider.providers.0.contextWindow", "100000",
+                                "yca.pruning.nudgeThresholdPercent", "0")));
+        final var result = loop.run("do it", null, "s1", null, () -> false);
+        assertEquals("all done", result);
+        final var tail = requests.get(1).get(2);
+        assertTrue(
+                String.valueOf(tail.content()).contains("Context usage: ~"),
+                "the volatile tail must always carry the usage line, got: " + tail.content());
     }
 
     @Test
@@ -2207,6 +2747,78 @@ class AgentLoopTest {
         assertTrue(secondTail.contains("<memory>"), "the refreshed tail must carry the memory section: " + secondTail);
     }
 
+    /** A registry exposing one wire tool, so a captured payload has a non-empty tools list. */
+    private ToolRegistry wireToolsRegistry() {
+        return new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of(Tool.function(
+                        "read_file",
+                        "read a file from disk",
+                        Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string")))));
+            }
+
+            @Override
+            public io.yupiik.ia.agent.core.tools.EmbeddedTool tool(final String name) {
+                return null;
+            }
+        };
+    }
+
+    @Test
+    void lastLlmPayloadIsCapturedAndThePreviewRebuildsTheRequest() {
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var loop = loop(
+                chatClient(replies, requests),
+                null,
+                configuration(true),
+                noContextManager(),
+                noSessionStore(),
+                null,
+                wireToolsRegistry(),
+                null,
+                null);
+        assertNull(loop.lastLlmPayload(), "nothing is captured before the first request");
+
+        assertEquals("done", loop.run("do it", null, "s1", null, () -> false));
+
+        final var payload = loop.lastLlmPayload();
+        assertNotNull(payload, "a request was sent, the payload must be captured");
+        assertEquals("s1", payload.sessionId());
+        assertEquals("test-model", payload.model());
+        assertEquals("auto", payload.toolChoice());
+        assertEquals(1, payload.tools().size());
+        assertTrue(payload.toolsTokens() > 0, "the wire tool schemas cost context tokens: " + payload.toolsTokens());
+        assertEquals("system", payload.messages().getFirst().role());
+        assertEquals(
+                "do it",
+                payload.messages().stream()
+                        .filter(m -> "user".equals(m.role()))
+                        .map(m -> String.valueOf(m.content()))
+                        .findFirst()
+                        .orElseThrow(),
+                "the user prompt is part of the snapshot");
+        assertEquals(
+                requests.getFirst(), payload.messages(), "the snapshot must be the exact list handed to the provider");
+        assertTrue(
+                payload.messages().stream()
+                        .anyMatch(m -> m.others() != null
+                                && Boolean.TRUE.equals(m.others().get("volatileTail"))),
+                "the volatile tail the store strips must still be visible: " + payload.messages());
+
+        // the preview is rebuilt from the persisted transcript (empty here) plus a fresh tail
+        final var preview = loop.previewLlmPayload("s1");
+        assertEquals(payload.model(), preview.model());
+        assertEquals(payload.tools(), preview.tools());
+        assertEquals(payload.toolsTokens(), preview.toolsTokens());
+        assertEquals("system", preview.messages().getFirst().role());
+        assertTrue(
+                preview.messages().stream()
+                        .anyMatch(m -> String.valueOf(m.content()).contains("<session-state>")),
+                "the preview must carry the volatile tail the store never persists: " + preview.messages());
+    }
+
     private ToolRegistry registryOf(final EmbeddedTool... tools) {
         return new ToolRegistry(null) {
             @Override
@@ -2432,7 +3044,7 @@ class AgentLoopTest {
                         }
                     }
                 },
-                new io.yupiik.fusion.json.internal.JsonMapperImpl(List.of(), key -> java.util.Optional.empty()),
+                mapper,
                 new io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph() {
                     @Override
                     public void ensureReadyAsync() {}

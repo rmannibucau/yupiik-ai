@@ -21,16 +21,19 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -40,10 +43,18 @@ import org.junit.jupiter.api.io.TempDir;
  * tab work: unrelated processes shared nothing; tabs must share the process
  * budget but nothing conversation-scoped).
  */
+@ExtendWith(TestJsonMapper.class)
 class SessionRuntimeTest {
 
     @TempDir
     Path storageHome;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     private SessionRuntimeFactory factory() {
         final var props = new HashMap<String, String>();
@@ -63,9 +74,7 @@ class SessionRuntimeTest {
                 null,
                 null,
                 null,
-                new JsonMapperImpl(
-                        List.of(new io.yupiik.ia.agent.core.todo.TodoItem$FusionJsonCodec()),
-                        key -> java.util.Optional.empty()),
+                mapper,
                 null,
                 Clock.systemUTC(),
                 null);

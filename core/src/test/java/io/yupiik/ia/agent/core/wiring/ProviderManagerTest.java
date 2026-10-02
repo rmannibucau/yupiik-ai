@@ -21,27 +21,36 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class ProviderManagerTest {
 
     @TempDir
     static Path storageHome;
 
-    private static ProviderManager manager(final Map<String, String> overrides) {
-        final CodingAgentConfiguration cfg = TestConfigs.codingAgent(overrides);
-        return new ProviderManager(cfg, new JsonMapperImpl(List.of(), key -> Optional.empty()));
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
     }
 
-    private static ProviderManager twoProviders() {
+    private ProviderManager manager(final Map<String, String> overrides) {
+        final CodingAgentConfiguration cfg = TestConfigs.codingAgent(overrides);
+        return new ProviderManager(cfg, mapper);
+    }
+
+    private ProviderManager twoProviders() {
         return manager(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "2"),
@@ -137,7 +146,7 @@ class ProviderManagerTest {
         assertEquals(0.2, ((Number) first.get("temperature")).doubleValue());
     }
 
-    private static ProviderManager tuningProvider() {
+    private ProviderManager tuningProvider() {
         return manager(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "1"),

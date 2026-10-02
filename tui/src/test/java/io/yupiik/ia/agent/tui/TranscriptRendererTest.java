@@ -121,6 +121,44 @@ class TranscriptRendererTest {
         assertEquals(List.of("one", "two", "three", "four"), b);
     }
 
+    @Test
+    void streamedBlankLinesMatchAFullRenderAtEveryStep() {
+        // a blank line only separates two blocks *inside* one markdown document: the streaming
+        // renderer cuts the region and parses both halves independently, so the separator row must
+        // be put back or paragraphs are glued together while the stream grows
+        final var md = "para one\n\npara two\n\npara three";
+        assertEquals(List.of("para one", "", "para two", "", "para three"), fullRender(md));
+        assertEveryFrameMatchesAFullRender(md);
+        assertEquals(List.of("para one", "", "para two", "", "para three"), plainOf(md));
+        // the flushed text is rendered again from scratch (thinking flushed, answer re-rendered):
+        // the cached prefix lines must not carry a lost separator for the rest of the session
+        assertEquals(List.of("para one", "", "para two", "", "para three"), plainOf(md));
+    }
+
+    @Test
+    void blankLineAroundAFenceMatchesAFullRenderWhileStreaming() {
+        final var md = "para\n\n```\ncode\n```\n\nafter";
+        assertEquals(List.of("para", "", "code", "", "after"), fullRender(md));
+        assertEveryFrameMatchesAFullRender(md);
+    }
+
+    /** Renders every growing prefix of {@code md}, as a token-by-token stream would. */
+    private void assertEveryFrameMatchesAFullRender(final String md) {
+        for (var cut = 1; cut <= md.length(); cut++) {
+            final var frame = cut;
+            final var partial = md.substring(0, cut);
+            assertEquals(fullRender(partial), plainOf(partial), () -> "frame after " + frame + " characters");
+        }
+    }
+
+    private List<String> plainOf(final String source) {
+        return plain(renderer.renderRegion(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS));
+    }
+
+    private static List<String> fullRender(final String source) {
+        return plain(new MarkdownLines().render(source, 80, Style.EMPTY, MarkdownStyles.DEFAULTS));
+    }
+
     private static List<String> plain(final List<Line> lines) {
         return lines.stream().map(Line::rawContent).toList();
     }

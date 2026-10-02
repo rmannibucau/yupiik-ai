@@ -85,8 +85,100 @@ final class TranscriptRenderer {
         }
         final var combined = new ArrayList<Line>(prefixLines.size() + 16);
         combined.addAll(prefixLines);
-        combined.addAll(renderToList(suffix, width, base, styles));
+        appendBlocks(
+                combined,
+                renderToList(suffix, width, base, styles),
+                boundaryBlanks(prefix, suffix) > 0,
+                !suffix.isBlank());
         return combined;
+    }
+
+    /**
+     * Appends {@code rendered} to {@code out}, optionally inserting the single blank row that
+     * separates two block groups.
+     * <p>
+     * A blank source line only separates blocks <em>inside</em> one markdown document: both
+     * chunks here are parsed independently, so commonmark drops the trailing blanks of the first
+     * and the leading blanks of the second and the separator row would be lost - the paragraph
+     * above glues to the paragraph below, and a stream that already rendered such a boundary
+     * keeps it glued for the rest of the session (the cached prefix lines are reused verbatim).
+     * The row is inserted only once the new chunk actually produced lines, so a stream paused on
+     * a paragraph-ending blank line still renders exactly like a cold render of the same text.
+     *
+     * @param blankRowBetween true to keep one blank row between the two groups: either a blank
+     *                        source line at the boundary, or a new block group (a fenced block)
+     */
+    static void appendBlocks(final List<Line> out, final List<Line> rendered, final boolean blankRowBetween) {
+        appendBlocks(out, rendered, blankRowBetween, false);
+    }
+
+    /**
+     * Same as {@link #appendBlocks(List, List, boolean)} but aware that the second document may
+     * have already started a block that did not emit a row yet (an open fenced block): the cold
+     * renderer still counts it as a sibling block and keeps the separator row, so the live stream
+     * must not wait for the first content row in that case or the frame right after the opening
+     * fence line would read denser than a full render of the same text.
+     */
+    static void appendBlocks(
+            final List<Line> out, final List<Line> rendered, final boolean blankRowBetween, final boolean openBlock) {
+        final var blank = (blankRowBetween && !rendered.isEmpty()) || (openBlock && rendered.isEmpty());
+        if (blank && !out.isEmpty() && !isBlankRow(out.get(out.size() - 1))) {
+            out.add(Line.empty());
+        }
+        if (!rendered.isEmpty()) {
+            out.addAll(rendered);
+        }
+    }
+
+    /** True when {@code line} carries no visible text (a spacer row). */
+    static boolean isBlankRow(final Line line) {
+        for (final var span : line.spans()) {
+            if (span.content() != null && !span.content().isBlank()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Number of blank source lines at the boundary between two chunks of the same region, i.e.
+     * the blank lines {@code left} ends with plus the ones {@code right} starts with (the split
+     * point is a line boundary, so the two sets never overlap). Positive when the two chunks must
+     * be kept apart by a blank row.
+     */
+    static int boundaryBlanks(final String left, final String right) {
+        return trailingBlankLines(left) + leadingBlankLines(right);
+    }
+
+    /**
+     * Blank lines at the end of {@code text}: a trailing line terminator only terminates the last
+     * content line, so {@code "a\n"} has none while {@code "a\n\n"} has one.
+     */
+    private static int trailingBlankLines(final String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        final var lines = text.split("\n", -1);
+        // a trailing "" is the artifact of the last terminator, not a blank line
+        final var end = text.endsWith("\n") ? lines.length - 1 : lines.length;
+        var count = 0;
+        for (var i = end - 1; i >= 0 && lines[i].isBlank(); i--) {
+            count++;
+        }
+        return count;
+    }
+
+    /** Blank lines at the start of {@code text} ({@code "\n\na"} has two). */
+    private static int leadingBlankLines(final String text) {
+        if (text == null || text.isEmpty()) {
+            return 0;
+        }
+        final var lines = text.split("\n", -1);
+        var count = 0;
+        for (var i = 0; i < lines.length && lines[i].isBlank(); i++) {
+            count++;
+        }
+        return count;
     }
 
     private List<Line> prefixLines(
@@ -103,9 +195,10 @@ final class TranscriptRenderer {
             if (lastPrefix != null && prefix.startsWith(lastPrefix)) {
                 // append-only streaming: only the delta (the lines added since the
                 // previous frame) is markdown-parsed; the rest was already rendered.
+                final var delta = prefix.substring(lastPrefix.length());
                 final var result = new ArrayList<Line>(lastPrefixLines.size() + 8);
                 result.addAll(lastPrefixLines);
-                result.addAll(renderToList(prefix.substring(lastPrefix.length()), width, base, styles));
+                appendBlocks(result, renderToList(delta, width, base, styles), boundaryBlanks(lastPrefix, delta) > 0);
                 remember(prefix, result, width, base, styles);
                 return result;
             }

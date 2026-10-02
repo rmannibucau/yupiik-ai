@@ -19,29 +19,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
-import java.util.List;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterEach;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class ToolOutputFormatTest {
-    private JsonMapperImpl mapper;
+    private JsonMapper mapper;
     private ToolOutputFormat service;
 
     @BeforeEach
-    void setUp() {
-        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    void setUp(final JsonMapper mapper) {
+        this.mapper = mapper;
         service = new ToolOutputFormat(mapper);
-    }
-
-    @AfterEach
-    void tearDown() {
-        if (mapper != null) {
-            mapper.close();
-            mapper = null;
-        }
     }
 
     @Test
@@ -88,12 +80,52 @@ class ToolOutputFormatTest {
     }
 
     @Test
-    void markdownTwoSignalsDetected() {
-        assertSame(ToolOutputFormat.Format.MARKDOWN, service.detect("# Title\n- item"));
+    void markdownDocumentWithFenceDetected() {
+        assertSame(ToolOutputFormat.Format.MARKDOWN, service.detect("# Title\n\n```java\nint a = 1;\n```"));
+    }
+
+    @Test
+    void markdownHeadingWithCompleteTableDetected() {
+        assertSame(
+                ToolOutputFormat.Format.MARKDOWN, service.detect("## Report\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n"));
     }
 
     @Test
     void markdownOneSignalStaysText() {
         assertSame(ToolOutputFormat.Format.TEXT, service.detect("# Title only"));
+    }
+
+    /**
+     * The regression: a python {@code tabulate(...)} dump plus one list marker used to be
+     * classified as markdown and rendered as a bordered grid, prefixing every line with a
+     * vertical bar. Two loose signals are no longer enough.
+     */
+    @Test
+    void pipeTableWithOneListMarkerStaysText() {
+        final var tabulated = """
+                | name | age |
+                |------|-----|
+                | bob  | 42  |
+                - bob is 42
+                """;
+        assertSame(ToolOutputFormat.Format.TEXT, service.detect(tabulated));
+    }
+
+    /** A delimiter row without a body row is not a table, so a piped dump stays text. */
+    @Test
+    void incompleteTableStaysText() {
+        assertSame(ToolOutputFormat.Format.TEXT, service.detect("# a\n\n| x | y |\n| --- | --- |\n"));
+    }
+
+    /** A proven source language wins over the loose yaml key heuristic. */
+    @Test
+    void detectedLanguageWinsOverYaml() {
+        assertSame(ToolOutputFormat.Format.CODE, service.detect("name: bob\nage: 42", "python3 report.py"));
+    }
+
+    /** ...but json/xml/diff keep their dedicated rendering even for a code command. */
+    @Test
+    void jsonStillWinsOverDetectedLanguage() {
+        assertSame(ToolOutputFormat.Format.JSON, service.detect("{\"a\":1,\"b\":2}", "python3 x.py"));
     }
 }

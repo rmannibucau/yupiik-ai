@@ -18,48 +18,72 @@ package io.yupiik.ia.agent.core.shell.btw;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.BtwConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Tool;
+import io.yupiik.ia.agent.core.llm.ToolCall;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
+import io.yupiik.ia.agent.core.permissions.ApprovalGate;
+import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.core.tools.ToolExecutionService;
+import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.function.BooleanSupplier;
 
 /**
- * Answers /btw side questions out of band: a single tool-less LLM round-trip over the
- * inherited session history. Nothing is written to the session store, so the main
- * conversation and its persistence are never affected.
+ * Answers /btw side questions out of band: a bounded read-only tool loop over the inherited
+ * session history, gated by the plan-mode permissions and the session approval gate. Tools
+ * are limited to the read-only category plus the bash tool evaluated against the plan-mode
+ * command rules (never inheriting yolo/permitAll). Nothing is written to the session store,
+ * so the main conversation and its persistence are never affected.
  */
 @ApplicationScoped
 public class BtwAnswerer {
     static final int MAX_RECALL_EXCHANGES = 20;
 
+    /** Bound on the model round-trips of a single /btw answer, tool round-trips included. */
+    static final int MAX_TOOL_ROUNDS = 6;
+
     static final String SYSTEM_PROMPT =
             "You answer quick side questions ('by the way') asked while a coding agent session is running. "
                     + "The session conversation is provided for context; the reply being streamed, if any, is not part of it. "
-                    + "You have no tools: answer from the provided context and your own knowledge only, and never claim "
-                    + "to have executed anything. Never emit tool calls or tool-call markup (DSML or similar), even though "
-                    + "the context shows past tool usage. Keep the answer concise and in markdown.";
+                    + "You can use the declared read-only tools (file/command readers, searches, and the read-only shell "
+                    + "commands allowed in plan mode) to inspect the project when it helps answering, exactly like plan mode. "
+                    + "You cannot modify anything: write/edit tools are never available and shell commands are restricted to "
+                    + "the plan-mode read-only allow-list - a refused or failed tool call just means it is not allowed, so "
+                    + "fall back to what you can read or to your own knowledge. Answer concisely and in markdown, and never "
+                    + "claim to have executed anything you did not.";
 
     private final ChatClient chatClient;
     private final SessionStore sessionStore;
     private final CodingAgentConfiguration configuration;
     private final VirtualThreadExecutor executor;
     private final ToolCallMarkupStripper toolCallMarkup;
+    private final ToolCallMarkupParser toolCallMarkupParser;
+    private final ToolRegistry toolRegistry;
+    private final ToolExecutionService toolExecutionService;
     private final JsonMapper mapper;
     private final ProviderManager providerManager;
     private final Clock clock;
@@ -73,6 +97,9 @@ public class BtwAnswerer {
             final CodingAgentConfiguration configuration,
             final VirtualThreadExecutor executor,
             final ToolCallMarkupStripper toolCallMarkup,
+            final ToolCallMarkupParser toolCallMarkupParser,
+            final ToolRegistry toolRegistry,
+            final ToolExecutionService toolExecutionService,
             final JsonMapper mapper,
             final ProviderManager providerManager,
             final Clock clock) {
@@ -81,6 +108,9 @@ public class BtwAnswerer {
         this.configuration = configuration;
         this.executor = executor;
         this.toolCallMarkup = toolCallMarkup;
+        this.toolCallMarkupParser = toolCallMarkupParser;
+        this.toolRegistry = toolRegistry;
+        this.toolExecutionService = toolExecutionService;
         this.mapper = mapper;
         this.providerManager = providerManager;
         this.clock = clock;
@@ -89,11 +119,15 @@ public class BtwAnswerer {
     public record BtwExchange(String question, String answer) {}
 
     public CompletionStage<String> ask(
-            final String question, final String sessionId, final UsageTracker usage, final BooleanSupplier cancelled) {
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate) {
         final var future = new CompletableFuture<String>();
         executor.execute(() -> {
             try {
-                future.complete(doAsk(question, sessionId, usage, cancelled));
+                future.complete(doAsk(question, sessionId, usage, cancelled, sessionGate));
             } catch (final IOException e) {
                 future.completeExceptionally(e);
             } catch (final InterruptedException e) {
@@ -107,7 +141,11 @@ public class BtwAnswerer {
     }
 
     String doAsk(
-            final String question, final String sessionId, final UsageTracker usage, final BooleanSupplier cancelled)
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate)
             throws IOException, InterruptedException {
         final var conf = configuration();
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
@@ -117,33 +155,127 @@ public class BtwAnswerer {
         messages.add(Message.user(userPrompt(conf, question)));
         final var model = conf.model() == null || conf.model().isBlank() ? null : conf.model();
         final var target = client(model);
-        final var res = target.client()
-                .chat(
-                        new ChatCompletionRequest(
-                                null, messages, null, null, false, null, null, conf.maxTokens(), null, null),
-                        target.settings(),
-                        cancelled);
-        if (usage != null) {
-            usage.recordAuxiliary(res.usage());
-        }
-        final var content = res.message() == null ? null : res.message().content();
-        final var raw = content == null ? "" : String.valueOf(content);
-        final var answer = toolCallMarkup.strip(raw);
-        if (answer.isBlank()) {
-            if (raw.isBlank()) {
-                throw new IOException("btw got an empty answer");
+        // /btw never inherits the session yolo/permitAll: plan-mode rules only, and the caller's
+        // approval gate (the tabs share it, so an approval pops above the btw modal) decides the rest.
+        final var permissions = new PermissionService(configuration);
+        permissions.setMode(AgentMode.PLAN);
+        permissions.setPermitAll(false);
+        permissions.setPermissionMode(PermissionMode.ASK);
+        permissions.setGate(sessionGate);
+        final var tools = toolRegistry == null
+                ? List.<Tool>of()
+                : toolRegistry.toWireTools(t -> t.category() == ToolCategory.READ || t.category() == ToolCategory.BASH);
+        var retried = false;
+        String raw = "";
+        for (var round = 0; round < MAX_TOOL_ROUNDS; round++) {
+            if (cancelled.getAsBoolean()) {
+                throw new InterruptedException("cancelled");
             }
-            // The model emitted tool-call markup with no prose at all: surface the glitch
-            // instead of an empty modal, and do not replay it into the next side questions.
-            return glitchNote(raw);
+            final var res = target.client()
+                    .chat(
+                            new ChatCompletionRequest(
+                                    model,
+                                    messages,
+                                    null,
+                                    null,
+                                    false,
+                                    tools,
+                                    "auto",
+                                    conf.maxTokens() > 0 ? conf.maxTokens() : null,
+                                    null,
+                                    null),
+                            target.settings(),
+                            cancelled);
+            if (usage != null) {
+                usage.recordAuxiliary(res.usage());
+            }
+            final var content = res.message() == null ? null : res.message().content();
+            raw = content == null ? "" : String.valueOf(content);
+            final var nativeCalls = res.message() == null ? null : res.message().toolCalls();
+            final var calls =
+                    nativeCalls != null && !nativeCalls.isEmpty() ? nativeCalls : toolCallMarkupParser.parse(raw);
+            if (calls.isEmpty()) {
+                final var answer = toolCallMarkup.strip(raw);
+                if (!answer.isBlank()) {
+                    remember(conf, new BtwExchange(question, answer));
+                    return answer;
+                }
+                // truncated-while-thinking signature: tokens were spent but nothing came out.
+                // Retry once, then fall back to a note instead of an exception.
+                if (!retried && res.usage() != null && res.usage().completionTokens() > 0) {
+                    retried = true;
+                    continue;
+                }
+                return "The model returned an empty answer. Check the output budget or retry the side question.";
+            }
+            final var prose = toolCallMarkup.strip(raw);
+            messages.add(Message.assistant(prose.isBlank() ? null : prose, calls));
+            for (final var call : calls) {
+                final var outcome = runTool(call, sessionId, usage, cancelled, permissions);
+                messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
+            }
         }
-        remember(conf, new BtwExchange(question, answer));
-        return answer;
+        // round cap reached while the model kept calling tools: surface the glitch.
+        return glitchNote(raw);
+    }
+
+    /** Executes a single /btw tool call, mirroring the main loop's authorisation and bounding. */
+    private ToolOutcome runTool(
+            final ToolCall call,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final PermissionService permissions) {
+        final var function = call.function();
+        final var name = function == null || function.name() == null ? "" : function.name();
+        final var argsJson = function == null || function.arguments() == null ? "{}" : function.arguments();
+        final var tool = toolRegistry.tool(name);
+        if (tool == null) {
+            return new ToolOutcome(call.id(), "unknown tool", false);
+        }
+        final Map<String, Object> args;
+        try {
+            // mirror the main loop's parsing: never trust the model, garbage in -> invalid args
+            final var parsed = mapper.fromString(Object.class, argsJson.isBlank() ? "{}" : argsJson);
+            args = parsed instanceof final Map<?, ?> map ? castArgs(map) : new LinkedHashMap<>();
+        } catch (final RuntimeException invalid) {
+            return new ToolOutcome(call.id(), "(invalid arguments: " + invalid.getMessage() + ")", false);
+        }
+        final var decision = permissions.check(name, tool.category(), args, tool.readonly());
+        if (!decision.allowed()) {
+            return new ToolOutcome(
+                    call.id(),
+                    "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason()),
+                    false);
+        }
+        final var context =
+                new ToolContext(sessionId, null, null, permissions, null, null, null, usage, null, cancelled);
+        final var result = toolExecutionService.execute(tool, args, context);
+        final var output = result.output() == null || result.output().isBlank() ? "(no output)" : result.output();
+        return new ToolOutcome(call.id(), capIngestionOutput(output), result.success());
+    }
+
+    private record ToolOutcome(String callId, String output, boolean success) {}
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> castArgs(final Map<?, ?> map) {
+        return (Map<String, Object>) map;
+    }
+
+    private String capIngestionOutput(final String output) {
+        final var cap = configuration.pruning().ingestionOutputCapChars();
+        if (cap <= 0 || output == null || output.length() <= cap) {
+            return output;
+        }
+        final var half = cap / 2;
+        return output.substring(0, half)
+                + "\n[... output truncated (" + output.length() + " chars), kept head and tail ...]\n"
+                + output.substring(output.length() - half);
     }
 
     /** Renders a tool-call-only answer as a note plus the raw output, in markdown. */
     private String glitchNote(final String raw) {
-        return "> The model tried to call a tool instead of answering this side question. Raw output:\n\n"
+        return "> The model kept calling tools instead of answering this side question. Raw output:\n\n"
                 + "```\n"
                 + raw
                 + "\n```";

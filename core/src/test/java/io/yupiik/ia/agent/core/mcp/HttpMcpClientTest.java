@@ -22,17 +22,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class HttpMcpClientTest {
 
     @AfterEach
@@ -43,11 +46,29 @@ class HttpMcpClientTest {
             server = null;
         }
         client = null;
+        httpClient.close();
+        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+        delegate.shutdownNow();
+        delegate.close();
+        httpClient = null;
+        delegate = null;
     }
 
     private com.sun.net.httpserver.HttpServer server;
     private HttpMcpClient client;
     private Object serverState;
+
+    private JsonMapper mapper;
+    private HttpClient delegate;
+    private ExtendedHttpClient httpClient;
+
+    @BeforeEach
+    void boot(final JsonMapper mapper) {
+        this.mapper = mapper;
+        this.delegate = HttpClient.newBuilder().build();
+        this.httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+    }
 
     private void start(final boolean sse) throws IOException, InterruptedException {
         server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
@@ -97,8 +118,8 @@ class HttpMcpClientTest {
                 "key",
                 List.of(),
                 10,
-                mapper(),
-                httpClient());
+                mapper,
+                httpClient);
         client.initialize();
     }
 
@@ -138,8 +159,8 @@ class HttpMcpClientTest {
                 "key",
                 List.of(),
                 10,
-                mapper(),
-                httpClient());
+                mapper,
+                httpClient);
         final var error = assertThrows(McpHttpException.class, failing::initialize);
         assertEquals(500, error.statusCode());
         assertEquals(true, error.getMessage().contains("500"));
@@ -160,8 +181,8 @@ class HttpMcpClientTest {
                 "key",
                 List.of(),
                 10,
-                mapper(),
-                httpClient());
+                mapper,
+                httpClient);
         final var error = assertThrows(McpHttpException.class, failing::initialize);
         assertEquals(429, error.statusCode());
         assertEquals("{\"error\":\"rate limited\"}", error.body());
@@ -182,8 +203,8 @@ class HttpMcpClientTest {
                 "key",
                 List.of(),
                 10,
-                mapper(),
-                httpClient());
+                mapper,
+                httpClient);
         final var error = assertThrows(McpHttpException.class, failing::initialize);
         assertEquals(404, error.statusCode());
         assertNull(error.retryAfterMillis());
@@ -220,25 +241,13 @@ class HttpMcpClientTest {
                 "key",
                 List.of(),
                 10,
-                mapper(),
-                httpClient());
+                mapper,
+                httpClient);
         negotiating.initialize();
     }
 
     private static String wrap(final boolean sse, final String json) {
         return sse ? "event: message\ndata: " + json + "\n\n" : json;
-    }
-
-    private JsonMapper mapper() {
-        return new JsonMapperImpl(List.of(), key -> Optional.empty());
-    }
-
-    private static final java.net.http.HttpClient WARM_HTTP_CLIENT = java.net.http.HttpClient.newBuilder()
-            .version(java.net.http.HttpClient.Version.HTTP_1_1)
-            .build();
-
-    private static ExtendedHttpClient httpClient() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
     }
 
     private static void respond(

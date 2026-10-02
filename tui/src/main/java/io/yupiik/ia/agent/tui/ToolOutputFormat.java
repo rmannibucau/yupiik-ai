@@ -44,6 +44,8 @@ public class ToolOutputFormat {
         XML,
         YAML,
         DIFF,
+        /** A detected source language: syntax colored, never reinterpreted. */
+        CODE,
         TEXT
     }
 
@@ -52,8 +54,11 @@ public class ToolOutputFormat {
             Pattern.compile("^[ \\t]*[A-Za-z_][A-Za-z0-9_. -]*:(\\s|$)", Pattern.MULTILINE);
     private static final Pattern MD_ATX = Pattern.compile("^#{1,6} ", Pattern.MULTILINE);
     private static final Pattern MD_LIST = Pattern.compile("^[-*+] ", Pattern.MULTILINE);
-    private static final Pattern MD_FENCE = Pattern.compile("^```|^~~~", Pattern.MULTILINE);
-    private static final Pattern MD_TABLE = Pattern.compile("^\\s*\\|.*\\|", Pattern.MULTILINE);
+    private static final Pattern MD_FENCE = Pattern.compile("^(?:```|~~~)", Pattern.MULTILINE);
+    private static final Pattern MD_TABLE_ROW = Pattern.compile("^\\s*\\|.*\\|");
+    private static final Pattern MD_TABLE_DELIMITER = Pattern.compile("^\\s*\\|(?:\\s*:?-{1,}:?\\s*\\|)+\\s*$");
+    /** Five or more lowercase words: a sentence, not an identifier list. */
+    private static final Pattern MD_PROSE = Pattern.compile("\\b[a-z][a-z'-]{2,}\\b(?:\\s+\\b[a-z][a-z'-]{2,}\\b){4,}");
 
     /** Singleton bean: the caches are instance state, shared by every render tick. */
     private final Map<String, Format> detectCache = new LinkedHashMap<>() {
@@ -104,23 +109,34 @@ public class ToolOutputFormat {
      * Results are cached (tool cards re-render on every tick).
      */
     public Format detect(final String output) {
+        return detect(output, null);
+    }
+
+    /**
+     * Same as {@link #detect(String)} but with the language of the output already known
+     * ({@link ToolOutputLanguage#guess(String, String)}). A proven source language wins over
+     * the yaml/markdown guesses: a script printing <code>key: value</code> lines or a table
+     * is code, not a document, and must not be reinterpreted.
+     */
+    public Format detect(final String output, final String language) {
         if (output == null || output.isBlank()) {
             return Format.TEXT;
         }
+        final var key = language == null ? output : language + '\n' + output;
         synchronized (detectCache) {
-            final var cached = detectCache.get(output);
+            final var cached = detectCache.get(key);
             if (cached != null) {
                 return cached;
             }
         }
-        final var format = detectUncached(output);
+        final var format = detectUncached(output, language);
         synchronized (detectCache) {
-            detectCache.put(output, format);
+            detectCache.put(key, format);
         }
         return format;
     }
 
-    private Format detectUncached(final String output) {
+    private Format detectUncached(final String output, final String language) {
         try {
             if (diffRenderer.looksLikeDiff(output)) {
                 return Format.DIFF;
@@ -147,6 +163,9 @@ public class ToolOutputFormat {
             }
         } catch (final Exception e) {
             // fall through to the next probe
+        }
+        if (language != null) {
+            return Format.CODE;
         }
         try {
             if (looksLikeYaml(output)) {
@@ -178,21 +197,50 @@ public class ToolOutputFormat {
         return keys >= 2;
     }
 
+    /**
+     * True only for output that <em>is</em> a markdown document: a terminal tool never
+     * produces prose, so anything looser turns piped output (a {@code tabulate} table, a
+     * log line starting with {@code -}) into a bordered grid and destroys its structure.
+     * <li>a fenced code block plus a heading or a list;</li>
+     * <li>a complete GFM table (header, delimiter and at least one body row) plus a heading,
+     * or plus an actual prose paragraph - the latter is what separates an authored document
+     * from a {@code tabulate()} dump, whose only other marker is a bullet-looking log line.</li>
+     * </ul>
+     */
     private static boolean looksLikeMarkdown(final String output) {
-        var signals = 0;
-        if (MD_ATX.matcher(output).find()) {
-            signals++;
+        final var fence = MD_FENCE.matcher(output).find();
+        final var atx = MD_ATX.matcher(output).find();
+        if (fence && (atx || MD_LIST.matcher(output).find())) {
+            return true;
         }
-        if (MD_LIST.matcher(output).find()) {
-            signals++;
+        return hasCompleteTable(output) && (atx || hasProse(output));
+    }
+
+    /** True when a line reads like a sentence rather than like code, log or table content. */
+    private static boolean hasProse(final String output) {
+        for (final var line : output.split("\n", -1)) {
+            if (!line.isBlank()
+                    && !MD_TABLE_ROW.matcher(line).matches()
+                    && MD_PROSE.matcher(line).find()) {
+                return true;
+            }
         }
-        if (MD_FENCE.matcher(output).find()) {
-            signals++;
+        return false;
+    }
+
+    /** True when the output holds a header row, a delimiter row and at least one body row. */
+    private static boolean hasCompleteTable(final String output) {
+        final var lines = output.split("\n", -1);
+        for (var i = 0; i + 1 < lines.length; i++) {
+            if (!MD_TABLE_ROW.matcher(lines[i]).matches()
+                    || !MD_TABLE_DELIMITER.matcher(lines[i + 1]).matches()) {
+                continue;
+            }
+            if (i + 2 < lines.length && MD_TABLE_ROW.matcher(lines[i + 2]).matches()) {
+                return true;
+            }
         }
-        if (MD_TABLE.matcher(output).find()) {
-            signals++;
-        }
-        return signals >= 2;
+        return false;
     }
 
     /**

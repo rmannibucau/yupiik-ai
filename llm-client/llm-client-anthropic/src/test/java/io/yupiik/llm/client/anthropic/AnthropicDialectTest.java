@@ -24,20 +24,7 @@ import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.llm.client.DialectNotSupportedException;
-import io.yupiik.llm.client.anthropic.model.AnthropicMessage$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicMessagesRequest$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse$AnthropicUsage$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse$ContentBlock$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicModels$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicModels$Model$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent$Delta$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.AnthropicTool$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.ErrorResponse$Error$FusionJsonCodec;
-import io.yupiik.llm.client.anthropic.model.ErrorResponse$FusionJsonCodec;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
@@ -46,6 +33,7 @@ import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.Usage;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
+import io.yupiik.llm.client.test.TestJsonMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
@@ -61,9 +49,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class AnthropicDialectTest {
     private HttpServer server;
+    private HttpClient delegate;
+    private ExtendedHttpClient client;
     private final AtomicReference<String> reqHeaders = new AtomicReference<>();
     private final AtomicReference<String> reqBody = new AtomicReference<>();
 
@@ -71,38 +63,25 @@ class AnthropicDialectTest {
     void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
+        delegate = HttpClient.newBuilder().build();
+        client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
     }
 
     @AfterEach
     void stop() {
-        if (server != null) {
+        if (server != null) { // close the server first so pooled keep-alive connections die before the client
             server.stop(0);
+            server = null;
         }
-    }
-
-    private static JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new AnthropicMessage$FusionJsonCodec(),
-                        new AnthropicMessagesRequest$FusionJsonCodec(),
-                        new AnthropicMessagesResponse$AnthropicUsage$FusionJsonCodec(),
-                        new AnthropicMessagesResponse$ContentBlock$FusionJsonCodec(),
-                        new AnthropicMessagesResponse$FusionJsonCodec(),
-                        new AnthropicModels$FusionJsonCodec(),
-                        new AnthropicModels$Model$FusionJsonCodec(),
-                        new AnthropicStreamEvent$Delta$FusionJsonCodec(),
-                        new AnthropicStreamEvent$FusionJsonCodec(),
-                        new AnthropicTool$FusionJsonCodec(),
-                        new ErrorResponse$Error$FusionJsonCodec(),
-                        new ErrorResponse$FusionJsonCodec()),
-                key -> Optional.empty());
-    }
-
-    private static final HttpClient WARM_HTTP_CLIENT =
-            HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build();
-
-    private static ExtendedHttpClient client() {
-        return new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(WARM_HTTP_CLIENT));
+        if (client != null) {
+            client.close();
+            // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+            // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+            delegate.shutdownNow();
+            delegate.close();
+            client = null;
+            delegate = null;
+        }
     }
 
     private static LlmRequest request(final boolean stream) {
@@ -176,7 +155,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void chatPostsToMessagesWithXApiKeyAndVersion() throws Exception {
+    void chatPostsToMessagesWithXApiKeyAndVersion(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/messages", exchange -> {
             reqHeaders.set("x-api-key:"
                     + exchange.getRequestHeaders().getFirst("x-api-key") + "|anthropic-version:"
@@ -190,8 +169,7 @@ class AnthropicDialectTest {
                             + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":2}}");
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final LlmResponse response =
                 dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals("x-api-key:sk-test|anthropic-version:2023-06-01", reqHeaders.get());
@@ -208,7 +186,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void promptCacheCanBeDisabledViaExtensions() throws Exception {
+    void promptCacheCanBeDisabledViaExtensions(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/messages", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -219,8 +197,7 @@ class AnthropicDialectTest {
                             + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var request = new LlmRequest(
                 "m",
                 List.of(LlmMessage.system("be concise"), LlmMessage.user("hi")),
@@ -242,7 +219,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void volatileTailMessageSplitsIntoTwoBlocksWithSecondBreakpoint() throws Exception {
+    void volatileTailMessageSplitsIntoTwoBlocksWithSecondBreakpoint(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/messages", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -253,8 +230,7 @@ class AnthropicDialectTest {
                             + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var request = new LlmRequest(
                 "m",
                 List.of(
@@ -288,7 +264,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void autoSplitBlocksStaysInlineOnGatewayHosts() throws Exception {
+    void autoSplitBlocksStaysInlineOnGatewayHosts(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/messages", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -299,8 +275,7 @@ class AnthropicDialectTest {
                             + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var request = new LlmRequest(
                 "m",
                 List.of(
@@ -331,7 +306,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void anthropicSplitBlocksFalseKeepsInlineTailAndStripsTheFlag() throws Exception {
+    void anthropicSplitBlocksFalseKeepsInlineTailAndStripsTheFlag(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/messages", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             respond(
@@ -342,8 +317,7 @@ class AnthropicDialectTest {
                             + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var request = new LlmRequest(
                 "m",
                 List.of(
@@ -375,7 +349,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void streamEmitsTextDeltasAndEnd() throws Exception {
+    void streamEmitsTextDeltasAndEnd(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
                 "event: message_start",
@@ -395,8 +369,7 @@ class AnthropicDialectTest {
                 "");
         server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var publisher =
                 dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
@@ -409,7 +382,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void streamEmitsToolArgumentDeltasPerOfficialProtocol() throws Exception {
+    void streamEmitsToolArgumentDeltasPerOfficialProtocol(final JsonMapper mapper) throws Exception {
         // the real API streams tool JSON as content_block_delta with delta.type=input_json_delta
         final var sse = String.join(
                 "\n",
@@ -428,8 +401,7 @@ class AnthropicDialectTest {
                 "");
         server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var publisher =
                 dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var events = collect(publisher);
@@ -443,7 +415,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void modelsListsIds() throws Exception {
+    void modelsListsIds(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/models",
                 exchange -> respond(
@@ -451,14 +423,13 @@ class AnthropicDialectTest {
                         200,
                         "{\"data\":[{\"type\":\"model\",\"id\":\"a\",\"display_name\":\"A\"},{\"type\":\"model\",\"id\":\"b\",\"display_name\":\"B\"}]}"));
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
         assertEquals(List.of("a", "b"), models.ids());
     }
 
     @Test
-    void modelsMaps404ToDialectNotSupported() {
+    void modelsMaps404ToDialectNotSupported(final JsonMapper mapper) {
         server.createContext("/v1/models", exchange -> {
             try {
                 respond(exchange, 404, "not found");
@@ -467,8 +438,7 @@ class AnthropicDialectTest {
             }
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var completion = dialect.models().toCompletableFuture();
         final var failure = failureOf(completion).orElseThrow();
         assertTrue(
@@ -477,7 +447,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void chatMaps404ToDialectNotSupported() {
+    void chatMaps404ToDialectNotSupported(final JsonMapper mapper) {
         server.createContext("/v1/messages", exchange -> {
             try {
                 respond(exchange, 404, "not found");
@@ -486,8 +456,7 @@ class AnthropicDialectTest {
             }
         });
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final var completion = dialect.chat(request(false)).toCompletableFuture();
         final var failure = failureOf(completion).orElseThrow();
         assertTrue(
@@ -496,7 +465,7 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void mapsToolUseToFunctionCall() throws Exception {
+    void mapsToolUseToFunctionCall(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/messages",
                 exchange -> respond(
@@ -506,8 +475,7 @@ class AnthropicDialectTest {
                                 + "\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"read\",\"input\":{\"path\":\"/a\"}}],"
                                 + "\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}"));
         server.start();
-        final var dialect =
-                new AnthropicDialect(mapper(), client(), ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
         final LlmResponse response =
                 dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var calls = response.first().message().toolCalls();
@@ -517,8 +485,8 @@ class AnthropicDialectTest {
     }
 
     @Test
-    void exposesNameForRouting() {
-        final Dialect dialect = new AnthropicDialect(mapper(), client(), ProviderSpec.of("http://x", "k"));
+    void exposesNameForRouting(final JsonMapper mapper) {
+        final Dialect dialect = new AnthropicDialect(mapper, client, ProviderSpec.of("http://x", "k"));
         assertEquals("anthropic-messages", dialect.name());
     }
 

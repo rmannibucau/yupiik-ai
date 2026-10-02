@@ -62,6 +62,27 @@ public final class Glyphs {
         return ascii ? "|" : "│";
     }
 
+    /** Turn header mark, role-neutral: the role is carried by the label color. */
+    public String turnMark() {
+        return ascii ? "*" : "▌";
+    }
+
+    /**
+     * Turn header mark carrying the role by glyph shape rather than color, for mono
+     * terminals ({@code NO_COLOR}) where every style collapses to the default and
+     * {@link #turnMark()} alone would make both roles look identical.
+     *
+     * @param user {@code true} for a user turn
+     */
+    public String roleMark(final boolean user) {
+        return ascii ? (user ? ">" : "<") : (user ? "▌" : "▐");
+    }
+
+    /** Rule filling the rest of a turn header line, out to the panel edge. */
+    public String rule() {
+        return ascii ? "-" : "─";
+    }
+
     /** Status dot (MCP servers etc). */
     public String dot() {
         return ascii ? "*" : "●";

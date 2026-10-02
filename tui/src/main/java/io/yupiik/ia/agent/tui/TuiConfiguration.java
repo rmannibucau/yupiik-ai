@@ -47,7 +47,7 @@ public record TuiConfiguration(
         String error,
 
         @Property(
-                defaultValue = "\"#b896d8\"",
+                defaultValue = "\"#56b6c2\"",
                 documentation = "Info color (hex), used for gauges and informational values.")
         String info,
 
@@ -99,6 +99,16 @@ public record TuiConfiguration(
                 defaultValue = "\"#ff5555\"",
                 documentation = "Highlight color (hex) used when permissions are set to all (danger mode).")
         String permitAll,
+
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Bold (**strong**) prose color (hex), or auto to follow the primary color.")
+        String strongColor,
+
+        @Property(
+                defaultValue = "\"auto\"",
+                documentation = "Inline code color (hex), or auto to follow the active code theme.")
+        String inlineCodeColor,
 
         @Property(
                 defaultValue = "4000L",
@@ -163,4 +173,11 @@ public record TuiConfiguration(
         @Property(
                 defaultValue = "10",
                 documentation = "Rows moved by PgUp/PgDn, in the transcript and in every modal/overlay.")
-        int scrollPageLines) {}
+        int scrollPageLines,
+
+        @Property(
+                defaultValue = "\"\"",
+                documentation = "Screen background color (hex) painted over the whole viewport before the UI widgets, "
+                        + "or blank (default) to keep the terminal background. Panels and cards draw their own "
+                        + "backgroundPanel-based colors on top.")
+        String background) {}

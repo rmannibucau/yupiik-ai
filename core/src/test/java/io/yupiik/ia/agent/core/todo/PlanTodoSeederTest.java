@@ -20,7 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
@@ -30,17 +29,27 @@ import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class PlanTodoSeederTest {
     @TempDir
     Path dir;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     @Test
     void seedsTodosFromLastAssistantPlan() {
@@ -128,7 +137,7 @@ class PlanTodoSeederTest {
         sessions.append(id, SessionEntry.of(1, "assistant", "a plan", null, null));
 
         final var todos = newTodoStore();
-        final var seeder = new PlanTodoSeeder(new FailingChatClient(), sessions, mapper());
+        final var seeder = new PlanTodoSeeder(new FailingChatClient(), sessions, mapper);
 
         assertSame(PlanTodoSeeder.SeedResult.DERIVATION_FAILED, seeder.seedFromLastAssistant(id, todos));
         assertTrue(todos.all().isEmpty());
@@ -154,31 +163,19 @@ class PlanTodoSeederTest {
     }
 
     private PlanTodoSeeder seeder(final TodoStore todos, final SessionStore sessions, final String llmResponse) {
-        return new PlanTodoSeeder(new StubChatClient(llmResponse), sessions, mapper());
+        return new PlanTodoSeeder(new StubChatClient(llmResponse), sessions, mapper);
     }
 
     private TodoStore newTodoStore() {
-        return new TodoStore(configuration(), mapper());
+        return new TodoStore(configuration(), mapper);
     }
 
     private SessionStore newSessionStore() {
-        return new FileSessionStore(configuration(), mapper(), Clock.systemUTC());
+        return new FileSessionStore(configuration(), mapper, Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {
         return io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of("yca.storageHome", dir.toString()));
-    }
-
-    private JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new io.yupiik.ia.agent.core.session.SessionEntry$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec(),
-                        new io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec(),
-                        new TodoItem$FusionJsonCodec()),
-                key -> Optional.empty());
     }
 
     private static final class StubChatClient extends ChatClient {

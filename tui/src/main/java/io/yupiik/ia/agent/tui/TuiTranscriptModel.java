@@ -94,46 +94,64 @@ public class TuiTranscriptModel extends ConversationTranscript {
         maxViewOffset = 0;
     }
 
-    /** A plain (non thought/tool) markdown segment belonging to one speaker. */
-    public record TurnSegment(String text, boolean user) {}
+    /**
+     * A plain (non thought/tool) markdown segment belonging to one speaker.
+     *
+     * @param user {@code true} for a user turn, {@code false} for an assistant turn
+     * @param labelled {@code true} when the segment was opened by an explicit
+     *        {@code **You**}/{@code **Assistant**} marker. Leading content with no
+     *        marker (the welcome block) is a plain assistant segment and must not
+     *        draw a speaker header.
+     */
+    public record TurnSegment(String text, boolean user, boolean labelled) {}
 
     /**
-     * Splits plain transcript markdown into speaker turns: a {@code ---} thematic break
-     * followed by a {@code **You**} or {@code **Assistant**} heading starts a new segment
-     * ({@code user} tells them apart). Plain {@code ---} breaks that are not followed by a
-     * speaker heading stay inside the current segment. Content before the first boundary is
-     * assistant. Code fences never reach this method (extracted before rendering).
+     * Splits plain transcript markdown into speaker turns. A line holding nothing but a
+     * {@code **You**} or {@code **Assistant**} heading opens a new segment ({@code user}
+     * tells them apart) and marks it {@code labelled}. The heading is the boundary on its
+     * own: {@link io.yupiik.ia.agent.core.shell.ConversationTranscript} writes the user
+     * marker after a {@code ---} thematic break but the assistant marker without one, so
+     * requiring the break would leave every assistant answer glued to the user turn that
+     * preceded it. A {@code ---} introducing a heading (blank padding included) is swallowed
+     * with the boundary; standalone breaks stay inside the current segment. Content before
+     * the first heading is assistant and is <em>not</em> labelled. Code fences never reach
+     * this method (extracted before rendering).
      */
     public static java.util.List<TurnSegment> splitTurns(final String text) {
         final var lines = text.split("\n", -1);
         final var out = new java.util.ArrayList<TurnSegment>();
         var start = 0;
         var user = false;
+        // only a segment opened by a real marker gets a speaker header: the leading
+        // welcome block has none and must not be labelled
+        var labelled = false;
         for (var i = 0; i < lines.length; i++) {
-            if (!"---".equals(lines[i].strip())) {
+            final var speaker = lines[i].strip();
+            if (!"**You**".equals(speaker) && !"**Assistant**".equals(speaker)) {
                 continue;
             }
-            var j = i + 1;
-            while (j < lines.length && lines[j].isBlank()) {
-                j++;
+            // the thematic break introducing this heading is chrome for the same boundary,
+            // never content: look back over the blank lines that pad it and drop it
+            var last = i - 1;
+            while (last >= start && lines[last].isBlank()) {
+                last--;
             }
-            if (j >= lines.length) {
-                continue;
+            var from = last >= start && "---".equals(lines[last].strip()) ? last : i;
+            // trailing padding would render as rail-only rows just above the next header
+            while (from > start && lines[from - 1].isBlank()) {
+                from--;
             }
-            final var speaker = lines[j].strip();
-            if (!speaker.startsWith("**You**") && !speaker.startsWith("**Assistant**")) {
-                continue;
-            }
-            if (i > start) {
+            if (from > start) {
                 out.add(new TurnSegment(
-                        String.join("\n", java.util.Arrays.asList(lines).subList(start, i)), user));
+                        String.join("\n", java.util.Arrays.asList(lines).subList(start, from)), user, labelled));
             }
-            user = speaker.startsWith("**You**");
-            start = j;
+            user = "**You**".equals(speaker);
+            start = i;
+            labelled = true;
         }
         if (start < lines.length) {
             out.add(new TurnSegment(
-                    String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)), user));
+                    String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)), user, labelled));
         }
         return out;
     }

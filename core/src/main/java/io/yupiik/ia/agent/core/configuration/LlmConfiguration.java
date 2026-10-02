@@ -60,13 +60,13 @@ public record LlmConfiguration(
         @Property(
                 defaultValue = "250",
                 documentation =
-                        "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. The turn is stopped with an error when exceeded.")
+                        "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. The turn is stopped with an error when exceeded, unless pending todos can auto-continue (yca.todos.continueOnUnfinished) - each todo continuation starts a fresh window with this same budget.")
         int maxIterations,
 
         @Property(
                 defaultValue = "true",
                 documentation =
-                        "When a reply ends truncated by the output token limit (finish_reason=length) without tool calls, automatically ask the model to continue instead of ending the turn (up to truncationContinuesMax continuations, then the turn is ended with an error notice).")
+                        "When a reply ends truncated by the output token limit (finish_reason=length) without tool calls, automatically ask the model to continue instead of ending the turn (up to truncationContinuesMax continuations, then the turn falls through to the todo auto-continue when pending todos remain, or ends with an error notice).")
         boolean continueOnTruncation,
 
         @Property(
@@ -74,6 +74,12 @@ public record LlmConfiguration(
                 documentation =
                         "Maximum automatic continuations when a reply is truncated by the output token limit (finish_reason=length); from the second continuation the model is asked to change strategy (smaller steps, tools to chunk output) instead of continuing verbatim.")
         int truncationContinuesMax,
+
+        @Property(
+                defaultValue = "2",
+                documentation =
+                        "Maximum automatic retries when a reply is empty (no content and no tool call, eg. a model that returned reasoning then stopped). Each retry asks the model again instead of ending the turn with a blank answer; 0 disables the retry. Retries happen before the todo auto-continue (yca.todos.continueOnUnfinished) and only count consecutive empty replies (a tool round or a real text reply resets the budget); once the budget is exhausted the turn falls through to the todo auto-continue when pending todos remain, otherwise it ends with an error notice.")
+        int emptyCompletionRetriesMax,
 
         @Property(
                 defaultValue = "2",

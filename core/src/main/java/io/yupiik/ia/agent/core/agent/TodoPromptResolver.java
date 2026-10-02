@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import java.util.List;
 import java.util.Locale;
 
@@ -31,11 +32,16 @@ import java.util.Locale;
  * <li>any other non-empty value is injected verbatim as the appendix;</li>
  * <li>an empty string or the literal {@code false} disables the extra guidance.</li>
  * </ul>
+ *
+ * <p>In PLAN mode the canned blocks are swapped for the plan variant: the todo list is the plan
+ * itself, so the guidance orders keeping every item 'pending' and re-syncing the list with
+ * {@code write_todo} whenever the discussion changes the plan - instead of the build-mode
+ * completion-tracking wording.</p>
  */
 @ApplicationScoped
 public class TodoPromptResolver {
 
-    private record Family(String name, List<String> hints, String block) {
+    private record Family(String name, List<String> hints, String block, String planBlock) {
         private boolean matches(final String baseUrl) {
             final var url = baseUrl == null ? "" : baseUrl.toLowerCase(Locale.ROOT);
             for (final var hint : hints) {
@@ -49,59 +55,83 @@ public class TodoPromptResolver {
 
     private static final String OPENAI = """
             Task Management:
-            Use the write_todo tool to manage and plan tasks. Use it frequently so your todos track your
-            progress and give the user visibility into it. It is also very useful to break a larger task down
-            into smaller concrete steps.
-            It is critical that you mark a todo as completed as soon as the task it describes is actually done,
-            including any verification. Do not batch up several todos before marking them completed, and keep
-            exactly one todo in_progress while work remains. If a step turns out to be unnecessary, mark it
-            cancelled instead of leaving it pending. Consult the todo list in the <session-state> block at the
-            start of each turn and re-check it before ending a turn: pending items are your queue.""";
+            Use the write_todo tool to manage and plan tasks. Use it frequently so your todos track your progress and give the user visibility into it. It is also very useful to break a larger task down into smaller concrete steps.
+            It is critical that you mark a todo as completed as soon as the task it describes is actually done, including any verification. Do not batch up several todos before marking them completed, and keep exactly one todo in_progress while work remains. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+
+    private static final String OPENAI_PLAN = """
+            Task Management (plan mode):
+            The todo list is the plan, not a progress report: record it with write_todo and keep every item 'pending' - statuses only advance in build mode, once a step is actually executed.
+            Whenever a follow-up message changes the plan (scope, steps, approach, trade-offs), update the list in the same turn with write_todo so it always mirrors the latest agreed plan.
+            Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: it must match the plan you just agreed on.""";
 
     private static final String ANTHROPIC = """
             Task Management:
-            You have access to the write_todo tool to help you manage and plan tasks. Use it VERY frequently to
-            ensure you are tracking your tasks and giving the user visibility into your progress. It is also
-            EXTREMELY helpful for planning, and for breaking down larger complex tasks into smaller steps; if you
-            do not use it when planning you may forget to do important tasks - and that is unacceptable.
-            It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up
-            multiple tasks before marking them as completed, and work through the whole list to completion.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before
-            ending a turn: pending items are your queue.""";
+            You have access to the write_todo tool to help you manage and plan tasks. Use it VERY frequently to ensure you are tracking your tasks and giving the user visibility into your progress. It is also EXTREMELY helpful for planning, and for breaking down larger complex tasks into smaller steps; if you do not use it when planning you may forget to do important tasks - and that is unacceptable.
+            It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed, and work through the whole list to completion. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+
+    private static final String ANTHROPIC_PLAN = """
+            Task Management (plan mode):
+            The todo list IS the plan: use write_todo EXTREMELY frequently to record it and to keep it in sync with the discussion, so the user can watch the plan evolve and approve it. Every item must stay 'pending' - statuses only advance in build mode, once a step is actually executed.
+            Whenever a follow-up message refines the plan (scope, steps, approach, trade-offs), update the list in the same turn so it always mirrors the latest agreed plan.
+            Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
 
     private static final String GEMINI = """
             Task Management:
-            Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress
-            as you start it and completed as soon as it is really done; keep a single in_progress item and do not
-            batch completion updates. Prefer writing a todo when the request involves several distinct steps.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before
-            ending a turn: pending items are your queue.""";
+            Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress as you start it and completed as soon as it is really done; keep a single in_progress item and do not batch completion updates. Prefer writing a todo when the request involves several distinct steps. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+
+    private static final String GEMINI_PLAN = """
+            Task Management (plan mode):
+            Keep the todo list as the structured plan: every item 'pending' - statuses advance only in build mode, once a step is actually executed.
+            Use write_todo to record the plan and to update it whenever a follow-up message changes it (scope, steps, approach, trade-offs), so the list always mirrors the latest agreed plan.
+            Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them.
+            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
 
     private static final List<Family> FAMILIES = List.of(
-            new Family("anthropic", List.of("anthropic", "claude"), ANTHROPIC),
-            new Family("gemini", List.of("google", "gemini", "generativelanguage"), GEMINI));
+            new Family("anthropic", List.of("anthropic", "claude"), ANTHROPIC, ANTHROPIC_PLAN),
+            new Family("gemini", List.of("google", "gemini", "generativelanguage"), GEMINI, GEMINI_PLAN));
 
     /**
-     * Resolves the effective todo-guidance appendix for {@code todoMode} against {@code baseUrl},
-     * or an empty string when the guidance is disabled.
+     * Resolves the effective todo-guidance appendix for {@code todoMode} against {@code baseUrl}
+     * in build mode (see {@link #resolve(String, String, AgentMode)}).
      *
      * @param todoMode the configured mode ('auto', a verbatim appendix, or blank/'false' to disable).
      * @param baseUrl  the provider base URL used for family detection in 'auto' mode.
      * @return the guidance block to append to the system prompt, or an empty string for none.
      */
     public String resolve(final String todoMode, final String baseUrl) {
-        final var mode = todoMode == null ? "auto" : todoMode;
-        if (mode.isBlank() || mode.trim().equalsIgnoreCase("false")) {
+        return resolve(todoMode, baseUrl, AgentMode.BUILD);
+    }
+
+    /**
+     * Resolves the effective todo-guidance appendix for {@code todoMode} against {@code baseUrl},
+     * picking the plan variant when {@code mode} is PLAN so the guidance matches the plan semantics
+     * (todo list = plan, all items pending, re-sync on discussion changes) instead of the build-mode
+     * completion tracking. Verbatim values and the disabled/blank cases are mode-agnostic.
+     *
+     * @param todoMode the configured mode ('auto', a verbatim appendix, or blank/'false' to disable).
+     * @param baseUrl  the provider base URL used for family detection in 'auto' mode.
+     * @param mode     the current agent mode, used to pick the plan variant in 'auto' mode.
+     * @return the guidance block to append to the system prompt, or an empty string for none.
+     */
+    public String resolve(final String todoMode, final String baseUrl, final AgentMode mode) {
+        final var configured = todoMode == null ? "auto" : todoMode;
+        if (configured.isBlank() || configured.trim().equalsIgnoreCase("false")) {
             return "";
         }
-        if (!mode.equalsIgnoreCase("auto")) {
-            return mode;
+        if (!configured.equalsIgnoreCase("auto")) {
+            return configured;
         }
+        final var plan = mode == AgentMode.PLAN;
         for (final var family : FAMILIES) {
             if (family.matches(baseUrl)) {
-                return family.block();
+                return plan ? family.planBlock() : family.block();
             }
         }
-        return OPENAI;
+        return plan ? OPENAI_PLAN : OPENAI;
     }
 }

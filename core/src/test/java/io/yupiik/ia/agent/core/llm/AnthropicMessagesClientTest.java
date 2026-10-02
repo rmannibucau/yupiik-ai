@@ -21,10 +21,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -32,21 +32,23 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
  * Exercises the Anthropic wire format through the routed {@link ChatClient} (provider configured
  * with the {@code anthropic} api flavor): headers, streaming, models listing and tool-call mapping.
  */
+@ExtendWith(TestJsonMapper.class)
 class AnthropicMessagesClientTest {
     private HttpServer server;
     private ChatClient client;
+    private JsonMapper mapper;
 
     @TempDir
     Path storageHome;
@@ -56,7 +58,8 @@ class AnthropicMessagesClientTest {
     private final CopyOnWriteArrayList<String> streamTexts = new CopyOnWriteArrayList<>();
 
     @BeforeEach
-    void start() throws IOException {
+    void start(final JsonMapper mapper) throws IOException {
+        this.mapper = mapper;
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
     }
 
@@ -76,7 +79,7 @@ class AnthropicMessagesClientTest {
 
     private ChatClient client() {
         final var configuration = configuration();
-        return new ChatClient(configuration, mapper(), new ProviderManager(configuration, mapper()), Clock.systemUTC());
+        return new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
     }
 
     private CodingAgentConfiguration configuration() {
@@ -97,31 +100,6 @@ class AnthropicMessagesClientTest {
                 Map.entry("yca.llm.maxConcurrent", "1"),
                 Map.entry("yca.llm.retryOnContextOverflow", "true"),
                 Map.entry("yca.llm.maxIterations", "250")));
-    }
-
-    private JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new Message$FusionJsonCodec(),
-                        new ToolCall$FusionJsonCodec(),
-                        new ToolCall$FunctionCall$FusionJsonCodec(),
-                        new Usage$FusionJsonCodec(),
-                        new ChatCompletionRequest$FusionJsonCodec(),
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicMessagesRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicMessage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicTool$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model
-                                .AnthropicMessagesResponse$ContentBlock$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model
-                                .AnthropicMessagesResponse$AnthropicUsage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent$Delta$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicModels$FusionJsonCodec(),
-                        new io.yupiik.llm.client.anthropic.model.AnthropicModels$Model$FusionJsonCodec()),
-                key -> Optional.empty());
     }
 
     private ChatCompletionRequest request() {

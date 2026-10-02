@@ -32,9 +32,9 @@ public record CodeTheme(
         String attr,
         String annotation) {
     public static final CodeTheme ONE_DARK =
-            new CodeTheme("e5c07b", "7f848e", "d19a66", "c678dd", "61afef", "e06c75", "56b6c2", "c586c0");
+            new CodeTheme("98c379", "7f848e", "d19a66", "c678dd", "61afef", "e06c75", "56b6c2", "c586c0");
     public static final CodeTheme ONE_LIGHT =
-            new CodeTheme("50a14f", "a0a1a7", "986801", "a626a4", "4078f2", "e45649", "0184bc", "008080");
+            new CodeTheme("2f7d33", "a0a1a7", "986801", "a626a4", "4078f2", "e45649", "0184bc", "008080");
 
     /**
      * @param name       configured value: auto, one-dark or one-light

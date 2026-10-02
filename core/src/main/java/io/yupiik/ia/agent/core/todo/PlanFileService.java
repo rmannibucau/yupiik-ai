@@ -67,6 +67,7 @@ public class PlanFileService {
                         switch (t.status() == null ? "" : t.status()) {
                             case "in_progress" -> "[>]";
                             case "completed" -> "[x]";
+                            case "cancelled" -> "[~]";
                             default -> "[ ]";
                         };
                 sb.append("\n- ").append(mark).append(' ').append(t.content()).append('\n');
@@ -96,6 +97,9 @@ public class PlanFileService {
                     body = item.substring(3).strip();
                 } else if (item.startsWith("[>]")) {
                     status = "in_progress";
+                    body = item.substring(3).strip();
+                } else if (item.startsWith("[~]")) {
+                    status = "cancelled";
                     body = item.substring(3).strip();
                 } else if (item.startsWith("[ ]")) {
                     status = "pending";

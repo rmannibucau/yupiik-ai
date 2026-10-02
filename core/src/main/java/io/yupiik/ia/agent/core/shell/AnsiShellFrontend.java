@@ -653,6 +653,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                     out.add(MarkdownColorizer.diffAdd(symbols.todoCompleted() + item.content()));
                     done++;
                 }
+                case "cancelled" -> out.add(MarkdownColorizer.dim(symbols.todoCancelled() + item.content()));
                 default -> out.add(MarkdownColorizer.dim(symbols.todoPending() + item.content()));
             }
         }

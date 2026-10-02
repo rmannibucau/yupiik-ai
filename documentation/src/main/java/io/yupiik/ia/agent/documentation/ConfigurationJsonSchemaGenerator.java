@@ -15,11 +15,20 @@
  */
 package io.yupiik.ia.agent.documentation;
 
+import io.yupiik.fusion.framework.api.ConfiguringContainer;
+import io.yupiik.fusion.framework.api.RuntimeContainer;
+import io.yupiik.fusion.framework.api.configuration.Configuration;
+import io.yupiik.fusion.framework.api.container.FusionBean;
+import io.yupiik.fusion.framework.api.container.FusionListener;
+import io.yupiik.fusion.framework.api.container.FusionModule;
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.fusion.json.pretty.PrettyJsonMapper;
+import io.yupiik.fusion.json.serialization.JsonCodec;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -31,6 +40,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.BiPredicate;
 import java.util.logging.Logger;
 
 /**
@@ -61,95 +71,109 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
     @Override
     public void run() {
         final var loader = Thread.currentThread().getContextClassLoader();
-        try (final var mapper = new JsonMapperImpl(List.of(), _ -> Optional.empty());
-                final var prettyMapper = new PrettyJsonMapper(mapper)) {
-            final var schemas = new LinkedHashMap<String, Object>();
-            resources(mapper, loader, "META-INF/fusion/json/schemas.json").forEach(resource -> {
-                if (resource.get("schemas") instanceof Map<?, ?> content) {
-                    merge(schemas, content);
-                }
-            });
-            final var docs = new LinkedHashMap<String, Object>();
-            final var roots = new LinkedHashSet<String>();
-            resources(mapper, loader, "META-INF/fusion/configuration/documentation.json")
-                    .forEach(resource -> {
-                        if (resource.get("classes") instanceof Map<?, ?> content) {
-                            merge(docs, content);
-                        }
-                        if (resource.get("roots") instanceof List<?> content) {
-                            content.forEach(name -> roots.add(name.toString()));
-                        }
-                    });
-            if (schemas.isEmpty() || docs.isEmpty()) {
-                throw new IllegalStateException(
-                        "No fusion json schema/documentation found, compile first (mvn process-classes).");
-            }
+        try (final var container = ConfiguringContainer.of()
+                .register(new FusionModule() {
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
+                        return (runtimeContainer, bean) -> isJsonType(bean.type());
+                    }
 
-            final var kept = keptRoots(docs, roots);
-            final var primary = kept.getFirst();
-            final var defs = new LinkedHashMap<String, Object>();
-            final var properties = new LinkedHashMap<String, Object>();
-            for (int i = 0; i < kept.size(); i++) {
-                final var root = kept.get(i);
-                final var name = defName(root.fqcn());
-                if (i == 0) { // the primary root properties are the schema top level ones, no dedicated def
-                    properties.putAll(map(convert(mapper, schemas, docs, root.fqcn(), defs, root.prefix())
-                            .get("properties")));
-                    continue;
+                    @Override
+                    public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+                        return (runtimeContainer, listener) -> false;
+                    }
+                })
+                .start()) {
+            final var mapper = container.lookup(JsonMapper.class).instance();
+            try (final var prettyMapper = new PrettyJsonMapper(mapper)) {
+                final var schemas = new LinkedHashMap<String, Object>();
+                resources(mapper, loader, "META-INF/fusion/json/schemas.json").forEach(resource -> {
+                    if (resource.get("schemas") instanceof Map<?, ?> content) {
+                        merge(schemas, content);
+                    }
+                });
+                final var docs = new LinkedHashMap<String, Object>();
+                final var roots = new LinkedHashSet<String>();
+                resources(mapper, loader, "META-INF/fusion/configuration/documentation.json")
+                        .forEach(resource -> {
+                            if (resource.get("classes") instanceof Map<?, ?> content) {
+                                merge(docs, content);
+                            }
+                            if (resource.get("roots") instanceof List<?> content) {
+                                content.forEach(name -> roots.add(name.toString()));
+                            }
+                        });
+                if (schemas.isEmpty() || docs.isEmpty()) {
+                    throw new IllegalStateException(
+                            "No fusion json schema/documentation found, compile first (mvn process-classes).");
                 }
-                if (!defs.containsKey(name)) {
-                    defs.put(name, Map.of()); // reserve before recursing to keep discovery order and break cycles
-                    defs.put(name, convert(mapper, schemas, docs, root.fqcn(), defs, root.prefix()));
+
+                final var kept = keptRoots(docs, roots);
+                final var primary = kept.getFirst();
+                final var defs = new LinkedHashMap<String, Object>();
+                final var properties = new LinkedHashMap<String, Object>();
+                for (int i = 0; i < kept.size(); i++) {
+                    final var root = kept.get(i);
+                    final var name = defName(root.fqcn());
+                    if (i == 0) { // the primary root properties are the schema top level ones, no dedicated def
+                        properties.putAll(map(convert(mapper, schemas, docs, root.fqcn(), defs, root.prefix())
+                                .get("properties")));
+                        continue;
+                    }
+                    if (!defs.containsKey(name)) {
+                        defs.put(name, Map.of()); // reserve before recursing to keep discovery order and break cycles
+                        defs.put(name, convert(mapper, schemas, docs, root.fqcn(), defs, root.prefix()));
+                    }
+                    final var segments = relativeSegments(primary.prefix(), root.prefix());
+                    final var rootProperties = map(map(defs.get(name)).get("properties"));
+                    if (segments.isEmpty()) {
+                        properties.putAll(rootProperties);
+                    } else {
+                        insert(properties, segments, Map.of("$ref", "#/$defs/" + name));
+                    }
                 }
-                final var segments = relativeSegments(primary.prefix(), root.prefix());
-                final var rootProperties = map(map(defs.get(name)).get("properties"));
-                if (segments.isEmpty()) {
-                    properties.putAll(rootProperties);
+
+                final var schema = new LinkedHashMap<String, Object>();
+                schema.put("$schema", "https://json-schema.org/draft/2020-12/schema");
+                schema.put(
+                        "$id",
+                        configuration.getOrDefault(
+                                "schemaId", "https://yupiik.github.io/yca/jsonschema/configuration.jsonschema.json"));
+                schema.put("title", configuration.getOrDefault("title", "YCA configuration"));
+                schema.put(
+                        "description",
+                        configuration.getOrDefault(
+                                "description",
+                                "Configuration file loaded from ~/.yupiik/coding-agent/configuration.json "
+                                        + "(override the location with the yca.configuration.json key)."));
+                schema.put("type", "object");
+                final var rootProperties = new LinkedHashMap<String, Object>();
+                if (primary.prefix().isEmpty()) {
+                    rootProperties.putAll(properties);
                 } else {
-                    insert(properties, segments, Map.of("$ref", "#/$defs/" + name));
+                    // the configuration file nests each root under its flattened prefix ("yca") so re-wrap it
+                    final var wrapper = new LinkedHashMap<String, Object>();
+                    wrapper.put("type", "object");
+                    wrapper.put("properties", properties);
+                    wrapper.put("additionalProperties", false);
+                    insert(rootProperties, List.of(primary.prefix().split("\\.")), wrapper);
                 }
-            }
+                rootProperties.put("$schema", Map.of("type", "string")); // editor hint key, tolerate it
+                schema.put("properties", rootProperties);
+                schema.put("additionalProperties", false);
+                schema.put("$defs", defs);
 
-            final var schema = new LinkedHashMap<String, Object>();
-            schema.put("$schema", "https://json-schema.org/draft/2020-12/schema");
-            schema.put(
-                    "$id",
-                    configuration.getOrDefault(
-                            "schemaId", "https://yupiik.github.io/yca/jsonschema/configuration.jsonschema.json"));
-            schema.put("title", configuration.getOrDefault("title", "YCA configuration"));
-            schema.put(
-                    "description",
-                    configuration.getOrDefault(
-                            "description",
-                            "Configuration file loaded from ~/.yupiik/coding-agent/configuration.json "
-                                    + "(override the location with the yca.configuration.json key)."));
-            schema.put("type", "object");
-            final var rootProperties = new LinkedHashMap<String, Object>();
-            if (primary.prefix().isEmpty()) {
-                rootProperties.putAll(properties);
-            } else {
-                // the configuration file nests each root under its flattened prefix ("yca") so re-wrap it
-                final var wrapper = new LinkedHashMap<String, Object>();
-                wrapper.put("type", "object");
-                wrapper.put("properties", properties);
-                wrapper.put("additionalProperties", false);
-                insert(rootProperties, List.of(primary.prefix().split("\\.")), wrapper);
-            }
-            rootProperties.put("$schema", Map.of("type", "string")); // editor hint key, tolerate it
-            schema.put("properties", rootProperties);
-            schema.put("additionalProperties", false);
-            schema.put("$defs", defs);
-
-            final var pretty = prettyMapper.toString(schema);
-            // download artifact (site root) and copy included by configuration.adoc
-            for (final var target : List.of(
-                    configuration.getOrDefault("output", "assets/jsonschema/configuration.jsonschema.json"),
-                    configuration.getOrDefault(
-                            "partialOutput", "content/_partials/generated/configuration.jsonschema.json"))) {
-                final var output = sourceBase.resolve(target);
-                Files.createDirectories(output.getParent());
-                Files.writeString(output, pretty);
-                logger.info(() -> "Generated '" + output + "'");
+                final var pretty = prettyMapper.toString(schema);
+                // download artifact (site root) and copy included by configuration.adoc
+                for (final var target : List.of(
+                        configuration.getOrDefault("output", "assets/jsonschema/configuration.jsonschema.json"),
+                        configuration.getOrDefault(
+                                "partialOutput", "content/_partials/generated/configuration.jsonschema.json"))) {
+                    final var output = sourceBase.resolve(target);
+                    Files.createDirectories(output.getParent());
+                    Files.writeString(output, pretty);
+                    logger.info(() -> "Generated '" + output + "'");
+                }
             }
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
@@ -399,6 +423,16 @@ public class ConfigurationJsonSchemaGenerator implements Runnable {
     @SuppressWarnings("unchecked")
     private Map<String, Object> map(final Object value) {
         return (Map<String, Object>) value;
+    }
+
+    private static boolean isJsonType(final Type type) {
+        final var raw = type instanceof ParameterizedType parameterized ? parameterized.getRawType() : type;
+        return raw instanceof Class<?> clazz
+                && (JsonCodec.class.isAssignableFrom(clazz)
+                        || JsonMapper.class.isAssignableFrom(clazz)
+                        || Configuration.class.isAssignableFrom(clazz)
+                        || RuntimeContainer.class.isAssignableFrom(clazz)
+                        || Emitter.class.isAssignableFrom(clazz));
     }
 
     private record Root(String fqcn, String prefix) {}

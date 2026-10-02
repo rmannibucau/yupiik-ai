@@ -128,9 +128,15 @@ public class MarkdownColorizer {
             final var c = line.charAt(i);
             if (c == '`') {
                 final var end = line.indexOf('`', i + 1);
-                final var code = end < 0 ? line.substring(i) : line.substring(i + 1, end);
-                sb.append(MUTED).append('`').append(code).append('`').append(RESET);
-                i = end < 0 ? line.length() : end + 1;
+                if (end < 0) {
+                    sb.append(c);
+                    i++;
+                } else {
+                    // inline code: colored + bold like the TUI (the weight does the emphasis),
+                    // backtick delimiters are dropped so code and prose share the same baseline
+                    sb.append(BOLD).append(CODE_STR).append(line, i + 1, end).append(RESET);
+                    i = end + 1;
+                }
             } else if (c == '*' && i + 1 < line.length() && line.charAt(i + 1) == '*') {
                 final var end = line.indexOf("**", i + 2);
                 final var boldText = end < 0 ? line.substring(i + 2) : line.substring(i + 2, end);

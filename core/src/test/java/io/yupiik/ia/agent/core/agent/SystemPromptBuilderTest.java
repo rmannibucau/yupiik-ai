@@ -19,22 +19,26 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.skills.SkillLocator;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class SystemPromptBuilderTest {
 
     @TempDir
@@ -42,6 +46,13 @@ class SystemPromptBuilderTest {
 
     @TempDir
     Path project;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     @Test
     void includesNearestAndFirstGlobalAgentsMd() throws Exception {
@@ -150,14 +161,11 @@ class SystemPromptBuilderTest {
     }
 
     @Test
-    void volatileSessionStateIsOutsideTheSystemPrompt() throws Exception {
+    void volatileSessionStateIsOutsideTheSystemPrompt(final JsonMapper mapper) throws Exception {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
                 "yca.workingDir", project.toString()));
-        final var todos = new io.yupiik.ia.agent.core.todo.TodoStore(
-                cfg,
-                new JsonMapperImpl(
-                        List.of(new io.yupiik.ia.agent.core.todo.TodoItem$FusionJsonCodec()), key -> Optional.empty()));
+        final var todos = new io.yupiik.ia.agent.core.todo.TodoStore(cfg, mapper);
         todos.replace(List.of(new io.yupiik.ia.agent.core.todo.TodoItem("step one", "pending")));
         final var builder = new SystemPromptBuilder(cfg, null, todos, null, null, null, null, null);
         final var prompt = builder.build();
@@ -233,6 +241,28 @@ class SystemPromptBuilderTest {
         assertTrue(
                 state.contains("Mode: BUILD"),
                 "build mode must be reported in the volatile tail, switching from plan: " + state);
+        assertFalse(
+                state.contains("if this turn changes the plan, call write_todo"),
+                "the plan-mode sync reminder must not leak into build mode: " + state);
+    }
+
+    @Test
+    void sessionStateRemindsSyncingTodosInPlanMode() throws Exception {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "plan"));
+        final var permissions = new PermissionService(cfg);
+        permissions.setMode(AgentMode.PLAN);
+        final var builder = new SystemPromptBuilder(cfg, null, null, permissions, null, null, null, null);
+        final var state = builder.sessionState(null);
+        assertTrue(
+                state.contains(
+                        "Plan mode: if this turn changes the plan, call write_todo to sync the todo list before answering."),
+                "plan mode must carry the per-turn sync reminder in the volatile tail: " + state);
+        assertTrue(
+                state.indexOf("Plan mode: if this turn changes the plan") > state.indexOf("Mode: PLAN"),
+                "the reminder must come after the mode line: " + state);
     }
 
     @Test
@@ -249,6 +279,13 @@ class SystemPromptBuilderTest {
         assertTrue(prompt.contains("every item stays 'pending'"));
         assertTrue(prompt.contains("statuses only advance in build mode"));
         assertTrue(prompt.contains("ready for the user to review"));
+        assertTrue(
+                prompt.contains("keep the list in sync with the discussion"),
+                "the plan tail must order re-syncing todos on discussion changes: " + prompt);
+        assertTrue(
+                prompt.contains(
+                        "Completed or cancelled items from earlier build sessions are progress history: keep them."),
+                "the plan tail must order keeping the progress history: " + prompt);
         // the mode constraint is a tail: the mode-neutral identity (which mentions editing) comes first
         assertTrue(prompt.indexOf("edit files") < prompt.indexOf("Mode: PLAN"));
         // the system prompt is deterministic now: no volatile session state inside
@@ -361,6 +398,37 @@ class SystemPromptBuilderTest {
     }
 
     @Test
+    void todoGuidancePlanModeUsesThePlanVariant() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "plan",
+                "yca.provider.providers.length", "1",
+                "yca.provider.providers.0.baseUrl", "https://mystery.example/v1",
+                "yca.provider.providers.0.model", "m"));
+        final var permissions = new PermissionService(cfg);
+        permissions.setMode(AgentMode.PLAN);
+        final var builder = new SystemPromptBuilder(
+                cfg, null, null, permissions, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null);
+        final var prompt = builder.build();
+        assertTrue(
+                prompt.contains("Task Management (plan mode)"),
+                "plan mode must inject the plan variant of the guidance: " + prompt);
+        assertFalse(
+                prompt.contains("Do not batch up several todos"),
+                "plan mode must not inject the build completion wording: " + prompt);
+
+        permissions.setMode(AgentMode.BUILD);
+        final var buildPrompt = builder.build();
+        assertTrue(
+                buildPrompt.contains("Do not batch up several todos"),
+                "build mode must inject the completion wording: " + buildPrompt);
+        assertFalse(
+                buildPrompt.contains("Task Management (plan mode)"),
+                "build mode must not inject the plan variant: " + buildPrompt);
+    }
+
+    @Test
     void todoGuidanceVerbatimOverride() {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
@@ -452,6 +520,56 @@ class SystemPromptBuilderTest {
     }
 
     @Test
+    void systemPromptTeachesProactiveManageContextWhenNudgeIsEnabled() {
+        final var cfg = config(Map.of(
+                "yca.storageHome",
+                storageHome.toString(),
+                "yca.workingDir",
+                project.toString(),
+                "yca.mode",
+                "build",
+                "yca.tools.manageContext.enabled",
+                "true"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(
+                prompt.contains("proactively call manage_context (action=prune or action=compact)"),
+                "with the nudge enabled the rules must invite proactive context management");
+    }
+
+    @Test
+    void systemPromptOmitsManageContextRuleWhenNudgeOrToolIsDisabled() {
+        final var nudgeOff = config(Map.of(
+                "yca.storageHome",
+                storageHome.toString(),
+                "yca.workingDir",
+                project.toString(),
+                "yca.mode",
+                "build",
+                "yca.pruning.nudgeThresholdPercent",
+                "0"));
+        assertFalse(
+                builder(nudgeOff, todoResolver(), providerManager(nudgeOff))
+                        .build()
+                        .contains("proactively call manage_context"),
+                "no need to push proactive compaction when the nudge is disabled");
+
+        final var toolOff = config(Map.of(
+                "yca.storageHome",
+                storageHome.toString(),
+                "yca.workingDir",
+                project.toString(),
+                "yca.mode",
+                "build",
+                "yca.tools.manageContext.enabled",
+                "false"));
+        assertFalse(
+                builder(toolOff, todoResolver(), providerManager(toolOff))
+                        .build()
+                        .contains("proactively call manage_context"),
+                "must not mention a disabled tool");
+    }
+
+    @Test
     void closedToolsetInvariantPresentInBuildMode() {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),
@@ -525,11 +643,11 @@ class SystemPromptBuilderTest {
         return new TodoPromptResolver();
     }
 
-    private static ProviderManager providerManager(final CodingAgentConfiguration cfg) {
-        return new ProviderManager(cfg, new JsonMapperImpl(List.of(), key -> Optional.empty()));
+    private ProviderManager providerManager(final CodingAgentConfiguration cfg) {
+        return new ProviderManager(cfg, mapper);
     }
 
-    private static SystemPromptBuilder builder(
+    private SystemPromptBuilder builder(
             final CodingAgentConfiguration cfg, final TodoPromptResolver resolver, final ProviderManager manager) {
         return new SystemPromptBuilder(
                 cfg, null, null, new PermissionService(cfg), new AgentProvider(cfg), manager, resolver, null);

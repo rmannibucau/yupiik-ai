@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import org.junit.jupiter.api.Test;
 
 class TodoPromptResolverTest {
@@ -95,5 +96,67 @@ class TodoPromptResolverTest {
     void blankValueDisablesGuidance() {
         assertEquals("", resolver.resolve("", "https://api.anthropic.com"));
         assertEquals("", resolver.resolve("   ", "https://api.anthropic.com"));
+    }
+
+    @Test
+    void planModePicksThePlanVariantForEveryFamily() {
+        assertTrue(
+                resolver.resolve("auto", "https://mystery.example/v1", AgentMode.PLAN)
+                        .contains("Task Management (plan mode)"),
+                "the unknown family must fall back to the OpenAI plan variant");
+        assertFalse(
+                resolver.resolve("auto", "https://mystery.example/v1", AgentMode.PLAN)
+                        .contains("pending items are your queue."),
+                "the plan variant must not use the build-mode queue directive");
+        assertTrue(
+                resolver.resolve("auto", "https://api.anthropic.com/v1/messages", AgentMode.PLAN)
+                        .contains("Task Management (plan mode)"),
+                "the Anthropic family must pick its plan variant");
+        assertTrue(
+                resolver.resolve("auto", "https://generativelanguage.googleapis.com/v1", AgentMode.PLAN)
+                        .contains("Task Management (plan mode)"),
+                "the Gemini family must pick its plan variant");
+    }
+
+    @Test
+    void planVariantOrdersSyncOnDiscussionChanges() {
+        final var resolved = resolver.resolve("auto", "https://mystery.example/v1", AgentMode.PLAN);
+        assertTrue(
+                resolved.contains("update the list in the same"),
+                "the plan variant must order re-syncing the list when the discussion changes the plan: " + resolved);
+        assertTrue(
+                resolved.contains("it must match the plan you just agreed on"),
+                "the plan variant must close on the plan-sync directive: " + resolved);
+        assertTrue(
+                resolved.contains("Consult the todo list in the <session-state> block at the start of each turn"),
+                "the plan variant must also order consulting the list at turn start: " + resolved);
+        assertTrue(
+                resolved.contains("'pending' - statuses only advance in build mode"),
+                "the plan variant must keep the all-pending invariant: " + resolved);
+    }
+
+    @Test
+    void planVariantKeepsCompletedAndCancelledHistory() {
+        final var resolved = resolver.resolve("auto", "https://mystery.example/v1", AgentMode.PLAN);
+        assertTrue(
+                resolved.contains(
+                        "Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them"),
+                "the plan variant must order keeping the progress history: " + resolved);
+    }
+
+    @Test
+    void twoArgResolveDefaultsToBuildModeVariant() {
+        assertEquals(
+                resolver.resolve("auto", "https://mystery.example/v1"),
+                resolver.resolve("auto", "https://mystery.example/v1", AgentMode.BUILD),
+                "the two-arg overload must resolve the build variant");
+        assertEquals(
+                resolver.resolve("custom guidance", "https://api.openai.com/v1"),
+                resolver.resolve("custom guidance", "https://api.openai.com/v1", AgentMode.PLAN),
+                "verbatim guidance must stay mode-agnostic");
+        assertEquals(
+                resolver.resolve("false", "https://api.anthropic.com"),
+                resolver.resolve("false", "https://api.anthropic.com", AgentMode.PLAN),
+                "disabled guidance must stay mode-agnostic");
     }
 }

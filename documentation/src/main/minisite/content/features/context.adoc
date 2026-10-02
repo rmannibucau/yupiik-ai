@@ -87,6 +87,162 @@ Every in-loop pruning or compaction is written back to the session store
 immediately (same as `/compact`), so the next turn never re-summarizes an
 already-compacted context.
 
+[#inspecting-the-context]
+== Inspecting the context
+
+The `/context` command dumps the context, and it takes a mode plus an optional
+file path.
+Every mode writes to the transcript when no path is given and to that file when
+one is, so a 100k context lands on disk instead of in the scrollback.
+
+[cols="1,2",opts=headers]
+|===
+|Mode
+|What it dumps
+
+|`transcript`
+|The persisted session: the system prompt followed by one line per stored message.
+The default, so `/context` and `/context out.txt` keep working unchanged.
+
+|`llm-payload`
+|The exact last request sent to the provider: every message with its full content,
+the assistant tool calls with their raw arguments, and the wire tool schemas.
+This is what the model really received, which the transcript is not.
+
+|`next-request`
+|The request the next round would carry, rebuilt from the persisted session and the
+current system prompt without calling the provider.
+
+|`compact`, `prune`
+|The context operations, as above.
+They take no path.
+|===
+
+`llm-payload` and `next-request` differ by one thing only: the first is a
+snapshot taken right before the call, the second is a reconstruction.
+A reconstruction cannot be the history, because the volatile session state
+depends on live values - the context usage line, the nudge band, the memory
+version captured at turn start - that were never persisted.
+That is why the persisted transcript is not the payload either: the store drops
+the leading system message and the volatile tails, so the transcript is a
+subset of what the model sees.
+When a session sent no request yet, `llm-payload` says so instead of guessing;
+run a turn first, or use `transcript`.
+
+[#soft-context-usage-nudge]
+== Soft context-usage nudge
+
+The nudge is a soft, LLM-free early warning delivered through the volatile
+session state (`<session-state>`), well before pruning and compaction fire.
+It invites the model to wrap the current step up, or to manage its own context
+via the `manage_context` tool.
+By default the nudge is enabled and tuned to be quiet on small windows and
+informative on large ones.
+It complements, and never replaces, the automatic pipelines: it only emits
+text into the session-state tail, so the byte-stable conversation prefix, the
+prompt cache and the automatic pruning and compaction are untouched.
+
+A nudge is emitted only when all three of these conditions hold:
+
+* the estimated context reaches `yca.pruning.nudgeThresholdPercent` (default
+  `55`) percent of the usable window - below the prune threshold (`65`) and
+  the compaction threshold (`80`), so the model hears the warning one full
+  band before any automatic action;
+* at least `yca.pruning.nudgeIterationThreshold` (default `15`) iterations ran
+  since the last user message, so short turns stay silent;
+* the estimated context is at least the absolute floor - see <<small-windows>>
+  below.
+
+Setting `nudgeThresholdPercent` to `0` disables the nudge entirely (the
+system-prompt guidance and the per-tail usage line are then also dropped).
+
+Regardless of the nudge, every session-state tail reports the live usage
+number:
+
+[source,text]
+----
+Context usage: ~61% of the usable window (prune at 65%, compaction at 80%).
+----
+
+The model therefore always has its real usage and the decision thresholds in
+front of it, and the `<nudge>` block only appears when it should act on them.
+
+=== Escalation
+
+The nudge wording escalates with usage:
+
+* between `nudgeThresholdPercent` and the prune threshold, the soft
+  `yca.pruning.nudgeTemplate` is used (`Context is at ~%USAGE%% of the usable
+  window. Prefer wrapping this step up, or compact soon.` by default);
+* once usage reaches or exceeds the prune threshold
+  (`yca.pruning.thresholdPercent`), the urgent
+  `yca.pruning.nudgeUrgentTemplate` is used (`Context is at ~%USAGE%% and
+  above the prune threshold (%PRUNE%%). Do not start new work - %ACTIONS% now
+  to avoid the hard compaction wall.` by default).
+
+Both templates support the `%USAGE%`, `%PRUNE%`, `%COMPACT%` and `%ACTIONS%`
+placeholders.
+`%ACTIONS%` renders the concrete next step and only ever mentions
+`manage_context` when the tool is actually exposed
+(`yca.tools.manageContext.enabled`); otherwise it falls back to a neutral
+"interrupt with a short summary of the remaining steps" wording.
+
+=== System prompt guidance
+
+When the nudge is enabled and `manage_context` is exposed, the system prompt
+carries a durable rule telling the model that the session state reports the
+current context usage and thresholds, and that it should proactively call
+`manage_context` (`action=prune` or `action=compact`) rather than waiting for
+the hard limit.
+The rule lives in the byte-stable system prompt, so it applies from the first
+turn even though the tail numbers are volatile.
+
+=== Small windows
+
+[#small-windows]
+The absolute floor prevents noisy nudging on small contexts: the nudge is
+suppressed while the estimated context is below
+`min(0.9 * usable window, yca.pruning.nudgeMinTokens)`.
+With the default `nudgeMinTokens` of `64000`, a small provider (for example a
+`32k` window, about `24k` usable) never gets percentage nudges all the time -
+the floor sits at about `90%` of its window, so at most the urgent wording can
+fire right before compaction, which is cheap anyway on such models.
+On a large window the floor caps at `64000` tokens (~44% of a `128k` window's
+usable space), well below the `55` threshold, so the nudge keeps its full
+lead time where compaction is expensive.
+Set `nudgeMinTokens` to `0` to disable the floor.
+
+=== Configuration
+
+All nudge options are `yca.pruning.*`:
+
+[cols="1,2,1",opts=headers]
+|===
+|Key
+|Purpose
+|Default
+
+|`nudgeThresholdPercent`
+|Percentage of the usable window triggering the nudge; `0` disables it.
+|`55`
+
+|`nudgeIterationThreshold`
+|Minimum iterations since the last user message before the nudge may fire.
+|`15`
+
+|`nudgeMinTokens`
+|Absolute token floor: effective floor is `min(0.9 * usable window, value)`; `0` disables.
+|`64000`
+
+|`nudgeTemplate`
+|Soft-band template (`%USAGE%`, `%PRUNE%`, `%COMPACT%`, `%ACTIONS%`).
+|see above
+
+|`nudgeUrgentTemplate`
+|Urgent-band template, used once usage reaches the prune threshold.
+|see above
+|===
+
 == The manage_context tool
 
 When `yca.tools.manageContext.enabled` is set (the default), the model gets a

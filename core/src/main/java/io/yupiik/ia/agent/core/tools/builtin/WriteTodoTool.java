@@ -43,7 +43,10 @@ public class WriteTodoTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Replace the current todo list (content + status: pending, in_progress, completed). Keep exactly one in_progress item. In plan mode every item must be 'pending': the plan is not implemented yet.";
+        return "Replace the current todo list (content + status: pending, in_progress, completed or cancelled). "
+                + "Keep exactly one in_progress item. Keep completed and cancelled items in the list: they are the "
+                + "progress history, only drop one when the task itself disappears. In plan mode every new item must be "
+                + "'pending': the plan is not implemented yet.";
     }
 
     @Override
@@ -61,7 +64,7 @@ public class WriteTodoTool implements EmbeddedTool {
                                 Schemas.object(
                                         Map.of(
                                                 "content", Schemas.str("Task description."),
-                                                "status", Schemas.str("pending, in_progress or completed.")),
+                                                "status", Schemas.str("pending, in_progress, completed or cancelled.")),
                                         "content",
                                         "status"))),
                 "todos");

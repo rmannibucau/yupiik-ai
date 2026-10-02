@@ -207,14 +207,19 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     @Destroy
+    @Override
     public void close() {
         if (docEnricher != null) {
-            docEnricher.close();
+            try {
+                docEnricher.close();
+            } catch (final Exception e) {
+                LOGGER.fine("Closing doc enricher failed: " + e.getMessage());
+            }
         }
+        stopWatchService();
         if (ownsScheduler && scheduler != null) {
             scheduler.shutdownNow();
         }
-        stopWatchService();
         flushPersist();
     }
 
@@ -240,19 +245,26 @@ public class StructuralCodeGraph implements AutoCloseable {
     }
 
     private void stopWatchService() {
-        if (!watching.compareAndSet(true, false)) {
-            return;
-        }
+        final var wasWatching = watching.compareAndSet(true, false);
         try {
             if (watchService != null) {
                 watchService.close();
+                watchService = null;
             }
-            if (watchThread != null) {
-                watchThread.interrupt();
-                watchThread.join(1000);
+        } catch (final IOException e) {
+            LOGGER.fine("Closing watch service: " + e.getMessage());
+        }
+        if (watchThread != null) {
+            watchThread.interrupt();
+            try {
+                watchThread.join(2000);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
             }
-        } catch (final IOException | InterruptedException e) {
-            LOGGER.fine("Stopping file watcher: " + e.getMessage());
+            watchThread = null;
+        }
+        if (wasWatching) {
+            LOGGER.fine("File watcher stopped");
         }
     }
 

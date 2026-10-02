@@ -20,30 +20,24 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.StringReader;
-import java.util.List;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
+import org.junit.jupiter.api.extension.ExtendWith;
 
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@ExtendWith(TestJsonMapper.class)
 class ToolCallArgumentsRepairerTest {
 
     private JsonMapper mapper;
     private ToolCallArgumentsRepairer repairer;
 
     @BeforeAll
-    void init() {
-        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    void init(final JsonMapper mapper) {
+        this.mapper = mapper;
         repairer = new ToolCallArgumentsRepairer(mapper);
-    }
-
-    @AfterAll
-    void close() {
-        mapper.close();
     }
 
     @Test

@@ -25,7 +25,10 @@ public record BtwConfiguration(
                 documentation = "Model used for /btw side questions. Defaults to the provider model when empty.")
         String model,
 
-        @Property(defaultValue = "2000", documentation = "Maximum output tokens of a /btw answer.")
+        @Property(
+                defaultValue = "0",
+                documentation =
+                        "Maximum output tokens of a /btw answer. 0 uses the provider/model budget (recommended, since reasoning models otherwise exhaust a small forced budget while thinking).")
         int maxTokens,
 
         @Property(
@@ -40,5 +43,5 @@ public record BtwConfiguration(
                         "Number of previous /btw questions and answers replayed to the model so follow-up side questions stay coherent (memory only, never persisted). 0 disables the replay.")
         int recall) {
 
-    public static final BtwConfiguration DEFAULT = new BtwConfiguration("", 2000, 200, 5);
+    public static final BtwConfiguration DEFAULT = new BtwConfiguration("", 0, 200, 5);
 }

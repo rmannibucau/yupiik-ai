@@ -48,6 +48,11 @@ public class PermissionService {
         this.gate = gate;
     }
 
+    /** The approval gate currently installed, if any (used to route /btw approvals to the same gate as the main turn). */
+    public ApprovalGate gate() {
+        return gate;
+    }
+
     public void setPermitAll(final boolean permitAll) {
         this.permitAll = permitAll;
     }

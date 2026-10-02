@@ -25,6 +25,6 @@ public record TodoItem(String content, String status) {
         return content != null
                 && !content.isBlank()
                 && status != null
-                && List.of("pending", "in_progress", "completed").contains(status);
+                && List.of("pending", "in_progress", "completed", "cancelled").contains(status);
     }
 }

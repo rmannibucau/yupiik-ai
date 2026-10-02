@@ -62,6 +62,10 @@ public final class Symbols {
         return ascii ? "[x] " : "[✓] ";
     }
 
+    public String todoCancelled() {
+        return ascii ? "[-] " : "[✕] ";
+    }
+
     public String todoPending() {
         return ascii ? "[ ] " : "[·] ";
     }

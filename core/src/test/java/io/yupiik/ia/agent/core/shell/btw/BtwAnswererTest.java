@@ -16,46 +16,48 @@
 package io.yupiik.ia.agent.core.shell.btw;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
-import io.yupiik.ia.agent.core.llm.ChatCompletionRequest$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
-import io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolExecutionService;
+import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.tools.builtin.BashTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class BtwAnswererTest {
     @TempDir
     Path storageHome;
@@ -67,28 +69,38 @@ class BtwAnswererTest {
             + "</\uFF5CDSML\uFF5Cinvoke>\n"
             + "</\uFF5CDSML\uFF5Ctool_calls>";
 
+    private static final Emitter NOOP = new Emitter() {
+        @Override
+        public <T> void emit(final T event) {
+            // no-op
+        }
+    };
+
     private HttpServer server;
     private java.util.concurrent.ExecutorService serverExecutor;
     private InMemorySessionStore sessionStore;
     private UsageTracker usageTracker;
     private BtwAnswerer answerer;
+    private ToolRegistry toolRegistry;
+    private JsonMapper mapper;
     private final List<ChatClient> clients = new ArrayList<>();
     private final CopyOnWriteArrayList<String> bodies = new CopyOnWriteArrayList<>();
 
     @BeforeEach
-    void start() throws IOException {
+    void start(final JsonMapper mapper) throws IOException {
+        this.mapper = mapper;
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/chat/completions", exchange -> {
             final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
             bodies.add(body);
-            respond(exchange, 200, """
-                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"%s"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}""".formatted(responseContent(body)), "application/json");
+            respond(exchange, 200, response(body, bodies.size()), "application/json");
         });
         serverExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
         server.setExecutor(serverExecutor);
         server.start();
         sessionStore = new InMemorySessionStore();
         usageTracker = new UsageTracker(null, null, null, Clock.systemUTC());
+        toolRegistry = registry();
         answerer = answerer(Map.of());
     }
 
@@ -105,7 +117,6 @@ class BtwAnswererTest {
 
     private BtwAnswerer answerer(final Map<String, String> extra) {
         final var configuration = TestConfigs.codingAgent(config(extra));
-        final var mapper = mapper();
         final var providerManager = new ProviderManager(configuration, mapper);
         final var client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());
         clients.add(client);
@@ -115,24 +126,162 @@ class BtwAnswererTest {
                 configuration,
                 new VirtualThreadExecutor(),
                 new ToolCallMarkupStripper(),
+                new ToolCallMarkupParser(),
+                toolRegistry,
+                new ToolExecutionService(configuration, NOOP, List.of()),
                 mapper,
                 providerManager,
                 Clock.systemUTC());
     }
 
-    /** What the stub returns for a given request body, selected by magic question words. */
-    private static String responseContent(final String body) {
-        if (body.contains("EMPTY PLEASE")) {
-            return "";
+    /**
+     * The /btw tool set: a fake read-only file reader, a fake writer (never allowed in /btw),
+     * and the real bash tool whose plan-mode rules gate which commands may actually run.
+     */
+    private ToolRegistry registry() {
+        final var tools = List.<EmbeddedTool>of(readFileTool(), writeFileTool(), new BashTool(NOOP));
+        return new ToolRegistry(null) {
+            @Override
+            public List<EmbeddedTool> tools() {
+                return tools;
+            }
+        };
+    }
+
+    private static EmbeddedTool readFileTool() {
+        return new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "read_file";
+            }
+
+            @Override
+            public String description() {
+                return "read a file";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of();
+            }
+
+            @Override
+            public boolean readonly() {
+                return true;
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                return ToolResult.ok("file content: " + args.get("path"));
+            }
+        };
+    }
+
+    private static EmbeddedTool writeFileTool() {
+        return new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "write_file";
+            }
+
+            @Override
+            public String description() {
+                return "write a file";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.EDIT;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of();
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                return ToolResult.error("must never run: write_file is not a /btw tool");
+            }
+        };
+    }
+
+    /**
+     * What the stub returns for a given request, driven by magic words in the question. The
+     * round-trip scenarios return a tool call for the first request and the final answer for
+     * the following ones, mirroring a real model answering with tools.
+     */
+    private String response(final String body, final int request) {
+        if (body.contains("NATIVE READ")) {
+            return request == 1
+                    ? toolResponse("read_file", "{\"path\":\"src/App.java\"}")
+                    : textResponse("read round-trip done");
+        }
+        if (body.contains("BASH CAT")) {
+            return request == 1
+                    ? toolResponse("bash", "{\"command\":\"cat " + catPath() + "\"}")
+                    : textResponse("cat done");
+        }
+        if (body.contains("BASH RM")) {
+            return request == 1
+                    ? toolResponse("bash", "{\"command\":\"rm -rf " + catPath() + "\"}")
+                    : textResponse("rm done");
+        }
+        if (body.contains("WRITE TOOL")) {
+            return request == 1
+                    ? toolResponse("write_file", "{\"path\":\"" + catPath() + "\",\"content\":\"x\"}")
+                    : textResponse("write done");
         }
         if (body.contains("TOOLCALL MARKUP")) {
-            // newlines must be JSON-escaped before embedding into the response
-            return ("the parsed answer\n\n" + DSML_BLOCK).replace("\n", "\\n");
+            // first request carries the markup the parser must turn into a real read_file call
+            return request == 1
+                    ? textResponse("the parsed answer\n\n" + DSML_BLOCK)
+                    : textResponse("the parsed answer");
         }
         if (body.contains("TOOLCALL ONLY")) {
-            return DSML_BLOCK.replace("\n", "\\n");
+            // the model insists on tools: the loop must give up with a note, never an exception
+            return textResponse(DSML_BLOCK);
         }
-        return "hello there";
+        if (body.contains("TRUNCATED FIRST")) {
+            // blank first answer that spent tokens (thinking eaten the budget): retry, then succeed
+            return request == 1 ? textResponse("") : textResponse("hello there");
+        }
+        if (body.contains("EMPTY PLEASE")) {
+            // always blank: retry once, then fall back to a note
+            return textResponse("");
+        }
+        return textResponse("hello there");
+    }
+
+    private String catPath() {
+        // a real temp file so the plan-mode `cat` rule actually reads something
+        try {
+            final var file = storageHome.resolve("cat-target.txt");
+            Files.writeString(file, "cat content");
+            return file.toString();
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static String textResponse(final String content) {
+        return "{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                + "\"content\":\"" + content.replace("\n", "\\n").replace("\"", "\\\"")
+                + "\"},\"finish_reason\":\"stop\"}],"
+                + "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}";
+    }
+
+    private static String toolResponse(final String name, final String arguments) {
+        return "{\"id\":\"c1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                + "\"content\":null,\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\""
+                + name + "\",\"arguments\":\"" + arguments.replace("\\", "\\\\").replace("\"", "\\\"")
+                + "\"}}]},\"finish_reason\":\"tool_calls\"}],"
+                + "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}";
     }
 
     private Map<String, String> config(final Map<String, String> extra) {
@@ -152,33 +301,6 @@ class BtwAnswererTest {
         entries.put("yca.llm.retriesBaseDelayMs", "1");
         entries.putAll(extra);
         return entries;
-    }
-
-    private JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new Message$FusionJsonCodec(),
-                        new ToolCall$FusionJsonCodec(),
-                        new ToolCall$FunctionCall$FusionJsonCodec(),
-                        new Usage$FusionJsonCodec(),
-                        new ChatCompletionRequest$FusionJsonCodec(),
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec()),
-                key -> Optional.empty());
     }
 
     private static void respond(
@@ -201,14 +323,17 @@ class BtwAnswererTest {
     @Test
     void answersOutOfBandWithoutPersisting() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi"), Message.assistant("hello", List.of())));
-        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false)
+        final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("hello there", answer);
         final var body = bodies.getLast();
         assertTrue(body.contains("\"model\":\"test-model\""), body);
-        assertTrue(body.contains("\"max_tokens\":2000"), body);
-        assertTrue(!body.contains("\"tools\""), body);
+        // the tiny default budget would starve reasoning: when not configured, it follows the provider
+        assertFalse(body.contains("\"max_tokens\""), body);
+        // /btw now declares the plan-mode read-only tools instead of running tool-less
+        assertTrue(body.contains("\"tools\""), body);
+        assertTrue(body.contains("read_file"), body);
         assertTrue(body.contains("Side question: what did I say?"), body);
         assertTrue(body.contains("hello"), body);
         assertEquals(2, sessionStore.size("s1"));
@@ -224,7 +349,7 @@ class BtwAnswererTest {
         }
         sessionStore.replace("s1", messages);
         answerer(Map.of("yca.slashcommands.btw.maxHistoryMessages", "200"))
-                .ask("q", "s1", usageTracker, () -> false)
+                .ask("q", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -238,11 +363,11 @@ class BtwAnswererTest {
         sessionStore.replace("s1", List.of());
         final var replaying = answerer(Map.of());
         replaying
-                .ask("first question", "s1", usageTracker, () -> false)
+                .ask("first question", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         replaying
-                .ask("second question", "s1", usageTracker, () -> false)
+                .ask("second question", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
@@ -252,10 +377,10 @@ class BtwAnswererTest {
 
         bodies.clear();
         final var noRecall = answerer(Map.of("yca.slashcommands.btw.recall", "0"));
-        noRecall.ask("first question", "s1", usageTracker, () -> false)
+        noRecall.ask("first question", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        noRecall.ask("second question", "s1", usageTracker, () -> false)
+        noRecall.ask("second question", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(!bodies.getLast().contains("Earlier side questions"), bodies.getLast());
@@ -264,49 +389,116 @@ class BtwAnswererTest {
     @Test
     void modelOverrideApplies() throws Exception {
         answerer(Map.of("yca.slashcommands.btw.model", "btw-model"))
-                .ask("q", "s1", usageTracker, () -> false)
+                .ask("q", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(bodies.getLast().contains("\"model\":\"btw-model\""), bodies.getLast());
     }
 
     @Test
-    void emptyAnswerFails() throws Exception {
-        final var error = assertThrows(
-                ExecutionException.class,
-                () -> answerer.ask("EMPTY PLEASE", "s1", usageTracker, () -> false)
-                        .toCompletableFuture()
-                        .get(5, TimeUnit.SECONDS));
-        assertTrue(error.getCause() instanceof IOException, String.valueOf(error.getCause()));
+    void nativeToolCallsRoundTrip() throws Exception {
+        sessionStore.replace("s1", List.of(Message.user("hi")));
+        final var answer = answerer.ask("NATIVE READ", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("read round-trip done", answer);
+        assertEquals(2, bodies.size(), bodies.toString());
+        // the first request declared the tools, the second carried the tool result back to the model
+        assertTrue(bodies.get(0).contains("\"tools\""), bodies.get(0));
+        assertTrue(bodies.get(1).contains("file content: src/App.java"), bodies.get(1));
+        // a round-trip still does not touch the session store
+        assertEquals(1, sessionStore.size("s1"));
+        assertEquals(2L, usageTracker.auxiliaryRequests());
     }
 
     @Test
-    void dsmlMarkupIsStrippedFromTheAnswer() throws Exception {
+    void toolCallMarkupIsParsedAndExecuted() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
-        final var answer = answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false)
+        final var answer = answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("the parsed answer", answer);
-        // the glitch never touches the session, and the request still carries no tools
+        // the DSML block was turned into a real read_file execution, not just stripped
+        assertEquals(2, bodies.size(), bodies.toString());
+        assertTrue(bodies.get(1).contains("file content: src/App.java"), bodies.get(1));
         assertEquals(1, sessionStore.size("s1"));
-        assertTrue(!bodies.getLast().contains("\"tools\""), bodies.getLast());
+    }
+
+    @Test
+    void bashReadCommandRunsButDestructiveIsRefused() throws Exception {
+        sessionStore.replace("s1", List.of(Message.user("hi")));
+        final var answer = answerer(Map.of())
+                .ask("BASH CAT", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("cat done", answer);
+        assertEquals(2, bodies.size(), bodies.toString());
+        // the plan-mode allow-list ran `cat` and fed the output back
+        assertTrue(bodies.get(1).contains("cat content"), bodies.get(1));
+        bodies.clear();
+
+        // a fresh answerer so the previous exchange is not replayed into this side question
+        final var denied = answerer(Map.of())
+                .ask("BASH RM", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("rm done", denied);
+        assertEquals(2, bodies.size(), bodies.toString());
+        // `rm -rf` is not a plan-mode read-only command: it is refused, and the tool never ran
+        assertTrue(bodies.get(1).contains("Permission denied by user"), bodies.get(1));
+        assertFalse(bodies.get(1).contains("cat content"), bodies.get(1));
+    }
+
+    @Test
+    void nonReadToolIsRefusedWithoutRunning() throws Exception {
+        final var answer = answerer.ask("WRITE TOOL", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("write done", answer);
+        assertEquals(2, bodies.size(), bodies.toString());
+        // write_file is never declared (-tools- has no writer) and is refused by plan-mode rules
+        assertFalse(bodies.get(0).contains("write_file"), bodies.get(0));
+        assertTrue(bodies.get(1).contains("Permission denied by user"), bodies.get(1));
     }
 
     @Test
     void toolCallOnlyAnswerFallsBackToRawNoteAndIsNotReplayed() throws Exception {
         sessionStore.replace("s1", List.of());
         final var answerer = answerer(Map.of());
-        final var answer = answerer.ask("TOOLCALL ONLY", "s1", usageTracker, () -> false)
+        final var answer = answerer.ask("TOOLCALL ONLY", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(answer.startsWith("> "), answer);
-        assertTrue(answer.contains("```\n" + DSML_BLOCK + "\n```"), answer);
+        assertTrue(answer.contains(DSML_BLOCK), answer);
+        // the round cap was reached: six model round-trips, all tool-only
+        assertEquals(6, bodies.size(), bodies.toString());
         // a broken exchange is never replayed into the next side question
-        answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false)
+        answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         final var body = bodies.getLast();
         assertTrue(!body.contains("Q: TOOLCALL ONLY"), body);
         assertTrue(body.contains("Side question: TOOLCALL MARKUP"), body);
+    }
+
+    @Test
+    void blankAnswerRetriesOnceThenReturnsNote() throws Exception {
+        final var first = answerer(Map.of())
+                .ask("TRUNCATED FIRST", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        assertEquals("hello there", first);
+        // the blank first answer was retried, then succeeded
+        assertEquals(2, bodies.size(), bodies.toString());
+
+        // a fresh answerer so the previous exchange is not replayed into this side question
+        bodies.clear();
+        final var alwaysBlank = answerer(Map.of())
+                .ask("EMPTY PLEASE", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        // a still-blank answer becomes a note, never an exception
+        assertTrue(alwaysBlank.startsWith("The model returned an empty answer"), alwaysBlank);
+        assertTrue(alwaysBlank.contains("Check the output budget"), alwaysBlank);
     }
 }

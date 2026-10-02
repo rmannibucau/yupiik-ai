@@ -20,15 +20,13 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
-import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -41,8 +39,10 @@ import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class UsageTrackerTest {
     @TempDir
     Path storageHome;
@@ -57,16 +57,11 @@ class UsageTrackerTest {
     private volatile int modelsStatus = 200;
 
     @BeforeEach
-    void start() throws IOException {
+    void start(final JsonMapper mapper) throws IOException {
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/models", exchange -> respond(exchange, modelsStatus, modelsBody));
         server.start();
-        mapper = new JsonMapperImpl(
-                List.of(
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new ContextWindowCache$Entry$FusionJsonCodec()),
-                key -> Optional.empty());
+        this.mapper = mapper;
         configuration = configuration(-1);
         providerManager = new ProviderManager(configuration, mapper);
         client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());

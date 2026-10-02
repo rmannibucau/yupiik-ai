@@ -336,13 +336,13 @@ public final class MarkdownLines {
             emitInline(h, prefix, styles.heading(h.getLevel()).patch(base), styles, width, breakWords, out);
         } else if (node instanceof FencedCodeBlock c) {
             emitLiteral(
-                    c.getLiteral(),
+                    codeLiteral(c.getLiteral()),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
                     width,
                     out);
         } else if (node instanceof IndentedCodeBlock c) {
             emitLiteral(
-                    c.getLiteral(),
+                    codeLiteral(c.getLiteral()),
                     styles.codeBlock() == null ? base : styles.codeBlock().patch(base),
                     width,
                     out);
@@ -492,23 +492,31 @@ public final class MarkdownLines {
         if (node instanceof Text t) {
             content.add(Span.styled(t.getLiteral(), base));
         } else if (node instanceof Code c) {
-            content.add(Span.styled(
-                    c.getLiteral(),
-                    styles.inlineCode() == null ? base : styles.inlineCode().patch(base)));
+            // same composition rule as strong: the code accent fills in only when the region
+            // carries no explicit foreground - on a plain base inline code is colored bold,
+            // inside dimmed regions (thinking/tool output) it stays bold but takes the region
+            // tone so code never outshouts the subdued prose it lives in
+            final var code =
+                    styles.inlineCode() == null ? base : styles.inlineCode().patch(base);
+            content.add(Span.styled(c.getLiteral(), code));
         } else if (node instanceof Emphasis) {
             for (final var child : children(node)) {
                 inline(child, prefix, base.patch(styles.emphasis()), styles, width, content, out);
             }
         } else if (node instanceof StrongEmphasis) {
+            // the strong accent fills in only when the region carries no explicit
+            // foreground: on a plain base bold is colored, inside dimmed regions
+            // (thinking/tool output) it stays bold but keeps the region tone
+            final var strong = styles.strong() == null ? Style.EMPTY.bold() : styles.strong();
             for (final var child : children(node)) {
-                inline(child, prefix, base.patch(styles.strong()), styles, width, content, out);
+                inline(child, prefix, strong.patch(base), styles, width, content, out);
             }
         } else if (node instanceof Strikethrough) {
             for (final var child : children(node)) {
                 inline(child, prefix, base.patch(styles.strikethrough()), styles, width, content, out);
             }
         } else if (node instanceof Link link) {
-            final var style = styles.link() == null ? base : styles.link().patch(base);
+            final var style = styles.link() == null ? base : base.patch(styles.link());
             for (final var child : children(link)) {
                 inline(child, prefix, style, styles, width, content, out);
             }
@@ -517,8 +525,7 @@ public final class MarkdownLines {
                 inline(child, prefix, base, styles, width, content, out);
             }
         } else if (node instanceof HtmlInline h) {
-            content.add(Span.styled(
-                    h.getLiteral(), styles.html() == null ? base : styles.html().patch(base)));
+            content.add(Span.styled(h.getLiteral(), styles.html() == null ? base : base.patch(styles.html())));
         } else if (node instanceof TaskListItemMarker) {
             // rendered by bulletMarker for the whole item; nothing to emit here
         } else if (node instanceof SoftLineBreak || node instanceof HardLineBreak) {
@@ -529,6 +536,16 @@ public final class MarkdownLines {
                 inline(child, prefix, base, styles, width, content, out);
             }
         }
+    }
+
+    /**
+     * The literal of a code block keeps the newline that terminates its last line; rendering it
+     * verbatim emits a phantom blank row under the block, so that single terminator is dropped
+     * here. An intentional empty last code line ({@code "a\n\n"}) keeps its own row, and the blank
+     * row that really separates the block from its neighbours is the one the block walk inserts.
+     */
+    private static String codeLiteral(final String literal) {
+        return literal != null && literal.endsWith("\n") ? literal.substring(0, literal.length() - 1) : literal;
     }
 
     private static void emitLiteral(final String literal, final Style style, final int width, final List<Line> out) {
@@ -641,27 +658,29 @@ public final class MarkdownLines {
             sb.append(t.getLiteral());
         } else if (node instanceof Code c) {
             flushCell(out, sb, base);
+            // same composition rule as the prose walk: the code accent yields to a colored base
             out.add(Span.styled(c.getLiteral(), styles.inlineCode().patch(base)));
         } else if (node instanceof HtmlInline h) {
             flushCell(out, sb, base);
-            out.add(Span.styled(h.getLiteral(), styles.html().patch(base)));
+            out.add(Span.styled(h.getLiteral(), base.patch(styles.html())));
         } else if (node instanceof SoftLineBreak || node instanceof HardLineBreak) {
             sb.append('\n');
         } else if (node instanceof Emphasis) {
             flushCell(out, sb, base);
-            renderCellMarkup(node, base, styles.emphasis(), styles, out);
+            renderCellMarkup(node, base, styles.emphasis(), styles, out, false);
         } else if (node instanceof StrongEmphasis) {
             flushCell(out, sb, base);
-            renderCellMarkup(node, base, styles.strong(), styles, out);
+            // like the prose walk: bold keeps the region tone when the base is colored
+            renderCellMarkup(node, base, styles.strong(), styles, out, true);
         } else if (node instanceof Strikethrough) {
             flushCell(out, sb, base);
-            renderCellMarkup(node, base, styles.strikethrough(), styles, out);
+            renderCellMarkup(node, base, styles.strikethrough(), styles, out, false);
         } else if (node instanceof Link) {
             flushCell(out, sb, base);
-            renderCellMarkup(node, base, styles.link(), styles, out);
+            renderCellMarkup(node, base, styles.link(), styles, out, false);
         } else if (node instanceof Image) {
             flushCell(out, sb, base);
-            renderCellMarkup(node, base, styles.link(), styles, out);
+            renderCellMarkup(node, base, styles.link(), styles, out, false);
         } else {
             for (final var child : children(node)) {
                 cellInline(child, base, styles, out, sb);
@@ -677,10 +696,21 @@ public final class MarkdownLines {
         }
     }
 
-    /** Emits the children of a markup node, each patched over the markup style (nested markups compose). */
+    /**
+     * Emits the children of a markup node, each patched over the markup style (nested markups compose).
+     *
+     * @param baseKeepsFg true when the region tone must win over the markup color (strong in a
+     *                    dimmed region stays bold but keeps the base color); false lets the markup
+     *                    color win (links/code stay visible)
+     */
     private static void renderCellMarkup(
-            final Node node, final Style base, final Style markup, final MarkdownStyles styles, final List<Span> out) {
-        final var childBase = markup.patch(base);
+            final Node node,
+            final Style base,
+            final Style markup,
+            final MarkdownStyles styles,
+            final List<Span> out,
+            final boolean baseKeepsFg) {
+        final var childBase = baseKeepsFg ? markup.patch(base) : base.patch(markup);
         final var nested = new ArrayList<Span>();
         final var nestedSb = new StringBuilder();
         for (final var child : children(node)) {

@@ -24,8 +24,12 @@ The question is an orphan by design: it is not added to the conversation, not
 persisted to the session and not echoed to the transcript, so the next turns
 never see it.
 The answer inherits the session history (minus the reply being streamed) and
-has no tool access: it is a single LLM round-trip, made for quick "what does
-this mean?" questions rather than actions.
+runs with a bounded read-only tool loop: the model can read files, search and
+run plan-mode commands (the same global bash allow-list used in plan mode, so
+a refused command simply means "not allowed"), and it is never granted
+write access or permissions-all mode.
+Mutating commands trigger the approval gate like any other command in the
+session, but the side loop stays bounded and keeps the turn running.
 The last few side questions are replayed to the model so follow-up side
 questions stay coherent.
 In the xref:../cli/tui.adoc[`tui`] the answer opens a modal titled `btw`:
@@ -43,8 +47,8 @@ block once ready.
 |Model answering side questions when set, the session model otherwise.
 
 |`yca.slashcommands.btw.maxTokens`
-|2000
-|Maximum output tokens of an answer.
+|0
+|Maximum output tokens of an answer, 0 follows the provider/model budget.
 
 |`yca.slashcommands.btw.maxHistoryMessages`
 |200

@@ -20,21 +20,31 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.AgentLoop;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.Tool;
+import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellFrontend;
 import io.yupiik.ia.agent.core.shell.ShellIO;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
 import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletionStage;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class SessionCommandsTest {
     private final List<String> picked = new ArrayList<>();
@@ -132,5 +142,195 @@ class SessionCommandsTest {
         final var outcome = cmd.action().apply("", env()).toCompletableFuture().join();
         assertEquals("no session to resume", ((ShellOutcome.Status) outcome).message());
         assertTrue(picked.isEmpty(), "the picker must not open when there is nothing to pick");
+    }
+
+    @Test
+    void contextArgSplitsModeFromPathAndKeepsTheLegacyForm() {
+        assertEquals(new SessionCommands.ContextRequest("transcript", ""), SessionCommands.parseContext(null));
+        assertEquals(new SessionCommands.ContextRequest("transcript", ""), SessionCommands.parseContext(""));
+        assertEquals(new SessionCommands.ContextRequest("transcript", ""), SessionCommands.parseContext("   "));
+        // a token is a mode only when it is one, otherwise the whole argument is the file
+        assertEquals(
+                new SessionCommands.ContextRequest("transcript", "out.txt"), SessionCommands.parseContext("out.txt"));
+        assertEquals(
+                new SessionCommands.ContextRequest("transcript", "my file.txt"),
+                SessionCommands.parseContext(" my file.txt "));
+        assertEquals(
+                new SessionCommands.ContextRequest("transcript", "out.txt"),
+                SessionCommands.parseContext(" transcript out.txt"));
+        assertEquals(
+                new SessionCommands.ContextRequest("llm-payload", "dump/payload.md"),
+                SessionCommands.parseContext(" llm-payload dump/payload.md "));
+        assertEquals(
+                new SessionCommands.ContextRequest("llm-payload", ""), SessionCommands.parseContext("LLM-Payload"));
+        assertEquals(
+                new SessionCommands.ContextRequest("next-request", ""), SessionCommands.parseContext("next-request"));
+        assertEquals(new SessionCommands.ContextRequest("compact", ""), SessionCommands.parseContext("compact"));
+        assertEquals(new SessionCommands.ContextRequest("prune", ""), SessionCommands.parseContext("prune"));
+    }
+
+    @Test
+    void contextCompletionOffersModesAndPaths() {
+        final var completion = contextCompletion();
+        assertEquals(
+                List.of("compact", "llm-payload", "next-request", "prune", "transcript"),
+                completion.complete("", "", new ArgCompletion.Env() {}).items());
+        assertEquals(
+                "mode", completion.complete("", "", new ArgCompletion.Env() {}).label());
+        assertEquals(
+                List.of("llm-payload"),
+                completion.complete("", "llm", new ArgCompletion.Env() {}).items());
+
+        // a path is proposed before any mode is typed, so /context out.txt still completes
+        final var withPaths = completion.complete("", "ou", pathsEnv());
+        assertEquals(List.of("out.txt"), withPaths.items());
+        assertEquals("path", withPaths.label(), "no mode matches the token: the label must say path");
+
+        // once a mode is there, the next token is a file
+        assertEquals(
+                List.of("out.txt"),
+                completion.complete("llm-payload ", "ou", pathsEnv()).items());
+    }
+
+    @Test
+    void llmPayloadWithoutAnyRequestExplainsHowToGetOne() {
+        final var outcome = context("llm-payload", contextEnv(null));
+        assertEquals(
+                "no LLM request was sent yet in this session - run a turn, or use /context transcript",
+                ((ShellOutcome.Status) outcome).message());
+    }
+
+    @Test
+    void llmPayloadRendersTheWholeRequestNotTheStoredTranscript(@TempDir final Path dir) throws IOException {
+        final var outcome = context("llm-payload", contextEnv(payload()));
+        final var markdown = ((ShellOutcome.Transcript) outcome).markdown();
+        assertTrue(markdown.contains("# LLM payload"), markdown);
+        assertTrue(markdown.contains("**Model** test-model"), markdown);
+        assertTrue(markdown.contains("**Messages** 5"), markdown);
+        assertTrue(markdown.contains("**Tool choice** auto"), markdown);
+        assertTrue(markdown.contains("### 1. system"), markdown);
+        assertTrue(markdown.contains("system prompt"), "the system message is dumped in full: " + markdown);
+        assertTrue(markdown.contains("### 2. user"), markdown);
+        assertTrue(markdown.contains("do it"), markdown);
+        // the tail the store strips is the whole point of this view
+        assertTrue(markdown.contains("### 3. user"), markdown);
+        assertTrue(markdown.contains("<session-state>"), markdown);
+        assertTrue(markdown.contains("### 4. assistant"), markdown);
+        // a tool result is labelled with the tool name recovered from the assistant call
+        assertTrue(markdown.contains("### 5. tool (read_file) [h1] [error]"), markdown);
+        assertTrue(markdown.contains("boom"), markdown);
+        assertTrue(markdown.contains("**tool_call** read_file [h1]"), markdown);
+        assertTrue(markdown.contains("## Tools (1)"), markdown);
+        assertTrue(markdown.contains("### read_file (function)"), markdown);
+        assertTrue(markdown.contains("read a file from disk"), markdown);
+        assertTrue(markdown.contains("**parameters**"), markdown);
+
+        // the very same dump, written to a file
+        final var target = dir.resolve("sub").resolve("payload.md");
+        final var written = (ShellOutcome.Status) context("llm-payload " + target, contextEnv(payload()));
+        assertEquals("context written to " + target.toAbsolutePath(), written.message());
+        assertEquals(markdown, Files.readString(target), "the file must hold the very same dump");
+    }
+
+    @Test
+    void aMessageQuotingBackticksCannotBreakOutOfItsFence() {
+        final var payload = new AgentLoop.LlmPayload(
+                "s1", "test-model", List.of(Message.user("before ``` after")), List.of(), "auto", 0);
+        final var markdown = SessionCommands.renderLlmPayload(payload, "note", null, null);
+        assertTrue(markdown.contains("````text\nbefore ``` after\n````"), markdown);
+    }
+
+    @Test
+    void contextOperationsRejectAPath() {
+        assertEquals(
+                "/context transcript|llm-payload|next-request|compact|prune [path]",
+                ((ShellOutcome.Status) context("compact out.txt", contextEnv(null))).message());
+        assertEquals(
+                "/context transcript|llm-payload|next-request|compact|prune [path]",
+                ((ShellOutcome.Status) context("prune out.txt", contextEnv(null))).message());
+    }
+
+    /** The captured payload the {@code llm-payload} tests start from. */
+    private AgentLoop.LlmPayload payload() {
+        // the volatile tail is how the loop really sends its state: a trailing user message the
+        // store never persists, so only this view shows it
+        final var tail = new Message(
+                "user",
+                "<session-state>\ncontext 12%\n</session-state>",
+                null,
+                null,
+                null,
+                Map.of("volatileTail", true));
+        return new AgentLoop.LlmPayload(
+                "s1",
+                "test-model",
+                List.of(
+                        Message.system("system prompt"),
+                        Message.user("do it"),
+                        tail,
+                        Message.assistant(
+                                null,
+                                List.of(new ToolCall(
+                                        "h1",
+                                        "function",
+                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"a.java\"}"),
+                                        null))),
+                        Message.tool("h1", "boom", true)),
+                List.of(Tool.function(
+                        "read_file",
+                        "read a file from disk",
+                        Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string"))))),
+                "auto",
+                42);
+    }
+
+    private ShellOutcome context(final String arg, final ShellEnv env) {
+        return new SessionCommands(new SessionStore() {}, null)
+                .commands().stream()
+                        .filter(c -> c.spec().name().equals("/context"))
+                        .findFirst()
+                        .orElseThrow()
+                        .action()
+                        .apply(arg, env)
+                        .toCompletableFuture()
+                        .join();
+    }
+
+    private ShellEnv contextEnv(final AgentLoop.LlmPayload payload) {
+        final var env = env();
+        env.session().sessionId("s1");
+        env.session()
+                .runtime(new SessionRuntime(
+                        new AgentLoop() {
+                            {
+                                lastLlmPayload = payload;
+                            }
+                        },
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null));
+        return env;
+    }
+
+    private static ArgCompletion.Env pathsEnv() {
+        return new ArgCompletion.Env() {
+            @Override
+            public List<String> paths(final String token) {
+                return List.of("out.txt");
+            }
+        };
+    }
+
+    private ArgCompletion contextCompletion() {
+        return new SessionCommands(new SessionStore() {}, null)
+                .commands().stream()
+                        .filter(c -> c.spec().name().equals("/context"))
+                        .findFirst()
+                        .orElseThrow()
+                        .completion();
     }
 }

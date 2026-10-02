@@ -20,9 +20,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
@@ -34,12 +34,12 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
@@ -47,13 +47,14 @@ import org.junit.jupiter.api.io.TempDir;
  * surface a {@link MidStreamFailureException} carrying the partial stream state instead of an
  * opaque transport error, so the agent loop can replay the request safely.
  */
+@ExtendWith(TestJsonMapper.class)
 class ChatClientMidStreamTest {
 
     @TempDir
     Path storageHome;
 
     @Test
-    void midStreamDisconnectSurfacesAsMidStreamFailure() throws Exception {
+    void midStreamDisconnectSurfacesAsMidStreamFailure(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",
                 "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"he\"},\"finish_reason\":null}]}",
@@ -71,7 +72,7 @@ class ChatClientMidStreamTest {
 
             final var port = server.getLocalPort();
             final var cfg = configuration(port);
-            final var client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+            final var client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
             final var deltas = new CopyOnWriteArrayList<LlmStreamEvent>();
             final Consumer<LlmStreamEvent> onDelta = delta -> {
                 if (delta instanceof TextDelta) {
@@ -154,32 +155,5 @@ class ChatClientMidStreamTest {
     private ChatCompletionRequest request() {
         return new ChatCompletionRequest(
                 "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
-    }
-
-    private JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new Message$FusionJsonCodec(),
-                        new ToolCall$FusionJsonCodec(),
-                        new ToolCall$FunctionCall$FusionJsonCodec(),
-                        new Usage$FusionJsonCodec(),
-                        new ChatCompletionRequest$FusionJsonCodec(),
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec()),
-                key -> Optional.empty());
     }
 }

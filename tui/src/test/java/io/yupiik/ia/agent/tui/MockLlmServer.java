@@ -16,22 +16,12 @@
 package io.yupiik.ia.agent.tui;
 
 import com.sun.net.httpserver.HttpServer;
-import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.fusion.json.internal.JsonStrings;
-import io.yupiik.ia.agent.core.llm.ChatCompletionRequest$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.Message$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ModelsResponse$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ModelsResponse$Model$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ToolCall$FunctionCall$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.ToolCall$FusionJsonCodec;
-import io.yupiik.ia.agent.core.llm.Usage$FusionJsonCodec;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 
@@ -126,33 +116,6 @@ public final class MockLlmServer implements AutoCloseable {
     private static String chunk(final String content) {
         return "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\""
                 + content + "\"},\"finish_reason\":null}]}";
-    }
-
-    public static JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new Message$FusionJsonCodec(),
-                        new ToolCall$FusionJsonCodec(),
-                        new ToolCall$FunctionCall$FusionJsonCodec(),
-                        new Usage$FusionJsonCodec(),
-                        new ChatCompletionRequest$FusionJsonCodec(),
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec()),
-                key -> Optional.empty());
     }
 
     private static void respond(

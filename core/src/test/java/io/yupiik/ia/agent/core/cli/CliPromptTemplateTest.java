@@ -19,23 +19,29 @@ import static io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.framework.api.ConfiguringContainer;
-import io.yupiik.fusion.framework.api.container.FusionBean;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.framework.JsonModule;
-import io.yupiik.fusion.json.serialization.JsonCodec;
-import io.yupiik.ia.agent.core.YcaCoreModule;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class CliPromptTemplateTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     /** Synthetic palette so tests do not depend on the real ANSI codes. Values double as the expected wrapper. */
     private static final Map<String, Object> COLORS = Map.of(
@@ -64,29 +70,8 @@ class CliPromptTemplateTest {
      * bean registered by YcaCoreModule, including the generated CodingAgentConfiguration codec. Without it the
      * configuration serialization in CliPromptTemplate fails with "no codec for CodingAgentConfiguration".
      */
-    private static CliPromptTemplate withMapper(final CodingAgentConfiguration configuration) {
-        final var codecBeans = new YcaCoreModule()
-                .beans()
-                .filter(b -> JsonCodec.class.isAssignableFrom(raw(b.type())))
-                .toArray(FusionBean[]::new);
-        try (final var container = ConfiguringContainer.of()
-                .disableAutoDiscovery(true)
-                .register(codecBeans)
-                .register(new JsonModule())
-                .start()) {
-            final JsonMapper mapper = container.lookup(JsonMapper.class).instance();
-            return new CliPromptTemplate(helpers(), configuration, mapper);
-        }
-    }
-
-    private static Class<?> raw(final java.lang.reflect.Type type) {
-        if (type instanceof Class<?> c) {
-            return c;
-        }
-        if (type instanceof java.lang.reflect.ParameterizedType pt) {
-            return raw(pt.getRawType());
-        }
-        throw new IllegalArgumentException("unsupported type " + type);
+    private CliPromptTemplate withMapper(final CodingAgentConfiguration configuration) {
+        return new CliPromptTemplate(helpers(), configuration, mapper);
     }
 
     private static List<PromptHandlebarsHelper> helpers() {

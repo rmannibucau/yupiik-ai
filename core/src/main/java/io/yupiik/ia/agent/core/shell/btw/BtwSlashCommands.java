@@ -59,11 +59,14 @@ public class BtwSlashCommands implements SlashCommandSet {
             return CompletableFuture.completedFuture(ShellOutcome.status("usage: /btw <question>"));
         }
         final var question = arg.strip();
+        final var runtime = env.session().runtime();
+        final var gate = runtime == null ? null : runtime.permissions().gate();
         return answerer.ask(
                         question,
                         env.session().sessionId(),
-                        env.session().runtime().usage(),
-                        () -> false)
+                        runtime == null ? null : runtime.usage(),
+                        () -> false,
+                        gate)
                 .thenApply(answer -> ShellOutcome.transcript(rendered(question, answer)))
                 .exceptionally(e -> ShellOutcome.error("btw failed: " + message(e)));
     }

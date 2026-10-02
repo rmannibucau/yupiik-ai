@@ -22,9 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
@@ -36,17 +36,19 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class ChatClientFlavorTest {
     private HttpServer server;
     private ChatClient client;
+    private JsonMapper mapper;
 
     @TempDir
     Path storageHome;
@@ -55,7 +57,8 @@ class ChatClientFlavorTest {
     private final AtomicInteger modelsHits = new AtomicInteger();
 
     @BeforeEach
-    void start() throws IOException {
+    void start(final JsonMapper mapper) throws IOException {
+        this.mapper = mapper;
         modelsHits.set(0);
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
@@ -88,7 +91,7 @@ class ChatClientFlavorTest {
                     "application/json");
         });
         server.start();
-        client = new ChatClient(configuration(), mapper(), providerManager(), Clock.systemUTC());
+        client = new ChatClient(configuration(), mapper, providerManager(), Clock.systemUTC());
     }
 
     @AfterEach
@@ -129,34 +132,7 @@ class ChatClientFlavorTest {
     }
 
     private ProviderManager providerManager() {
-        return new ProviderManager(configuration(), mapper());
-    }
-
-    private JsonMapper mapper() {
-        return new JsonMapperImpl(
-                List.of(
-                        new Message$FusionJsonCodec(),
-                        new ToolCall$FusionJsonCodec(),
-                        new ToolCall$FunctionCall$FusionJsonCodec(),
-                        new Usage$FusionJsonCodec(),
-                        new ChatCompletionRequest$FusionJsonCodec(),
-                        new ModelsResponse$FusionJsonCodec(),
-                        new ModelsResponse$Model$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireToolCall$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireMessage$WireFunction$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.WireTool$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.OpenAIUsage$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatCompletionResponse$Choice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkChoice$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ChatChunk$ChunkDelta$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesRequest$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesInput$FusionJsonCodec(),
-                        new io.yupiik.llm.client.openai.model.ResponsesTool$FusionJsonCodec()),
-                key -> Optional.empty());
+        return new ProviderManager(configuration(), mapper);
     }
 
     private static void respond(
@@ -211,7 +187,7 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.apiKey", "test-key"),
                 Map.entry("yca.provider.providers.0.model", "test-model"),
                 Map.entry("yca.provider.providers.0.api", "auto")));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("ok", client.chat(request()).message().content());
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
@@ -275,7 +251,7 @@ class ChatClientFlavorTest {
                 Map.entry("yca.llm.maxConcurrent", "1"),
                 Map.entry("yca.llm.retryOnContextOverflow", "true"),
                 Map.entry("yca.llm.maxIterations", "250")));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("ok", client.chat(request()).message().content());
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
@@ -284,7 +260,7 @@ class ChatClientFlavorTest {
     @Test
     void configuredOutputTokensIsSentAsMaxTokens() throws Exception {
         final var cfg = configuration(Map.of("yca.provider.providers.0.outputTokens", "1234"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertTrue(bodies.getLast().contains("\"max_tokens\":1234"), bodies.getLast());
@@ -310,7 +286,7 @@ class ChatClientFlavorTest {
         final var cfg = configuration(Map.of(
                 "yca.provider.providers.0.api", "responses",
                 "yca.provider.providers.0.outputTokens", "1234"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertEquals(ApiFlavor.RESPONSES, client.flavor());
@@ -321,7 +297,7 @@ class ChatClientFlavorTest {
     void providerSpecificTemperatureIsPromotedAndSentExactlyOnce() throws Exception {
         final var cfg =
                 configuration(Map.of("yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertEquals(1, occurrences(bodies.getLast(), "\"temperature\":0.2"), bodies.getLast());
@@ -331,7 +307,7 @@ class ChatClientFlavorTest {
     void providerSpecificMaxTokensIsPromotedWithoutDuplicateWireKeys() throws Exception {
         final var cfg =
                 configuration(Map.of("yca.provider.providers.0.providerSpecificOptions", "{\"max_tokens\":777}"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertEquals(1, occurrences(bodies.getLast(), "\"max_tokens\":777"), bodies.getLast());
@@ -341,7 +317,7 @@ class ChatClientFlavorTest {
     void extrasTemperatureIsPromotedOnTheStreamPath() throws Exception {
         final var cfg =
                 configuration(Map.of("yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         client.stream(request(), delta -> {
             // no-op consumer: the assertion is on the wire body below
@@ -362,7 +338,7 @@ class ChatClientFlavorTest {
         final var cfg = configuration(Map.of(
                 "yca.provider.providers.0.api", "responses",
                 "yca.provider.providers.0.providerSpecificOptions", "{\"temperature\":0.2}"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertEquals(1, occurrences(bodies.getLast(), "\"temperature\":0.2"), bodies.getLast());
@@ -371,7 +347,7 @@ class ChatClientFlavorTest {
     @Test
     void providerModelLeadingSpaceIsTrimmedOffTheWire() throws Exception {
         final var cfg = configuration(Map.of("yca.provider.providers.0.model", " deepseek-v4-flash"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertTrue(bodies.getLast().contains("\"model\":\"deepseek-v4-flash\""), bodies.getLast());
@@ -394,7 +370,7 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.top_p", "0.9"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.top_k", "40")));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         assertEquals(1, client.variants(settings).size());
         settings.setVariant("balanced");
@@ -415,7 +391,7 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         settings.setVariant("missing");
         assertEquals(
@@ -440,7 +416,7 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.1.api", "auto"),
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced")));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         settings.setVariant("balanced");
         assertEquals("balanced", client.variant(settings));
@@ -454,7 +430,7 @@ class ChatClientFlavorTest {
     @Test
     void inMemorySamplingOverrideSetsTemperatureTopPAndTopK() throws Exception {
         client = new ChatClient(
-                configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
+                configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         settings.setSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
                 ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.3d),
@@ -476,7 +452,7 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         settings.setVariant("balanced");
         settings.setSampling(ChatClient.SamplingOverride.of(
@@ -492,7 +468,7 @@ class ChatClientFlavorTest {
     @Test
     void implicitVariantReflectsInlineSamplingOverrides() throws Exception {
         client = new ChatClient(
-                configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
+                configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         settings.setSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.25d))));
@@ -510,7 +486,7 @@ class ChatClientFlavorTest {
     @Test
     void setModelClearsInMemorySamplingOverrides() throws Exception {
         client = new ChatClient(
-                configuration(), mapper(), new ProviderManager(configuration(), mapper()), Clock.systemUTC());
+                configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
         final var settings = new ChatSettings();
         settings.setSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TOP_K, java.util.Optional.of(16d))));
@@ -522,7 +498,7 @@ class ChatClientFlavorTest {
     @Test
     void gpt5EmitsDefaultReasoningEffortOnTheWire() throws Exception {
         final var cfg = configuration(Map.of("yca.provider.providers.0.model", "gpt-5"));
-        client = new ChatClient(cfg, mapper(), new ProviderManager(cfg, mapper()), Clock.systemUTC());
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request()).message().content());
         assertEquals(1, occurrences(bodies.getLast(), "\"reasoning_effort\":\"medium\""), bodies.getLast());

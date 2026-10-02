@@ -50,8 +50,12 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
@@ -81,7 +85,18 @@ class RunCommandTest {
     private PrintStream originalErr;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
-    private final List<String> logLines = new ArrayList<>();
+    /** Concurrent: records are published by whichever thread logs, not always the test one. */
+    private final Queue<String> logLines = new ConcurrentLinkedQueue<>();
+    /**
+     * Strong references to the loggers the handler is attached to. {@code LogManager} only keeps
+     * loggers weakly, and a class literal ({@code RunShellFrontend.class}) does <em>not</em> trigger
+     * static initialization: without these fields the logger created by {@link #capture()} can be
+     * collected before the class under test initializes its own {@code LOGGER} static, which then
+     * registers on a fresh logger the handler was never attached to - the records silently vanish,
+     * intermittently and only under the GC pressure of a full suite.
+     */
+    private final List<Logger> capturedLoggers = new ArrayList<>();
+
     private Handler logHandler;
 
     @BeforeEach
@@ -106,20 +121,40 @@ class RunCommandTest {
                 // no-op
             }
         };
-        Logger.getLogger(RunShellFrontend.class.getName()).addHandler(logHandler);
-        Logger.getLogger(RunCommand.class.getName()).addHandler(logHandler);
+        logLines.clear();
+        capturedLoggers.clear();
+        for (final var name : List.of(RunShellFrontend.class.getName(), RunCommand.class.getName())) {
+            final var logger = Logger.getLogger(name);
+            logger.addHandler(logHandler);
+            capturedLoggers.add(logger);
+        }
     }
 
     @AfterEach
     void restore() {
         System.setOut(originalOut);
         System.setErr(originalErr);
-        Logger.getLogger(RunShellFrontend.class.getName()).removeHandler(logHandler);
-        Logger.getLogger(RunCommand.class.getName()).removeHandler(logHandler);
+        capturedLoggers.forEach(logger -> logger.removeHandler(logHandler));
+        capturedLoggers.clear();
     }
 
     private String logs() {
         return String.join("\n", logLines);
+    }
+
+    /**
+     * Waits for a log record carrying {@code needle} instead of asserting immediately: a record is
+     * published by the logger caller, which is not guaranteed to be this thread, so the assertion has
+     * to race nothing.
+     *
+     * @param needle substring the expected record must carry
+     */
+    private void awaitLog(final String needle) {
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!logs().contains(needle) && System.nanoTime() < deadline) {
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(10));
+        }
+        assertTrue(logs().contains(needle), "expected a '" + needle + "' log record, got: [" + logs() + "]");
     }
 
     @Test
@@ -185,7 +220,7 @@ class RunCommandTest {
 
         assertEquals("s-2", lastSessionIdUsed.get());
         assertTrue(error.getMessage().contains("boom"));
-        assertTrue(logs().contains("boom"), "expected a 'boom' log record, got: [" + logs() + "]");
+        awaitLog("boom");
     }
 
     @Test
@@ -223,8 +258,8 @@ class RunCommandTest {
         command.run();
 
         assertFalse(allowed.get(), "headless gate must deny the tool call");
-        assertTrue(logs().contains("denied"));
-        assertTrue(logs().contains("headless mode"));
+        awaitLog("denied");
+        awaitLog("headless mode");
     }
 
     @Test
@@ -364,8 +399,8 @@ class RunCommandTest {
 
         command.run();
 
-        assertTrue(logs().contains("line1"));
-        assertTrue(logs().contains("line2"));
+        awaitLog("line1");
+        awaitLog("line2");
     }
 
     @Test
@@ -396,9 +431,8 @@ class RunCommandTest {
         command.run();
 
         // streamed tool output must not be re-printed from ToolFinished.output
-        final var logged = logs();
-        assertTrue(logged.contains("streamed line"));
-        assertEquals(1, logged.split("streamed line", -1).length - 1);
+        awaitLog("streamed line");
+        assertEquals(1, logs().split("streamed line", -1).length - 1);
     }
 
     @Test

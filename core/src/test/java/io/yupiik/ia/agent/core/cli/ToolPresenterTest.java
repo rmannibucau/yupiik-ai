@@ -18,27 +18,22 @@ package io.yupiik.ia.agent.core.cli;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.util.List;
-import java.util.Optional;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
+@ExtendWith(TestJsonMapper.class)
 class ToolPresenterTest {
-    private JsonMapperImpl mapper;
+    private JsonMapper mapper;
     private ToolPresenter presenter;
 
     @BeforeEach
-    void setUp() {
-        mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
+    void setUp(final JsonMapper mapper) {
+        this.mapper = mapper;
         presenter = new ToolPresenter(mapper);
-    }
-
-    @AfterEach
-    void tearDown() {
-        mapper.close();
-        mapper = null;
     }
 
     @Test

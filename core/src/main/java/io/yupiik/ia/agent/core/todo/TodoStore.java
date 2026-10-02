@@ -110,6 +110,7 @@ public class TodoStore {
                             switch (t.status() == null ? "" : t.status()) {
                                 case "in_progress" -> "[> ] ";
                                 case "completed" -> "[x] ";
+                                case "cancelled" -> "[-] ";
                                 default -> "[ ] ";
                             })
                     .append(t.content())

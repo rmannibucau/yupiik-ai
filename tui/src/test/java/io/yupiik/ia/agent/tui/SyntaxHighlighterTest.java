@@ -59,7 +59,7 @@ class SyntaxHighlighterTest {
         assertEquals("before", segments.get(0).text().strip());
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(1).type());
         assertEquals("java", segments.get(1).language());
-        assertEquals("int a = 1;\n", segments.get(1).text());
+        assertEquals("int a = 1;", segments.get(1).text());
         assertEquals(SyntaxHighlighter.Segment.Type.TEXT, segments.get(2).type());
         assertEquals("after", segments.get(2).text().strip());
     }
@@ -70,7 +70,7 @@ class SyntaxHighlighterTest {
         assertEquals(1, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
         assertEquals("", segments.get(0).language());
-        assertEquals("plain code\n", segments.get(0).text());
+        assertEquals("plain code", segments.get(0).text());
     }
 
     @Test
@@ -81,7 +81,7 @@ class SyntaxHighlighterTest {
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
         assertEquals("java", segments.get(0).language());
         assertTrue(segments.get(0).text().contains("~~~"), "body must keep the tilde line");
-        assertEquals("\ncode\n~~~\nafter\n", segments.get(0).text());
+        assertEquals("\ncode\n~~~\nafter", segments.get(0).text());
     }
 
     @Test
@@ -90,7 +90,7 @@ class SyntaxHighlighterTest {
         assertEquals(3, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(1).type());
         assertEquals("sql", segments.get(1).language());
-        assertEquals("SELECT 1;\n", segments.get(1).text());
+        assertEquals("SELECT 1;", segments.get(1).text());
     }
 
     @Test
@@ -98,7 +98,7 @@ class SyntaxHighlighterTest {
         final var segments = highlighter.split("```java title=App.java\nint a;\n```");
         assertEquals(1, segments.size());
         assertEquals("java", segments.get(0).language());
-        assertEquals("int a;\n", segments.get(0).text());
+        assertEquals("int a;", segments.get(0).text());
     }
 
     @Test
@@ -106,6 +106,25 @@ class SyntaxHighlighterTest {
         final var segments = highlighter.split("```java\nint a;\n```");
         assertEquals(1, segments.size());
         assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
+    }
+
+    @Test
+    void fenceBodyDropsTheTerminatingNewLine() {
+        // the newline closing the last code line belongs to the fence, not to the code: keeping it
+        // highlights one phantom trailing empty line, which renders as a blank row after the block
+        assertEquals("code", highlighter.split("```\ncode\n```").get(0).text());
+        assertEquals("code", highlighter.split("```\ncode\n```\nnext").get(0).text());
+        assertEquals("code", highlighter.split("```\ncode\n```").get(0).text());
+        // an empty fence body stays empty (no lone "\n" left behind)
+        assertEquals("", highlighter.split("```\n```").get(0).text());
+        // internal blank lines are source and must survive
+        assertEquals(
+                "one\n\ntwo", highlighter.split("```\none\n\ntwo\n```").get(0).text());
+        assertEquals(
+                List.of("one", "", "two"),
+                highlighter.highlightLines("", "one\n\ntwo").stream()
+                        .map(dev.tamboui.text.Line::rawContent)
+                        .toList());
     }
 
     @Test

@@ -177,8 +177,12 @@ public class TuiCommand implements Runnable {
     private volatile Color thoughtBg;
     private volatile Color toolBg;
     private volatile Style toolStyle;
+    /** Optional full-viewport background fill (blank config keeps the terminal background). */
+    private volatile Color screenBackground;
+
     private final TranscriptRenderer transcriptRenderer = new TranscriptRenderer();
     private volatile Palette palette;
+    private volatile MarkdownStyles markdownStyles;
     private volatile String theme = "dark";
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
@@ -451,9 +455,10 @@ public class TuiCommand implements Runnable {
                 lightTheme ? tuiConfiguration.thinkingOpacityLight() : tuiConfiguration.thinkingOpacityDark();
         final var opacity = Math.clamp(configuredOpacity >= 0 ? configuredOpacity : defaultOpacity, 0.0, 0.95);
         this.thoughtStyle = palette.blended(palette.text(), opacity).italic().dim();
-        // code tokens keep their palette color inside thoughts: only the italic modifier is
-        // layered on (no fg, no dim) so highlighted code stays colourful and readable
-        this.thoughtCodeStyle = Style.EMPTY.italic();
+        // code blocks inside thoughts keep their token colors but are laid out bold (matching
+        // the inline-code weight; the italic-only layer is gone so highest-prominence text is
+        // never italicized away)
+        this.thoughtCodeStyle = Style.EMPTY.bold();
         // categorical thought/output separation: reasoning sits on a subtle full-width
         // info-tinted panel (terminals have no alpha, a pre-blended bg IS the tint)
         this.thoughtBg = palette.mono() ? null : TuiColors.blend(palette.info(), palette.backgroundPanel(), 0.9);
@@ -463,6 +468,17 @@ public class TuiCommand implements Runnable {
         this.toolBg = palette.mono() ? null : TuiColors.blend(palette.text(), palette.backgroundPanel(), 0.95);
         final var toolOpacity = Math.clamp(tuiConfiguration.toolOutputOpacity(), 0.05, 0.95);
         this.toolStyle = palette.blended(palette.text(), toolOpacity);
+        // the markdown theme follows the same palette/code-theme switch so /theme (and
+        // NO_COLOR) restyles bold and inline code too
+        this.markdownStyles = MarkdownTheme.of(
+                this.palette, this.codeTheme, tuiConfiguration.strongColor(), tuiConfiguration.inlineCodeColor());
+        // screen background: blank keeps the terminal background (default), a configured hex
+        // paints the whole viewport first so empty areas match the palette instead of the
+        // terminal scheme (mono and NO_COLOR keep the terminal background)
+        final var configuredBackground = tuiConfiguration.background();
+        this.screenBackground = palette.mono() || configuredBackground == null || configuredBackground.isBlank()
+                ? null
+                : Color.hex(configuredBackground);
     }
 
     @Override
@@ -702,16 +718,46 @@ public class TuiCommand implements Runnable {
             final var outcome = new AtomicReference<ApprovalGate.Result>();
             tui.runLater(() -> {
                 state.dirty = true;
-                state.approval = new Approval(title, detail, latch, outcome);
+                state.approvals.add(new Approval(title, detail, latch, outcome));
             });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
                     if (state.interrupted || renderStalled(state)) {
                         tui.runLater(() -> {
                             state.dirty = true;
-                            if (state.approval != null && state.approval.latch() == latch) {
-                                state.approval = null;
-                            }
+                            state.approvals.removeIf(a -> a.latch() == latch);
+                        });
+                        return ApprovalGate.Result.DENY;
+                    }
+                }
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return ApprovalGate.Result.DENY;
+            }
+            final var r = outcome.get();
+            return r == null ? ApprovalGate.Result.DENY : r;
+        };
+    }
+
+    /**
+     * A gate owned by the given /btw overlay: pending approvals are tagged with the overlay
+     * ordinal so closing the btw modal can deny its pending approvals without touching an
+     * approval requested by the main turn.
+     */
+    private ApprovalGate btwGate(final TuiRunner tui, final UiState state, final long btwOrdinal) {
+        return (title, detail, toolName, args) -> {
+            final var latch = new CountDownLatch(1);
+            final var outcome = new AtomicReference<ApprovalGate.Result>();
+            tui.runLater(() -> {
+                state.dirty = true;
+                state.approvals.add(new Approval(title, detail, latch, outcome, btwOrdinal));
+            });
+            try {
+                while (!latch.await(200, TimeUnit.MILLISECONDS)) {
+                    if (state.interrupted || renderStalled(state)) {
+                        tui.runLater(() -> {
+                            state.dirty = true;
+                            state.approvals.removeIf(a -> a.latch() == latch);
                         });
                         return ApprovalGate.Result.DENY;
                     }
@@ -1227,15 +1273,15 @@ public class TuiCommand implements Runnable {
         if (!(event instanceof final KeyEvent key)) {
             return false;
         }
-        if (state.approval != null) {
-            final var approval = state.approval;
+        if (!state.approvals.isEmpty()) {
+            final var approval = state.approvals.peek();
             if (key.isConfirm()) {
                 final var ok = approval.perform();
-                state.approval = null;
+                state.approvals.poll();
                 notify(state, ok ? "approved" : "denied");
             } else if (key.isCancel() || key.isKey(KeyCode.ESCAPE)) {
                 approval.perform();
-                state.approval = null;
+                state.approvals.poll();
                 notify(state, "denied");
             } else if (key.isKey(KeyCode.LEFT)) {
                 approval.action(approval.action() - 1);
@@ -1582,6 +1628,7 @@ public class TuiCommand implements Runnable {
      */
     private void copySelection(final TuiRunner runner, final UiState state) {
         final var text = state.selection.copy(state.screenGrid);
+        System.err.println("DEBUG copySelection text=[" + text + "] overlay=" + (state.toolOverlay != null));
         if (text == null || text.length() <= 1 || text.isBlank()) {
             return;
         }
@@ -1737,7 +1784,10 @@ public class TuiCommand implements Runnable {
             btw(parts.length > 1 ? parts[1].strip() : "", runner, state);
             return;
         }
-        state.model.appendTranscript("\n\n---\n\n**You**\n\n`" + text + "`\n");
+        // the user prompt is transcribed as plain markdown (no backticks): wrapping it in
+        // an inline-code span made slash commands look exactly like `code`; plain text (under
+        // the You bar) stays visually distinct from code tokens
+        state.model.appendTranscript("\n\n---\n\n**You**\n\n" + text + "\n");
         // the TUI keeps its modal-driven plan editor (Enter/Esc handling needs the widget stack)
         if ("editplan".equals(parts[0].toLowerCase(Locale.ROOT))) {
             editPlan(parts.length > 1 ? parts[1].strip() : "", runner, state);
@@ -1777,7 +1827,8 @@ public class TuiCommand implements Runnable {
                         state.session.runtime() != null
                                 ? state.session.runtime().usage()
                                 : null,
-                        cancelled::get)
+                        cancelled::get,
+                        btwGate(runner, state, ordinal))
                 .whenComplete((answer, error) ->
                         runLater(state, () -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
     }
@@ -1817,6 +1868,16 @@ public class TuiCommand implements Runnable {
         state.btw = null;
         if (btw != null) {
             btw.cancelled().set(true);
+            // deny any approval the btw loop is still waiting on so its virtual thread
+            // wakes up instead of blocking forever; approvals from the main turn are kept.
+            final var it = state.approvals.iterator();
+            while (it.hasNext()) {
+                final var approval = it.next();
+                if (approval.btwOrdinal() == btw.ordinal()) {
+                    approval.deny();
+                    it.remove();
+                }
+            }
         }
     }
 
@@ -2305,8 +2366,8 @@ public class TuiCommand implements Runnable {
             }
         } else if (state.picker != null) {
             state.picker.move(delta);
-        } else if (state.approval != null) {
-            final var approval = state.approval;
+        } else if (!state.approvals.isEmpty()) {
+            final var approval = state.approvals.peek();
             approval.detailScroll(scrollService.apply(approval.detailScroll(), delta));
         } else if (state.btw != null) {
             state.btw = withBtwScroll(state.btw, delta);
@@ -2769,6 +2830,11 @@ public class TuiCommand implements Runnable {
         state.lastRenderTick = clock.millis();
         state.dirty = false;
         frameZones.clear();
+        if (screenBackground != null) {
+            // paint the configured viewport background before any widget so blank screen areas
+            // match the palette; widgets with their own background draw over it
+            frame.buffer().fill(frame.area(), new dev.tamboui.buffer.Cell(" ", Style.EMPTY.bg(screenBackground)));
+        }
         if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
             state.spinnerTick++;
         }
@@ -2872,7 +2938,7 @@ public class TuiCommand implements Runnable {
         if (state.picker != null) {
             renderPicker(frame, state);
         }
-        if (state.approval != null) {
+        if (!state.approvals.isEmpty()) {
             renderApproval(frame, state);
         }
         if (state.feedbackPrompt != null) {
@@ -2887,7 +2953,9 @@ public class TuiCommand implements Runnable {
         if (state.errorDetail != null && state.errorOpen) {
             renderErrorDetail(frame, state);
         }
-        if (state.btw != null) {
+        // /btw is hidden while an approval is pending: the approval must stay on top and keep
+        // its sole focus, and the overlay state survives so it reappears once resolved.
+        if (state.approvals.isEmpty() && state.btw != null) {
             renderBtw(frame, state);
         }
         renderToast(frame, state);
@@ -2985,7 +3053,7 @@ public class TuiCommand implements Runnable {
      * fall back to ASCII ({@code tui.glyphs=ascii}).
      */
     private String tabStatusIcon(final UiState state) {
-        if (state.approval != null) {
+        if (!state.approvals.isEmpty()) {
             return "!";
         }
         if (state.feedbackPrompt != null) {
@@ -3342,9 +3410,9 @@ public class TuiCommand implements Runnable {
     /**
      * Renders a thought region (flushed or live) italicized behind the thin bar. Prose is
      * rendered by the markdown engine on the italic thought base; fenced code blocks are
-     * split and syntax-highlighted like normal output, then every token span is italicized
-     * (keeping its token color) so code stays readable and colour-coded inside thoughts. The
-     * flushed marker text carries a bold `**Thinking**` header mimicking a speaker heading -
+     * split and syntax-highlighted like normal output, then every token span is laid out
+     * bold (keeping its token color) so code stays readable and colour-coded inside thoughts.
+     * The flushed marker text carries a bold `**Thinking**` header mimicking a speaker heading -
      * it is stripped and replaced by the lowercase panel label below.
      */
     private List<Line> thoughtLines(final String text, final int width) {
@@ -3358,19 +3426,32 @@ public class TuiCommand implements Runnable {
         return lines;
     }
 
-    /** Renders one thought source region (prose or fenced code) into existing output lines. */
+    /**
+     * Renders one thought source region (prose or fenced code) into existing output lines.
+     * <p>
+     * Fenced blocks are split out of the prose and highlighted separately, so consecutive segments
+     * are independent block groups: one blank row is kept between them, exactly like the sibling
+     * blocks of a single markdown document get from the markdown walk. Without it a fenced block
+     * glues to the paragraph above it, which is what made thoughts read denser than they are.
+     */
     private void appendThoughtBody(final List<Line> lines, final String source, final int width) {
+        final var body = new ArrayList<Line>();
         for (final var seg : syntaxHighlighter.split(source)) {
+            final List<Line> rendered;
             if (seg.type() == SyntaxHighlighter.Segment.Type.CODE) {
-                final var highlighted = MarkdownLines.wrapCode(
-                        italicizeCode(syntaxHighlighter.highlightLines(seg.language(), seg.text())), width);
-                lines.addAll(withBar(highlighted, thoughtBar()));
+                rendered = withBar(
+                        MarkdownLines.wrapCode(
+                                boldedCode(syntaxHighlighter.highlightLines(seg.language(), seg.text())), width),
+                        thoughtBar());
             } else if (!seg.text().isBlank()) {
-                lines.addAll(withBar(
-                        transcriptRenderer.renderRegion(seg.text(), width, thoughtStyle, MarkdownStyles.DEFAULTS),
-                        thoughtBar()));
+                rendered = withBar(
+                        transcriptRenderer.renderRegion(seg.text(), width, thoughtStyle, markdownStyles), thoughtBar());
+            } else {
+                continue;
             }
+            TranscriptRenderer.appendBlocks(body, rendered, true);
         }
+        lines.addAll(body);
     }
 
     /**
@@ -3401,12 +3482,17 @@ public class TuiCommand implements Runnable {
         }
         final var out = new ArrayList<Line>(lastLiveThoughtLines.size() + 16);
         out.addAll(lastLiveThoughtLines);
-        appendThoughtBody(out, suffix, width);
+        // the memoized prefix and the still-open suffix are two independent renders: a paragraph
+        // separator that falls on the cut would be lost, so it is restored from the source
+        final var suffixLines = new ArrayList<Line>();
+        appendThoughtBody(suffixLines, suffix, width);
+        TranscriptRenderer.appendBlocks(
+                out, suffixLines, TranscriptRenderer.boundaryBlanks(prefix, suffix) > 0, !suffix.isBlank());
         return out;
     }
 
-    /** Applies the thought italic to every span of a highlighted code block, preserving token colors. */
-    private List<Line> italicizeCode(final List<Line> lines) {
+    /** Applies the thought code style (bold) to every span of a highlighted code block, preserving token colors. */
+    private List<Line> boldedCode(final List<Line> lines) {
         final var out = new ArrayList<Line>(lines.size());
         for (final var line : lines) {
             final var spans = new ArrayList<Span>(line.spans().size());
@@ -3418,24 +3504,55 @@ public class TuiCommand implements Runnable {
         return out;
     }
 
+    /**
+     * Renders a final answer body as rendered chunks (a fenced block is split out of the prose and
+     * boxed on its own chunk).
+     * <p>
+     * Consecutive segments are independent block groups: a blank chunk is inserted between them,
+     * exactly like the sibling blocks of a single markdown document get from the markdown walk.
+     * Without it a fenced block glues to the paragraph above it, and since the answer body is
+     * streamed the same way a thought is, a paragraph separator can also fall on a chunk cut.
+     */
     private void appendChunks(
             final List<RenderedChunk> out,
             final String md,
             final int width,
             final UiState state,
             final List<String> rows) {
+        var anySegment = false;
         for (final var seg : syntaxHighlighter.split(md)) {
+            if (anySegment && !rows.isEmpty()) {
+                // blank row between two block groups: a turn header already brings its own spacer
+                addMarkdownChunk(out, List.of(Line.empty()), rows);
+                anySegment = false;
+            }
             if (seg.type() == SyntaxHighlighter.Segment.Type.TEXT) {
                 for (final var turn : TuiTranscriptModel.splitTurns(seg.text())) {
                     if (turn.text().isBlank()) {
                         continue;
                     }
-                    final var lines = withBar(
-                            transcriptRenderer.renderRegion(turn.text(), width, Style.EMPTY, MarkdownStyles.DEFAULTS),
-                            turn.user() ? userBar() : outputBar());
+                    // the `**You**`/`**Assistant**` marker is split out of the rendered body
+                    // and drawn back as a turn header (blank line + role-colored label + rule
+                    // to the panel edge): the boundary must stay readable when scrolling back,
+                    // which a single gray word at the text indent could not convey. A labelled
+                    // segment starts on the marker line, so drop exactly that first line.
+                    final var markerEnd = turn.labelled() ? turn.text().indexOf('\n') : -1;
+                    final var body = markerEnd < 0
+                            ? turn.text()
+                            : turn.text().substring(markerEnd + 1).stripLeading();
+                    final var bar = turn.user() ? userBar() : outputBar();
+                    final var lines = new ArrayList<>(
+                            withBar(transcriptRenderer.renderRegion(body, width, Style.EMPTY, markdownStyles), bar));
+                    if (turn.labelled()) {
+                        lines.add(0, turnHeader(turn.user(), width));
+                        // spacer row above the header: two turns must never read as one
+                        lines.add(0, Line.from(bar));
+                    }
                     addMarkdownChunk(out, lines, rows);
+                    anySegment = true;
                 }
             } else {
+                anySegment = false;
                 final var lang = seg.language();
                 final var text = syntaxHighlighter.highlight(lang, seg.text());
                 // wrap at box inner width minus the code block's horizontal padding
@@ -3455,6 +3572,7 @@ public class TuiCommand implements Runnable {
                                 .overflow(Overflow.CLIP)
                                 .scroll(Math.clamp(innerH - 1, 0, skip))
                                 .build()));
+                anySegment = true;
             }
         }
     }
@@ -3578,7 +3696,8 @@ public class TuiCommand implements Runnable {
         if (!card.output().isBlank()) {
             lines.add(Line.empty());
             // ask_user answers read better as key: value pairs than raw JSON
-            var outputLines = toolBodyLines(card.name(), null, card.output(), innerW, card.isDiff(diffRenderer));
+            var outputLines = toolBodyLines(
+                    card.name(), card.keyCommand(), null, card.output(), innerW, card.isDiff(diffRenderer));
             // keep the card compact: a short inline preview, the rest lives behind
             // the "click to expand" footer / Ctrl+O overlay
             final var clipped = outputLines.size() > MAX_INLINE_TOOL_LINES;
@@ -3742,6 +3861,25 @@ public class TuiCommand implements Runnable {
      */
     private Span thoughtBar() {
         return Span.styled("│ ", thoughtBarStyle);
+    }
+
+    /**
+     * Header line opening a speaker turn: a role-colored label followed by a rule running
+     * to the panel edge. The rule is what makes the block boundary survive scrolling back
+     * through a long transcript - a bare label at the text indent reads as another line of
+     * prose. Both spans share the role color so the header reads as one unit; mono mode
+     * keeps the role in the glyph shape because colors collapse to the terminal default.
+     *
+     * @param user {@code true} for a user turn
+     * @param width content width available to the turn (bar already excluded)
+     */
+    private Line turnHeader(final boolean user, final int width) {
+        final var color = user ? palette.primary() : palette.accent();
+        final var label = user ? "You" : "Assistant";
+        final var head = (palette.mono() ? glyphs.roleMark(user) : glyphs.turnMark()) + " " + label;
+        // the rule fills whatever the label left, never overflowing the panel
+        final var rule = glyphs.rule().repeat(Math.max(0, width - head.length() - 1));
+        return Line.from(Span.styled(head, palette.bold(color)), Span.styled(" " + rule, palette.style(color)));
     }
 
     private List<Line> withBar(final List<Line> lines, final Span bar) {
@@ -4006,12 +4144,24 @@ public class TuiCommand implements Runnable {
         // topmost pane a press can resolve to
         frameZones.add(inner);
         final var lines = new ArrayList<Line>();
+        // the active row reads as a highlighted selection: accent bold foreground on a subtle
+        // accent-tinted backdrop (padding the row so the backdrop spans the whole popup width)
+        final var selectedStyle = Style.EMPTY
+                .fg(Color.hex(palette.accent()))
+                .bold()
+                .bg(TuiColors.blend(palette.accent(), palette.backgroundPanel(), 0.85));
         for (var i = 0; i < visible; i++) {
             final var selected = i == (state.completionIndex % items.size());
             final var item = items.get(i);
-            final var style = selected ? accent.bold() : textStyle;
+            final var style = selected ? selectedStyle : textStyle;
             final var marker = selected ? "> " : "  ";
-            lines.add(Line.from(Span.styled(marker + item, style)));
+            if (selected) {
+                final var content = marker + item;
+                lines.add(Line.from(Span.styled(
+                        content + " ".repeat(Math.max(0, inner.width() - content.length())), style)));
+            } else {
+                lines.add(Line.from(Span.styled(marker + item, style)));
+            }
         }
         frame.renderWidget(
                 Paragraph.builder()
@@ -4567,16 +4717,28 @@ public class TuiCommand implements Runnable {
         return summary == null || summary.isBlank() ? (sub.task() == null ? "" : sub.task()) : summary;
     }
 
-    /** Renders one non-thought subagent-region body (prose or fenced code) into plain modal lines. */
+    /**
+     * Renders one non-thought subagent-region body (prose or fenced code) into plain modal lines.
+     * <p>
+     * As for thoughts, consecutive segments are independent block groups (a fenced block is split
+     * out of the prose and highlighted separately) so one blank row is kept between them, like the
+     * markdown walk does for the sibling blocks of a single document.
+     */
     private void appendModalRegion(final List<Line> rows, final String text, final int width, final Style base) {
+        final var body = new ArrayList<Line>();
         for (final var seg : syntaxHighlighter.split(text)) {
+            final List<Line> rendered;
             if (seg.type() == SyntaxHighlighter.Segment.Type.CODE) {
-                rows.addAll(MarkdownLines.wrapCode(
-                        syntaxHighlighter.highlightLines(seg.language(), seg.text()), Math.max(1, width - 4)));
+                rendered = MarkdownLines.wrapCode(
+                        syntaxHighlighter.highlightLines(seg.language(), seg.text()), Math.max(1, width - 4));
             } else if (!seg.text().isBlank()) {
-                rows.addAll(transcriptRenderer.renderRegion(seg.text(), width, base, MarkdownStyles.DEFAULTS));
+                rendered = transcriptRenderer.renderRegion(seg.text(), width, base, markdownStyles);
+            } else {
+                continue;
             }
+            TranscriptRenderer.appendBlocks(body, rendered, true);
         }
+        rows.addAll(body);
     }
 
     private void renderBtw(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -4596,8 +4758,7 @@ public class TuiCommand implements Runnable {
         } else if (btw.error() != null) {
             lines.add(Line.from(Span.styled("failed: " + btw.error(), Style.EMPTY.fg(Color.hex(palette.error())))));
         } else {
-            lines.addAll(
-                    transcriptRenderer.renderRegion(btw.answer(), inner.width(), Style.EMPTY, MarkdownStyles.DEFAULTS));
+            lines.addAll(transcriptRenderer.renderRegion(btw.answer(), inner.width(), Style.EMPTY, markdownStyles));
         }
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
@@ -4708,8 +4869,7 @@ public class TuiCommand implements Runnable {
     /** Key/mouse handling while the full tool output overlay is open. */
     private boolean onToolOverlayEvent(final Event event, final TuiRunner runner, final UiState state) {
         if (event instanceof final MouseEvent mouse) {
-            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
-            return true;
+            return onModalMouse(mouse, runner, state);
         }
         if (!(event instanceof final KeyEvent key)) {
             return false;
@@ -4721,6 +4881,10 @@ public class TuiCommand implements Runnable {
             state.toolOverlay = null;
             return true;
         }
+        if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
+            copySelection(runner, state);
+            return true;
+        }
         if (key.isCharIgnoreCase('c')) {
             copyText(runner, state, state.toolOverlay.entry().output());
             return true;
@@ -4729,18 +4893,58 @@ public class TuiCommand implements Runnable {
         return true;
     }
 
-    /** Full-screen scrollable view of the uncapped output of one tool call. */
+    /**
+     * Mouse handling shared by the modal dialogs (tool output, error details).
+     * <p>
+     * The wheel never reaches here - {@link #scrollTopOverlay(MouseEvent, UiState)} routed
+     * it to the topmost scrollable view first - so the remaining events are only the
+     * selection gestures. They are forwarded to the global selection engine instead of
+     * being dropped: {@link #modal(dev.tamboui.terminal.Frame, Rect, String, Color)}
+     * registers the dialog area as a copy zone precisely so a drag started on it stays
+     * confined to the dialog, which is what makes its content selectable and copyable.
+     */
+    private boolean onModalMouse(final MouseEvent mouse, final TuiRunner runner, final UiState state) {
+        if (mouse.isScroll()) {
+            return true;
+        }
+        if (mouse.isPress() && mouse.isLeftButton()) {
+            state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
+            return true;
+        }
+        if (mouse.kind() == MouseEventKind.DRAG && mouse.isLeftButton()) {
+            state.selection.drag(mouse.x(), mouse.y(), state.screenGrid);
+            return true;
+        }
+        if (mouse.isRelease() && mouse.isLeftButton()) {
+            copySelection(runner, state);
+            return true;
+        }
+        if (mouse.isPress()) {
+            state.selection.clear();
+            return true;
+        }
+        return true;
+    }
+
     /**
      * Shared renderer for tool output bodies (inline cards and the Ctrl+O overlay):
-     * ask_user answers first, then format detection (markdown/JSON/XML/YAML/diff),
+     * ask_user answers first, then format detection (diff/JSON/XML/code/yaml/markdown),
      * always falling back to the historical rendering on any failure.
+     *
+     * @param command the command that produced the output, used to color it as code
+     *                ({@code null} when unknown, eg. for write_file/edit_file)
      */
     private List<Line> toolBodyLines(
-            final String name, final String args, final String output, final int width, final boolean isDiff) {
+            final String name,
+            final String command,
+            final String args,
+            final String output,
+            final int width,
+            final boolean isDiff) {
         if (output == null || output.isBlank()) {
             return List.of();
         }
-        final var body = renderToolBody(name, output, width, isDiff);
+        final var body = renderToolBody(name, command, output, width, isDiff);
         if (args == null || args.isBlank()) {
             return body;
         }
@@ -4757,7 +4961,8 @@ public class TuiCommand implements Runnable {
         return all;
     }
 
-    private List<Line> renderToolBody(final String name, final String output, final int width, final boolean isDiff) {
+    private List<Line> renderToolBody(
+            final String name, final String command, final String output, final int width, final boolean isDiff) {
         final var answers = "ask_user".equals(name) ? askUserCardRenderer.render(output, palette) : null;
         if (answers != null) {
             return answers;
@@ -4766,12 +4971,14 @@ public class TuiCommand implements Runnable {
             if (!formatToolOutput) {
                 return legacyBody(output, width, isDiff);
             }
-            return switch (toolOutputFormat.detect(output)) {
+            final var language = ToolOutputLanguage.guess(output, command);
+            return switch (toolOutputFormat.detect(output, language)) {
                 case DIFF -> diffRenderer.render(output, width, palette);
                 case JSON -> syntaxHighlighter.highlightLines("json", toolOutputFormat.prettyJson(output));
                 case XML -> syntaxHighlighter.highlightLines("xml", toolOutputFormat.prettyXml(output));
+                case CODE -> toolCodeLines(output, width, language);
                 case YAML -> syntaxHighlighter.highlightLines("yaml", output);
-                case MARKDOWN -> transcriptRenderer.renderRegion(output, width, toolStyle, MarkdownStyles.DEFAULTS);
+                case MARKDOWN -> transcriptRenderer.renderRegion(output, width, toolStyle, markdownStyles);
                 case TEXT -> toolOutputLines(output, width, false);
             };
         } catch (final RuntimeException e) {
@@ -4779,8 +4986,38 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    /**
+     * Syntax colored output, one source line per row: the highlighter tokenizes per line
+     * and {@link MarkdownLines#wrapCode(List, int)} only hard-wraps what does not fit, so a
+     * wrong language guess costs colors, never the layout (which is exactly what the
+     * markdown/table detection used to cost).
+     */
+    private List<Line> toolCodeLines(final String output, final int width, final String language) {
+        return MarkdownLines.wrapCode(syntaxHighlighter.highlightLines(language, output), Math.max(1, width));
+    }
+
     private List<Line> legacyBody(final String output, final int width, final boolean isDiff) {
         return isDiff ? diffRenderer.render(output, width, palette) : toolOutputLines(output, width, false);
+    }
+
+    /**
+     * The command a recorded tool call ran, extracted from its raw arguments JSON so the
+     * overlay can color the output as code ({@link ToolOutputLanguage}). Null when the
+     * tool has no command (write_file, edit_file...) or the payload is unreadable.
+     */
+    private String toolCommandOf(final ToolOutputStore.Entry entry) {
+        if (entry.args() == null || entry.args().isBlank()) {
+            return null;
+        }
+        try {
+            final var args = toolOutputFormat.parseArguments(entry.args());
+            if (args != null && args.get("command") instanceof final String command && !command.isBlank()) {
+                return command;
+            }
+        } catch (final RuntimeException e) {
+            // not JSON: no command hint, the output signals then have to speak
+        }
+        return null;
     }
 
     private void renderToolOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -4793,7 +5030,8 @@ public class TuiCommand implements Runnable {
         if (inner == null) {
             return;
         }
-        final var body = toolBodyLines(entry.name(), entry.args(), entry.output(), inner.width(), false);
+        final var body =
+                toolBodyLines(entry.name(), toolCommandOf(entry), entry.args(), entry.output(), inner.width(), false);
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(inner);
@@ -4812,11 +5050,13 @@ public class TuiCommand implements Runnable {
                             .build(),
                     splits.getFirst());
         }
+        final var hint =
+                "Ctrl+O/q/Esc close | Wheel/Up/Down scroll | c copy output | drag or Ctrl+Shift+C copies the selection ";
         final var footer = " "
                 + (entry.args() == null || entry.args().isBlank()
                         ? ""
-                        : ellipsize(entry.args(), Math.max(1, inner.width() - 42)) + "  ")
-                + "Ctrl+O/q/Esc close | Wheel/Up/Down scroll | c copy output ";
+                        : ellipsize(entry.args(), Math.max(1, inner.width() - hint.length() - 3)) + "  ")
+                + hint;
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(footer, Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
@@ -4831,8 +5071,7 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (event instanceof final MouseEvent mouse) {
-            // the wheel is routed to the topmost scrollable view by scrollTopOverlay
-            return true;
+            return onModalMouse(mouse, runner, state);
         }
         if (!(event instanceof final KeyEvent key)) {
             return false;
@@ -4842,6 +5081,10 @@ public class TuiCommand implements Runnable {
                 || key.isCharIgnoreCase('q')
                 || (key.hasAlt() && key.isCharIgnoreCase('e'))) {
             state.errorOpen = false;
+            return true;
+        }
+        if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
+            copySelection(runner, state);
             return true;
         }
         if (key.isCharIgnoreCase('c')) {
@@ -4898,7 +5141,7 @@ public class TuiCommand implements Runnable {
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(Line.from(Span.styled(
-                                " Esc close | Wheel/Up/Down scroll | c copy ",
+                                " Esc close | Wheel/Up/Down scroll | c copy | drag or Ctrl+Shift+C copies the selection ",
                                 Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
@@ -5100,7 +5343,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void renderApproval(final dev.tamboui.terminal.Frame frame, final UiState state) {
-        final var approval = state.approval;
+        final var approval = state.approvals.peek();
         final var width = Math.min(Math.max(60, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(12, frame.height() * 2 / 3), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.2);
@@ -5731,6 +5974,9 @@ public class TuiCommand implements Runnable {
         private final String detail;
         private final CountDownLatch latch;
         private final AtomicReference<ApprovalGate.Result> outcome;
+        /** The /btw overlay that owns this approval, or -1 for a main-turn approval. */
+        private final long btwOrdinal;
+
         private int action;
         private int detailScroll;
 
@@ -5739,10 +5985,20 @@ public class TuiCommand implements Runnable {
                 final String detail,
                 final CountDownLatch latch,
                 final AtomicReference<ApprovalGate.Result> outcome) {
+            this(title, detail, latch, outcome, -1);
+        }
+
+        private Approval(
+                final String title,
+                final String detail,
+                final CountDownLatch latch,
+                final AtomicReference<ApprovalGate.Result> outcome,
+                final long btwOrdinal) {
             this.title = title;
             this.detail = detail;
             this.latch = latch;
             this.outcome = outcome;
+            this.btwOrdinal = btwOrdinal;
             this.action = 0; // default-deny: focus Deny first
         }
 
@@ -5772,6 +6028,16 @@ public class TuiCommand implements Runnable {
 
         private void detailScroll(final int detailScroll) {
             this.detailScroll = Math.max(0, detailScroll);
+        }
+
+        private long btwOrdinal() {
+            return btwOrdinal;
+        }
+
+        /** Resolves the approval to a plain Deny without user interaction (e.g. when /btw is closed while pending). */
+        private void deny() {
+            outcome.set(ApprovalGate.Result.DENY);
+            latch.countDown();
         }
 
         /** Resolves and performs the currently focused action, releasing the gate latch. Returns true when the call is allowed. */
@@ -6132,7 +6398,14 @@ public class TuiCommand implements Runnable {
         private volatile CompletableFuture<Boolean> inFlight;
         private volatile boolean historyActive;
         private volatile String historyDraft = "";
-        private volatile Approval approval;
+        /**
+         * Pending approval dialogs (head = currently displayed), FIFO. Both the main agent
+         * turn and a /btw side answer can need the user at the same time: each is enqueued
+         * by its gate invocation and resolved one after the other, so a late approval never
+         * steals the visible dialog of an earlier one.
+         */
+        private final java.util.Deque<Approval> approvals = new java.util.concurrent.ConcurrentLinkedDeque<>();
+
         private volatile FeedbackPrompt feedbackPrompt;
         private volatile PickerPrompt picker;
         private volatile PendingEditPlan editPlan;

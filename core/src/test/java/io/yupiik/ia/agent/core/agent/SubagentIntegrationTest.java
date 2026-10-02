@@ -21,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
@@ -49,6 +48,7 @@ import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.CheckSubagentsTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import java.io.IOException;
@@ -60,19 +60,28 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class SubagentIntegrationTest {
     @TempDir
     Path storageHome;
+
+    private JsonMapper mapper;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     private final List<AgentEvent> events = new ArrayList<>();
 
@@ -140,10 +149,6 @@ class SubagentIntegrationTest {
                         null);
             }
         };
-    }
-
-    private JsonMapper jsonMapper() {
-        return new JsonMapperImpl(List.of(), k -> Optional.empty());
     }
 
     private SessionStore noopStore() {
@@ -553,7 +558,7 @@ class SubagentIntegrationTest {
                         }
                     }
                 },
-                jsonMapper(),
+                mapper,
                 new io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph() {
                     @Override
                     public void ensureReadyAsync() {}
@@ -585,7 +590,7 @@ class SubagentIntegrationTest {
         final var requests = new ArrayList<List<Message>>();
         final var replies = new ArrayDeque<>(List.of(new ScriptedReply("subagent result", "stop")));
         final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "task").orElseThrow();
         runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
@@ -632,7 +637,7 @@ class SubagentIntegrationTest {
         runner1.awaitCompletion(s1);
         runner2.awaitCompletion(s2);
 
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
         final var c1 = checkTool.execute(Map.of("action", "collect", "subagent_id", s1.id()));
         final var c2 = checkTool.execute(Map.of("action", "collect", "subagent_id", s2.id()));
         assertTrue(c1.success(), c1.output());
@@ -661,7 +666,7 @@ class SubagentIntegrationTest {
         final var requests = new ArrayList<List<Message>>();
 
         final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "long task").orElseThrow();
         runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
@@ -688,7 +693,7 @@ class SubagentIntegrationTest {
         final var requests = new ArrayList<List<Message>>();
 
         final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "failing task").orElseThrow();
         runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
@@ -712,7 +717,7 @@ class SubagentIntegrationTest {
         final var requests = new ArrayList<List<Message>>();
 
         final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var cancelled = new AtomicBoolean(false);
         final var state = reg.start("parent", "task").orElseThrow();
@@ -721,6 +726,12 @@ class SubagentIntegrationTest {
 
         // Tool is waiting on releaseLatch - parent cancels
         cancelled.set(true);
+
+        // Release the latch so the in-flight tool returns right away: the cancellation probe is
+        // only read at iteration boundaries, so the loop cannot make progress until this tool
+        // completed - without the release the tool would block for its whole 10s timeout and the
+        // test would assert the same thing 10s later
+        releaseLatch.countDown();
 
         // Wait for sub-agent to process cancellation
         state.awaitResult();
@@ -793,7 +804,7 @@ class SubagentIntegrationTest {
         final var requests = new ArrayList<List<Message>>();
 
         final var runner = newRunner(scriptedClient(replies, requests), toolReg, reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "read something").orElseThrow();
         runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
@@ -811,7 +822,7 @@ class SubagentIntegrationTest {
         final var requests = new ArrayList<List<Message>>();
 
         final var runner = newRunner(scriptedClient(replies, requests), emptyToolRegistry(), reg, cfg);
-        final var checkTool = new CheckSubagentsTool(reg, jsonMapper());
+        final var checkTool = new CheckSubagentsTool(reg, mapper);
 
         final var state = reg.start("parent", "task").orElseThrow();
         runner.runAsync(state, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);

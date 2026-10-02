@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -36,8 +37,10 @@ class MarkdownColorizerTest {
         assertTrue(heading.contains("Title"));
         assertTrue(heading.contains("\u001b[1m"));
         final var bullet = colorizer.colorizeLine("- use `yca cli` today");
-        assertTrue(bullet.contains("`yca cli`"));
+        assertTrue(bullet.contains("yca cli"));
         assertTrue(bullet.contains("\u001b["));
+        assertFalse(bullet.contains("`yca cli`"), "backtick delimiters are dropped from the render");
+        assertTrue(bullet.contains("\u001b[1m"), "inline code is bold like the TUI");
     }
 
     @Test

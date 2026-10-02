@@ -21,28 +21,35 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.time.Clock;
-import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class ModelStyleServiceTest {
 
     @TempDir
     Path storageHome;
 
+    private JsonMapper mapper;
     private ChatClient chatClient;
     private ModelStyleService service;
     private ProviderManager providerManager;
+
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
 
     @AfterEach
     void tearDown() {
@@ -52,7 +59,6 @@ class ModelStyleServiceTest {
     }
 
     private void init() {
-        final JsonMapper mapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
         final CodingAgentConfiguration cfg = TestConfigs.codingAgent(Map.ofEntries(
                 Map.entry("yca.storageHome", storageHome.toString()),
                 Map.entry("yca.provider.providers.length", "2"),

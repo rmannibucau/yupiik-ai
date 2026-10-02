@@ -27,7 +27,7 @@ import dev.tamboui.tui.event.MouseButton;
 import dev.tamboui.tui.event.MouseEvent;
 import dev.tamboui.tui.event.PasteEvent;
 import io.yupiik.fusion.framework.api.event.Emitter;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
@@ -39,6 +39,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
@@ -60,6 +61,7 @@ import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -79,6 +81,7 @@ import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
 
@@ -90,6 +93,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 // TuiCommand, which hijacks the JVM-wide "io.yupiik" java.util.logging logger and gives up when
 // another handler is already installed. See TuiCommand.redirectLoggerToUi.
 @ResourceLock("io.yupiik-jul-handler")
+@ExtendWith(TestJsonMapper.class)
 class TuiCommandRenderTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
     private static final Duration TICK_RATE = Duration.ofMillis(2);
@@ -103,22 +107,14 @@ class TuiCommandRenderTest {
     private final AtomicReference<TuiRunner> tuiRef = new AtomicReference<>();
     private Thread uiThread;
 
-    private JsonMapperImpl formatMapper;
+    private JsonMapper formatMapper;
     private final List<String> sessionAppends = new ArrayList<>();
 
     @BeforeEach
-    void start() throws IOException {
-        formatMapper = new JsonMapperImpl(List.of(), key -> java.util.Optional.empty());
+    void start(final JsonMapper mapper) throws IOException {
+        formatMapper = mapper;
         llm = new MockLlmServer();
         backend = new HeadlessBackend();
-    }
-
-    @AfterEach
-    void closeFormatMapper() {
-        if (formatMapper != null) {
-            formatMapper.close();
-            formatMapper = null;
-        }
     }
 
     @AfterEach
@@ -135,6 +131,58 @@ class TuiCommandRenderTest {
 
     private static String sid(final ShellRegistry registry) {
         return registry.sessions().iterator().next();
+    }
+
+    @Test
+    void rendersTurnHeadersWithRule() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-render-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        awaitText("say hi");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("hello from stub");
+        awaitText("ready");
+
+        // a labelled turn opens with a role-colored label and a rule running to the panel
+        // edge; this is what keeps the "You"/"Assistant" boundary readable while scrolling
+        assertTrue(
+                anyRowContaining("\u258c You \u2500"),
+                "the user turn header and rule should be rendered:\n" + backend.text());
+        assertTrue(
+                anyRowContaining("\u258c Assistant \u2500"),
+                "the assistant turn header and rule should be rendered:\n" + backend.text());
+
+        quit();
     }
 
     @Test
@@ -595,7 +643,7 @@ class TuiCommandRenderTest {
             final AgentLoop agentLoop,
             final boolean showThinking,
             final UsageTracker usageTracker) {
-        final var mapper = MockLlmServer.mapper();
+        final var mapper = formatMapper;
         return command(shellRegistry, agentLoop, showThinking, usageTracker, new TodoStore(configuration(), mapper));
     }
 
@@ -615,7 +663,7 @@ class TuiCommandRenderTest {
             final UsageTracker usageTracker,
             final TodoStore todoStore,
             final Clock clock) {
-        final var mapper = MockLlmServer.mapper();
+        final var mapper = formatMapper;
         final var configuration = configuration();
         return command(
                 shellRegistry,
@@ -635,13 +683,13 @@ class TuiCommandRenderTest {
             final TodoStore todoStore,
             final Clock clock,
             final SubagentRegistry subagentRegistry) {
-        final var mapper = MockLlmServer.mapper();
+        final var mapper = formatMapper;
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark", true);
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
-                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", 4000L, 3500L, true, "unicode", "auto", "auto",
-                List.of(), null, true, 3, 10);
+                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", "auto", "auto", 4000L, 3500L, true, "unicode",
+                "auto", "auto", List.of(), null, true, 3, 10, "");
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -670,9 +718,8 @@ class TuiCommandRenderTest {
                 List.of(),
                 new io.yupiik.fusion.httpclient.core.ExtendedHttpClient(
                         new io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration()
-                                .setDelegate(java.net.http.HttpClient.newBuilder()
-                                        .version(java.net.http.HttpClient.Version.HTTP_1_1)
-                                        .build())));
+                                .setDelegate(
+                                        java.net.http.HttpClient.newBuilder().build())));
         final var factory = new TuiRunnerFactory() {
             @Override
             public TuiRunner create(final TuiCommand.TuiConf tuiConf, final boolean hideCursor) throws Exception {
@@ -763,6 +810,9 @@ class TuiCommandRenderTest {
                         configuration,
                         new VirtualThreadExecutor(),
                         new ToolCallMarkupStripper(),
+                        new ToolCallMarkupParser(),
+                        null,
+                        null,
                         null,
                         null,
                         null),
@@ -803,7 +853,7 @@ class TuiCommandRenderTest {
                 stubAgentLoop(),
                 true,
                 newUsageTracker(),
-                new TodoStore(configuration(), MockLlmServer.mapper()),
+                new TodoStore(configuration(), formatMapper),
                 clock);
         uiThread = new Thread(command, "tui-thinking-tool-timer-test");
         uiThread.setDaemon(true);
@@ -833,7 +883,7 @@ class TuiCommandRenderTest {
                 stubAgentLoop(),
                 true,
                 newUsageTracker(),
-                new TodoStore(configuration(), MockLlmServer.mapper()),
+                new TodoStore(configuration(), formatMapper),
                 clock);
         uiThread = new Thread(command, "tui-thinking-timer-reset-test");
         uiThread.setDaemon(true);
@@ -882,6 +932,55 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void streamedThoughtsKeepTheBlankLineBetweenParagraphs() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-thinking-blank-line-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a paragraph separator streamed while the thought is still open must survive on screen:
+        // the live tail is cut at a newline and the two halves parsed independently, so without
+        // restoring the separator the paragraphs render glued (which is what made thoughts read dense)
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first paragraph", sid(shellRegistry)));
+        awaitText("first paragraph");
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("\n\nsecond", sid(shellRegistry)));
+        awaitText("second");
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta(" paragraph", sid(shellRegistry)));
+        awaitText("second paragraph");
+        // the flushed render (the live region is replaced by the memoized one) must keep it too
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+        awaitText("answer");
+        assertBlankRowBetween("first paragraph", "second paragraph");
+
+        quit();
+    }
+
+    @Test
+    void streamedThoughtsKeepTheBlankLineAroundAFence() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-thinking-blank-fence-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a fenced block is split out of the prose and highlighted on its own: it must not glue to
+        // the paragraph above it, and must not leave a phantom row after it either
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta(
+                "let's inspect\n\n```java\npublic int x() {\n return 1;\n}\n```", sid(shellRegistry)));
+        awaitText("public int x()");
+        shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
+        awaitText("answer");
+        assertBlankRowBetween("let's inspect", "public int x()");
+
+        quit();
+    }
+
+    @Test
     void assistantAnswerRendersFencedCodeIndentedAndHighlighted() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
@@ -922,7 +1021,7 @@ class TuiCommandRenderTest {
     void collapsedTodosStillRenderTheList() throws Exception {
         final var shellRegistry = testRegistry();
         // a store whose render() yields a real todo so the panel auto-shows (expanded)
-        final var todoStore = new TodoStore(configuration(), MockLlmServer.mapper()) {
+        final var todoStore = new TodoStore(configuration(), formatMapper) {
             @Override
             public String render() {
                 return "[> ] fix header padding";
@@ -1063,6 +1162,86 @@ class TuiCommandRenderTest {
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
         awaitTextGone("full output");
         awaitTextGone("out-a"); // back to the condensed line, cards stay hidden
+
+        quit();
+    }
+
+    /**
+     * A python command printing a piped table (eg. {@code tabulate}) used to be detected as
+     * markdown and rendered as a bordered grid, prefixing every line with a vertical bar. The
+     * output must stay one row per source line.
+     */
+    @Test
+    void toolOverlayKeepsPipedOutputLinesVerbatim() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-pipes-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        final var output = """
+                | name | age |
+                |------|-----|
+                | bob  | 42  |
+                - bob is 42
+                """;
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"python3 report.py\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry)));
+        awaitText("✓ bash");
+
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+        awaitText("full output");
+        awaitText("| name | age |");
+        awaitText("|------|-----|");
+        awaitText("| bob  | 42  |");
+
+        // no grid borders were injected around the piped rows
+        assertFalse(backend.text().contains("│ bob"), backend.text());
+        assertFalse(backend.text().contains("┌"), backend.text());
+        assertTrue(rowIndex("| name | age |") < rowIndex("|------|-----|"));
+        assertTrue(rowIndex("|------|-----|") < rowIndex("| bob  | 42  |"));
+
+        quit();
+    }
+
+    /** The modal registers its own copy zone: a drag started inside it selects (and copies) it. */
+    @Test
+    void toolOverlayDragSelectionCopies() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-copy-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"cat out.txt\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "copy-me-line", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "copy-me-line", true, sid(shellRegistry)));
+        awaitText("✓ bash");
+
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+        awaitText("full output");
+        awaitText("copy-me-line");
+
+        final var row = rowOf("copy-me-line");
+        final var from = columnOfLineContaining("copy-me-line");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, from, row));
+        tuiRef.get().dispatch(MouseEvent.drag(MouseButton.LEFT, from + 5, row));
+        tuiRef.get().dispatch(MouseEvent.release(MouseButton.LEFT, from + 5, row));
+
+        // the release is what copies: OSC 52 carries the dragged span of the modal body
+        final var deadline = System.nanoTime() + Duration.ofSeconds(2).toNanos();
+        while (!backend.raw().contains(SelectionState.osc52Payload("copy-m")) && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertTrue(
+                backend.raw().contains(SelectionState.osc52Payload("copy-m")),
+                "expected the drag to copy the selected modal text over OSC 52, raw=" + backend.raw());
 
         quit();
     }
@@ -1660,7 +1839,7 @@ class TuiCommandRenderTest {
     @Test
     void subagentDetailModalRendersRegionsAndHonorsThinkingToggle() throws Exception {
         final var shellRegistry = testRegistry();
-        final var mapper = MockLlmServer.mapper();
+        final var mapper = formatMapper;
         final var configuration = subagentConfiguration();
         final var subagentRegistry = new SubagentRegistry(configuration, new ProviderManager(configuration, mapper));
         final var command = command(
@@ -1950,6 +2129,15 @@ class TuiCommandRenderTest {
         return false;
     }
 
+    private boolean anyRowContaining(final String needle) {
+        for (final var line : backend.text().split("\n")) {
+            if (line.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void awaitRowStartingWith(final String prefix) throws InterruptedException {
         while (!anyRowStartsWith(prefix)) {
             assertTrue(
@@ -2124,6 +2312,17 @@ class TuiCommandRenderTest {
         }
     }
 
+    /** Screen row index of the first row containing {@code token}, without waiting for a frame. */
+    private int rowIndex(final String token) {
+        final var lines = backend.text().split("\n");
+        for (var y = 0; y < lines.length; y++) {
+            if (lines[y].contains(token)) {
+                return y;
+            }
+        }
+        return -1;
+    }
+
     /** Screen row index of the first row containing {@code token}. */
     private int rowOf(final String token) throws InterruptedException {
         while (true) {
@@ -2135,6 +2334,23 @@ class TuiCommandRenderTest {
             }
             assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + token + "'");
         }
+    }
+
+    /**
+     * Asserts the two rows are separated by exactly one separator row (the block separator
+     * markdown renders). The row content is not checked beyond the gap: every screen row also
+     * carries the right-hand info panel, so a spacer row still shows its text.
+     */
+    private void assertBlankRowBetween(final String before, final String after) throws InterruptedException {
+        final var first = rowOf(before);
+        final var second = rowOf(after);
+        assertTrue(
+                second > first, "'" + after + "' must come after '" + before + "' (" + first + " then " + second + ")");
+        org.junit.jupiter.api.Assertions.assertEquals(
+                first + 2,
+                second,
+                () -> "expected one blank row between '" + before + "' and '" + after + "', screen was:\n"
+                        + backend.text());
     }
 
     private static ShellRegistry testRegistry() {

@@ -35,13 +35,13 @@ public record TodoConfiguration(
         @Property(
                 defaultValue = "false",
                 documentation =
-                        "When a turn ends text-only while the todo list still has pending or in_progress items, automatically ask the model to continue instead of ending the turn (up to maxContinues continuations per turn, then the turn is ended with the usual warning notice). Applies to build mode, to the top-level turns only (never to sub-agents) and is skipped in a turn where a prompt typed while the loop was running was injected.")
+                        "When a turn ends text-only while the todo list still has pending or in_progress items, automatically ask the model to continue instead of ending the turn (up to maxContinues continuations per turn, then the turn is ended with the usual warning notice). The continuation is also attempted before giving up on an exhausted iteration window, a truncated reply or an empty completion, so pending todos keep the turn going across those mid-turn stops. Applies to build mode, to the top-level turns only (never to sub-agents) and is skipped in a turn where a prompt typed while the loop was running was injected.")
         boolean continueOnUnfinished,
 
         @Property(
                 defaultValue = "25",
                 documentation =
-                        "Maximum automatic continuations per turn when continueOnUnfinished is enabled. Each continuation costs one LLM round-trip and one iteration of yca.llm.maxIterations.")
+                        "Maximum automatic continuations per turn when continueOnUnfinished is enabled. Each continuation costs one LLM round-trip and starts a fresh yca.llm.maxIterations window, so a long turn is bounded by this budget rather than by a single iteration window.")
         int maxContinues,
 
         @Property(

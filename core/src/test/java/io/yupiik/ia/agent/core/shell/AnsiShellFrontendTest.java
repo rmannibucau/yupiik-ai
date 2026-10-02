@@ -19,34 +19,36 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.cli.CliVerbosity;
 import io.yupiik.ia.agent.core.cli.MarkdownColorizer;
 import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
+@ExtendWith(TestJsonMapper.class)
 class AnsiShellFrontendTest {
     private PrintStream originalOut;
     private PrintStream originalErr;
     private final ByteArrayOutputStream out = new ByteArrayOutputStream();
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
-    private JsonMapperImpl jsonMapper;
+    private JsonMapper mapper;
 
     @BeforeEach
     void capture() {
@@ -56,12 +58,13 @@ class AnsiShellFrontendTest {
         System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
     }
 
+    @BeforeEach
+    void bindMapper(final JsonMapper mapper) {
+        this.mapper = mapper;
+    }
+
     @AfterEach
     void restore() {
-        if (jsonMapper != null) {
-            jsonMapper.close();
-            jsonMapper = null;
-        }
         System.setOut(originalOut);
         System.setErr(originalErr);
     }
@@ -88,7 +91,7 @@ class AnsiShellFrontendTest {
         return new AnsiShellFrontend(
                 colorizer,
                 new Symbols(false),
-                new ToolPresenter(mapper()),
+                new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
                 tty,
                 showThinking,
@@ -99,18 +102,11 @@ class AnsiShellFrontendTest {
         return new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
-                new ToolPresenter(mapper()),
+                new ToolPresenter(mapper),
                 verbosity,
                 tty,
                 showThinking,
                 ToolOutputVisibility.SHOWN);
-    }
-
-    private JsonMapperImpl mapper() {
-        if (jsonMapper == null) {
-            jsonMapper = new JsonMapperImpl(List.of(), key -> Optional.empty());
-        }
-        return jsonMapper;
     }
 
     @Test
@@ -260,7 +256,7 @@ class AnsiShellFrontendTest {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
-                new ToolPresenter(mapper()),
+                new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
                 true,
                 true,
@@ -303,7 +299,7 @@ class AnsiShellFrontendTest {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
-                new ToolPresenter(mapper()),
+                new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
                 true,
                 true,
@@ -339,7 +335,7 @@ class AnsiShellFrontendTest {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
-                new ToolPresenter(mapper()),
+                new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
                 true,
                 true,
@@ -368,7 +364,7 @@ class AnsiShellFrontendTest {
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
-                new ToolPresenter(mapper()),
+                new ToolPresenter(mapper),
                 CliVerbosity.COMPACT,
                 true,
                 true,

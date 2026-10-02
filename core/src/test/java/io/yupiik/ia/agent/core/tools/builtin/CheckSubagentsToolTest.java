@@ -19,21 +19,22 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
-import io.yupiik.fusion.json.internal.JsonMapperImpl;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
+@ExtendWith(TestJsonMapper.class)
 class CheckSubagentsToolTest {
     @TempDir
     Path storageHome;
@@ -77,25 +78,21 @@ class CheckSubagentsToolTest {
         return new SubagentRegistry(config, providerManager(4));
     }
 
-    private JsonMapper jsonMapper() {
-        return new JsonMapperImpl(List.of(), k -> Optional.empty());
-    }
-
     @Test
-    void pollReturnsEmptyListWhenNoSubagents() {
+    void pollReturnsEmptyListWhenNoSubagents(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "poll"));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"subagents\":[]"));
     }
 
     @Test
-    void pollReturnsActiveSubagentsWithStatus() {
+    void pollReturnsActiveSubagentsWithStatus(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         reg.start("parent", "task1");
         reg.start("parent", "task2");
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "poll"));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("running"));
@@ -104,11 +101,11 @@ class CheckSubagentsToolTest {
     }
 
     @Test
-    void collectReturnsSummaryWhenCompleted() {
+    void collectReturnsSummaryWhenCompleted(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var state = reg.start("parent", "task").orElseThrow();
         reg.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "full", List.of("artifact")));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "collect", "subagent_id", state.id()));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"completed\":true"));
@@ -116,29 +113,29 @@ class CheckSubagentsToolTest {
     }
 
     @Test
-    void collectFailsWhenStillRunning() {
+    void collectFailsWhenStillRunning(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var state = reg.start("parent", "task").orElseThrow();
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "collect", "subagent_id", state.id()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("still running"));
     }
 
     @Test
-    void collectFailsWhenNotFound() {
+    void collectFailsWhenNotFound(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "collect", "subagent_id", "unknown"));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("not found"));
     }
 
     @Test
-    void cancelTerminatesRunningSubagent() {
+    void cancelTerminatesRunningSubagent(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var state = reg.start("parent", "task").orElseThrow();
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "cancel", "subagent_id", state.id()));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"cancelled\":true"));
@@ -146,11 +143,11 @@ class CheckSubagentsToolTest {
     }
 
     @Test
-    void cancelNoopWhenAlreadyCompleted() {
+    void cancelNoopWhenAlreadyCompleted(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var state = reg.start("parent", "task").orElseThrow();
         reg.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "full", List.of()));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "cancel", "subagent_id", state.id()));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("\"cancelled\":false"));
@@ -158,27 +155,27 @@ class CheckSubagentsToolTest {
     }
 
     @Test
-    void executeFailsWhenDisabled() {
+    void executeFailsWhenDisabled(final JsonMapper mapper) {
         final var reg = registry(config(Map.of("yca.subagents.enabled", "false")));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "poll"));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("disabled"));
     }
 
     @Test
-    void executeFailsWhenActionMissing() {
+    void executeFailsWhenActionMissing(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of());
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("action is required"));
     }
 
     @Test
-    void executeFailsWhenInvalidAction() {
+    void executeFailsWhenInvalidAction(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
-        final var tool = new CheckSubagentsTool(reg, jsonMapper());
+        final var tool = new CheckSubagentsTool(reg, mapper);
         final var result = tool.execute(Map.of("action", "invalid"));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("Invalid action"));
