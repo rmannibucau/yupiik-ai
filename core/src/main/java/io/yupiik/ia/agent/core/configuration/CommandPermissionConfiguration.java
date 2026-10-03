@@ -165,6 +165,10 @@ public record CommandPermissionConfiguration(
                 command("shuf"),
                 command("rev"),
 
+                // jq is a pure JSON filter: stdin/files to stdout, it has no in-place or
+                // output-file option (writing needs a shell redirect, already gated).
+                command("jq"),
+
                 // sed is read-only except for in-place editing.
                 command("sed", "-i", "--in-place"),
 

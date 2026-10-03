@@ -390,6 +390,20 @@ class MarkdownLinesTest {
     }
 
     @Test
+    void loneLessThanLineDoesNotCrash() {
+        // a line that trims to "<" alone must not throw (charAt(1) guard)
+        assertEquals(List.of("<"), plain(renderer.render("<", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void lessThanInterleavedWithProse() {
+        // splitSegments runs isXmlLine per line; a stray "<" among prose must stay prose
+        assertEquals(
+                List.of("before", "<", "after"),
+                plain(renderer.render("before\n<\nafter", 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
     void indentedCodeBlockKeepsIndentationVerbatim() {
         // commonmark's IndentedCodeBlock.getLiteral() strips the common 4-space indent;
         // we must keep the source bytes exactly as written
@@ -414,6 +428,17 @@ class MarkdownLinesTest {
         assertEquals(
                 List.of("", "    first", "", "    second", ""),
                 plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+    }
+
+    @Test
+    void tinyWidthDoesNotHangOrCrash() {
+        // a non-empty code block rendered at width <= 1 must terminate (clamped to 1),
+        // wrapping per character instead of hanging or throwing
+        final var md = String.join("\n", "```", "abc", "```");
+        assertEquals(List.of("a", "b", "c"), plain(renderer.render(md, 1, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        // wrapCode entry point is clamped too
+        assertEquals(List.of("a", "b", "c"), plain(MarkdownLines.wrapCode(List.of(Line.from("abc")), 0)));
+        assertEquals(List.of("a", "b", "c"), plain(MarkdownLines.wrapCode(List.of(Line.from("abc")), 1)));
     }
 
     @Test

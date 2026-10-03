@@ -38,4 +38,21 @@ class LlmWireTest {
         assertFalse(otherWire.extensions().containsKey(Message.IDENTITY_KEY));
         assertFalse(otherWire.extensions().isEmpty());
     }
+
+    /**
+     * P4: inline {@code  thinking} blocks (GLM-style / Qwen templates without a dedicated
+     * reasoning channel) must be stripped before the assistant message enters the conversation,
+     * otherwise the thoughts are persisted and replayed verbatim on the next request, making the
+     * model reconstruct them. The visible text around the blocks is preserved.
+     */
+    @Test
+    void visibleTextStripsInlineThinkingBlocks() {
+        final var raw = new StringBuilder(
+                "let me check the pom\n think the build fails because of the plugin\n think\nso I edit it");
+        final var stripped = LlmWire.visibleText(raw);
+        org.junit.jupiter.api.Assertions.assertFalse(
+                stripped.contains("think"), "inline thinking must be removed: " + stripped);
+        org.junit.jupiter.api.Assertions.assertTrue(stripped.contains("let me check the pom"), stripped);
+        org.junit.jupiter.api.Assertions.assertTrue(stripped.contains("so I edit it"), stripped);
+    }
 }

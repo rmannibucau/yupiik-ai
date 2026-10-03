@@ -27,6 +27,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
@@ -75,6 +76,9 @@ public class CompactionCoordinator {
 
     /** Replacement content of tool outputs cleared by {@link #prune(List)}. */
     public static final String PRUNE_CLEARED_MARKER = "[old tool result cleared]";
+
+    /** Replacement content of failed tool outputs cleared by {@link #prune(List)}: keeps the failure visible. */
+    public static final String PRUNE_CLEARED_FAILED_MARKER = "[old tool result cleared - failed]";
 
     /** Fragment of the elision marker inserted by {@link #splice(String, int)}; detects already spliced outputs. */
     private static final String SPLICE_MARKER_FRAGMENT = " chars elided ...]";
@@ -211,15 +215,19 @@ public class CompactionCoordinator {
         }
         final var out = new ArrayList<Message>(messages);
         for (final var i : toClear) {
+            final var cleared = messages.get(i);
+            // keep the failure semantics visible: a cleared error must not look like a success
+            final var failed = cleared.others() != null
+                    && Boolean.TRUE.equals(cleared.others().get("is_error"));
             out.set(
                     i,
                     new Message(
                             "tool",
-                            PRUNE_CLEARED_MARKER,
+                            failed ? PRUNE_CLEARED_FAILED_MARKER : PRUNE_CLEARED_MARKER,
                             null,
                             null,
-                            messages.get(i).toolCallId(),
-                            null));
+                            cleared.toolCallId(),
+                            failed ? Map.of("is_error", true) : null));
         }
         final var clearedCount = toClear.size();
         final var clearedTokens = prunableTokens;
@@ -467,7 +475,9 @@ public class CompactionCoordinator {
                 ? content.substring(0, TOOL_OUTPUT_CAP_CHARS) + " [truncated]"
                 : content;
         if ("tool".equals(m.role())) {
-            return "[Tool result]: " + truncated;
+            final var failed =
+                    m.others() != null && Boolean.TRUE.equals(m.others().get("is_error"));
+            return (failed ? "[Tool result FAILED]: " : "[Tool result]: ") + truncated;
         }
         if ("assistant".equals(m.role())
                 && m.toolCalls() != null

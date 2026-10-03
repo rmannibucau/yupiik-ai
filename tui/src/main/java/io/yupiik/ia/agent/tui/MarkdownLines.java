@@ -202,7 +202,7 @@ public final class MarkdownLines {
         if (t.isEmpty() || t.charAt(0) != '<') {
             return false;
         }
-        final var idx = t.charAt(1) == '/' ? 2 : 1;
+        final var idx = t.length() > 1 && t.charAt(1) == '/' ? 2 : 1;
         return idx < t.length() && (Character.isLetter(t.charAt(idx)) || t.charAt(idx) == '_');
     }
 
@@ -553,7 +553,7 @@ public final class MarkdownLines {
             return;
         }
         for (final var row : literal.split("\n", -1)) {
-            appendCodeLine(row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), width, out);
+            appendCodeLine(row.isEmpty() ? List.of() : List.of(Span.styled(row, style)), Math.max(1, width), out);
         }
     }
 
@@ -847,9 +847,10 @@ public final class MarkdownLines {
             sb.append(s.content());
         }
         final var text = sb.toString();
+        final var chunk = Math.max(1, avail);
         var from = 0;
         while (from < text.length()) {
-            final var to = Math.min(text.length(), from + avail);
+            final var to = Math.min(text.length(), from + chunk);
             out.add(Line.from(List.of(Span.styled(text.substring(from, to), Style.EMPTY))));
             from = to;
         }

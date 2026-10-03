@@ -134,6 +134,28 @@ class ThinkTagSplitterTest {
         assertTrue(parts.visible().contains("```"), parts.visible());
     }
 
+    @Test
+    void flushRestoresTheHeldBackInlineCodeTail() {
+        final var parser = splitter.create();
+        final var visible = new StringBuilder();
+        // a single inline-code backtick is not a fence: it is held back while a possible
+        // fence continuation is awaited, and flush() must hand it back to the caller
+        for (final var segment : parser.feed("je commence par le code de `AgentLoop.java` :")) {
+            append(segment, visible, new StringBuilder(), new StringBuilder());
+        }
+        assertEquals(
+                "je commence par le code de `AgentLoop.java",
+                visible.toString(),
+                "the tail after the held-back backtick stays buffered until flush()");
+        for (final var segment : parser.flush()) {
+            append(segment, visible, new StringBuilder(), new StringBuilder());
+        }
+        assertEquals(
+                "je commence par le code de `AgentLoop.java` :",
+                visible.toString(),
+                "flush() must restore the whole inline code including its closing backtick");
+    }
+
     private static void append(
             final ThinkTagSplitter.Segment segment,
             final StringBuilder visible,

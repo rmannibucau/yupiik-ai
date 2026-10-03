@@ -204,7 +204,7 @@ final class LlmWire {
                 synchronized (mergeLock) {
                     if (cancelled.getAsBoolean()) {
                         subscription.cancel();
-                        done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                        done.complete(new Message("assistant", visibleText(text), null, toNull(toolCalls), null, null));
                         return;
                     }
                     if (event instanceof TextDelta(String t)) {
@@ -244,7 +244,7 @@ final class LlmWire {
                         done.completeExceptionally(new MidStreamFailureException(
                                 "stream interrupted after " + text.length() + " chars of partial content: " + throwable,
                                 throwable,
-                                text.toString(),
+                                visibleText(text),
                                 creationOrder.isEmpty()
                                         ? null
                                         : creationOrder.stream()
@@ -262,7 +262,7 @@ final class LlmWire {
                     toolCalls.addAll(creationOrder.stream()
                             .map(PartialToolCall::toToolCall)
                             .toList());
-                    done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                    done.complete(new Message("assistant", visibleText(text), null, toNull(toolCalls), null, null));
                 }
             }
         });
@@ -276,7 +276,7 @@ final class LlmWire {
                     done.get(100, TimeUnit.MILLISECONDS);
                 } catch (final TimeoutException e) {
                     if (cancelled.getAsBoolean()) {
-                        done.complete(new Message("assistant", text.toString(), null, toNull(toolCalls), null, null));
+                        done.complete(new Message("assistant", visibleText(text), null, toNull(toolCalls), null, null));
                     }
                     // keep waiting for the next frame (or the completion above)
                 }
@@ -293,6 +293,37 @@ final class LlmWire {
             }
             throw translate(cause);
         }
+    }
+
+    /**
+     * Strips inline {@code  thinking...} blocks from an assistant completion before it enters the
+     * conversation (and from then on every request). Some OpenAI-compatible gateways (GLM-style,
+     * Qwen templates without a dedicated reasoning channel) stream the reasoning inside {@code content};
+     * keeping it would persist and replay the thoughts verbatim, making the model reconstruct them on
+     * every turn. The {@code ReasoningDelta} events (when the channel is dedicated) are untouched: the
+     * UI still renders the thinking live, only the stored/resent message loses it.
+     */
+    static String visibleText(final StringBuilder text) {
+        final var raw = text.toString();
+        if (raw.indexOf("think") < 0) {
+            return raw; // fast path: no thinking marker at all
+        }
+        // GLM/Qwen templates stream the reasoning inline as whole lines " think ... \n think"
+        // (indented markdown-ish tags). Drop those lines; keep everything else.
+        final var out = new StringBuilder(raw.length());
+        for (final var line : raw.split("\n", -1)) {
+            final var trimmed = line.strip();
+            final var isThinkingLine = trimmed.equals("think") || trimmed.startsWith("think ");
+            if (isThinkingLine || trimmed.contains("<think")) {
+                continue; // a whole thinking line: drop it
+            }
+            out.append(line).append('\n');
+        }
+        // the split loop adds a trailing newline: drop it when the raw text had none
+        if (!raw.endsWith("\n") && !out.isEmpty() && out.charAt(out.length() - 1) == '\n') {
+            out.setLength(out.length() - 1);
+        }
+        return out.toString();
     }
 
     private static List<ToolCall> toNull(final List<ToolCall> calls) {

@@ -378,6 +378,42 @@ class ContextManagerTest {
         assertEquals("goal", result.messages().get(1).content());
     }
 
+    /**
+     * P5: a pruned failed tool output keeps its failure semantics visible: the cleared marker must
+     * say "failed" and the {@code is_error} flag must survive, so a later compaction summary and
+     * the model still know the attempt failed instead of looking like an ordinary cleared result.
+     */
+    @Test
+    void pruneKeepsTheFailureMarkerOfClearedErrors() {
+        final var cfg = config(
+                2,
+                8_000,
+                Map.ofEntries(
+                        Map.entry("yca.pruning.protectTurns", "1"),
+                        Map.entry("yca.pruning.minPruneTokens", "1000"),
+                        Map.entry("yca.pruning.protectRecentTokens", "1000"),
+                        Map.entry("yca.pruning.shrinkOutputChars", "0")));
+        final var manager = manager(cfg, null);
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        messages.add(Message.user("goal"));
+        messages.add(Message.tool("t1", "command failed: boom " + "x".repeat(6_000), true));
+        messages.add(Message.tool("t2", "command failed again " + "y".repeat(6_000), true));
+        messages.add(Message.user("follow-up"));
+        messages.add(Message.assistant("working", null));
+        messages.add(Message.tool("t3", "recent output " + "z".repeat(4_000)));
+        final var result = manager.prune(messages);
+        assertEquals(CompactionResult.Mode.CLEARED, result.mode());
+        assertEquals(
+                CompactionCoordinator.PRUNE_CLEARED_FAILED_MARKER,
+                result.messages().get(2).content(),
+                "a cleared failure must keep the failed marker");
+        assertEquals(
+                Boolean.TRUE,
+                result.messages().get(2).others().get("is_error"),
+                "the is_error flag must survive the prune");
+    }
+
     @Test
     void pruneIsNoOpWhenPrunableVolumeIsBelowTheMinimum() {
         final var cfg = config(

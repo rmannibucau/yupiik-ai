@@ -280,6 +280,45 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void splitterCarryDoesNotLeakIntoTheNextMessage() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        // round 1: the message ends with an inline-code backtick + " :" - the splitter
+        // holds that tail back (waiting for a possible fence continuation) and the tool
+        // call in the same round must flush it with THIS message, not the next one
+        t.onEvent(new AgentEvent.TextDelta("je commence par le code de `AgentLoop.java` :", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("edit_file", "{}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("edit_file", "oldString not found", false, "s1"));
+        // round 2: the next message must start clean, without the leaked "` :" prefix
+        t.onEvent(new AgentEvent.TextDelta("Le fichier a peut-être bougé depuis.", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true, "s1"));
+
+        final var md = t.transcript().toString();
+        // round 1 keeps its full tail (backtick + " :") attached to the message that produced it
+        assertTrue(md.contains("code de `AgentLoop.java` :"), md);
+        // the flush writes the whole round-1 message before the failed tool, no truncation
+        assertOrdered(md, "code de `AgentLoop.java` :", "> tool `edit_file` failed");
+        // round 2 starts with the clean text: no "` :" residual prefix, no leading colon
+        assertFalse(
+                md.contains("> tool `edit_file` failed: oldString not found\n\n` :Le fichier"),
+                "the splitter carry must not leak into the next message: " + md);
+        // the failed tool footer carries the elapsed duration, so match on the message
+        // boundary that follows it rather than on the exact footer text
+        assertTrue(
+                md.indexOf("Le fichier a peut-être bougé depuis.") > md.indexOf("oldString not found"),
+                "round 2 must follow the failed tool: " + md);
+        assertTrue(
+                md.contains("\n\nLe fichier a peut-être bougé depuis."),
+                "round 2 must start right after the tool block, un-prefixed: " + md);
+        assertFalse(md.contains("` :Le"), "the splitter carry must not leak into the next message: " + md);
+        assertEquals(
+                1,
+                countOccurrences(md, "`AgentLoop.java`"),
+                "the inline code must appear exactly once, complete: " + md);
+    }
+
+    @Test
     void integratedPromptRendersBelowTheAnswerItInterrupted() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");

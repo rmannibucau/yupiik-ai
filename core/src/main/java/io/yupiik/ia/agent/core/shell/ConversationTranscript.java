@@ -588,7 +588,28 @@ public class ConversationTranscript {
      * transcript whatever the current visibility toggle is so toggling never
      * loses data.
      */
+    /**
+     * Emits whatever the stream splitter still holds for the current utterance (a
+     * trailing inline-code backtick, a fence tail or an unclosed {@code <think>}
+     * whose delimiter was split across chunks) into the pending/thinking buffers
+     * before they are flushed. The splitter deliberately holds back a bounded
+     * suffix of each delta waiting for a possible delimiter continuation, and
+     * without this drain that carry would leak into the transcript of the next
+     * message (a {@code ` :} residual appearing at the start of the following
+     * assistant turn) while the current message loses its tail.
+     */
+    private void drainInlineThink() {
+        for (final var segment : inlineThink.flush()) {
+            if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
+                thinking.append(segment.text());
+            } else {
+                pending.append(segment.text());
+            }
+        }
+    }
+
     public synchronized void flushThinking() {
+        drainInlineThink();
         if (thinking.isEmpty()) {
             return;
         }
@@ -627,6 +648,7 @@ public class ConversationTranscript {
      * of the same answer.
      */
     public synchronized void flushPending() {
+        drainInlineThink();
         if (pending.isEmpty()) {
             return;
         }

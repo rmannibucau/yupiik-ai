@@ -169,6 +169,28 @@ class SessionStoreTest {
         assertEquals("c1", loaded.get(1).toolCallId());
     }
 
+    /**
+     * P5: the {@code is_error} flag of a failed tool result must survive the session round-trip
+     * (append -> load), so a resumed session and the compaction summary still know the attempt
+     * failed instead of treating it as an ordinary result.
+     */
+    @Test
+    void toolFailureIsErrorFlagSurvivesTheStoreRoundTrip() {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "user", "goal", null, null));
+        store.append(
+                id, SessionEntry.of(2, "tool", "command failed: boom", null, "t1", "bash", Map.of("is_error", true)));
+
+        final var loaded = store.load(id);
+        assertEquals(2, loaded.size());
+        final var tool = loaded.get(1);
+        assertEquals("tool", tool.role());
+        assertEquals("t1", tool.toolCallId());
+        assertEquals("bash", tool.name());
+        assertEquals(Boolean.TRUE, tool.others().get("is_error"), "the is_error flag must survive persistence");
+    }
+
     @Test
     void replaceRewritesFile() {
         final var store = newStore();

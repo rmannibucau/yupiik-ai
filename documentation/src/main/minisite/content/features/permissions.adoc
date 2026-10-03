@@ -22,7 +22,7 @@ The defaults cover `git status`, `git diff`, `git log`, `git branch`, `git show`
 `git submodule status`, `git remote` (except its write subcommands
 `add`, `remove`, `set-url`, `rename`, `prune`), `xargs git log`, `ls`,
 `cat`, `pwd`, `echo`, `find`, `grep`, `rg`, `wc`, `head`, `tail`, `test`,
-`tr`, `sort`, `uniq`, `sed -n` and `java -version`/`java -help`, plus the
+`tr`, `sort`, `uniq`, `jq`, `sed -n` and `java -version`/`java -help`, plus the
 read-only text processing and inspection families `awk`, `cut`, `diff` (except
 `-o`/`--output`), `basename`, `dirname`, `stat`, `file`, `which`, `readlink`,
 `realpath`, `du`, `df`, `id`, `uname`, `date` (except `-s`/`--set`), `env`,

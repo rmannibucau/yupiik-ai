@@ -57,6 +57,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -79,6 +80,9 @@ public class AgentLoop {
     /** Anti-thrash: stop auto-compacting when the context refills right after compaction this many turns in a row. */
     private static final int MAX_CONSECUTIVE_COMPACTIONS = 5;
 
+    /** P2: after this many consecutive tool rounds with no new information, the turn is stopped. */
+    private static final int NO_PROGRESS_ROUNDS_LIMIT = 5;
+
     /** Nudge sent to the model after a truncated reply so it resumes instead of restarting. */
     private static final String TRUNCATION_CONTINUE_PROMPT =
             "Your previous reply was cut off by the output token limit before you could finish."
@@ -93,6 +97,18 @@ public class AgentLoop {
                     + " it will hit the limit a second time. Change strategy: break the remaining work into smaller"
                     + " steps, use tools to write files or produce results in chunks, keep prose minimal and summarize"
                     + " instead of dumping full content.";
+
+    /**
+     * Retry nudge for an empty completion (no content, no tool call) that followed a request which
+     * produced reasoning tokens: the model spent its whole output budget thinking, so asking it to
+     * "retry" the same context would re-derive the same thoughts and hit the same wall. The model is
+     * asked to bound its reasoning (or answer without further deliberation) instead of re-thinking.
+     */
+    private static final String EMPTY_REASONING_RETRY_PROMPT =
+            "Your previous try produced no answer at all: it looks like the output budget was consumed by the"
+                    + " reasoning/thinking phase. Do not re-derive the same reasoning: it will hit the same limit."
+                    + " Answer directly now - keep the thinking minimal, or skip it - and use the tools to make"
+                    + " concrete progress (or reply with the final answer if the work is done).";
 
     /**
      * Nudge sent when the turn ended with todos still open and {@code yca.todos.continueOnUnfinished}
@@ -214,6 +230,24 @@ public class AgentLoop {
     private long turnLlmReportedMs;
     // todo auto-continuation budget consumed by the current turn (bounded by yca.todos.maxContinues)
     private int unfinishedTodoContinues;
+    /**
+     * Whether the last completed LLM request produced reasoning tokens (a {@code ReasoningDelta}
+     * was observed before its {@code End}): an empty or truncated completion after reasoning means
+     * the model spent its whole output budget thinking, and re-asking the same context would only
+     * re-derive the same reasoning. Reset before each request, flipped by {@link #dispatch}, read
+     * by the truncation/empty-completion branches.
+     */
+    private volatile boolean lastRequestProducedReasoning;
+
+    /**
+     * Doom-loop breaker state for the current turn: counts repeated tool calls (normalized args)
+     * and remembers the last output per signature for the no-progress termination. Created fresh
+     * per turn, mutated on the loop thread only.
+     */
+    private ToolRepeats repeats = new ToolRepeats();
+
+    /** Consecutive tool rounds with no new information (reset on any informative round), see P2. */
+    private int noProgressRounds;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -521,6 +555,9 @@ public class AgentLoop {
                 ? null
                 : agentProvider.byName(agentName);
         structuralCodeGraph.ensureReadyAsync();
+        // fresh per-turn loop-guard state: repeat counts must not leak across turns
+        repeats = new ToolRepeats();
+        noProgressRounds = 0;
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
                 + snapshotBlock(sessionId)));
@@ -736,7 +773,6 @@ public class AgentLoop {
         // a prompt typed while the loop was running was injected in this turn: the model answered
         // it, so its text-only end answers that message and must not be treated as "stopped early"
         var userInjected = false;
-        final var repeats = new ToolRepeats();
         final var staleReads = new StaleReads(readsFromHistory(messages));
 
         // Reset per-turn metrics
@@ -923,8 +959,18 @@ public class AgentLoop {
                                     "Response truncated by the output token limit (finish_reason="
                                             + reason + "); asking the model to continue (" + truncationContinues + '/'
                                             + maxTruncationContinues + ")."));
+                            // When the model produced reasoning before the truncation, its whole output
+                            // budget was spent thinking: "continue exactly where you stopped" would make
+                            // it re-derive the same reasoning from the same context (the thoughts are not
+                            // part of the request), hitting the same wall. Jump straight to the
+                            // change-strategy prompt instead of the verbatim continue. Without reasoning
+                            // the usual progressive escalation (continue, then split) still applies.
+                            final var changeStrategy = lastRequestProducedReasoning || truncationContinues >= 2;
                             messages.add(Message.user(
-                                    truncationContinues >= 2 ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
+                                    changeStrategy ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
+                            // the reasoning flag was consumed: a retry of this request must not re-trigger
+                            // the "spent thinking" branch again on the same generation
+                            lastRequestProducedReasoning = false;
                             continue;
                         }
                         if (tryTodoAutoContinue(messages, reason, toolsRanThisTurn, userInjected)) {
@@ -949,6 +995,14 @@ public class AgentLoop {
                                     AgentEvent.Notice.Level.WARN,
                                     "model returned an empty completion (finish_reason=" + reason + "); retrying ("
                                             + emptyCompletionRetries + '/' + maxRetries + ')'));
+                            // An empty completion after reasoning means the model burned its whole
+                            // output budget thinking (reasoning tokens are not part of the request):
+                            // re-asking the identical context would re-derive the same thoughts and
+                            // hit the same wall. Ask for a strategy change instead of a blind retry.
+                            if (lastRequestProducedReasoning) {
+                                lastRequestProducedReasoning = false;
+                                messages.add(Message.user(EMPTY_REASONING_RETRY_PROMPT));
+                            }
                             continue;
                         }
                         if (tryTodoAutoContinue(messages, reason, toolsRanThisTurn, userInjected)) {
@@ -983,12 +1037,39 @@ public class AgentLoop {
                 if (cancelled.getAsBoolean()) {
                     break;
                 }
+                final var roundInformative = new boolean[] {false};
                 executeToolCalls(
-                        sessionId, messages, assistant.toolCalls(), repeats, staleReads, toolsTokens, cancelled);
+                        sessionId,
+                        messages,
+                        assistant.toolCalls(),
+                        repeats,
+                        staleReads,
+                        toolsTokens,
+                        cancelled,
+                        roundInformative);
                 toolsRanThisTurn = true;
                 // a tool round is progress too: a later empty/truncated reply starts its retry budget fresh
                 emptyCompletionRetries = 0;
                 truncationContinues = 0;
+                // no-progress termination (P2): 5 consecutive tool rounds that brought no new
+                // information (same calls, same outputs, no write) mean the model is spinning
+                if (roundInformative[0]) {
+                    noProgressRounds = 0;
+                } else {
+                    // open todos keep the turn going: the todo auto-continue (and the model's own
+                    // next round) is the intended escape hatch there, not a hard no-progress stop
+                    if (unfinishedTodos(toolsRanThisTurn) != null) {
+                        noProgressRounds = 0;
+                    } else {
+                        noProgressRounds++;
+                        if (noProgressRounds >= NO_PROGRESS_ROUNDS_LIMIT) {
+                            emit(error("No progress: the model made " + NO_PROGRESS_ROUNDS_LIMIT
+                                    + " consecutive tool calls returning the same results. Stopping the turn."));
+                            emitTurnMetrics(null, turnStartNanos);
+                            return null;
+                        }
+                    }
+                }
                 if (!toolDirectiveApplied && contextView != null) {
                     final var directive = contextView.poll();
                     if (directive != null) {
@@ -1591,6 +1672,9 @@ public class AgentLoop {
             throws IOException, InterruptedException {
         final var maxAttempts = 1 + Math.max(0, configuration.llm().streamRetriesMaxAttempts());
         IOException last = null;
+        // a fresh generation starts here: whether it produces reasoning (and may burn its whole
+        // output budget thinking) is observed per-attempt by dispatch()
+        lastRequestProducedReasoning = false;
         for (var attempt = 1; attempt <= maxAttempts; attempt++) {
             if (cancelled.getAsBoolean()) {
                 throw new IOException("Cancelled");
@@ -1826,7 +1910,19 @@ public class AgentLoop {
             boolean success,
             boolean persist,
             List<String> paths,
-            long durationMs) {
+            long durationMs,
+            boolean informative) {
+
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist,
+                final List<String> paths,
+                final long durationMs) {
+            this(callId, name, output, success, persist, paths, durationMs, true);
+        }
 
         ToolOutcome(
                 final String callId,
@@ -1835,7 +1931,7 @@ public class AgentLoop {
                 final boolean success,
                 final boolean persist,
                 final List<String> paths) {
-            this(callId, name, output, success, persist, paths, 0L);
+            this(callId, name, output, success, persist, paths, 0L, true);
         }
 
         ToolOutcome(
@@ -1844,7 +1940,7 @@ public class AgentLoop {
                 final String output,
                 final boolean success,
                 final boolean persist) {
-            this(callId, name, output, success, persist, List.of(), 0L);
+            this(callId, name, output, success, persist, List.of(), 0L, true);
         }
     }
 
@@ -1854,14 +1950,15 @@ public class AgentLoop {
      * state-changing tools stay sequential: a read never overtakes a preceding edit issued in the
      * same reply. Message and session order always follow the model's call order.
      */
-    private void executeToolCalls(
+    private boolean executeToolCalls(
             final String sessionId,
             final List<Message> messages,
             final List<ToolCall> calls,
             final ToolRepeats repeats,
             final StaleReads staleReads,
             final int toolsTokens,
-            final BooleanSupplier cancelled)
+            final BooleanSupplier cancelled,
+            final boolean[] roundInformative)
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
@@ -1869,7 +1966,7 @@ public class AgentLoop {
                 // a cancel pressed mid-batch: abort the remaining calls (the running tool stops
                 // cooperatively through its own probe); the loop sees the flag on its next
                 // iteration and unwinds the turn
-                return;
+                return roundInformative[0];
             }
             if (isParallelizable(calls.get(i))) {
                 var end = i + 1;
@@ -1884,7 +1981,7 @@ public class AgentLoop {
                     for (var j = i; j < end; j++) {
                         final var call = calls.get(j);
                         // doom-loop check happens in call order, before the worker starts
-                        final var repeated = repeats.rejectIfRepeated(call);
+                        final var repeated = repeats.rejectIfRepeated(call, this::normalizedArguments);
                         if (repeated != null) {
                             emit(toolFinished(repeated.name(), repeated.output(), false));
                             futures.add(executor.submit(() -> repeated));
@@ -1893,28 +1990,39 @@ public class AgentLoop {
                         }
                     }
                     for (final var future : futures) {
-                        appendToolResult(sessionId, messages, awaitTool(future), staleReads);
+                        appendToolResult(sessionId, messages, awaitTool(future), staleReads, roundInformative);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                     final var batchWallMs = (System.nanoTime() - batchStartNanos) / 1_000_000;
                     turnToolWallMs += batchWallMs;
                 } else {
                     for (var j = i; j < end; j++) {
-                        appendToolResult(sessionId, messages, runGuarded(calls.get(j), repeats, cancelled), staleReads);
+                        appendToolResult(
+                                sessionId,
+                                messages,
+                                runGuarded(calls.get(j), repeats, cancelled),
+                                staleReads,
+                                roundInformative);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                 }
                 i = end;
             } else {
-                appendToolResult(sessionId, messages, runGuarded(calls.get(i), repeats, cancelled), staleReads);
+                appendToolResult(
+                        sessionId,
+                        messages,
+                        runGuarded(calls.get(i), repeats, cancelled),
+                        staleReads,
+                        roundInformative);
                 checkRoundBudget(sessionId, messages, toolsTokens);
                 i++;
             }
         }
+        return roundInformative[0];
     }
 
     private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats, final BooleanSupplier cancelled) {
-        final var repeated = repeats.rejectIfRepeated(call);
+        final var repeated = repeats.rejectIfRepeated(call, this::normalizedArguments);
         if (repeated != null) {
             emit(toolFinished(repeated.name(), repeated.output(), false));
             return repeated;
@@ -2053,34 +2161,63 @@ public class AgentLoop {
     }
 
     /**
-     * Doom-loop breaker: counts consecutive executions of the same tool with identical arguments across the whole
-     * turn. The third identical call in a row is refused with guidance instead of burning another model round-trip
-     * on the exact same output (mirrors opencode's doom-loop detection).
+     * Doom-loop breaker: counts executions of the same tool with the same normalized arguments across
+     * the whole turn. The third identical call is refused with guidance instead of burning another
+     * model round-trip on the exact same output (mirrors opencode's doom-loop detection). Arguments are
+     * normalized (JSON keys sorted) so cosmetic spelling variants do not bypass the guard, and the
+     * count is per signature (not merely consecutive): {@code read A, read B, read A, read A} refuses
+     * the third occurrence of {@code read A}. Read-only calls below the threshold are never refused:
+     * legitimate polling/exploration stays legal.
      */
     private static final class ToolRepeats {
         private static final int THRESHOLD = 3;
 
-        private String lastKey;
-        private int count;
+        /** Signature (name + normalized args) -> number of occurrences seen this turn. */
+        private final Map<String, Integer> counts = new HashMap<>();
+        /** callId -> signature key of the call, so a result can be matched back to its call args. */
+        private final Map<String, String> callKeyByCallId = new HashMap<>();
+        /** Signature -> last output seen this turn (for same-call-same-result detection). */
+        private final Map<String, String> lastOutputs = new HashMap<>();
 
+        /**
+         * Records one tool result {@code output} for the call {@code callId} and reports whether it
+         * brought new information: {@code false} when the same signature already produced
+         * byte-identical output this turn. The no-progress counting itself is done by the loop
+         * (one decision per round, aggregating all results of a round).
+         */
+        synchronized boolean isNovelResult(final String callId, final String name, final String output) {
+            final var key = callKeyByCallId.get(callId);
+            if (key == null) {
+                return true; // never saw the call: always informative
+            }
+            final var previous = lastOutputs.get(key);
+            final var value = output == null ? "" : output;
+            final var novel = previous == null || !previous.equals(value);
+            lastOutputs.put(key, value);
+            return novel;
+        }
+
+        /** The normalized arguments are computed by the owning loop (JSON key sorting lives there). */
         ToolOutcome rejectIfRepeated(final ToolCall call) {
+            return rejectIfRepeated(call, null);
+        }
+
+        ToolOutcome rejectIfRepeated(
+                final ToolCall call, final java.util.function.Function<String, String> normalizer) {
             final var fn = call.function();
             final var name = fn == null || fn.name() == null ? "" : fn.name();
             final var args = fn == null || fn.arguments() == null ? "{}" : fn.arguments();
-            final var key = name + '\n' + args;
-            if (key.equals(lastKey)) {
-                count++;
-            } else {
-                lastKey = key;
-                count = 1;
-            }
+            final var normalized = normalizer == null ? args : normalizer.apply(args);
+            final var key = name + '\n' + normalized;
+            final var count = counts.merge(key, 1, Integer::sum);
+            callKeyByCallId.put(call.id(), key);
             if (count < THRESHOLD) {
                 return null;
             }
-            final var diagnostic = "Tool " + name + " was called " + count + " times in a row with exactly the same "
-                    + "arguments: repeating it adds no information. Change strategy - narrow or widen the query, "
+            final var diagnostic = "Tool " + name + " was called " + count + " times with the same arguments: "
+                    + "repeating it adds no information. Change strategy - narrow or widen the query, "
                     + "use another tool, or answer from what you already collected.";
-            return new ToolOutcome(call.id(), name, diagnostic, false, false);
+            return new ToolOutcome(call.id(), name, diagnostic, false, false, List.of(), 0L, false);
         }
     }
 
@@ -2166,13 +2303,31 @@ public class AgentLoop {
             final String sessionId,
             final List<Message> messages,
             final ToolOutcome outcome,
-            final StaleReads staleReads) {
+            final StaleReads staleReads,
+            final boolean[] roundInformative) {
         final var raw = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
         final var output = capIngestionOutput(raw);
         messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
+        // a round is informative when at least one result is new (same call, different output) or
+        // a write succeeded: used by the no-progress termination (P2). Refused doom-loop calls are
+        // explicitly non-informative (their diagnostic output would otherwise look "new").
+        if (outcome.informative() && outcome.success() && FILE_WRITE_TOOLS.contains(outcome.name())) {
+            roundInformative[0] = true;
+        } else if (roundInformative != null && !roundInformative[0]) {
+            roundInformative[0] =
+                    outcome.informative() && repeats.isNovelResult(outcome.callId(), outcome.name(), output);
+        }
         if (outcome.persist()) {
             sessionStore.append(
-                    sessionId, SessionEntry.of(clock.millis(), "tool", output, null, outcome.callId(), outcome.name()));
+                    sessionId,
+                    SessionEntry.of(
+                            clock.millis(),
+                            "tool",
+                            output,
+                            null,
+                            outcome.callId(),
+                            outcome.name(),
+                            outcome.success() ? null : Map.of("is_error", true)));
         }
         final var invalidated = staleReads.onLanded(messages, outcome);
         if (invalidated > 0) {
@@ -2212,6 +2367,10 @@ public class AgentLoop {
                 thinkingActive = true;
                 thinkingStartNanos = System.nanoTime();
             }
+            // record that this request produced reasoning: later, a truncation or an empty
+            // completion after reasoning means the output budget was spent thinking, and a
+            // context-identical retry would only re-derive the same thoughts (P3)
+            lastRequestProducedReasoning = true;
             emit(thinkingDelta(text));
         } else if (delta instanceof End(final String reason, final Usage upper)) {
             if (thinkingActive) {
@@ -2293,8 +2452,8 @@ public class AgentLoop {
      */
     String contextUsageLine(final List<Message> messages, final int toolsTokens) {
         final var percent =
-                (int) Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens)));
-        return "Context usage: ~" + percent + "% of the usable window (prune at "
+                Math.round(usageTracker.contextPercent(usageTracker.effectiveContext(messages, toolsTokens)) / 5d) * 5;
+        return "Context usage: ~" + (int) percent + "% of the usable window (prune at "
                 + configuration.pruning().thresholdPercent() + "%, compaction at "
                 + configuration.compaction().thresholdPercent() + "%).\n";
     }

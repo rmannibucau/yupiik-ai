@@ -54,6 +54,9 @@ class BashRulesTest {
             assertTrue(compiled.evaluate(agentMode, "ls -la").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "wc -l pom.xml").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "java -version").allowed(), agentMode.name());
+            // jq is a pure read-only JSON filter (no in-place/output option)
+            assertTrue(compiled.evaluate(agentMode, "jq '.version' pom.json").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "jq -r . \"$F\"").allowed(), agentMode.name());
             // git read-only inspection families
             assertTrue(compiled.evaluate(agentMode, "git show --stat 7483271").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "git blame pom.xml").allowed(), agentMode.name());
@@ -124,6 +127,9 @@ class BashRulesTest {
                 compiled.evaluate(AgentMode.BUILD, "sort -o out.txt pom.xml").allowed());
         assertFalse(compiled.evaluate(AgentMode.BUILD, "sort --output=out.txt pom.xml")
                 .allowed());
+        // jq has no write option but shell redirection is still gated
+        assertFalse(
+                compiled.evaluate(AgentMode.BUILD, "jq . pom.json > out.json").allowed());
         assertFalse(compiled.evaluate(AgentMode.BUILD, "git branch -D feature").allowed());
         assertFalse(compiled.evaluate(AgentMode.BUILD, "git branch -d feature").allowed());
         // the read-only forms stay allowed

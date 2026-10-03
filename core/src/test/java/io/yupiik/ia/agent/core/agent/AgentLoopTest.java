@@ -946,6 +946,265 @@ class AgentLoopTest {
         assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
     }
 
+    /** P3: an empty completion that followed reasoning (the model burned its whole output budget
+     * thinking) must NOT be retried with the identical context - that would re-derive the same
+     * reasoning and hit the same wall. The retry nudge must tell the model to answer directly /
+     * skip reasoning. The reasoning flag is observed through the stream (ReasoningDelta before End).
+     */
+    @Test
+    void emptyCompletionAfterReasoningAsksForDirectAnswerInsteadOfIdenticalRetry() {
+        // first reply: the stream emits reasoning then ends empty
+        final var first = new ScriptedReply(null, "stop", false) {
+            @Override
+            Message toMessage() {
+                return Message.assistant("", null);
+            }
+        };
+        // second reply: a normal answer (the loop asks again after the reasoning-aware nudge)
+        final var replies = new ArrayDeque<ScriptedReply>();
+        replies.add(first);
+        replies.add(new ScriptedReply("done after reasoning nudge", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                final var reply = replies.poll();
+                if (reply == null) {
+                    throw new IllegalStateException("no scripted reply left");
+                }
+                requests.add(List.copyOf(request.messages()));
+                // the first request emits a ReasoningDelta: we assert the loop records it and
+                // adapts the retry nudge accordingly
+                if (requests.size() == 1) {
+                    onDelta.accept(new LlmStreamEvent.ReasoningDelta("let me think about this"));
+                }
+                if (reply.finishReason() != null) {
+                    onDelta.accept(new End(reply.finishReason(), null));
+                }
+                return reply.toMessage();
+            }
+        };
+
+        final var result = loop(client, null, configuration(true, Map.of("yca.llm.emptyCompletionRetriesMax", "2")))
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("done after reasoning nudge", result);
+        assertEquals(2, requests.size(), "one reasoning-aware retry then the answer");
+        // the retry request must carry the direct-answer nudge (not a blind identical retry)
+        final var retryNudge = requests.get(1).getLast();
+        assertEquals("user", retryNudge.role());
+        final var nudgeText = String.valueOf(retryNudge.content());
+        assertTrue(
+                nudgeText.contains("no answer at all") && nudgeText.contains("Answer directly"),
+                "the reasoning-aware empty retry must ask for a direct answer: " + nudgeText);
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertTrue(
+                notices.stream()
+                        .anyMatch(n -> n.level() == AgentEvent.Notice.Level.WARN
+                                && n.message().contains("empty completion")
+                                && n.message().contains("retrying")),
+                "the retry notice must still be emitted: " + notices);
+    }
+
+    /**
+     * P1: the doom-loop breaker normalizes the arguments (JSON keys sorted) so cosmetic spelling
+     * variants of the same call do not bypass it: {@code {"path":"a","offset":1}} and
+     * {@code {"offset":1,"path":"a"}} are the same signature.
+     */
+    @Test
+    void repeatedCallNormalizedArgsAreRefusedAfterTheThirdOccurrence() {
+        // three occurrences with different key orderings of the same semantic call
+        final var calls = List.of(
+                new ToolCall("t1", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\",\"offset\":1}"), 0),
+                new ToolCall("t2", "function", new ToolCall.FunctionCall("echo", "{\"offset\":1,\"path\":\"/a\"}"), 0),
+                new ToolCall(
+                        "t3", "function", new ToolCall.FunctionCall("echo", "{\"path\": \"/a\", \"offset\": 1}"), 0));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(requests, calls);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        echoRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        // the third identical call must have been refused with the doom-loop diagnostic
+        final var refused = events.stream()
+                .filter(AgentEvent.ToolFinished.class::isInstance)
+                .map(AgentEvent.ToolFinished.class::cast)
+                .filter(t -> !t.success())
+                .toList();
+        assertTrue(
+                refused.stream().anyMatch(t -> String.valueOf(t.output()).contains("times with the same arguments")),
+                "the normalized duplicate must be refused with the doom-loop guidance: " + refused);
+    }
+
+    /**
+     * P1: the count is per signature, not merely consecutive: read A, read B, read A, read A must
+     * refuse the third occurrence of read A even though a different call happened in between.
+     */
+    @Test
+    void interleavedRepeatedCallsAreCountedPerSignature() {
+        final var calls = List.of(
+                new ToolCall("t1", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0),
+                new ToolCall("t2", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/b\"}"), 0),
+                new ToolCall("t3", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0),
+                new ToolCall("t4", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(requests, calls);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        echoRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        final var refused = events.stream()
+                .filter(AgentEvent.ToolFinished.class::isInstance)
+                .map(AgentEvent.ToolFinished.class::cast)
+                .filter(t -> !t.success())
+                .toList();
+        assertEquals(1, refused.size(), "only the third /a must be refused: " + refused);
+        assertTrue(
+                String.valueOf(refused.getFirst().output()).contains("3 times"),
+                refused.getFirst().output());
+    }
+
+    /**
+     * P1: a read-only call repeated fewer than three times is never refused - legitimate polling
+     * and exploration stay legal.
+     */
+    @Test
+    void repeatedReadBelowThresholdIsNotRefused() {
+        final var calls = List.of(
+                new ToolCall("t1", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0),
+                new ToolCall("t2", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = scriptedToolClient(requests, calls);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        echoRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        final var refused = events.stream()
+                .filter(AgentEvent.ToolFinished.class::isInstance)
+                .map(AgentEvent.ToolFinished.class::cast)
+                .filter(t -> !t.success())
+                .toList();
+        assertTrue(refused.isEmpty(), "two identical reads must stay legal (polling): " + refused);
+    }
+
+    /**
+     * P2: five consecutive tool rounds whose outputs are byte-identical (same signature, no write)
+     * terminate the turn with a clear error instead of spinning until maxIterations.
+     */
+    @Test
+    void noProgressAfterRepeatedIdenticalOutputsStopsTheTurn() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 6 identical tool-call rounds: the first is novel, then 5 duplicates
+        for (var i = 0; i < 6; i++) {
+            replies.add(toolCallReply("t" + i, "echo"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        echoRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "a no-progress turn must not return a normal answer");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertFalse(errors.isEmpty(), "a no-progress turn must emit an error");
+        assertTrue(
+                errors.getLast().message().contains("No progress"),
+                "the error must explain the no-progress stop: "
+                        + errors.getLast().message());
+        assertTrue(requests.size() < 10, "the turn must stop way before maxIterations: " + requests.size());
+    }
+
+    /**
+     * P6: the volatile tail rounds the context usage to the nearest 5% so tiny drifts between tool
+     * rounds do not re-append a new session-state message at every iteration.
+     */
+    @Test
+    void contextUsageTailRoundsToFivePercent() throws Exception {
+        final var loopInstance = loop(chatClient(new ArrayDeque<>(), new ArrayList<>()), null, configuration(true));
+        // replace the stub UsageTracker (percent=1) with one whose percent drifts slightly
+        final var field = AgentLoop.class.getDeclaredField("usageTracker");
+        field.setAccessible(true);
+        final var usage = new UsageTracker() {
+            private int calls;
+
+            @Override
+            public double contextPercent(final int estimatedTokens) {
+                // 53.1% then 53.4%: within the same 5% bucket, the tail must stay byte-identical
+                return calls++ == 0 ? 53.1 : 53.4;
+            }
+
+            @Override
+            public int estimateContext(final List<Message> messages, final int extraToolTokens) {
+                return 100;
+            }
+
+            @Override
+            public boolean lastResolutionWasAuto() {
+                return false;
+            }
+
+            @Override
+            public int rememberShrinkOnOverflow() {
+                return 1000;
+            }
+        };
+        field.set(loopInstance, usage);
+
+        final var first = loopInstance.contextUsageLine(List.of(Message.user("hi")), 0);
+        final var second = loopInstance.contextUsageLine(List.of(Message.user("hi")), 0);
+        assertEquals(first, second, "a sub-5% drift must not change the volatile tail (rounded to 55%): " + second);
+        assertTrue(second.contains("~55%"), "the rounded value must be the nearest 5% bucket: " + second);
+    }
+
     /**
      * The empty-completion retry runs before the todo auto-continue: a blank reply is a provider
      * hiccup, not a deliberate "stopped mid-implementation" stop the auto-continue is made for.
@@ -2011,7 +2270,7 @@ class AgentLoopTest {
                 requests.get(3).stream().filter(m -> "tool".equals(m.role())).toList();
         final var refusal = toolMessages.get(toolMessages.size() - 1);
         assertTrue(
-                String.valueOf(refusal.content()).contains("3 times in a row"),
+                String.valueOf(refusal.content()).contains("3 times with the same arguments"),
                 "the refused call must explain the doom loop: " + refusal.content());
     }
 
@@ -2913,6 +3172,36 @@ class AgentLoopTest {
                 return null;
             }
         };
+    }
+
+    /** A registry exposing a stateless read-only {@code echo} tool returning {@code done}. */
+    private ToolRegistry echoRegistry() {
+        return registryOf(new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "echo";
+            }
+
+            @Override
+            public String description() {
+                return "echoes";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of("path", Map.of("type", "string"));
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                return new ToolResult(true, "done");
+            }
+        });
     }
 
     private ChatClient scriptedToolClient(final List<List<Message>> requests, final List<ToolCall> firstReplyCalls) {
