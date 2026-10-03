@@ -1063,6 +1063,27 @@ public class TuiCommand implements Runnable {
         }
     }
 
+    /**
+     * Interrupts the running turn: sets the flag (the loop stops the stream, kills in-flight tools,
+     * aborts sub-agents and unwinds by emitting TurnCancelled) and drops everything still scheduled:
+     * queued prompts typed while the turn ran and the remaining scripted initial prompts. Without
+     * this, the TurnDone/TurnCancelled handler auto-submits the next queued prompt and the work
+     * the user just interrupted restarts immediately.
+     */
+    private void interruptTurn(final UiState state) {
+        state.interrupted = true;
+        waiting(state, "interrupting...", SpinnerStyle.CLOCK);
+        final var queued = state.pendingPrompts.size();
+        state.pendingPrompts.clear();
+        final var scheduled = state.initialPrompts.size();
+        state.initialPrompts.clear();
+        if (queued + scheduled > 0) {
+            notify(
+                    state,
+                    (queued + scheduled) + " pending prompt" + ((queued + scheduled) == 1 ? "" : "s") + " cancelled");
+        }
+    }
+
     private void confirmAnswers(final UiState state, final FeedbackPrompt prompt) {
         final var answers = prompt.answers();
         for (final var fq : prompt.questions()) {
@@ -1153,16 +1174,20 @@ public class TuiCommand implements Runnable {
             // a cancellation is not an error, only the end of the current turn
             state.turnCompleted = true;
             state.wait = null;
-            if (!state.pendingPrompts.isEmpty()) {
-                final var runner = state.runner;
-                if (runner != null && !state.model.busy()) {
-                    final var next = state.pendingPrompts.removeFirst();
-                    runLater(state, () -> submit(next, state.runner, state, false));
+            // the interrupt dropped the queues (see interruptTurn): nothing may auto-submit after
+            // a cancel, even a prompt re-queued in the race window
+            if (!state.interrupted) {
+                if (!state.pendingPrompts.isEmpty()) {
+                    final var runner = state.runner;
+                    if (runner != null && !state.model.busy()) {
+                        final var next = state.pendingPrompts.removeFirst();
+                        runLater(state, () -> submit(next, state.runner, state, false));
+                    }
                 }
-            }
-            // startup prompts run one turn each: the next one starts now that this turn ended
-            if (!state.initialPrompts.isEmpty() && state.runner != null && !state.model.busy()) {
-                runLater(state, () -> submitNextInitialPrompt(state));
+                // startup prompts run one turn each: the next one starts now that this turn ended
+                if (!state.initialPrompts.isEmpty() && state.runner != null && !state.model.busy()) {
+                    runLater(state, () -> submitNextInitialPrompt(state));
+                }
             }
         }
     }
@@ -1414,7 +1439,7 @@ public class TuiCommand implements Runnable {
         if (key.isCtrlC()) {
             if (state.interruptor.interrupt(state.model.busy()) == InterruptCoordinator.Decision.INTERRUPT) {
                 state.quitArmed = true;
-                state.interrupted = true;
+                interruptTurn(state);
                 waiting(state, "interrupting... press Ctrl+C again to quit", SpinnerStyle.CLOCK);
             } else {
                 state.quitArmed = false;
@@ -1542,8 +1567,7 @@ public class TuiCommand implements Runnable {
                 return true;
             }
             if (state.model.busy()) {
-                state.interrupted = true;
-                waiting(state, "interrupting...", SpinnerStyle.CLOCK);
+                interruptTurn(state);
             }
             return true;
         }

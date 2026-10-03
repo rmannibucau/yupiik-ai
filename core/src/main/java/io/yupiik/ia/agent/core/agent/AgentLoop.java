@@ -903,6 +903,12 @@ public class AgentLoop {
                     // an interrupt pressed while a continuation (truncation or overflow retry) was
                     // about to re-ask the model must stop here, not spawn another request
                     if (cancelled.getAsBoolean()) {
+                        // rush the terminal event out so the shells reset their busy state and flush
+                        // the buffered thinking/answer: the other cancel exits (window budget, outer
+                        // loop) emit TurnCancelled before returning, without it the transcript stays
+                        // busy forever and the live thinking tail keeps animating after the interrupt
+                        emit(new AgentEvent.TurnCancelled(currentSessionId, subagentId, subagentName));
+                        emitTurnMetrics(null, turnStartNanos);
                         return str(assistant.content());
                     }
                     final var content = str(assistant.content());

@@ -86,7 +86,11 @@ current turn and stay in the REPL, or exit (when idle a second press quits);
 `Ctrl-D` exits too. Cancelling is cooperative but prompt: the running LLM stream
 is stopped within ~100ms, in-flight `bash`/`web_fetch` tools are killed, and a
 pending compaction/retry is aborted at its next checkpoint - the transcript is
-not marked as an error, only the streamed content stays. When only the
+not marked as an error, the streamed content stays and the turn ends cleanly
+(busy state is reset, so the next prompt starts normally). In the TUI `Esc`
+interrupts the same way and also drops the queued prompts and the remaining
+scheduled `--initialPrompt`s so the interrupted work does not immediately
+restart. When only the
 `core` jar is on the classpath the prompt falls back to a plain, non-editing
 `stdin` reader (Ctrl-C/Ctrl-D still work; with the plain reader, Ctrl-C while a
 turn runs also opens the interrupt menu).
@@ -394,7 +398,7 @@ Project instructions and skills are loaded into the system prompt:
   opens automatically on the first todo update
 - Switching `/mode build` keeps the plan todos recorded in `plan` mode, or
   derives them from the last plan of the session when the list is empty
-- `Ctrl+S` compact (or scheduled at the next agent checkpoint while a turn is running), `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt; `Shift+Tab`
+- `Ctrl+S` compact (or scheduled at the next agent checkpoint while a turn is running), `Ctrl+L` clear, `Ctrl+C` quit, `Esc` interrupt (also drops queued and scheduled prompts); `Shift+Tab`
   flips between `plan` and `build` modes (same as `/mode`), `Tab` completes
   slash commands and their parameters
 - Mouse drag selects any visible text (transcript, sidebar, status bar...) and

@@ -200,6 +200,35 @@ class AgentLoopTest {
     }
 
     /**
+     * Esc pressed while the model streams a plain text reply (no tool calls): the pump surfaces the
+     * cancel as a partial message and the loop must emit TurnCancelled - exactly the terminal event
+     * the other cancel exits emit - so shells reset their busy state and flush the buffered
+     * thinking. The partial content is still returned so callers can render/continue it.
+     */
+    @Test
+    void midStreamCancelEmitsTurnCancelledAndReturnsPartialContent() {
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("partial thought", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        // the probe starts false so the first iteration runs, then flips once the model is asked
+        final var cancelled = new boolean[] {false};
+        final var result = loop(chatClient(replies, requests), null, configuration(true))
+                .run("do it", null, "s1", null, () -> {
+                    cancelled[0] = !requests.isEmpty() && !cancelled[0];
+                    return cancelled[0];
+                });
+
+        assertEquals("partial thought", result, "the partial streamed content must still be returned");
+        assertEquals(1, requests.size(), "a cancel must not spawn a retry/continuation request");
+        final var cancellations = events.stream()
+                .filter(AgentEvent.TurnCancelled.class::isInstance)
+                .toList();
+        assertEquals(1, cancellations.size(), "exactly one TurnCancelled must be emitted");
+        assertTrue(
+                events.stream().noneMatch(AgentEvent.TurnDone.class::isInstance),
+                "a cancelled turn must not emit TurnDone");
+    }
+
+    /**
      * A truncation give-up with pending todos falls through to the todo auto-continue instead of ending
      * the turn: hitting the output limit is an accident, not a reason to abandon unfinished work.
      */
