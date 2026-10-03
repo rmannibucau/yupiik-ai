@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import java.io.IOException;
@@ -48,6 +49,7 @@ public class MemoryExtractor {
     private final Clock clock;
     private final UsageTracker usageTracker;
     private final String sessionId;
+    private final MemoryCompactor memoryCompactor;
 
     public MemoryExtractor(
             final ChatClient chatClient,
@@ -58,7 +60,8 @@ public class MemoryExtractor {
             final Emitter emitter,
             final Clock clock,
             final UsageTracker usageTracker,
-            final String sessionId) {
+            final String sessionId,
+            final MemoryCompactor memoryCompactor) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
@@ -68,6 +71,7 @@ public class MemoryExtractor {
         this.clock = clock;
         this.usageTracker = usageTracker;
         this.sessionId = sessionId;
+        this.memoryCompactor = memoryCompactor;
     }
 
     protected MemoryExtractor() {
@@ -80,11 +84,14 @@ public class MemoryExtractor {
         this.clock = null;
         this.usageTracker = null;
         this.sessionId = null;
+        this.memoryCompactor = null;
     }
 
     public void maybeExtract(final List<Message> messages) {
-        if (!configuration.memory().enabled()) {
-            return;
+        if (!configuration.memory().enabled()
+                || configuration.memory().maxRatio() <= 0
+                || configuration.memory().maxChars() <= 0) {
+            return; // memory auto-disabled by budget ratio: never store facts that would not be injected
         }
         final var now = clock.millis();
         final var last = lastRun.get();
@@ -99,6 +106,10 @@ public class MemoryExtractor {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
                 }
                 notifyFailure("memory extraction failed: " + e.getMessage());
+            } finally {
+                if (memoryCompactor != null) {
+                    memoryCompactor.maybeCompact();
+                }
             }
         });
     }
@@ -123,7 +134,7 @@ public class MemoryExtractor {
                     null,
                     List.of(
                             Message.system(
-                                    "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 5 facts. Use an empty facts array when nothing is worth remembering. Do not include transient task state. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
+                                    "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
                             Message.user(excerpt)),
                     null,
                     null,

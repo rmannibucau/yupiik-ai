@@ -23,10 +23,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.regex.Pattern;
 
@@ -40,11 +43,30 @@ public class MemoryStore {
     private final CodingAgentConfiguration configuration;
 
     /**
-     * Content fingerprint of the memory files, cached and invalidated on every write
-     * ({@link #append} / {@link #appendText}). Lets the agent loop detect a mid-turn
-     * {@code memory_write} without re-reading the files at every LLM round.
+     * Cached content fingerprint of the memory files, protected by a last-modified/size guard so an
+     * external edit (which bypasses {@link #append}) also invalidates it. Lets the agent loop detect
+     * a mid-turn {@code memory_write} without re-hashing the files at every LLM round.
      */
     private volatile int contentVersion = -1;
+
+    private volatile long globalMtime = Long.MIN_VALUE;
+    private volatile long globalSize = Long.MIN_VALUE;
+    private volatile long projectMtime = Long.MIN_VALUE;
+    private volatile long projectSize = Long.MIN_VALUE;
+
+    /**
+     * Tokenized memory corpus cache (access-order LRU, so unchanged content costs one {@code get}
+     * per turn instead of a full re-tokenization). Keyed by the actual scoped content read from
+     * disk on every {@link #promptSection(String)} call: any change to the memory files - including
+     * external edits outside {@link #append} - produces a key mismatch and a safe recompute, so the
+     * cache can never return a stale corpus.
+     */
+    private final Map<String, Corpus> corpusCache = new LinkedHashMap<>(8, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, Corpus> eldest) {
+            return size() > 4;
+        }
+    };
 
     public MemoryStore(final CodingAgentConfiguration configuration) {
         this.configuration = configuration;
@@ -55,16 +77,56 @@ public class MemoryStore {
     }
 
     /**
-     * Cached fingerprint of the current memory content (global + project). Changes whenever
-     * memory is written through this store; a never-written store is stable across calls.
+     * Cached fingerprint of the current memory content (global + project), recomputed only when
+     * the files change (detected through last-modified/size, so in-store writes and external edits
+     * both invalidate it). A never-written store is stable across calls.
      */
     public int version() {
         var v = contentVersion;
-        if (v < 0) {
-            v = java.util.Objects.hash(readGlobal(), readProject());
-            contentVersion = v;
+        if (v >= 0 && (configuration == null || !stampsChanged())) {
+            return v;
         }
-        return v;
+        synchronized (this) {
+            v = contentVersion;
+            if (v < 0 || (configuration != null && stampsChanged())) {
+                v = java.util.Objects.hash(readGlobal(), readProject());
+                contentVersion = v;
+                if (configuration != null) {
+                    snapshotStamps();
+                }
+            }
+            return v;
+        }
+    }
+
+    private boolean stampsChanged() {
+        return globalMtime != mtime(globalFile())
+                || globalSize != size(globalFile())
+                || projectMtime != mtime(projectFile())
+                || projectSize != size(projectFile());
+    }
+
+    private void snapshotStamps() {
+        globalMtime = mtime(globalFile());
+        globalSize = size(globalFile());
+        projectMtime = mtime(projectFile());
+        projectSize = size(projectFile());
+    }
+
+    private static long mtime(final Path file) {
+        try {
+            return Files.isRegularFile(file) ? Files.getLastModifiedTime(file).toMillis() : -1;
+        } catch (final IOException e) {
+            return Long.MIN_VALUE; // unreadable: always report a change, recompute is the safe side
+        }
+    }
+
+    private static long size(final Path file) {
+        try {
+            return Files.isRegularFile(file) ? Files.size(file) : -1;
+        } catch (final IOException e) {
+            return Long.MIN_VALUE;
+        }
     }
 
     public Path globalFile() {
@@ -72,7 +134,11 @@ public class MemoryStore {
     }
 
     public Path projectFile() {
-        return Path.of(".", ".yca", "memory", "MEMORY.md");
+        return configuration
+                .resolveWorkingDir()
+                .resolve(".yca")
+                .resolve("memory")
+                .resolve("MEMORY.md");
     }
 
     public String readGlobal() {
@@ -100,7 +166,18 @@ public class MemoryStore {
      * @return the memory section, or empty when no memory is stored
      */
     public String promptSection(final String prompt) {
-        if (!configuration.memory().enabled()) {
+        return promptSection(
+                prompt,
+                Math.max(500, configuration == null ? 0 : configuration.memory().maxChars()));
+    }
+
+    /**
+     * Builds the {@code <memory>} section with an explicit character budget.
+     * {@code budget <= 0} (memory auto-disabled, eg. when the resolved ratio budget
+     * is too small) returns an empty section without reading the files.
+     */
+    public String promptSection(final String prompt, final int budget) {
+        if (configuration == null || !configuration.memory().enabled() || budget < 500) {
             return "";
         }
         final var global = readGlobal();
@@ -108,7 +185,7 @@ public class MemoryStore {
         if (global.isBlank() && project.isBlank()) {
             return "";
         }
-        final var max = Math.max(500, configuration.memory().maxChars());
+        final var max = budget;
         final var globalText = withScope("global", global);
         final var projectText = withScope("project", project);
         final var selected = select(globalText, projectText, global, project, prompt, max);
@@ -146,7 +223,7 @@ public class MemoryStore {
 
     private static final int MARKUP_OVERHEAD = 57;
 
-    private static ScopeSelection select(
+    private ScopeSelection select(
             final String globalText,
             final String projectText,
             final String globalRaw,
@@ -168,8 +245,7 @@ public class MemoryStore {
             return new ScopeSelection(g, p);
         }
         final var promptTokens = tokens(prompt);
-        final var projectLines = projectText.lines().filter(l -> !l.isBlank()).toList();
-        final List<Entry> ranked = rank(projectLines, promptTokens);
+        final List<Entry> ranked = rank(projectText, promptTokens);
         final var g = bounded(globalText, max / 2, false);
         var remaining = max - g.length() - MARKUP_OVERHEAD;
         final var projectSb = new StringBuilder();
@@ -189,8 +265,11 @@ public class MemoryStore {
     }
 
     private static String bounded(final String content, final int limit, final boolean tail) {
-        if (content == null || content.isBlank() || content.length() <= limit) {
-            return content == null ? "" : content;
+        if (content == null || content.isBlank() || limit <= 0) {
+            return "";
+        }
+        if (content.length() <= limit) {
+            return content;
         }
         return tail ? content.substring(content.length() - limit) : content.substring(0, limit);
     }
@@ -235,28 +314,68 @@ public class MemoryStore {
         return list;
     }
 
-    private static List<Entry> rank(final List<String> lines, final List<String> promptTokens) {
+    /**
+     * Tokenized shape of a memory corpus, computed once per distinct content and cached (LRU).
+     * {@code lineTokens} holds the tokens of each non-blank line (same order), {@code documentFrequency}
+     * counts how many lines contain each token (presence, not frequency); both are used to score lines
+     * in {@link #rank(String, List)} without any re-tokenization.
+     */
+    private record Corpus(List<String> lines, List<List<String>> lineTokens, Map<String, Integer> documentFrequency) {
+
+        private static Corpus of(final String text) {
+            final var lines = text.lines().filter(l -> !l.isBlank()).toList();
+            final var lineTokens = new ArrayList<List<String>>(lines.size());
+            final var df = new HashMap<String, Integer>();
+            for (final var line : lines) {
+                final var toks = tokens(line);
+                lineTokens.add(toks);
+                final var seen = new HashSet<String>(toks.size());
+                for (final var token : toks) {
+                    if (seen.add(token)) {
+                        df.merge(token, 1, Integer::sum);
+                    }
+                }
+            }
+            return new Corpus(lines, lineTokens, df);
+        }
+    }
+
+    private synchronized Corpus corpus(final String content) {
+        final var cached = corpusCache.get(content);
+        if (cached != null) {
+            return cached;
+        }
+        final var built = Corpus.of(content);
+        corpusCache.put(content, built);
+        return built;
+    }
+
+    private List<Entry> rank(final String projectText, final List<String> promptTokens) {
+        final var corpus = corpus(projectText);
+        final var lines = corpus.lines();
+        final var lineTokens = corpus.lineTokens();
+        final var df = corpus.documentFrequency();
         final var pq = new PriorityQueue<Entry>(Comparator.comparingDouble(Entry::score));
-        for (final var line : lines) {
-            final var lineTokens = tokens(line);
-            if (lineTokens.isEmpty()) {
+        for (var i = 0; i < lines.size(); i++) {
+            final var currentTokens = lineTokens.get(i);
+            if (currentTokens.isEmpty()) {
                 continue;
             }
             // BM25-lite: tf of shared tokens weighted by inverse rarity across the corpus (idf approx = log(1+N/nT))
             final var counts = new LinkedHashMap<String, Integer>();
-            for (final var t : lineTokens) {
+            for (final var t : currentTokens) {
                 counts.merge(t, 1, Integer::sum);
             }
             double score = 0;
             for (final var t : promptTokens) {
                 final var tf = counts.getOrDefault(t, 0);
                 if (tf > 0) {
-                    final var idf = Math.log1p((double) lines.size() / Math.max(1, tokenDocFrequency(lines, t)));
+                    final var idf = Math.log1p((double) lines.size() / Math.max(1, df.getOrDefault(t, 0)));
                     score += tf / (tf + 1.3) * idf;
                 }
             }
             if (score > 0) {
-                pq.offer(new Entry(line, score));
+                pq.offer(new Entry(lines.get(i), score));
                 if (pq.size() > 64) {
                     pq.poll();
                 }
@@ -267,25 +386,11 @@ public class MemoryStore {
         return all;
     }
 
-    private static int tokenDocFrequency(final List<String> lines, final String token) {
-        int n = 0;
-        for (final var line : lines) {
-            if (tokens(line).contains(token)) {
-                n++;
-            }
-        }
-        return n;
-    }
-
     private record Entry(String line, double score) {}
 
     private record ScopeSelection(String global, String project) {}
 
     public synchronized List<String> append(final boolean global, final List<String> facts) {
-        return append(global, facts, true);
-    }
-
-    synchronized List<String> append(final boolean global, final List<String> facts, final boolean touchVersion) {
         if (facts == null || facts.isEmpty()) {
             return List.of();
         }
@@ -304,16 +409,20 @@ public class MemoryStore {
                 final var wrapped = wrapLine(line, 500);
                 for (final var piece : wrapped) {
                     final var normalized = piece.startsWith("-") ? piece.strip() : "- " + piece;
-                    if (existing.add(normalized)) {
+                    final var replaced = fuzzyReplace(existing, normalized);
+                    if (replaced != null) {
+                        // a near-duplicate bullet was superseded by the new wording
+                        existing.remove(replaced);
+                        existing.add(normalized);
+                        added.add(normalized);
+                    } else if (existing.add(normalized)) {
                         added.add(normalized);
                     }
+                    // exact duplicate: already present, nothing to do
                 }
             }
             if (!added.isEmpty()) {
                 write(file, existing);
-                if (touchVersion) {
-                    contentVersion = -1; // next version() recomputes from the fresh files
-                }
             }
             return added;
         } catch (final IOException e) {
@@ -329,6 +438,83 @@ public class MemoryStore {
         return append(
                 global,
                 text.lines().map(String::strip).filter(l -> !l.isEmpty()).toList());
+    }
+
+    /**
+     * Near-duplicate detection: when a bullet already covers the new fact (normalized token
+     * Dice similarity {@code >= 0.8} with at least 4 shared tokens), the new wording supersedes
+     * the old one and the existing bullet is returned for replacement. This keeps the store from
+     * growing with reformulations ("supersedes" observations, reworded decisions) while never
+     * merging distinct facts, thanks to the conservative token-overlap floor.
+     */
+    private static String fuzzyReplace(final LinkedHashSet<String> existing, final String normalized) {
+        final var newTokens = set(tokens(normalized));
+        if (newTokens.size() < 4) {
+            return null;
+        }
+        String best = null;
+        double bestScore = 0;
+        for (final var bullet : existing) {
+            final var oldTokens = set(tokens(bullet));
+            if (oldTokens.size() < 4 || Math.min(oldTokens.size(), newTokens.size()) < 4) {
+                continue;
+            }
+            int common = 0;
+            for (final var t : newTokens) {
+                if (oldTokens.contains(t)) {
+                    common++;
+                }
+            }
+            if (common < 4) {
+                continue;
+            }
+            // Dice coefficient on token sets
+            final var dice = 2.0 * common / (oldTokens.size() + newTokens.size());
+            if (dice >= 0.8 && dice > bestScore) {
+                best = bullet;
+                bestScore = dice;
+            }
+        }
+        return best;
+    }
+
+    private static java.util.Set<String> set(final List<String> tokens) {
+        return new java.util.HashSet<>(tokens);
+    }
+
+    /**
+     * Replaces the whole memory content (used by the compactor): writes the given
+     * bullet lines atomically (keeping the file header). The previous file is kept
+     * as a {@code .bak} sibling so a bad rewrite can be restored.
+     *
+     * @return the number of bytes written, or -1 when the rewrite was rejected
+     */
+    public synchronized long replace(final boolean global, final List<String> bullets) {
+        try {
+            final var file = global ? globalFile() : projectFile();
+            Files.createDirectories(file.getParent());
+            if (Files.exists(file)) {
+                Files.copy(
+                        file,
+                        file.resolveSibling(file.getFileName() + ".bak"),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+            final var content = new StringBuilder(HEADER);
+            bullets.stream()
+                    .map(b -> b.startsWith("-") ? b : "- " + b)
+                    .forEach(b -> content.append(b).append('\n'));
+            final var tmp = file.resolveSibling(file.getFileName() + ".tmp-"
+                    + Thread.currentThread().getName().hashCode());
+            Files.writeString(tmp, content.toString());
+            Files.move(
+                    tmp,
+                    file,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            return content.length();
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 
     private void write(final Path file, final LinkedHashSet<String> lines) throws IOException {

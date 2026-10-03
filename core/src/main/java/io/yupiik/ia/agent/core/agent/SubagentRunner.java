@@ -208,7 +208,8 @@ public class SubagentRunner {
                 emitter,
                 clock,
                 subagentUsageTracker,
-                state.parentSessionId());
+                state.parentSessionId(),
+                null);
         final var subagentContextView = new ContextView();
         final var subagentCompactionCoordinator = new CompactionCoordinator(
                 configuration, chatClient, subagentUsageTracker, providerManager, emitter, state.parentSessionId());

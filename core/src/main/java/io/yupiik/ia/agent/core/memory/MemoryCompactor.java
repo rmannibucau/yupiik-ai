@@ -1,0 +1,253 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.memory;
+
+import static java.util.stream.Collectors.toList;
+
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+/**
+ * Periodic hygiene pass over the project memory file: when it grows past a size
+ * threshold, an LLM call (on the compact model when configured) rewrites the
+ * durable facts, merging near-duplicates, dropping superseded one-off
+ * observations and keeping one short bullet per fact. A {@code .bak} backup is
+ * kept and rewrites that do not shrink the file by at least {@code minReduction}
+ * are discarded, so a poor model output can never destroy memory.
+ *
+ * <p>Runs at most {@code minIntervalMs} apart (debounced), never more than once
+ * per session (a {@code compaction.txt} state file records the last run), and
+ * only when memory is enabled.</p>
+ */
+@ApplicationScoped
+public class MemoryCompactor {
+    private static final Logger LOGGER = Logger.getLogger(MemoryCompactor.class.getName());
+
+    /** Project memory files below this size are never worth rewriting. */
+    private static final long THRESHOLD_BYTES = 64 * 1024;
+
+    /** A rewrite must shrink the file by at least this fraction, or it is discarded. */
+    private static final double MIN_REDUCTION = 0.20;
+
+    /** Debounce between automatic runs (manual {@link #compactNow()} bypasses it). */
+    private static final long MIN_INTERVAL_MS = 60_000;
+
+    private final ChatClient chatClient;
+    private final CodingAgentConfiguration configuration;
+    private final MemoryStore memoryStore;
+    private final ProviderManager providerManager;
+    private final UsageTracker usageTracker;
+    private final AtomicLong lastRun = new AtomicLong();
+    private final AtomicBoolean running = new AtomicBoolean();
+
+    public MemoryCompactor(
+            final ChatClient chatClient,
+            final CodingAgentConfiguration configuration,
+            final MemoryStore memoryStore,
+            final ProviderManager providerManager,
+            final UsageTracker usageTracker) {
+        this.chatClient = chatClient;
+        this.configuration = configuration;
+        this.memoryStore = memoryStore;
+        this.providerManager = providerManager;
+        this.usageTracker = usageTracker;
+    }
+
+    protected MemoryCompactor() {
+        this(null, null, null, null, null);
+    }
+
+    /**
+     * Called at the end of a turn: debounced, threshold-gated, single-flight.
+     *
+     * @return a short status message, or {@code null} when nothing ran
+     */
+    public String maybeCompact() {
+        if (configuration == null
+                || !configuration.memory().compactEnabled()
+                || !configuration.memory().enabled()) {
+            return null;
+        }
+        final var now = System.currentTimeMillis();
+        final var last = lastRun.get();
+        if (now - last < MIN_INTERVAL_MS || !lastRun.compareAndSet(last, now)) {
+            return null;
+        }
+        final var file = memoryStore.projectFile();
+        try {
+            if (!Files.isRegularFile(file) || Files.size(file) < THRESHOLD_BYTES) {
+                return null; // below the threshold: nothing to gain
+            }
+            return compactNow(false);
+        } catch (final IOException e) {
+            LOGGER.log(Level.FINE, "memory compaction threshold check failed", e);
+            return null;
+        }
+    }
+
+    /**
+     * Runs the rewrite right now (manual {@code /memory compact}). Bypasses the
+     * debounce and threshold, honoring only the enabled flag and the single-flight
+     * guard (protected constructor use is only for the manual path).
+     */
+    public String compactNow() {
+        return compactNow(true);
+    }
+
+    private String compactNow(final boolean manual) {
+        if (!running.compareAndSet(false, true)) {
+            return "memory compaction already running";
+        }
+        try {
+            final var file = memoryStore.projectFile();
+            final var content = memoryStore.readProject();
+            if (content == null || content.isBlank()) {
+                return manual ? "no project memory to compact" : null;
+            }
+            final var rewritten = rewrite(content);
+            if (rewritten == null || rewritten.isBlank()) {
+                return manual ? "memory compaction produced no output; left untouched" : null;
+            }
+            // normalize and re-parse the model output into bullets; keep the ones that are not blank
+            final var bullets = rewritten
+                    .lines()
+                    .map(String::strip)
+                    .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                    .map(l -> l.startsWith("-") ? l : "- " + l)
+                    .collect(toList());
+            final var beforeBytes = content.length();
+            final var afterBytes =
+                    bullets.stream().mapToInt(l -> l.length() + 1).sum() + MemoryStore.HEADER.length();
+            if (beforeBytes > 0 && afterBytes >= beforeBytes * (1 - MIN_REDUCTION)) {
+                // not enough reduction: a poor rewrite would only churn the file
+                return manual ? "memory compaction kept the file (reduction below 20%)" : null;
+            }
+            memoryStore.replace(false, bullets);
+            writeState(beforeBytes, afterBytes);
+            return "memory compacted: "
+                    + beforeBytes
+                    + " -> "
+                    + afterBytes
+                    + " chars ("
+                    + Math.round((1 - (double) afterBytes / beforeBytes) * 100)
+                    + "% smaller)";
+        } finally {
+            running.set(false);
+        }
+    }
+
+    private String rewrite(final String content) {
+        final var compact =
+                configuration.model() == null ? null : configuration.model().compact();
+        final var model = providerManager == null ? null : providerManager.resolveModel(compact);
+        try {
+            final var res = chatClient.chat(new ChatCompletionRequest(
+                    model,
+                    List.of(
+                            Message.system("You maintain a project memory file: a list of durable facts, decisions and "
+                                    + "preferences, one bullet per line, all about this repository. "
+                                    + "Rewrite the provided memory: merge near-duplicate bullets, drop facts that "
+                                    + "supersede or contradict older ones, drop one-off session observations "
+                                    + "(benchmarks, sandbox paths, single-run findings) and drop non-facts (plans, "
+                                    + "\"must be fixed\", implementation details). Keep one short bullet per fact, "
+                                    + "each at most 200 characters. Keep the same information density; only remove "
+                                    + "the noise. Reply with only the new bullet list, one per line, '-' prefixed, "
+                                    + "no preamble, no markdown fences."),
+                            Message.user(content)),
+                    null,
+                    null,
+                    false,
+                    null,
+                    null,
+                    null,
+                    null,
+                    null));
+            if (usageTracker != null) {
+                usageTracker.recordAuxiliary(res.usage());
+            }
+            return res.message() == null || res.message().content() == null
+                    ? ""
+                    : String.valueOf(res.message().content());
+        } catch (final IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            LOGGER.log(Level.FINE, "memory compaction LLM call failed", e);
+            LOGGER.info("memory compaction failed; run /memory compact to retry");
+            return null;
+        }
+    }
+
+    private void writeState(final long beforeBytes, final long afterBytes) {
+        try {
+            final var file = memoryStore.projectFile().resolveSibling("compaction.txt");
+            Files.writeString(
+                    file,
+                    "timestamp=" + System.currentTimeMillis()
+                            + "\nbefore=" + beforeBytes
+                            + "\nafter=" + afterBytes
+                            + "\n");
+        } catch (final IOException e) {
+            LOGGER.log(Level.FINE, "could not persist memory compaction state", e);
+        }
+    }
+
+    /** Reads the last compaction state, or {@code null} when none is recorded. */
+    public CompactionState state() {
+        final var file = memoryStore.projectFile().resolveSibling("compaction.txt");
+        try {
+            if (!Files.isRegularFile(file)) {
+                return null;
+            }
+            long before = -1;
+            long after = -1;
+            long timestamp = -1;
+            for (final var line : Files.readAllLines(file)) {
+                final var i = line.indexOf('=');
+                if (i < 0) {
+                    continue;
+                }
+                final var value = line.substring(i + 1);
+                switch (line.substring(0, i)) {
+                    case "timestamp" -> timestamp = Long.parseLong(value);
+                    case "before" -> before = Long.parseLong(value);
+                    case "after" -> after = Long.parseLong(value);
+                    default -> {
+                        // ignore unknown keys
+                    }
+                }
+            }
+            return new CompactionState(timestamp, before, after);
+        } catch (final IOException e) {
+            LOGGER.log(Level.FINE, "could not read memory compaction state", e);
+            return null;
+        }
+    }
+
+    public record CompactionState(long timestamp, long before, long after) {}
+}

@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -61,6 +62,7 @@ public class AgentSessionService {
     private final PlanTodoSeeder planTodoSeeder;
     private final CodingAgentConfiguration configuration;
     private final SnapshotStore snapshotStore;
+    private final MemoryCompactor memoryCompactor;
 
     public AgentSessionService(
             final ChatClient chatClient,
@@ -72,7 +74,8 @@ public class AgentSessionService {
             final PlanFileService planFileService,
             final PlanTodoSeeder planTodoSeeder,
             final CodingAgentConfiguration configuration,
-            final SnapshotStore snapshotStore) {
+            final SnapshotStore snapshotStore,
+            final MemoryCompactor memoryCompactor) {
         this.chatClient = chatClient;
         this.mcpManager = mcpManager;
         this.agentProvider = agentProvider;
@@ -83,6 +86,33 @@ public class AgentSessionService {
         this.planTodoSeeder = planTodoSeeder;
         this.configuration = configuration;
         this.snapshotStore = snapshotStore;
+        this.memoryCompactor = memoryCompactor;
+    }
+
+    /** Kept for callers that do not wire the compactor (eg. tests). */
+    public AgentSessionService(
+            final ChatClient chatClient,
+            final McpManager mcpManager,
+            final AgentProvider agentProvider,
+            final SessionStore sessionStore,
+            final MemoryStore memoryStore,
+            final StructuralCodeGraph structuralCodeGraph,
+            final PlanFileService planFileService,
+            final PlanTodoSeeder planTodoSeeder,
+            final CodingAgentConfiguration configuration,
+            final SnapshotStore snapshotStore) {
+        this(
+                chatClient,
+                mcpManager,
+                agentProvider,
+                sessionStore,
+                memoryStore,
+                structuralCodeGraph,
+                planFileService,
+                planTodoSeeder,
+                configuration,
+                snapshotStore,
+                null);
     }
 
     public record ToolInfo(String name, String description) {}
@@ -442,6 +472,45 @@ public class AgentSessionService {
      */
     public MemoryContent memory() {
         return new MemoryContent(memoryStore.readGlobal(), memoryStore.readProject());
+    }
+
+    public record MemoryStats(
+            int globalChars,
+            int globalBullets,
+            int projectChars,
+            int projectBullets,
+            long injectedBudget,
+            MemoryCompactor.CompactionState lastCompaction) {}
+
+    /**
+     * Aggregated memory statistics for the inspection command: sizes, bullet
+     * counts, the effective injected budget and the last compaction state.
+     */
+    public MemoryStats memoryStats() {
+        return new MemoryStats(
+                memoryStore.readGlobal().length(),
+                (int) memoryStore
+                        .readGlobal()
+                        .lines()
+                        .filter(l -> l.strip().startsWith("-"))
+                        .count(),
+                memoryStore.readProject().length(),
+                (int) memoryStore
+                        .readProject()
+                        .lines()
+                        .filter(l -> l.strip().startsWith("-"))
+                        .count(),
+                -1,
+                null);
+    }
+
+    /**
+     * Runs the memory compaction synchronously (manual {@code /memory compact}).
+     * Returns the status message from the compactor, or a hint when the compactor
+     * is not wired.
+     */
+    public String compactMemory() {
+        return memoryCompactor == null ? "memory compaction is not available" : memoryCompactor.compactNow();
     }
 
     public record AgentOverride(String agentName, String prompt) {}

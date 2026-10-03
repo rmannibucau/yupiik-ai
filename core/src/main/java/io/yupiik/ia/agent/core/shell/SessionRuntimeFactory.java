@@ -32,6 +32,7 @@ import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
@@ -123,8 +124,18 @@ public class SessionRuntimeFactory {
         final var compactionCoordinator =
                 new CompactionCoordinator(configuration, chatClient, usage, providerManager, emitter, sessionId);
         final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);
+        final var memoryCompactor = new MemoryCompactor(chatClient, configuration, memoryStore, providerManager, usage);
         final var memoryExtractor = new MemoryExtractor(
-                chatClient, configuration, memoryStore, mapper, executor, emitter, clock, usage, sessionId);
+                chatClient,
+                configuration,
+                memoryStore,
+                mapper,
+                executor,
+                emitter,
+                clock,
+                usage,
+                sessionId,
+                memoryCompactor);
         final var systemPromptBuilder = new SystemPromptBuilder(
                 configuration,
                 memoryStore,

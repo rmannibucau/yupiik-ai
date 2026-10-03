@@ -192,7 +192,7 @@ public class SystemPromptBuilder {
         // durable memory lives in the stable prefix (message[0], built once per turn) so it is never
         // re-sent at every tool-call round; only a mid-turn memory_write refreshes it via the tail
         if (memoryStore != null) {
-            final var memory = memoryStore.promptSection(prompt);
+            final var memory = memoryStore.promptSection(prompt, resolvedMemoryBudget());
             if (!memory.isBlank()) {
                 sb.append('\n').append(memory).append('\n');
             }
@@ -245,7 +245,7 @@ public class SystemPromptBuilder {
      * Empty when memory is disabled or not stored.
      */
     public String memorySection(final String prompt) {
-        return memoryStore == null ? "" : memoryStore.promptSection(prompt);
+        return memoryStore == null ? "" : memoryStore.promptSection(prompt, resolvedMemoryBudget());
     }
 
     /**
@@ -255,6 +255,30 @@ public class SystemPromptBuilder {
      */
     public int memoryVersion() {
         return memoryStore == null ? -1 : memoryStore.version();
+    }
+
+    /**
+     * Memory injection budget: when {@code memory.maxRatio > 0} the configured
+     * {@code memory.maxChars} is capped by {@code maxRatio} of the resolved system
+     * prompt cap (so a small context window does not waste its budget on memory),
+     * and a budget below 1000 chars disables memory entirely (auto-off: extraction
+     * is skipped too, the store keeps the facts untouched).
+     */
+    public int resolvedMemoryBudget() {
+        if (memoryStore == null) {
+            return 0;
+        }
+        final var memory = configuration.memory();
+        if (!memory.enabled()) {
+            return 0;
+        }
+        final var maxChars = Math.max(0, memory.maxChars());
+        if (memory.maxRatio() <= 0) {
+            return maxChars;
+        }
+        final var ratioBudget = (int) Math.floor(resolvedSystemPromptCap() * memory.maxRatio());
+        final var budget = Math.min(maxChars, ratioBudget);
+        return budget < 1_000 ? 0 : budget;
     }
 
     /**

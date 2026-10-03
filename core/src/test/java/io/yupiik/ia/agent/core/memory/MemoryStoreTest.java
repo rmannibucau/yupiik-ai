@@ -72,6 +72,53 @@ class MemoryStoreTest {
         assertEquals(1, count(store.promptSection(null), "- the same fact"));
     }
 
+    @Test
+    void promptSectionHonorsExplicitBudget() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of("yca.memory.maxChars", "8000")));
+        Files.createDirectories(store.globalFile().getParent());
+        Files.writeString(
+                store.globalFile(),
+                "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n"
+                        + "- alpha beta gamma delta epsilon zeta\n"
+                        + "- a b c d e f g h i j k l\n");
+        assertTrue(store.promptSection(null, 0).isEmpty(), "budget 0 must disable the section");
+        assertTrue(store.promptSection(null, 5).isEmpty(), "tiny budget must disable the section");
+        assertTrue(store.promptSection(null, 120).isEmpty(), "budget below the 500 floor is auto-off");
+        final var small = store.promptSection(null, 700);
+        // the global (only 2 bullets, ~65 chars) fits in the budget: the section keeps content
+        assertTrue(small.contains("- alpha"), "budgeted section must keep content: " + small);
+        assertTrue(small.length() <= 900, "budgeted section must stay small: " + small.length());
+    }
+
+    @Test
+    void appendReformulationReplacesTheOldBullet() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        store.append(
+                true,
+                List.of(
+                        "FileSessionStore and InMemorySessionStore must round-trip Message.others() on load and replace"));
+        store.append(
+                true,
+                List.of(
+                        "FileSessionStore and InMemorySessionStore must round-trip Message.others in load() and replace()"));
+        final var section = store.promptSection(null);
+        assertEquals(
+                1,
+                count(section, "FileSessionStore and InMemorySessionStore must round-trip"),
+                "a reformulated near-duplicate must replace the old bullet: " + section);
+        assertTrue(section.contains("round-trip Message.others in load()"), "the newest wording must win: " + section);
+    }
+
+    @Test
+    void appendKeepsDistinctBulletsEvenWhenTokensOverlap() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        store.append(true, List.of("the agent prefers tabs for indentation"));
+        store.append(true, List.of("the agent prefers spaces in documentation files"));
+        final var section = store.promptSection(null);
+        assertEquals(1, count(section, "the agent prefers tabs"), "distinct fact must be kept: " + section);
+        assertEquals(1, count(section, "the agent prefers spaces"), "distinct fact must be kept: " + section);
+    }
+
     private static int count(final String haystack, final String needle) {
         var out = 0;
         var from = 0;

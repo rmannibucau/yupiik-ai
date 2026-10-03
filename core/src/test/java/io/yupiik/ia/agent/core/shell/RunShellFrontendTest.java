@@ -46,6 +46,8 @@ class RunShellFrontendTest {
     private final ByteArrayOutputStream err = new ByteArrayOutputStream();
     private final List<String> logs = new ArrayList<>();
     private Handler handler;
+    private Level previousLevel;
+    private boolean previousUseParentHandlers;
 
     @BeforeEach
     void capture() {
@@ -71,14 +73,23 @@ class RunShellFrontendTest {
         };
         final var logger = Logger.getLogger(RunShellFrontend.class.getName());
         logger.addHandler(handler);
+        // isolate the JVM-wide JUL logger for the duration of the test: classes run in parallel
+        // (same fork) and a parent handler's level/filter could swallow the records before they
+        // reach this handler, or leave the logger level changed for the following tests
+        previousLevel = logger.getLevel();
+        previousUseParentHandlers = logger.getUseParentHandlers();
         logger.setLevel(Level.INFO);
+        logger.setUseParentHandlers(false);
     }
 
     @AfterEach
     void restore() {
         System.setOut(originalOut);
         System.setErr(originalErr);
-        Logger.getLogger(RunShellFrontend.class.getName()).removeHandler(handler);
+        final var logger = Logger.getLogger(RunShellFrontend.class.getName());
+        logger.removeHandler(handler);
+        logger.setLevel(previousLevel);
+        logger.setUseParentHandlers(previousUseParentHandlers);
     }
 
     @Test

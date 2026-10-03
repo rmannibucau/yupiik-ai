@@ -56,11 +56,32 @@ public class InspectCommands implements SlashCommandSet {
     }
 
     private ShellOutcome memory(final String arg, final ShellEnv env) {
-        final var memory = agentSessionService.memory();
-        if (memory.global().isBlank() && memory.project().isBlank()) {
-            return ShellOutcome.status("(empty memory)");
+        if ("compact".equalsIgnoreCase(arg == null ? "" : arg.strip())) {
+            return ShellOutcome.transcript("**Memory compaction**\n\n" + agentSessionService.compactMemory());
         }
+        final var stats = agentSessionService.memoryStats();
         final var sb = new StringBuilder("\n```text\n");
+        sb.append("-- global: ")
+                .append(stats.globalChars())
+                .append(" chars, ")
+                .append(stats.globalBullets())
+                .append(" bullets\n");
+        sb.append("-- project: ")
+                .append(stats.projectChars())
+                .append(" chars, ")
+                .append(stats.projectBullets())
+                .append(" bullets\n");
+        if (stats.lastCompaction() != null) {
+            sb.append("-- last compaction: ")
+                    .append(new java.util.Date(stats.lastCompaction().timestamp()))
+                    .append(" (before=")
+                    .append(stats.lastCompaction().before())
+                    .append(", after=")
+                    .append(stats.lastCompaction().after())
+                    .append(")\n");
+        }
+        sb.append("\n");
+        final var memory = agentSessionService.memory();
         if (!memory.global().isBlank()) {
             sb.append("-- global memory --\n").append(memory.global()).append('\n');
         }
