@@ -58,6 +58,7 @@ import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
@@ -403,12 +404,6 @@ public class TuiCommand implements Runnable {
             String theme,
 
             @Property(
-                    defaultValue = "false",
-                    documentation =
-                            "Bypass permission prompts and allow all tool calls (not persisted to the transcript).")
-            boolean permitAll,
-
-            @Property(
                     defaultValue = "java.util.List.of()",
                     documentation =
                             "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
@@ -427,16 +422,14 @@ public class TuiCommand implements Runnable {
          * @param bindings key binding preset
          * @param showThinking show the reasoning stream
          * @param theme UI theme
-         * @param permitAll bypass permission prompts
          */
         public TuiConf(
                 final String session,
                 final String context,
                 final KeyBindingPreset bindings,
                 final boolean showThinking,
-                final String theme,
-                final boolean permitAll) {
-            this(session, context, bindings, showThinking, theme, permitAll, List.of());
+                final String theme) {
+            this(session, context, bindings, showThinking, theme, List.of());
         }
     }
 
@@ -669,7 +662,6 @@ public class TuiCommand implements Runnable {
         }
         runtime.permissions().setGate(gate(tui, state));
         runtime.feedback().setGate(feedbackGate(tui, state));
-        runtime.permissions().setPermitAll(conf.permitAll());
         refreshLabels(state);
         state.model.status("ready");
         shellRegistry.register(env(tui, state));
@@ -690,7 +682,6 @@ public class TuiCommand implements Runnable {
         if (runtime != null) {
             runtime.permissions().setGate(null);
             runtime.feedback().setGate(null);
-            runtime.permissions().setPermitAll(false);
         }
         if (state.sessionId != null && sessionStore.isEmpty(state.sessionId)) {
             sessionStore.delete(state.sessionId);
@@ -730,7 +721,6 @@ public class TuiCommand implements Runnable {
         if (tui != null) {
             runtime.permissions().setGate(gate(tui, state));
             runtime.feedback().setGate(feedbackGate(tui, state));
-            runtime.permissions().setPermitAll(conf.permitAll());
             shellRegistry.register(env(tui, state));
         }
     }
@@ -3248,18 +3238,18 @@ public class TuiCommand implements Runnable {
         }
         text.add(Line.from(Span.styled("session ", label), Span.styled(ellipsize(state.sessionId, width - 8), value)));
         // the mode and permissions each get their own row: mode is always visible with
-        // the mode-colored value, permissions shows the approval mode (all -> red)
+        // the mode-colored value, permissions shows the approval mode (yolo -> red)
         final var permissions = state.session.runtime().permissions();
         text.add(Line.from(
                 Span.styled("mode ", label),
                 Span.styled(permissions.mode().name().toLowerCase(Locale.ROOT), Style.EMPTY.fg(modeColor()))));
+        final var permissionMode = permissions.permissionMode().name().toLowerCase(Locale.ROOT);
+        final var yolo = permissions.permissionMode() == PermissionMode.YOLO;
         text.add(Line.from(
                 Span.styled("permissions ", label),
                 Span.styled(
-                        permissions.isPermitAll()
-                                ? "all ⚠"
-                                : permissions.permissionMode().name().toLowerCase(Locale.ROOT),
-                        permissions.isPermitAll() ? Style.EMPTY.fg(Color.hex(palette.permitAll())) : value)));
+                        yolo ? "yolo ⚠" : permissionMode,
+                        yolo ? Style.EMPTY.fg(Color.hex(palette.yolo())).bold() : value)));
         text.add(Line.from(Span.styled("servers ", label)));
         for (final var status : mcpManager.serverStatuses()) {
             final var dotColor =
@@ -5971,21 +5961,15 @@ public class TuiCommand implements Runnable {
     }
 
     private String modeName() {
-        if (active().session.runtime().permissions().isPermitAll()) {
-            return "all";
-        }
         return active().session.runtime().permissions().mode().name().toLowerCase(Locale.ROOT);
     }
 
-    /** Mode word shown in the status strip; "all ⚠" when permissions are open. */
+    /** Mode word shown in the status strip. */
     private String modeWord() {
-        return modeName() + (active().session.runtime().permissions().isPermitAll() ? " ⚠" : "");
+        return modeName();
     }
 
     private Color modeColor() {
-        if (active().session.runtime().permissions().isPermitAll()) {
-            return Color.hex(palette.permitAll());
-        }
         return Color.hex(planMode() ? palette.warning() : palette.accent());
     }
 

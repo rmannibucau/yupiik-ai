@@ -125,17 +125,17 @@ class CliPromptTemplateTest {
 
     @Test
     void defaultTemplateRendersPermissionAndAgentWhenPresent() {
-        final var rendered = defaultTemplate().render(data("build", "all", "reviewer", 42, Map.of()));
-        assertEquals("[build@gpt-x] (all) [reviewer] 42%> ", rendered);
+        final var rendered = defaultTemplate().render(data("build", "yolo", "reviewer", 42, Map.of()));
+        assertEquals("[build@gpt-x] (yolo) [reviewer] 42%> ", rendered);
     }
 
     @Test
     void defaultTemplateColorizesWithPalette() {
-        final var rendered = defaultTemplate().render(data("plan", "all", "reviewer"));
+        final var rendered = defaultTemplate().render(data("plan", "yolo", "reviewer"));
         // mode plan -> accent, reset before the '@' so the separator is uncolored
         assertTrue(rendered.contains("[accent]plan[reset]@"), "expected accent-wrapped mode: " + rendered);
-        // permission all -> error, reset before the ')'
-        assertTrue(rendered.contains("[error]all[reset])"), "expected error-wrapped permission: " + rendered);
+        // permission yolo -> status (default branch), reset before the ')'
+        assertTrue(rendered.contains("[status]yolo[reset])"), "expected status-wrapped permission: " + rendered);
         // model -> model palette entry, reset before the ']'
         assertTrue(rendered.contains("[model]gpt-x[reset]]"), "expected model-wrapped name: " + rendered);
         // 42% context -> warning band, reset after the '%' so the chevron and typed input are uncolored

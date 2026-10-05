@@ -689,11 +689,11 @@ class TuiCommandRenderTest {
             final SubagentRegistry subagentRegistry) {
         final var mapper = formatMapper;
         final var configuration = configuration();
-        final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark", true);
+        final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark");
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
-                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", "auto", "auto", 4000L, 3500L, true, "unicode",
-                "auto", "auto", List.of(), null, true, 3, 10, "");
+                0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode", "auto",
+                "auto", List.of(), null, true, 3, 10, "", "#ff5555");
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -1727,18 +1727,14 @@ class TuiCommandRenderTest {
         uiThread.start();
         awaitTui();
         awaitText("yca coding agent");
-        // the default permissions state is "all": the gutter (screen column 0) stays thin
+        // the default permissions state is "ask" (the mode the sidebar shows): the gutter (screen column 0) stays thin
         awaitNoRowStartingWith("┃");
         // the sidebar model line is a plain labeled row; the mode sits in its own row below
         awaitText("model test-model");
-        awaitText("permissions all ⚠");
-
-        // leave the permissions-all state so the actual plan/build mode is shown textually
-        tuiRef.get().dispatch(new PasteEvent("/permissions none"));
-        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-        // the sidebar always shows "mode plan" (its own row), so sync on the
-        // permissions row flipping to the ask mode before probing the color
         awaitText("permissions ask");
+
+        // the sidebar always shows "mode plan" (its own row), so sync on the
+        // mode row before probing the color
         awaitText("mode plan");
         final var col = columnOfLineContaining("mode plan") + 5; // skip the muted "mode " label
         final var row = rowOf("mode plan");

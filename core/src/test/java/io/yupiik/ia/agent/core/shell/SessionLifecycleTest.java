@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -102,15 +103,15 @@ class SessionLifecycleTest {
     }
 
     @Test
-    void installAppliesPermitAllAndReleaseKeepsNonEmptySession() {
+    void installAppliesGatesAndReleaseKeepsNonEmptySession() {
         final var store = newStore();
         final var lifecycle = newLifecycle(store);
         final ApprovalGate approval = (title, detail, toolName, args) -> ApprovalGate.Result.DENY;
         final FeedbackGate feedback = questions -> Map.of();
 
         final var runtime = newRuntime();
-        lifecycle.installGates(approval, feedback, true, runtime);
-        assertTrue(runtime.permissions().isPermitAll());
+        lifecycle.installGates(approval, feedback, runtime);
+        assertEquals(approval, runtime.permissions().gate());
 
         final var sessionId = store.create();
         store.append(sessionId, SessionEntry.of(store.now(), "user", "hello", null, null));
@@ -119,6 +120,6 @@ class SessionLifecycleTest {
 
         lifecycle.release(sessionId, runtime);
         assertFalse(store.isEmpty(sessionId), "non-empty session must survive");
-        assertFalse(runtime.permissions().isPermitAll());
+        assertNull(runtime.permissions().gate());
     }
 }

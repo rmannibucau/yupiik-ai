@@ -56,7 +56,7 @@ import java.util.function.BooleanSupplier;
  * Answers /btw side questions out of band: a bounded read-only tool loop over the inherited
  * session history, gated by the plan-mode permissions and the session approval gate. Tools
  * are limited to the read-only category plus the bash tool evaluated against the plan-mode
- * command rules (never inheriting yolo/permitAll). Nothing is written to the session store,
+ * command rules (never inheriting the session permission mode). Nothing is written to the session store,
  * so the main conversation and its persistence are never affected.
  */
 @ApplicationScoped
@@ -155,11 +155,10 @@ public class BtwAnswerer {
         messages.add(Message.user(userPrompt(conf, question)));
         final var model = conf.model() == null || conf.model().isBlank() ? null : conf.model();
         final var target = client(model);
-        // /btw never inherits the session yolo/permitAll: plan-mode rules only, and the caller's
+        // /btw never inherits the session permission mode: plan-mode rules only, and the caller's
         // approval gate (the tabs share it, so an approval pops above the btw modal) decides the rest.
         final var permissions = new PermissionService(configuration);
         permissions.setMode(AgentMode.PLAN);
-        permissions.setPermitAll(false);
         permissions.setPermissionMode(PermissionMode.ASK);
         permissions.setGate(sessionGate);
         final var tools = toolRegistry == null

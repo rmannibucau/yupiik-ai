@@ -273,9 +273,6 @@ public class CliCommand implements Runnable {
                             "Print the context usage (estimated tokens and percent of the context window) on stderr after each turn.")
             boolean showUsage,
 
-            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.")
-            boolean permitAll,
-
             @Property(
                     defaultValue = "java.util.List.of()",
                     documentation =
@@ -299,7 +296,6 @@ public class CliCommand implements Runnable {
          * @param showThinking show the reasoning stream
          * @param showToolOutput tool output verbosity on stderr
          * @param showUsage print the context usage after each turn
-         * @param permitAll bypass permission checks
          */
         public CliConf(
                 final String session,
@@ -310,8 +306,7 @@ public class CliCommand implements Runnable {
                 final String presentation,
                 final boolean showThinking,
                 final String showToolOutput,
-                final boolean showUsage,
-                final boolean permitAll) {
+                final boolean showUsage) {
             this(
                     session,
                     context,
@@ -322,7 +317,6 @@ public class CliCommand implements Runnable {
                     showThinking,
                     showToolOutput,
                     showUsage,
-                    permitAll,
                     List.of());
         }
     }
@@ -347,10 +341,6 @@ public class CliCommand implements Runnable {
         final var runtime = sessionRuntimeFactory.create(sessionId);
         session.runtime(runtime);
         printBanner();
-        if (conf.permitAll()) {
-            println(MarkdownColorizer.warning(
-                    "WARNING: --permit-all is on; all tool calls will run without approval."));
-        }
         if (conf.agent() != null && !conf.agent().isBlank()) {
             if (agentProvider.byName(conf.agent()) == null) {
                 throw new IllegalArgumentException(
@@ -358,7 +348,7 @@ public class CliCommand implements Runnable {
             }
             activeAgent = conf.agent();
         }
-        sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), conf.permitAll(), runtime);
+        sessionLifecycle.installGates(io.approvalGate(), io.feedbackGate(), runtime);
         session.sessionId(sessionId).activeAgent(activeAgent);
         shellRegistry.register(env());
         final var shutdownHook = new Thread(this::shutdownCleanup, "yca-cli-shutdown");
@@ -449,7 +439,7 @@ public class CliCommand implements Runnable {
         final var data = new LinkedHashMap<String, Object>();
         data.put("mode", mode);
         data.put("modelName", model);
-        data.put("permission", permissionLabel(info.permitAll(), info.permissionMode()));
+        data.put("permission", permissionLabel(info.permissionMode()));
         data.put("agent", activeAgent);
         data.put("model", modelData);
         data.put("prune", configuration.pruning().thresholdPercent());
@@ -475,10 +465,7 @@ public class CliCommand implements Runnable {
         return style.ansiPrefix() + model + "\u001b[0m";
     }
 
-    private String permissionLabel(final boolean permitAll, final PermissionMode mode) {
-        if (permitAll) {
-            return "all";
-        }
+    private String permissionLabel(final PermissionMode mode) {
         if (mode == null) {
             return null;
         }

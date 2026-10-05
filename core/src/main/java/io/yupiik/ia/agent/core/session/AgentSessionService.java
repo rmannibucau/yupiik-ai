@@ -185,6 +185,15 @@ public class AgentSessionService {
     public ModeChange setMode(final String arg, final String sessionId, final SessionRuntime runtime) {
         final var mode = AgentMode.fromConfigurationString(arg);
         runtime.permissions().setMode(mode);
+        if (mode == AgentMode.PLAN) {
+            // approvals granted during a build phase must not leak back into planning
+            runtime.permissions().clearSessionGrants();
+            // a session approval mode set during build (yolo/auto_edit) must not silently keep
+            // plan building: drop the session override so the mode falls back to the configured
+            // default (ASK unless explicitly configured otherwise). An explicit /permissions
+            // override in plan remains possible.
+            runtime.permissions().setPermissionMode(null);
+        }
         String seedMessage = null;
         String seedError = null;
         if (mode == AgentMode.BUILD) {
@@ -205,33 +214,30 @@ public class AgentSessionService {
 
     /**
      * Sets the tool permission level of the session owning {@code runtime}.
-     * Returns {@code true} for "allow all", {@code false} for "ask for
-     * approval", and {@code null} for an invalid argument (the caller should
-     * show the usage hint).
+     * Returns the resulting permission mode, or {@code null} for an invalid
+     * argument (the caller should show the usage hint).
      */
-    public Boolean setPermissions(final String arg, final SessionRuntime runtime) {
+    public PermissionMode setPermissions(final String arg, final SessionRuntime runtime) {
         final var permissions = runtime.permissions();
         final var v = arg == null ? "" : arg.strip();
-        if (v.equals("all") || v.equals("unsafe")) {
-            permissions.setPermitAll(true);
-            return true;
-        }
         if (v.equals("none") || v.equals("safe")) {
-            permissions.setPermitAll(false);
             permissions.setPermissionMode(PermissionMode.ASK);
-            return false;
+            return PermissionMode.ASK;
+        }
+        if ("all".equalsIgnoreCase(v) || "unsafe".equalsIgnoreCase(v)) {
+            // removed slash values: they used to toggle the (deleted) permit-all shortcut.
+            // Use 'yolo' to auto-approve, or configure yca.permissions.mode=all globally.
+            return null;
         }
         if (PermissionMode.isValue(v)) {
-            permissions.setPermitAll(false);
             final var resolved = PermissionMode.fromConfigurationString(v);
             permissions.setPermissionMode(resolved);
-            return resolved != PermissionMode.ASK;
+            return resolved;
         }
         return null;
     }
 
-    public record PermissionsInfo(
-            boolean permitAll, AgentMode agentMode, PermissionMode permissionMode, List<String> sessionGrants) {}
+    public record PermissionsInfo(AgentMode agentMode, PermissionMode permissionMode, List<String> sessionGrants) {}
 
     /**
      * Returns the permission state of the session owning {@code runtime} for
@@ -240,11 +246,7 @@ public class AgentSessionService {
      */
     public PermissionsInfo permissionsInfo(final SessionRuntime runtime) {
         final var permissions = runtime.permissions();
-        return new PermissionsInfo(
-                permissions.isPermitAll(),
-                permissions.mode(),
-                permissions.permissionMode(),
-                permissions.sessionGrants());
+        return new PermissionsInfo(permissions.mode(), permissions.permissionMode(), permissions.sessionGrants());
     }
 
     /**

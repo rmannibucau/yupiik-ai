@@ -11,6 +11,40 @@ Allow/deny glob lists refine what the agent may touch in any mode: entries are
 tool names (`bash`) or command patterns (`rm *`, `bash:rm -rf *`) matched
 against every segment of a compound command, and a command is only allowed when
 all its segments pass. Deny entries win over everything else.
+Plan mode additionally hides the file-mutating tools (`edit_file`, `write_file`,
+`apply_patch`) from the tool list the model sees, so plan turns cannot build.
+
+== Modes at a glance
+
+[cols="1,2,2,2", opts=headers]
+|===
+|Mode |Edits |Bash and other mutable tools |Read-only tools
+|`ask` (default) |prompt |prompt |allowed silently
+|`auto_edit` (alias `autoedit`) |allowed silently |prompt |allowed silently
+|`yolo` (alias `all`) |allowed silently |allowed silently |allowed silently
+|===
+
+== Sample tools by category
+
+[cols="1,2", opts=headers]
+|===
+|Category |Sample tools
+|Edit (prompted in `ask`) |`write_file`, `edit_file`, `apply_patch`, `maven_repository_knowledge`
+|Bash (prompted in `ask` and `auto_edit`) |`bash`, e.g. running `mvn install`, `rm -rf target` or `docker run -p 80:80 nginx`
+|Read-only (never prompted) |`read_file`, `grep`, `glob`, `list_dir`, `read_symbol`, the `code_*` tools, `skill`, `webfetch`, `websearch`, `maven_knowledge_content`
+|Agent (never prompted) |`write_todo`, `ask_user`, `manage_context`, `memory_write`, `spawn_subagent`, `check_subagents`
+|Read-only bash rules (never prompted) |`git status`, `git diff`, `ls`, `grep`, `sed -n`, ... (see <<_bash_command_rules,Bash command rules>>)
+|MCP (read-only calls never prompted, others follow the mode) |`<server>_<tool>`
+|===
+
+IMPORTANT: `yolo` bypasses the approval gate but not the deny list:
+`yca.permissions.deny` (including denied bash segments) is enforced in every
+mode, including `yolo`.
+`yca.permissions.allow` and session grants are resolved before the mode, so they
+behave the same in all three modes.
+
+NOTE: This page covers the permission mode axis. The orthogonal plan/build axis
+(`plan` is read-only) is covered in xref:modes.adoc[Plan and build modes].
 
 == Bash command rules
 
@@ -45,6 +79,13 @@ backticks) always fall back to the gate.
 When a command is approved for the session, the grant uses the matched rule
 `commandStart` tokens, so approving `docker run -p 80:80 nginx` grants
 `docker run ...` and not every `docker` command.
+Session grants are in-memory and cleared when the agent switches back from
+`build` to `plan` mode: build-phase approvals never leak into planning.
+The session approval mode is reset at the same time, so a `yolo`/`auto_edit`
+selected for a build phase does not silently keep plan mode building; `plan`
+falls back to the configured `yca.permissions.mode` (default `ask`) while an
+explicit `/permissions yolo|auto_edit` in `plan` remains possible as a
+deliberate override.
 
 [source,json]
 ----

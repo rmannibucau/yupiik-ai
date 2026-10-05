@@ -119,14 +119,15 @@ class AgentSessionServiceTest {
     }
 
     @Test
-    void permissionsParseAllNoneAndInvalid() {
+    void permissionsParseModesNoneAndInvalid() {
         final var permissions = new PermissionService(cfg());
         final var service = service(permissions);
 
-        assertEquals(Boolean.TRUE, service.setPermissions("all", runtime(permissions)));
-        assertEquals(Boolean.TRUE, service.setPermissions("unsafe", runtime(permissions)));
-        assertEquals(Boolean.FALSE, service.setPermissions("none", runtime(permissions)));
-        assertEquals(Boolean.FALSE, service.setPermissions("safe", runtime(permissions)));
+        assertEquals(PermissionMode.ASK, service.setPermissions("none", runtime(permissions)));
+        assertEquals(PermissionMode.ASK, service.setPermissions("safe", runtime(permissions)));
+        assertEquals(PermissionMode.YOLO, service.setPermissions("yolo", runtime(permissions)));
+        assertNull(service.setPermissions("all", runtime(permissions)), "'all' is no longer a slash value");
+        assertNull(service.setPermissions("unsafe", runtime(permissions)), "'unsafe' is no longer a slash value");
         assertNull(service.setPermissions("", runtime(permissions)));
         assertNull(service.setPermissions("bogus", runtime(permissions)));
     }
@@ -136,10 +137,10 @@ class AgentSessionServiceTest {
         final var permissions = new PermissionService(cfg());
         final var service = service(permissions);
 
-        assertEquals(Boolean.TRUE, service.setPermissions("all", runtime(permissions)));
-        assertTrue(permissions.isPermitAll());
-        assertEquals(Boolean.FALSE, service.setPermissions("none", runtime(permissions)));
-        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.YOLO, service.setPermissions("yolo", runtime(permissions)));
+        assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+        assertEquals(PermissionMode.ASK, service.setPermissions("none", runtime(permissions)));
+        assertEquals(PermissionMode.ASK, permissions.permissionMode());
     }
 
     @Test
@@ -147,16 +148,13 @@ class AgentSessionServiceTest {
         final var permissions = new PermissionService(cfg());
         final var service = service(permissions);
 
-        assertEquals(Boolean.TRUE, service.setPermissions("yolo", runtime(permissions)));
-        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.YOLO, service.setPermissions("yolo", runtime(permissions)));
         assertEquals(PermissionMode.YOLO, permissions.permissionMode());
 
-        assertEquals(Boolean.TRUE, service.setPermissions("auto_edit", runtime(permissions)));
-        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.AUTO_EDIT, service.setPermissions("auto_edit", runtime(permissions)));
         assertEquals(PermissionMode.AUTO_EDIT, permissions.permissionMode());
 
-        assertEquals(Boolean.FALSE, service.setPermissions("ask", runtime(permissions)));
-        assertFalse(permissions.isPermitAll());
+        assertEquals(PermissionMode.ASK, service.setPermissions("ask", runtime(permissions)));
         assertEquals(PermissionMode.ASK, permissions.permissionMode());
         assertNull(service.setPermissions("bogus", runtime(permissions)));
     }
@@ -164,14 +162,69 @@ class AgentSessionServiceTest {
     @Test
     void permissionsInfoExposesStateAndSessionGrants() {
         final var permissions = new PermissionService(cfg());
-        permissions.setPermitAll(true);
+        permissions.setMode(AgentMode.BUILD);
+        permissions.setPermissionMode(PermissionMode.ASK);
         permissions.grantSession("bash", Map.of("command", "mvn install"));
         final var service = service(permissions);
 
         final var info = service.permissionsInfo(runtime(permissions));
-        assertTrue(info.permitAll());
-        assertFalse(info.sessionGrants().isEmpty());
+        assertEquals(AgentMode.BUILD, info.agentMode());
+        assertEquals(PermissionMode.ASK, info.permissionMode());
+        assertEquals(1, info.sessionGrants().size());
         assertTrue(info.sessionGrants().stream().anyMatch(g -> g.contains("|bash:mvn")));
+    }
+
+    @Test
+    void setModeClearsSessionGrantsWhenBackToPlan() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+        permissions.setMode(AgentMode.BUILD);
+        permissions.grantSession("bash", Map.of("command", "mvn install"));
+        assertEquals(1, permissions.sessionGrants().size());
+
+        service.setMode("plan", "s1", runtime(permissions));
+
+        assertTrue(permissions.sessionGrants().isEmpty(), "build approvals must not leak back into plan mode");
+    }
+
+    @Test
+    void setModeKeepsSessionGrantsWhenStayingInBuild() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+        permissions.setMode(AgentMode.BUILD);
+        permissions.grantSession("bash", Map.of("command", "mvn install"));
+
+        service.setMode("build", "s1", runtime(permissions));
+
+        assertEquals(1, permissions.sessionGrants().size());
+    }
+
+    @Test
+    void setModeClearsPermissionModeOverrideWhenBackToPlan() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+        final var runtime = runtime(permissions);
+        service.setPermissions("yolo", runtime);
+        assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+
+        service.setMode("plan", "s1", runtime);
+
+        assertEquals(
+                PermissionMode.ASK,
+                permissions.permissionMode(),
+                "a build approval mode must not silently keep plan mode building");
+    }
+
+    @Test
+    void setModeKeepsPermissionModeOverrideWhenStayingInBuild() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+        final var runtime = runtime(permissions);
+        service.setPermissions("yolo", runtime);
+
+        service.setMode("build", "s1", runtime);
+
+        assertEquals(PermissionMode.YOLO, permissions.permissionMode());
     }
 
     @Test

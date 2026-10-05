@@ -343,8 +343,7 @@ class TuiCommandHeadlessTest {
     }
 
     private TuiCommand newUiCommand(final RuntimeContainer container, final TuiDeps d) {
-        return newUiCommand(
-                container, d, new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, true, "dark", true));
+        return newUiCommand(container, d, new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, true, "dark"));
     }
 
     private TuiCommand newUiCommand(final RuntimeContainer container, final TuiDeps d, final TuiCommand.TuiConf conf) {
@@ -471,7 +470,7 @@ class TuiCommandHeadlessTest {
             final var command = newUiCommand(
                     isolated,
                     isolatedDeps,
-                    new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark", true));
+                    new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark"));
 
             uiThread = new Thread(command::run, "tui-headless-session");
             uiThread.setDaemon(true);
@@ -504,7 +503,7 @@ class TuiCommandHeadlessTest {
                     isolated,
                     isolatedDeps,
                     new TuiCommand.TuiConf(
-                            sessionId, "", KeyBindingPreset.STANDARD, true, "dark", true, List.of("continue")));
+                            sessionId, "", KeyBindingPreset.STANDARD, true, "dark", List.of("continue")));
 
             uiThread = new Thread(command::run, "tui-headless-initial-resume");
             uiThread.setDaemon(true);
@@ -547,7 +546,6 @@ class TuiCommandHeadlessTest {
                             KeyBindingPreset.STANDARD,
                             true,
                             "dark",
-                            true,
                             List.of("injected first", "injected second")));
 
             uiThread = new Thread(command::run, "tui-headless-initial-list");
@@ -594,7 +592,6 @@ class TuiCommandHeadlessTest {
                             KeyBindingPreset.STANDARD,
                             true,
                             "dark",
-                            true,
                             List.of("/mode build", "hello from the script")));
 
             uiThread = new Thread(command::run, "tui-headless-initial-slash");

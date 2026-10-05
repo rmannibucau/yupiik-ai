@@ -71,9 +71,7 @@ value with `sep=<char>,` to split on another single character when a value
 itself contains commas.
 
 Plan mode is the default for every command. `run` is read-only by default; pass
-`--yca-run-mode build` to allow applying changes, or `--yca-run-permitAll`
-(`--yca-tui-permitAll` for the `tui` command) to bypass permission prompts and
-allow every tool call without asking. `--yca-run-show-tool-output` controls tool output presentation (shown, collapsed
+`--yca-run-mode build` to allow applying changes. `--yca-run-show-tool-output` controls tool output presentation (shown, collapsed
 or hidden; booleans accepted for backward compatibility).
 
 The `cli` command gets full line editing when the fatjar is used: Up/Down browse
@@ -244,9 +242,9 @@ empty directory (e.g. scaffolding a new project), the agent behaves like a
 neutral scaffolder: it does not index an unrelated structural code graph and
 does not inject an unrelated repository README/AGENTS.md, scoping to the
 target directory the way a tool like opencode does. UI colors (under `tui`,
-e.g. `permitAll` for the red highlight shown when permissions are set to
-`all`) are themeable hex values; markdown bold and inline-code colors are
-themeable as well (`strongColor`, `inlineCodeColor`, each `auto` or a hex).
+e.g. `accent`, `warning`, `error`, `success`) are themeable hex values;
+markdown bold and inline-code colors are themeable as well (`strongColor`,
+`inlineCodeColor`, each `auto` or a hex).
 
 Context usage is estimated locally against `provider.contextWindow` and,
 before each turn, the conversation is pruned at `pruning.thresholdPercent`
@@ -343,10 +341,11 @@ Project instructions and skills are loaded into the system prompt:
 
 - Right details panel: model, flavor, cwd, git branch, mode, session, MCP
   servers with status dots (green=enabled, grey=disabled, red=failing), token
-  counts, session LLM call count and a context gauge
+  counts, session LLM call count and a context gauge; the panel also shows the
+  permission mode (`ask`, `auto_edit`, `yolo`), with `yolo` rendered as a red
+  `yolo ⚠` badge in `yca.tui.yolo` (default `#ff5555`)
 - Transcript and prompt have a mode-colored left bar (thin orange in `plan`,
-  heavy bold purple in `build`, red when permissions are `all`
-  (`tui.permitAll`, default `#ff5555`)); transcript renders as
+  heavy bold purple in `build`); transcript renders as
   markdown with long lines wrapped at the panel width. Bold (`**strong**`)
   prose is a colored bold following `yca.tui.strongColor` (default `auto`,
   resolving to the primary `#fab283`) and inline `code` spans follow
@@ -420,7 +419,7 @@ Project instructions and skills are loaded into the system prompt:
   structural code graph); the status bar shows the same animated feedback
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions all|none` (allow every tool without asking, or restore interactive approval), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact; switching back to `plan` resets the session approval mode to the configured default and clears the in-memory session grants), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions ask|auto_edit|yolo|none|show` (switch the approval mode interactively; `none` restores interactive approval, `show` lists the current mode and in-memory session grants - approvals granted in `build` are cleared when switching back to `plan`), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

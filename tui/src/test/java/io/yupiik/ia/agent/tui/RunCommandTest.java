@@ -178,7 +178,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, true, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -210,7 +210,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "s-2", "", false, true, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "s-2", "", false, "", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -249,7 +249,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "build", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "build", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -288,7 +288,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -321,7 +321,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "plan", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -357,7 +357,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "plan", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "plan", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, permissions),
                 sessionStore(),
@@ -391,7 +391,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "", "shown", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -422,7 +422,7 @@ class RunCommandTest {
             }
         };
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "", false, false, "", "shown", "", ""),
+                new RunCommand.RunConf("say hi", "", "", false, "", "shown", "", ""),
                 shellRegistry,
                 runtimeFactory(agentLoop, new PermissionService(null)),
                 sessionStore(),
@@ -443,7 +443,7 @@ class RunCommandTest {
                 .build();
         final var shellRegistry = testRegistry();
         final var command = new RunCommand(
-                new RunCommand.RunConf("say hi", "", "nope", false, true, "", "collapsed", "", ""),
+                new RunCommand.RunConf("say hi", "", "nope", false, "", "collapsed", "", ""),
                 shellRegistry,
                 runtimeFactory(stubAgentLoop(), new PermissionService(null)),
                 sessionStore(),

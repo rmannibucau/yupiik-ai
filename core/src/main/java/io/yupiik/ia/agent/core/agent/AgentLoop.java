@@ -497,7 +497,7 @@ public class AgentLoop {
      * {@link #lastLlmPayload()} stays the exact bytes of the last call.
      */
     public LlmPayload previewLlmPayload(final String sessionId) {
-        final var tools = toolRegistry.toWireTools();
+        final var tools = wireTools();
         final var toolsTokens = toolTokens(tools);
         final var history = sessionStore.load(sessionId);
         final var prompt = lastUserPrompt(history);
@@ -512,6 +512,24 @@ public class AgentLoop {
                 List.copyOf(tools),
                 "auto",
                 toolsTokens);
+    }
+
+    /**
+     * Builds the wire tool list for the current call, hiding the file-mutating
+     * tools (EDIT category) while the agent runs in PLAN mode: the model then
+     * simply cannot call them - the strongest form of "plan must not build".
+     */
+    private List<Tool> wireTools() {
+        final var tools = toolRegistry.toWireTools();
+        if (permissionService == null || permissionService.mode() != AgentMode.PLAN) {
+            return tools;
+        }
+        return tools.stream()
+                .filter(t -> {
+                    final var embedded = toolRegistry.tool(t.function().name());
+                    return embedded == null || embedded.category() != ToolCategory.EDIT;
+                })
+                .toList();
     }
 
     public String run(
@@ -824,7 +842,7 @@ public class AgentLoop {
         final var plateauFeedback = resolvedPlateauFeedback(resolved);
         final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
         final var model = resolved.model();
-        final var tools = toolRegistry.toWireTools();
+        final var tools = wireTools();
         final var toolsTokens = toolTokens(tools);
         var overflowRetried = false;
         var consecutiveCompactions = 0;

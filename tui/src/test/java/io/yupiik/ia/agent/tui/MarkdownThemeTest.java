@@ -143,7 +143,7 @@ class MarkdownThemeTest {
     private static TuiConfiguration config() {
         return new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
-                0.14, 0.85, "#484848", "#606060", "#141414", "#ff5555", "auto", "auto", 4000L, 3500L, true, "unicode",
-                "auto", "auto", List.of(), null, true, 3, 10, "");
+                0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode", "auto",
+                "auto", List.of(), null, true, 3, 10, "", "#ff5555");
     }
 }

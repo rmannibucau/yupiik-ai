@@ -96,11 +96,6 @@ public record TuiConfiguration(
         String backgroundPanel,
 
         @Property(
-                defaultValue = "\"#ff5555\"",
-                documentation = "Highlight color (hex) used when permissions are set to all (danger mode).")
-        String permitAll,
-
-        @Property(
                 defaultValue = "\"auto\"",
                 documentation = "Bold (**strong**) prose color (hex), or auto to follow the primary color.")
         String strongColor,
@@ -180,4 +175,10 @@ public record TuiConfiguration(
                 documentation = "Screen background color (hex) painted over the whole viewport before the UI widgets, "
                         + "or blank (default) to keep the terminal background. Panels and cards draw their own "
                         + "backgroundPanel-based colors on top.")
-        String background) {}
+        String background,
+
+        @Property(
+                defaultValue = "\"#ff5555\"",
+                documentation = "Yolo approval color (hex), used for the red 'yolo ⚠' badge in the status bar when the "
+                        + "approval mode is set to yolo (danger mode).")
+        String yolo) {}

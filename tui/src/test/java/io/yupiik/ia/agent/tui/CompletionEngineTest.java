@@ -63,7 +63,7 @@ class CompletionEngineTest {
                 spec("/mode", ArgCompletion.options("build", "plan"), SlashGroup.CONFIG),
                 spec(
                         "/permissions",
-                        ArgCompletion.options("ask", "auto_edit", "yolo", "all", "none", "show"),
+                        ArgCompletion.options("ask", "auto_edit", "yolo", "none", "show"),
                         SlashGroup.CONFIG),
                 spec("/thinking", ArgCompletion.options("show", "hide"), SlashGroup.CONFIG),
                 spec("/tool-output", ArgCompletion.options("show", "collapse", "hide"), SlashGroup.CONFIG),
@@ -181,8 +181,9 @@ class CompletionEngineTest {
 
     @Test
     void completesPermissionsParam() {
-        final var all = engine().suggest("/permissions a", 14);
-        assertTrue(all.items().contains("all"));
+        final var ask = engine().suggest("/permissions a", 14);
+        assertTrue(ask.items().contains("ask"));
+        assertFalse(ask.items().contains("all"));
         final var y = engine().suggest("/permissions y", 14);
         assertTrue(y.items().contains("yolo"));
         final var auto = engine().suggest("/permissions auto", 17);

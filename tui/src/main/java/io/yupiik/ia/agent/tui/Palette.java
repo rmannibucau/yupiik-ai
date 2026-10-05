@@ -41,7 +41,7 @@ public record Palette(
         String border,
         String borderActive,
         String backgroundPanel,
-        String permitAll,
+        String yolo,
         boolean mono) {
 
     public static Palette from(final String theme, final TuiConfiguration c) {
@@ -62,26 +62,15 @@ public record Palette(
                     c.border(),
                     c.borderActive(),
                     c.backgroundPanel(),
-                    c.permitAll(),
+                    c.yolo(),
                     mono);
         }
         // on light backgrounds the theme's dark accent tones are too pale to read (the dark
         // peach/brown-orange sit under 3:1 on white), so the light palette remaps every status
         // color to a darker, WCAG-safe variant while text/border/panel are inverted as today
         return new Palette(
-                "#7c5cd6",
-                "#b55227",
-                "#2f7a43",
-                "#8a621f",
-                "#d1383d",
-                "#1f7a88",
-                "#1a1a1a",
-                "#6b6b6b",
-                "#c0c0c0",
-                "#808080",
-                "#ffffff",
-                c.permitAll(),
-                mono);
+                "#7c5cd6", "#b55227", "#2f7a43", "#8a621f", "#d1383d", "#1f7a88", "#1a1a1a", "#6b6b6b", "#c0c0c0",
+                "#808080", "#ffffff", c.yolo(), mono);
     }
 
     /** @return true when NO_COLOR is set to a non-empty value. */

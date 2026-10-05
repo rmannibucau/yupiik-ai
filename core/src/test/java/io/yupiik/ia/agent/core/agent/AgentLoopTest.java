@@ -3695,6 +3695,63 @@ class AgentLoopTest {
         };
     }
 
+    /** A registry exposing {@code read_file} (READ) and {@code write_file} (EDIT) wire tools. */
+    private ToolRegistry readWriteWireToolsRegistry() {
+        return new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of(
+                        Tool.function(
+                                "read_file",
+                                "read a file from disk",
+                                Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string")))),
+                        Tool.function(
+                                "write_file",
+                                "write a file to disk",
+                                Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string")))));
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                final var read = "read_file".equals(name);
+                if (!read && !"write_file".equals(name)) {
+                    return null;
+                }
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return name;
+                    }
+
+                    @Override
+                    public String description() {
+                        return "test tool";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return read ? ToolCategory.READ : ToolCategory.EDIT;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return read;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        return ToolResult.ok(read ? "old content" : "written");
+                    }
+                };
+            }
+        };
+    }
+
     @Test
     void lastLlmPayloadIsCapturedAndThePreviewRebuildsTheRequest() {
         final var replies = new ArrayDeque<>(List.of(new ScriptedReply("done", "stop", false)));
@@ -3747,6 +3804,71 @@ class AgentLoopTest {
                 preview.messages().stream()
                         .anyMatch(m -> String.valueOf(m.content()).contains("<session-state>")),
                 "the preview must carry the volatile tail the store never persists: " + preview.messages());
+    }
+
+    @Test
+    void planModeHidesEditToolsFromTheWireToolList() {
+        final var payloads = new ArrayList<List<Tool>>();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final ChatSettings settings,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                payloads.add(List.copyOf(request.tools() == null ? List.of() : request.tools()));
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("done", null);
+            }
+        };
+        final var config = configuration(true);
+        final var planPermissions = new PermissionService(config);
+        planPermissions.setMode(AgentMode.PLAN);
+        permissionServiceOverride = planPermissions;
+        try {
+            loop(
+                            client,
+                            null,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            readWriteWireToolsRegistry(),
+                            null,
+                            null)
+                    .run("plan it", null, "s1", null, () -> false);
+        } finally {
+            permissionServiceOverride = null;
+        }
+        final var planTools =
+                payloads.getFirst().stream().map(t -> t.function().name()).toList();
+        assertFalse(planTools.contains("write_file"), "plan mode must hide EDIT tools: " + planTools);
+        assertTrue(planTools.contains("read_file"), "plan mode must keep READ tools: " + planTools);
+
+        payloads.clear();
+        final var buildPermissions = new PermissionService(config);
+        buildPermissions.setMode(AgentMode.BUILD);
+        permissionServiceOverride = buildPermissions;
+        try {
+            loop(
+                            client,
+                            null,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            readWriteWireToolsRegistry(),
+                            null,
+                            null)
+                    .run("build it", null, "s1", null, () -> false);
+        } finally {
+            permissionServiceOverride = null;
+        }
+        final var buildTools =
+                payloads.getFirst().stream().map(t -> t.function().name()).toList();
+        assertTrue(buildTools.contains("write_file"), "build mode must expose EDIT tools: " + buildTools);
+        assertTrue(buildTools.contains("read_file"), "build mode must keep READ tools: " + buildTools);
     }
 
     private ToolRegistry registryOf(final EmbeddedTool... tools) {

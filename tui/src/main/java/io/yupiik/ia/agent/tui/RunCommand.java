@@ -89,9 +89,6 @@ public class RunCommand implements Runnable {
             @Property(defaultValue = "false", documentation = "Print reasoning deltas on stderr.")
             boolean showThinking,
 
-            @Property(defaultValue = "false", documentation = "Bypass permission checks and allow all tool calls.")
-            boolean permitAll,
-
             @Property(
                     defaultValue = "\"\"",
                     documentation =
@@ -174,7 +171,6 @@ public class RunCommand implements Runnable {
                     "ask_user is not available in headless mode; provide the required input in your prompt and retry.");
             return null;
         });
-        permissions.setPermitAll(conf.permitAll());
         final var agentName = conf.agent() == null || conf.agent().isBlank() ? null : conf.agent();
         if (agentName != null && agentProvider.byName(agentName) == null) {
             throw new IllegalArgumentException("Unknown agent: " + agentName + " (configure one under yca.agents)");

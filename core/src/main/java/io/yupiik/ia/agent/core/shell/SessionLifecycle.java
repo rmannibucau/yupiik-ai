@@ -71,29 +71,24 @@ public class SessionLifecycle {
         }
     }
 
-    /** Installs the interaction gates on the session runtime and applies the permit-all switch. */
+    /** Installs the interaction gates on the session runtime. */
     public void installGates(
-            final ApprovalGate approvalGate,
-            final FeedbackGate feedbackGate,
-            final boolean permitAll,
-            final SessionRuntime runtime) {
+            final ApprovalGate approvalGate, final FeedbackGate feedbackGate, final SessionRuntime runtime) {
         final var permissions = runtime.permissions();
-        permissions.setPermitAll(permitAll);
         permissions.setPermissionMode(null);
         permissions.setGate(approvalGate);
         runtime.feedback().setGate(feedbackGate);
     }
 
     /**
-     * Removes the session's gates, clears its permit-all switch and deletes the
-     * session when it holds no message (so aborted runs do not leave empty files).
-     * Other sessions keep their own gates and switches.
+     * Removes the session's gates and deletes the session when it holds no
+     * message (so aborted runs do not leave empty files). Other sessions keep
+     * their own gates and switches.
      */
     public void release(final String sessionId, final SessionRuntime runtime) {
         if (runtime != null) {
             final var permissions = runtime.permissions();
             permissions.setGate(null);
-            permissions.setPermitAll(false);
             permissions.setPermissionMode(null);
             permissions.setMode(null);
             runtime.feedback().setGate(null);

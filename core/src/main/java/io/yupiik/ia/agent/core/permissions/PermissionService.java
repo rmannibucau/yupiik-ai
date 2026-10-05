@@ -33,7 +33,6 @@ public class PermissionService {
     private final Set<String> sessionGrants = ConcurrentHashMap.newKeySet();
     private volatile AgentMode mode;
     private volatile PermissionMode permissionMode;
-    private volatile boolean permitAll;
     private volatile RulesCache rulesCache;
 
     public PermissionService(final CodingAgentConfiguration configuration) {
@@ -53,14 +52,6 @@ public class PermissionService {
         return gate;
     }
 
-    public void setPermitAll(final boolean permitAll) {
-        this.permitAll = permitAll;
-    }
-
-    public boolean isPermitAll() {
-        return permitAll;
-    }
-
     public void grantSession(final String toolName) {
         grantSession(toolName, Map.of());
     }
@@ -72,6 +63,14 @@ public class PermissionService {
     /** Current session-scoped grants as human readable entries (project|tool:prefix), for the /permissions show command. */
     public List<String> sessionGrants() {
         return new ArrayList<>(sessionGrants);
+    }
+
+    /**
+     * Drops every session-scoped grant. Mode switches back to {@code PLAN} call this: approvals
+     * granted during a build phase must not leak into the next planning phase.
+     */
+    public void clearSessionGrants() {
+        sessionGrants.clear();
     }
 
     public void setMode(final AgentMode mode) {
@@ -127,9 +126,6 @@ public class PermissionService {
             final Map<String, Object> args,
             final boolean readOnly) {
         final var permissions = configuration.permissions();
-        if (permitAll) {
-            return Decision.allow();
-        }
         final var command =
                 category == ToolCategory.BASH && args.get("command") instanceof final String c && !c.isBlank()
                         ? c

@@ -70,7 +70,7 @@ public final class SessionRuntime {
         return loop;
     }
 
-    /** The session's permission state: mode, permit-all, session grants and approval gate. */
+    /** The session's permission state: mode and approval gate. */
     public PermissionService permissions() {
         return permissions;
     }

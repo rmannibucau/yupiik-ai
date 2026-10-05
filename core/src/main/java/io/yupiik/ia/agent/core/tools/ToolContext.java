@@ -38,7 +38,7 @@ import java.util.function.BooleanSupplier;
  * @param sessionId      the session (tab) owning the running turn
  * @param subagentId     the subagent id when the turn runs in a subagent, else null
  * @param subagentName   the subagent display name when in a subagent, else null
- * @param permissions    the asking session's permission state (its own mode / permitAll)
+ * @param permissions    the asking session's permission state (its own mode)
  * @param feedback       the asking session's feedback service (its gate renders in that tab)
  * @param todos          the asking session's todo list
  * @param statusReporter the asking session's status reporter (optimization notices land in that tab)

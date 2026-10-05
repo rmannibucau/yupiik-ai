@@ -64,7 +64,6 @@ public class ConfigCommands implements SlashCommandSet {
 
     private static List<String> permissionOptions() {
         final var out = new ArrayList<String>(PermissionMode.VALUES);
-        out.add("all");
         out.add("none");
         out.add("show");
         return List.copyOf(out);
@@ -455,7 +454,6 @@ public class ConfigCommands implements SlashCommandSet {
         if (value.equals("show") || value.equals("list")) {
             final var info = agentSessionService.permissionsInfo(env.session().runtime());
             final var sb = new StringBuilder("**permissions status (session-scoped)**\n\n");
-            sb.append("- permit all: ").append(info.permitAll() ? "on" : "off").append('\n');
             sb.append("- agent mode: ")
                     .append(info.agentMode().name().toLowerCase(Locale.ROOT))
                     .append(", permission mode: ")
@@ -465,22 +463,22 @@ public class ConfigCommands implements SlashCommandSet {
                                     : info.permissionMode().toString().toLowerCase(Locale.ROOT))
                     .append('\n');
             if (info.sessionGrants().isEmpty()) {
-                sb.append("- session grants: none (use 'a' in the approval prompt to add one)");
+                sb.append("- session grants: none (use 'a' in the approval prompt to add one; cleared on mode->plan)");
             } else {
-                sb.append("- session grants (in-memory, lost on restart):");
+                sb.append("- session grants (in-memory, cleared on mode->plan):");
                 for (final var grant : info.sessionGrants()) {
                     sb.append("\n  - ").append(grant);
                 }
             }
             return ShellOutcome.transcript(sb.toString());
         }
-        final var permitAll =
-                agentSessionService.setPermissions(value, env.session().runtime());
-        if (permitAll == null) {
+        final var mode = agentSessionService.setPermissions(value, env.session().runtime());
+        if (mode == null) {
             return ShellOutcome.status("invalid /permissions value '" + value + "'; expected one of: "
-                    + String.join("|", PermissionMode.VALUES) + "|all|none|show");
+                    + String.join("|", PermissionMode.VALUES) + "|none|show");
         }
-        return ShellOutcome.status(permitAll ? "permissions: all tools allowed" : "permissions: asking for approval");
+        return ShellOutcome.status(
+                mode == PermissionMode.ASK ? "permissions: asking for approval" : "permissions: " + mode.name());
     }
 
     private static ShellOutcome thinking(final String arg, final ShellEnv env) {

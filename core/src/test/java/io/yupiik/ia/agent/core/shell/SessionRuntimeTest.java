@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.todo.TodoItem;
@@ -87,9 +88,9 @@ class SessionRuntimeTest {
         final var second = factory.create("k2", "s2");
 
         assertTrue(first.permissions() != second.permissions());
-        first.permissions().setPermitAll(true);
-        assertTrue(first.permissions().isPermitAll());
-        assertFalse(second.permissions().isPermitAll(), "permitAll of one tab must not leak to the other");
+        first.permissions().setMode(AgentMode.BUILD);
+        assertEquals(AgentMode.BUILD, first.permissions().mode());
+        assertFalse(second.permissions().mode() == AgentMode.BUILD, "mode of one tab must not leak to the other");
 
         first.todos().replace(List.of(new TodoItem("only in tab one", "pending")));
         assertEquals(1, first.todos().all().size());
