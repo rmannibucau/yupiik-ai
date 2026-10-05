@@ -154,6 +154,93 @@ public final class BashRules {
             return segments;
         }
 
+        /**
+         * Exploration-coverage keys of a bash command for the plateau detector: one key per segment,
+         * {@code <matched-rule-prefix>:<target>} where the prefix comes from the configured bash rules
+         * ({@code yca.permissions.bash.rules} {@code commandStart}, so a rule added there - eg.
+         * {@code jq} - is automatically covered instead of duplicating a hardcoded command list) and
+         * the target is the last non-flag, non-redirected path-like token of the segment. Commands
+         * with no matching rule, pure env assignments, {@code cd} and shell wrappers yield no key
+         * (they are never plateau signals). The tokenizer (quote aware, operator segmentation) is the
+         * same one used for permission evaluation.
+         */
+        public List<String> coverageKeys(final String command) {
+            if (command == null || command.isBlank()) {
+                return List.of();
+            }
+            final var keys = new ArrayList<String>(1);
+            for (final var segment : tokenize(command)) {
+                final var effective = new ArrayList<Token>(segment.tokens().size());
+                for (final var token : segment.tokens()) {
+                    if (!TOLERATED_REDIRECTS.contains(token.text())) {
+                        effective.add(token);
+                    }
+                }
+                if (effective.isEmpty()) {
+                    continue;
+                }
+                var i = 0;
+                while (i < effective.size() && isEnvAssignment(effective.get(i).text())) {
+                    i++;
+                }
+                if (i >= effective.size()) {
+                    continue;
+                }
+                final var head = effective.get(i).text();
+                if ("cd".equals(head)) {
+                    continue;
+                }
+                final var tokens = new ArrayList<String>(effective.size() - i);
+                var skipNext = false;
+                for (var j = i; j < effective.size(); j++) {
+                    final var token = effective.get(j);
+                    if (token.redirect() || token.substitution()) {
+                        skipNext = true; // the redirect operator AND its target are not coverage
+                        continue;
+                    }
+                    if (skipNext) {
+                        skipNext = false;
+                        continue;
+                    }
+                    tokens.add(token.text());
+                }
+                if (tokens.isEmpty()) {
+                    continue;
+                }
+                if (isShellCommand(tokens.get(0))) {
+                    continue;
+                }
+                final var prefix = coveragePrefix(tokens);
+                if (prefix == null) {
+                    continue;
+                }
+                final var last = tokens.get(tokens.size() - 1);
+                final var target = last.contains(":") ? last.substring(last.lastIndexOf(':') + 1) : last;
+                keys.add(prefix + ":" + target);
+            }
+            return keys;
+        }
+
+        /**
+         * Best matching configured rule prefix ({@code commandStart} joined) for the given command
+         * tokens, or null when no rule matches (the command is not a recognized read-only family, so
+         * it cannot be classified as an exploration target).
+         */
+        private String coveragePrefix(final List<String> tokens) {
+            String best = null;
+            var bestLength = 0;
+            for (final var rule : rules) {
+                if (!rule.matches(tokens)) {
+                    continue;
+                }
+                if (best == null || rule.commandStart().size() > bestLength) {
+                    best = String.join(" ", rule.commandStart());
+                    bestLength = rule.commandStart().size();
+                }
+            }
+            return best;
+        }
+
         private record SegmentDecision(boolean allowed, String matchedStart) {}
 
         private SegmentDecision evaluateSegment(final Segment segment, final AgentMode agentMode) {

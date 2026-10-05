@@ -60,8 +60,20 @@ public record LlmConfiguration(
         @Property(
                 defaultValue = "250",
                 documentation =
-                        "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. The turn is stopped with an error when exceeded, unless pending todos can auto-continue (yca.todos.continueOnUnfinished) - each todo continuation starts a fresh window with this same budget.")
+                        "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. The turn is stopped with an error when exceeded, unless pending todos can auto-continue (yca.todos.continueOnUnfinished) - each todo continuation starts a fresh window with this same budget. A per-provider tuning or per-model behavior maxIterations wins over this value.")
         int maxIterations,
+
+        @Property(
+                defaultValue = "8",
+                documentation =
+                        "Maximum number of consecutive read-only tool rounds that re-cover only already-seen files/results (an 'exploration plateau') before the turn is stopped with an error, for the models that do not set a per-model behavior or per-provider tuning plateauRounds. 0 disables the guard entirely.")
+        int plateauRounds,
+
+        @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode.NUDGE_2",
+                documentation =
+                        "Plateau feedback strategy for the models that do not set a per-model behavior or per-provider tuning plateauFeedback: NUDGE_2 nudges once at limit-2, NUDGE_1 at limit-1 (both then hard-stop at the limit), NONE never nudges.")
+        PlateauFeedbackMode plateauFeedback,
 
         @Property(
                 defaultValue = "true",

@@ -231,6 +231,17 @@ public class PermissionService {
         return compiled;
     }
 
+    /**
+     * Exploration-coverage keys of a bash command for the plateau detector, derived from the
+     * configured read-only bash rules ({@code yca.permissions.bash.rules}): the matched rule
+     * {@code commandStart} plus the segment target. Commands not covered by any rule (or not
+     * exploration-shaped) yield no key, so they never trip the plateau guard. Uses the same
+     * quote-aware tokenizer and rule matching as {@link #check(String, ToolCategory, Map)}.
+     */
+    public List<String> bashCoverage(final String command) {
+        return compiledBashRules().coverageKeys(command);
+    }
+
     private boolean matchesSessionGrant(final String toolName, final Map<String, Object> args) {
         final var project = projectDir();
         final var requestedPrefix = commandPrefixOf(args);

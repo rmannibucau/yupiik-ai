@@ -883,6 +883,15 @@ public class ConversationTranscript {
                             .append(firstLine(String.valueOf(message.content())))
                             .append("*\n");
                 }
+                case "system" -> {
+                    // persisted stop notices (iteration cap, exploration plateau): display-only.
+                    // The leading system prompt is never rendered here, so only notice-shaped
+                    // content (starting with the cap/plateau wording) is shown.
+                    final var content = String.valueOf(message.content());
+                    if (content.startsWith("Maximum iterations reached") || content.startsWith("Exploration plateau")) {
+                        transcript.append("\n\n> ⚠ ").append(content).append('\n');
+                    }
+                }
                 default -> {}
             }
         }

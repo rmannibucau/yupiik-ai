@@ -20,6 +20,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
+import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
@@ -242,6 +243,62 @@ public class ProviderManager {
         final var tuning = providerTuning(provider);
         return tuning != null && tuning.systemPromptMaxChars() != null && tuning.systemPromptMaxChars() > 0
                 ? tuning.systemPromptMaxChars()
+                : 0;
+    }
+
+    /**
+     * Resolve the effective exploration-plateau round limit for a model of a provider: the
+     * {@code behavior.plateauRounds} of the first matching model entry when > 0, else the
+     * provider-level {@code tuning.plateauRounds} when > 0, else 0 so the caller applies the
+     * global {@code llm.plateauRounds} default (0 disables the guard entirely).
+     */
+    public int plateauRounds(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().plateauRounds() != null) {
+            final var rounds = entry.behavior().plateauRounds();
+            if (rounds > 0) {
+                return rounds;
+            }
+        }
+        final var tuning = providerTuning(provider);
+        return tuning != null && tuning.plateauRounds() != null && tuning.plateauRounds() > 0
+                ? tuning.plateauRounds()
+                : 0;
+    }
+
+    /**
+     * Resolve the effective plateau feedback strategy for a model of a provider: the
+     * {@code behavior.plateauFeedback} of the first matching model entry, else the provider-level
+     * {@code tuning.plateauFeedback}, else null so the caller applies the global
+     * {@code llm.plateauFeedback} default. The strategy controls whether the model is nudged once
+     * at the plateau limit-1 / limit-2 before the hard stop.
+     */
+    public PlateauFeedbackMode plateauFeedback(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().plateauFeedback() != null) {
+            return entry.behavior().plateauFeedback();
+        }
+        final var tuning = providerTuning(provider);
+        return tuning == null ? null : tuning.plateauFeedback();
+    }
+
+    /**
+     * Resolve the effective iteration window cap override for a model of a provider: the
+     * {@code behavior.maxIterations} of the first matching model entry when > 0, else the
+     * provider-level {@code tuning.maxIterations} when > 0, else 0 so the caller applies the
+     * global {@code llm.maxIterations} default.
+     */
+    public int maxIterationsOverride(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().maxIterations() != null) {
+            final var iterations = entry.behavior().maxIterations();
+            if (iterations > 0) {
+                return iterations;
+            }
+        }
+        final var tuning = providerTuning(provider);
+        return tuning != null && tuning.maxIterations() != null && tuning.maxIterations() > 0
+                ? tuning.maxIterations()
                 : 0;
     }
 

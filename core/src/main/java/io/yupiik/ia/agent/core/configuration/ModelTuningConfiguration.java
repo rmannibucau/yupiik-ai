@@ -49,6 +49,22 @@ public record ModelTuningConfiguration(
         Integer systemPromptMaxChars,
 
         @Property(
+                documentation =
+                        "Maximum number of consecutive read-only tool rounds that re-cover only already-seen files/results before the turn is stopped with an 'Exploration plateau' error. Unset or zero/negative keeps the provider tuning, then the global llm.plateauRounds default (8). Zero disables the guard entirely.")
+        Integer plateauRounds,
+
+        @Property(
+                documentation =
+                        "Iteration window cap override for this model (LLM round-trips per turn window). Unset or zero/negative keeps the provider tuning, then the global llm.maxIterations (250).")
+        Integer maxIterations,
+
+        @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode.NUDGE_2",
+                documentation =
+                        "Feedback strategy when the exploration-plateau guard approaches its limit: NUDGE_2 nudges the model once at limit-2, NUDGE_1 at limit-1 (both then hard-stop at the limit), NONE never nudges. Unset keeps the provider tuning, then the global llm.plateauFeedback default (nudge_2).")
+        PlateauFeedbackMode plateauFeedback,
+
+        @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Named tuning presets (variants) selectable at runtime via the /model command. Unset defers to the provider-level variants, then to the implicit per-family scheme.")

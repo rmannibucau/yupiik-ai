@@ -268,4 +268,37 @@ class BashRulesTest {
         assertEquals(List.of("git status"), compiled.segments("  git   status  "));
         assertEquals(List.of(), compiled.segments(""));
     }
+
+    @Test
+    void coverageKeysComeFromConfiguredRulesNotHardcodedCommands() {
+        final var compiled =
+                compile(List.of(rule(PermissionMode.YOLO, null, "git show"), rule(PermissionMode.YOLO, null, "grep")));
+        // matched rule prefix + target: rev:path collapses to the path
+        assertEquals(
+                List.of("git show:src/main/java/Foo.java"),
+                compiled.coverageKeys("git show abc123:src/main/java/Foo.java"));
+        // multi-token target: last non-flag token
+        assertEquals(
+                List.of("grep:fusion-jwt/src/main/java"),
+                compiled.coverageKeys("grep -rn \"get(\\\"\" fusion-jwt/src/main/java"));
+        // a command with no matching rule yields no key (never a plateau signal)
+        assertEquals(List.of(), compiled.coverageKeys("mvn install"));
+        // env prefix, cd and shell wrappers yield no key
+        assertEquals(List.of(), compiled.coverageKeys("LC_ALL=C git status"));
+        assertEquals(List.of(), compiled.coverageKeys("cd /tmp"));
+        assertEquals(List.of(), compiled.coverageKeys("sh -c 'ls -la'"));
+        // compounds produce one key per segment
+        assertEquals(
+                List.of("git show:Foo.java", "grep:bar.txt"),
+                compiled.coverageKeys("git show abc123:Foo.java | grep foo bar.txt"));
+        // redirections drop the redirect target, not the read target
+        assertEquals(List.of("grep:bar"), compiled.coverageKeys("grep foo bar > out.txt"));
+    }
+
+    @Test
+    void coverageKeysFollowConfigAddedReadOnlyRules() {
+        // a rule the user adds to yca.permissions.bash.rules (jq) is picked up automatically
+        final var compiled = compile(List.of(rule(PermissionMode.YOLO, null, "jq")));
+        assertEquals(List.of("jq:pom.json"), compiled.coverageKeys("jq '.version' pom.json"));
+    }
 }

@@ -61,10 +61,14 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.models.0.behavior.outputTokens", "1000"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.reasoningEffort", "low"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.systemPromptMaxChars", "4000"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.plateauRounds", "4"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.maxIterations", "80"),
                 Map.entry("yca.provider.providers.0.models.1.model", "claude-sonnet-5"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.outputTokens", "2000"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.reasoningEffort", "high"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.systemPromptMaxChars", "9000"),
+                Map.entry("yca.provider.providers.0.models.1.behavior.plateauRounds", "6"),
+                Map.entry("yca.provider.providers.0.models.1.behavior.maxIterations", "120"),
                 Map.entry("yca.provider.providers.0.models.2.model", "haiku"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.outputTokens", "-1"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.reasoningEffort", ""),
@@ -96,6 +100,25 @@ class ProviderManagerTest {
         assertEquals(0, manager.outputTokensOverride(provider, "haiku-4-5"));
         // unlisted model
         assertEquals(0, manager.outputTokensOverride(provider, "gpt-5"));
+    }
+
+    @Test
+    void plateauRoundsAndMaxIterationsFollowExactThenContainsAndIgnoreInvalid() {
+        final var manager = twoProviders();
+        final var provider = manager.providers().get(0);
+        // exact match wins over the earlier contains entry
+        assertEquals(6, manager.plateauRounds(provider, "claude-sonnet-5"));
+        // contains fallback follows the list order
+        assertEquals(4, manager.plateauRounds(provider, "claude-opus-4"));
+        // zero/negative override is ignored (falls back to 0 = unset)
+        assertEquals(0, manager.plateauRounds(provider, "haiku-4-5"));
+        // unlisted model returns 0 = no override
+        assertEquals(0, manager.plateauRounds(provider, "gpt-5"));
+        // same cascade for the iteration window cap
+        assertEquals(120, manager.maxIterationsOverride(provider, "claude-sonnet-5"));
+        assertEquals(80, manager.maxIterationsOverride(provider, "claude-opus-4"));
+        assertEquals(0, manager.maxIterationsOverride(provider, "haiku-4-5"));
+        assertEquals(0, manager.maxIterationsOverride(provider, "gpt-5"));
     }
 
     @Test
@@ -156,6 +179,8 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.tuning.reasoningEffort", "medium"),
                 Map.entry("yca.provider.providers.0.tuning.outputTokens", "4096"),
                 Map.entry("yca.provider.providers.0.tuning.systemPromptMaxChars", "5000"),
+                Map.entry("yca.provider.providers.0.tuning.plateauRounds", "3"),
+                Map.entry("yca.provider.providers.0.tuning.maxIterations", "60"),
                 Map.entry("yca.provider.providers.0.tuning.providerSpecificOptions", "{\"frequency_penalty\":0.5}"),
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "2"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
@@ -166,6 +191,8 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.models.length", "1"),
                 Map.entry("yca.provider.providers.0.models.0.model", "claude-sonnet-5"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.reasoningEffort", "low"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.plateauRounds", "4"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.maxIterations", "90"),
                 Map.entry(
                         "yca.provider.providers.0.models.0.behavior.providerSpecificOptions",
                         "{\"temperature\":0.2}")));
@@ -181,6 +208,8 @@ class ProviderManagerTest {
         assertEquals("medium", manager.reasoningEffort(provider, "gpt-5"));
         assertEquals(4096, manager.outputTokensOverride(provider, "gpt-5"));
         assertEquals(5000, manager.systemPromptMaxChars(provider, "gpt-5"));
+        assertEquals(3, manager.plateauRounds(provider, "gpt-5"));
+        assertEquals(60, manager.maxIterationsOverride(provider, "gpt-5"));
         assertEquals(2, manager.variants(provider, "gpt-5").size());
     }
 
@@ -193,6 +222,9 @@ class ProviderManagerTest {
         assertEquals("low", manager.reasoningEffort(provider, "claude-sonnet-5"));
         // per-model providerSpecificOptions wins over the provider-level one
         assertEquals("{\"temperature\":0.2}", manager.providerSpecificOptions(provider, "claude-sonnet-5"));
+        // per-model behavior.plateauRounds / maxIterations win over the provider tuning
+        assertEquals(4, manager.plateauRounds(provider, "claude-sonnet-5"));
+        assertEquals(90, manager.maxIterationsOverride(provider, "claude-sonnet-5"));
         // provider-level (top-level) providerSpecificOptions applies for an unlisted model
         assertEquals("{\"echo\":1}", manager.providerSpecificOptions(provider, "gpt-5"));
     }

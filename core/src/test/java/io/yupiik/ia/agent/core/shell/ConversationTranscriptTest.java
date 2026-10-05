@@ -406,6 +406,26 @@ class ConversationTranscriptTest {
     }
 
     @Test
+    void replayRendersPersistedSystemNotices() {
+        final var t = new ConversationTranscript();
+        t.replay(List.of(
+                Message.user("question"),
+                Message.assistant("reply", null),
+                new Message(
+                        "system",
+                        "Maximum iterations reached (250): turn stopped; resume starts a fresh window.",
+                        null,
+                        null,
+                        null,
+                        null)));
+
+        final var md = t.transcript().toString();
+        assertTrue(
+                md.contains("> ⚠ Maximum iterations reached (250)"),
+                "the persisted cap notice must be rendered in the replay: " + md);
+    }
+
+    @Test
     void replayResolvesToolNameFromAssistantCall() {
         final var t = new ConversationTranscript();
         t.replay(List.of(

@@ -4,3 +4,10 @@
 Model calls are protected against transient failures: yca applies rate
 limiting, automatic retries and concurrency limits so bursts and API hiccups do
 not break a session.
+
+== Turn loop guards
+
+A single turn can run many LLM round-trips. Iteration bounds (the per-window
+cap, the exploration-plateau guard and the persisted stop notices) follow a
+per-model / per-provider / global cascade and are covered in detail in
+xref:features/iteration-guards.adoc[Iteration guards].

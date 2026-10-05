@@ -100,6 +100,7 @@ class AgentLoopTest {
     private final AtomicReference<Consumer<PauseEvent>> pauseListenerReference = new AtomicReference<>();
     private final AtomicReference<io.yupiik.ia.agent.core.llm.Usage> recordedUsage = new AtomicReference<>();
     private PermissionService permissionServiceOverride;
+    private ProviderManager providerManagerOverride;
 
     @Test
     void unknownToolDiagnosticNamesOffendingToolAndPointsToTools() throws Exception {
@@ -1164,6 +1165,483 @@ class AgentLoopTest {
     }
 
     /**
+     * P2b: the exploration-plateau guard stops a turn whose read-only rounds re-cover only
+     * already-seen files/results, even with novel call signatures (the doom-loop breaker would miss
+     * them: different offsets/patterns are not identical signatures). Uses the global
+     * llm.plateauRounds default (8) via the fallback (no provider-level override).
+     */
+    @Test
+    void explorationPlateauStopsTheTurn() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 9 read_file rounds on the SAME file, same 2k bucket, distinct limits: signatures are novel
+        // (ToolRepeats stays silent), coverage is redundant -> plateau after 8
+        final int[] offsets = {0, 100, 700, 1500, 100, 700, 1500, 0, 100};
+        for (var i = 0; i < offsets.length; i++) {
+            replies.add(toolCallReply(
+                    "t" + i,
+                    "read_file",
+                    "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "a plateau turn must not return a normal answer");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertFalse(errors.isEmpty(), "a plateau turn must emit an error");
+        assertTrue(
+                errors.getLast().message().contains("Exploration plateau"),
+                "the error must explain the plateau stop: " + errors.getLast().message());
+        assertTrue(
+                requests.size() < 12,
+                "the turn must stop around the plateau limit, not maxIterations: " + requests.size());
+    }
+
+    /**
+     * P2c: a per-model behavior.plateauRounds override wins over the global default and stops the
+     * turn earlier (cascade: behavior > provider tuning > global).
+     */
+    @Test
+    void behaviorPlateauRoundsOverridesGlobal() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 3 redundant rounds: behavior.plateauRounds=2 stops after the 3rd
+        final int[] offsets = {0, 100, 700};
+        for (var i = 0; i < offsets.length; i++) {
+            replies.add(toolCallReply(
+                    "t" + i,
+                    "read_file",
+                    "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.plateauRounds", "2"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "behavior plateau override must stop the turn");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertFalse(errors.isEmpty());
+        assertTrue(errors.getLast().message().contains("Exploration plateau"));
+        assertTrue(
+                requests.size() <= 4,
+                "behavior plateauRounds=2 must stop after ~3 rounds, not the global 8: " + requests.size());
+    }
+
+    /**
+     * P2d: a write resets the plateau streak - the model may legitimately re-read files after
+     * editing them. 2 redundant reads, a write, then 2 more redundant reads must NOT stop (the
+     * write clears the counter).
+     */
+    @Test
+    void plateauResetByWrite() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        replies.add(toolCallReply("r1", "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
+        replies.add(toolCallReply("r2", "read_file", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("w1", "write_file", "{\"path\":\"/a.txt\",\"content\":\"new\"}"));
+        replies.add(toolCallReply("r3", "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
+        replies.add(toolCallReply("r4", "read_file", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(new ScriptedReply("done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readWriteRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNotNull(result, "a write between redundant reads must keep the turn alive");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertTrue(errors.isEmpty(), "no plateau error expected: " + errors);
+    }
+
+    /**
+     * P2e: reading a NEW file resets the plateau streak - legitimate multi-file exploration stays
+     * legal even when each file is re-read a few times.
+     */
+    @Test
+    void plateauResetByNewFile() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 10 DISTINCT files read once each: every round is a fresh coverage key, so the plateau
+        // streak never accumulates (re-reading an older file is what the plateau guard is for)
+        for (var i = 0; i < 10; i++) {
+            replies.add(
+                    toolCallReply("t" + i, "read_file", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":30}"));
+        }
+        replies.add(new ScriptedReply("done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true, Map.of("yca.llm.maxIterations", "50")),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+        assertNotNull(result, "distinct new files must keep the turn alive");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertTrue(errors.isEmpty(), "no plateau error expected: " + errors);
+    }
+
+    /**
+     * Plateau feedback: with nudge_2 (default) the model gets a one-shot strategy nudge when the
+     * streak reaches limit-2 (injected as a user message, so it reaches the LLM), then still
+     * hard-stops at the limit if it keeps re-reading.
+     */
+    @Test
+    void plateauNudge2FiresThenStopsAtLimit() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // behavior plateauRounds=3, nudge_2: nudge at streak 1 (3-2), hard stop at streak 3
+        for (var i = 0; i < 4; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.plateauRounds", "3",
+                        "yca.provider.providers.0.models.0.behavior.plateauFeedback", "nudge_2"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+        assertNull(result, "after the nudge the turn must still hard-stop at the limit");
+        // the nudge was injected as a user message; it stays in the working list, so it appears in
+        // every request after injection (assert at least once, not exactly once)
+        final var nudgeOnWire = requests.stream()
+                .anyMatch(r -> r.stream()
+                        .anyMatch(m -> "user".equals(m.role())
+                                && String.valueOf(m.content()).contains("Stop re-reading")));
+        assertTrue(nudgeOnWire, "the nudge must be sent on the wire: " + requests);
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertFalse(errors.isEmpty());
+        assertTrue(
+                errors.getLast().message().contains("Exploration plateau"),
+                "the turn must end with the plateau stop: " + errors.getLast().message());
+    }
+
+    /**
+     * Plateau feedback: nudge_1 fires later than nudge_2 (one round before the limit) but still
+     * before the hard stop.
+     */
+    @Test
+    void plateauNudge1FiresLaterThanNudge2() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // behavior plateauRounds=4, nudge_1: nudge at streak 3 (4-1), hard stop at streak 4
+        for (var i = 0; i < 5; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.plateauRounds", "4",
+                        "yca.provider.providers.0.models.0.behavior.plateauFeedback", "nudge_1"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "the turn must still hard-stop at the limit");
+        // the nudge request appears only on the second+ wire request (after round 3) - not at round 1-2
+        final var nudgeFirstSeen = requests.stream()
+                .filter(r -> r.stream()
+                        .anyMatch(m -> "user".equals(m.role())
+                                && String.valueOf(m.content()).contains("Stop re-reading")))
+                .findFirst()
+                .map(requests::indexOf)
+                .orElse(-1);
+        assertTrue(nudgeFirstSeen >= 3, "nudge_1 must fire only near the limit (round 3 of 4), not early: " + requests);
+    }
+
+    /**
+     * Plateau feedback: with nudge the model is allowed to recover - a new file read after the
+     * nudge resets the streak, so the turn completes normally.
+     */
+    @Test
+    void plateauNudgeLetsModelRecover() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // plateauRounds=3, nudge_2: rounds 1 (a) -> nudge; then a NEW file (b) resets; then more new files
+        replies.add(toolCallReply("r1", "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
+        replies.add(toolCallReply("r2", "read_file", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r3", "read_file", "{\"path\":\"/b.txt\",\"offset\":0,\"limit\":50}"));
+        replies.add(toolCallReply("r4", "read_file", "{\"path\":\"/c.txt\",\"offset\":0,\"limit\":60}"));
+        replies.add(new ScriptedReply("done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.plateauRounds", "3",
+                        "yca.provider.providers.0.models.0.behavior.plateauFeedback", "nudge_2"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNotNull(result, "a new file after the nudge resets the streak, the turn survives");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertTrue(errors.isEmpty(), "no plateau error when the model recovers: " + errors);
+    }
+
+    /**
+     * Plateau feedback: with plateauFeedback=none no nudge is ever injected - the turn hard-stops
+     * at the limit exactly as before this feature.
+     */
+    @Test
+    void plateauFeedbackNoneKeepsHardStopWithoutNudge() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 4; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.plateauRounds", "3",
+                        "yca.provider.providers.0.models.0.behavior.plateauFeedback", "none"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "none must still hard-stop");
+        final var nudgeCount = requests.stream()
+                .filter(r -> r.stream()
+                        .anyMatch(m -> "user".equals(m.role())
+                                && String.valueOf(m.content()).contains("Stop re-reading")))
+                .count();
+        assertEquals(0, nudgeCount, "no nudge may be sent with plateauFeedback=none");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertFalse(errors.isEmpty());
+        assertTrue(errors.getLast().message().contains("Exploration plateau"));
+    }
+
+    /**
+     * A-bis: behavior.maxIterations caps the turn window below the global default (cascade:
+     * behavior > provider tuning > global llm.maxIterations). A model making tool rounds is
+     * stopped once the capped window is exhausted.
+     */
+    @Test
+    void behaviorMaxIterationsOverridesGlobalWindowCap() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 6 tool rounds: behavior.maxIterations=3 stops the window after 3 rounds
+        for (var i = 0; i < 6; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read_file", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.maxIterations", "3"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "a capped window must not return a normal answer");
+        assertTrue(
+                requests.size() <= 4,
+                "behavior maxIterations=3 must cap near 3 rounds, not the global 10: " + requests.size());
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertFalse(errors.isEmpty());
+        assertTrue(
+                errors.getLast().message().contains("Maximum iterations reached"),
+                "the error must explain the capped window: " + errors.getLast().message());
+    }
+
+    /**
+     * C: a window-cap stop persists a display-only "system" notice; on resume that entry must NOT
+     * reach the LLM wire (filtered in doRun) while the transcript replay can still render it.
+     */
+    @Test
+    void capStopPersistsSystemNoticeAndResumeKeepsItOffTheWire() {
+        final var persisted = new ArrayList<SessionEntry>();
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        // 5 tool rounds: global maxIterations=10 never reached here; use a tiny behavior cap = 2
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 4; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read_file", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.maxIterations", "2"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var loopInstance =
+                loop(client, null, cfg, noContextManager(), store, null, readFileRegistry(), directExecutions(), null);
+        final var result = loopInstance.run("do it", null, "s1", null, () -> false);
+        assertNull(result, "capped window must stop");
+
+        final var notices =
+                persisted.stream().filter(e -> "system".equals(e.role())).toList();
+        assertEquals(1, notices.size(), "exactly one persisted stop notice: " + persisted);
+        assertTrue(
+                String.valueOf(notices.get(0).content()).contains("Maximum iterations reached"),
+                "notice content must explain the cap: " + notices.get(0).content());
+
+        // resume with the persisted notices in history: they must not be added to the working
+        // messages (the wire), and no extra notice is persisted while no turn runs
+        final var history = persisted.stream()
+                .map(e -> new Message(e.role(), e.content(), e.name(), e.toolCalls(), e.toolCallId(), e.others()))
+                .toList();
+        final var resumed = loopInstance.resume(
+                "test-agent", "s1", List.of(Message.user("first"), history.get(history.size() - 1)), () -> false);
+        // no scripted replies left -> the resume's LLM call is refused; assert the request carrying
+        // the system notice never happened by checking requests only contain the first turn.
+        // NOTE: index 0 of every request is the real system prompt; only mid-list "system" entries
+        // are the display-only stop notices that must not reach the wire.
+        assertTrue(
+                requests.stream().noneMatch(r -> r.stream().skip(1).anyMatch(m -> "system".equals(m.role()))),
+                "the system notice must never reach the wire: " + requests);
+        // the resume emitted the info notice (before failing on missing reply); accept null result
+        assertNull(resumed);
+        assertTrue(
+                events.stream()
+                        .anyMatch(e -> e instanceof AgentEvent.Notice n
+                                && String.valueOf(n.message()).contains("resuming after an iteration-cap stop")),
+                "resume after cap must emit the info notice: " + events);
+    }
+
+    /**
      * P6: the volatile tail rounds the context usage to the nearest 5% so tiny drifts between tool
      * rounds do not re-append a new session-state message at every iteration.
      */
@@ -1318,6 +1796,10 @@ class AgentLoopTest {
     }
 
     private static ScriptedReply toolCallReply(final String callId, final String tool) {
+        return toolCallReply(callId, tool, "{}");
+    }
+
+    private static ScriptedReply toolCallReply(final String callId, final String tool, final String args) {
         return new ScriptedReply(null, "tool_calls", false) {
             @Override
             Message toMessage() {
@@ -1325,11 +1807,123 @@ class AgentLoopTest {
                         "assistant",
                         null,
                         null,
-                        List.of(new ToolCall(callId, "function", new ToolCall.FunctionCall(tool, "{}"), 0)),
+                        List.of(new ToolCall(callId, "function", new ToolCall.FunctionCall(tool, args), 0)),
                         null,
                         null);
             }
         };
+    }
+
+    /** A registry exposing a read-only {@code read_file} tool (coverage-keyed for the plateau guard). */
+    private ToolRegistry readFileRegistry() {
+        return registryOf(new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "read_file";
+            }
+
+            @Override
+            public String description() {
+                return "read a file";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of("path", Map.of("type", "string"), "offset", Map.of("type", "integer"));
+            }
+
+            @Override
+            public boolean readonly() {
+                return true;
+            }
+
+            private int call;
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                final var path = args.get("path") instanceof final String p ? p : "?";
+                final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
+                return ToolResult.ok("content of " + path + " @" + offset + " #" + (call++));
+            }
+        });
+    }
+
+    /** A registry exposing read_file + write_file (writes reset the plateau streak). */
+    private ToolRegistry readWriteRegistry() {
+        return registryOf(
+                new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "read_file";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "read a file";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.READ;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of("path", Map.of("type", "string"), "offset", Map.of("type", "integer"));
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return true;
+                    }
+
+                    private int call;
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        final var path = args.get("path") instanceof final String p ? p : "?";
+                        final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
+                        return ToolResult.ok("content of " + path + " @" + offset + " #" + (call++));
+                    }
+                },
+                new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "write_file";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "write a file";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.EDIT;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of(
+                                "path", Map.of("type", "string"),
+                                "content", Map.of("type", "string"));
+                    }
+
+                    @Override
+                    public boolean readonly() {
+                        return false;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        return ToolResult.ok("written");
+                    }
+                });
     }
 
     private static MutableTodoStore mutableTodoStore(final TodoItem... initial) {
@@ -3418,7 +4012,27 @@ class AgentLoopTest {
                 new ProviderManager() {
                     @Override
                     public ResolvedModel resolveDefault() {
-                        return new ResolvedModel(null, "test-model");
+                        return providerManagerOverride == null
+                                ? new ResolvedModel(null, "test-model")
+                                : providerManagerOverride.resolveDefault();
+                    }
+
+                    @Override
+                    public int plateauRounds(
+                            final io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider,
+                            final String model) {
+                        return providerManagerOverride == null
+                                ? super.plateauRounds(provider, model)
+                                : providerManagerOverride.plateauRounds(provider, model);
+                    }
+
+                    @Override
+                    public int maxIterationsOverride(
+                            final io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider,
+                            final String model) {
+                        return providerManagerOverride == null
+                                ? super.maxIterationsOverride(provider, model)
+                                : providerManagerOverride.maxIterationsOverride(provider, model);
                     }
                 },
                 null,

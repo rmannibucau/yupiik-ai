@@ -29,6 +29,10 @@ it. For single-provider setups, the flat `yca.provider.*` scalars build the
  (`yca.provider.*.prompt.todo`), is covered in
  xref:features/todo-guidance.adoc[Todo and plan guidance].
 
+ Iteration bounds and the exploration-plateau guard (per-model / per-provider /
+ global cascade) are covered in
+ xref:features/iteration-guards.adoc[Iteration guards].
+
 A provider's context window (`yca.provider.*.contextWindow`) accepts an explicit
 token count; when zero or negative (the default) it is auto-detected from the
 provider `/v1/models` vendor extensions, cached one day per provider and model,

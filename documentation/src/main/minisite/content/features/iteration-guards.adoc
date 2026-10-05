@@ -1,0 +1,110 @@
+= Iteration guards: exploration plateaus and window caps
+
+The agent loop bounds how long a single turn can run and stops models that spin
+without making progress. Two guards cooperate:
+
+* the pre-existing *no-progress* guard stops rounds that repeat the same tool
+  call with the same arguments and the same output;
+* the *exploration-plateau* guard (added for flash-class models such as
+  `deepseek-v4-flash`, whose native style is one small novel tool call per round)
+  stops rounds that keep re-covering files/results the turn already read, even
+  when every call signature is different.
+
+Both guards are configured with a three-level cascade: per-model
+(`yca.provider.<id>.models[i].behavior.*`) wins over per-provider
+(`yca.provider.<id>.tuning.*`) wins over the global default (`yca.llm.*`).
+
+== Exploration plateau
+
+A read-only tool round re-covering only *already-seen* files/results is not
+progress: the model explores the same targets with slightly different queries
+(different `offset`, `limit`, grep pattern or bash fingerprint) instead of
+learning something new. After `plateauRounds` consecutive such rounds the turn
+stops with an *Exploration plateau* error, instead of burning the whole
+iteration window on redundant reads.
+
+What counts as "already seen" is per turn and keyed by:
+
+* `read_file`: the normalized absolute path plus a 2k line offset bucket
+  (advancing through a file is novel, re-reading the same window is redundant);
+* `grep`: the pattern plus the searched root (a new search is novel);
+* `bash`: derived from the configured read-only bash rules
+  (`yca.permissions.bash.rules`): the matched rule prefix plus the segment
+  target (so a rule added there - eg. `jq` - is automatically protected, there
+  is no hardcoded command list); tokens after a redirection are not coverage;
+* `glob` / `list_dir`: the normalized root path.
+
+A round is a plateau round only when it is pure read-only (no write, no failed
+tool) and every covered key was already seen. Writes and first-time files reset
+the streak immediately, and the guard is skipped while pending todos exist (the
+todo auto-continuation is the intended escape hatch there).
+
+== Feedback before the stop
+
+With the built-in default (`plateauFeedback=nudge_2`) the model gets **one
+chance to adapt** before the hard stop: when the plateau streak reaches
+`limit-2` a strategy-change user message is injected ("Stop re-reading: use the
+information you already collected, batch any remaining independent reads or
+searches into a single reply..."). If the model then reads new files or writes,
+the streak resets and the turn continues; if it keeps re-reading, the turn is
+stopped at the limit exactly as without the nudge. `nudge_1` sends the same
+nudge later (at `limit-1`, for models that profit from a last-minute hint);
+`none` disables the feedback entirely and the turn is hard-stopped at the limit
+with no model feedback (the pre-existing behavior).
+
+[source,properties]
+----
+# global default (built-in): nudge_2 - nudge at limit-2, then hard stop at limit
+yca.llm.plateauFeedback=nudge_2
+
+# per-provider: nudge later (at limit-1)
+yca.provider.<id>.tuning.plateauFeedback=nudge_1
+
+# per-model: no feedback, hard stop only
+yca.provider.<id>.models.0.behavior.plateauFeedback=none
+----
+
+[source,properties]
+----
+# global default (built-in): 8, 0 disables the guard entirely
+yca.llm.plateauRounds=8
+
+# per-provider
+yca.provider.<id>.tuning.plateauRounds=5
+
+# per-model (wins over the provider and the global)
+yca.provider.<id>.models.0.behavior.plateauRounds=3
+----
+
+== Iteration window cap
+
+`yca.llm.maxIterations` (default 250) bounds one iteration window: each
+response carrying tool calls consumes one iteration; when the budget runs out
+the loop stops (unless pending todos auto-continue, each continuation starting
+a fresh window). The cap itself can now be raised for a specific provider or
+model without touching the global default:
+
+[source,properties]
+----
+# global (built-in): 250
+yca.llm.maxIterations=250
+
+# per-provider
+yca.provider.<id>.tuning.maxIterations=500
+
+# per-model
+yca.provider.<id>.models.0.behavior.maxIterations=500
+----
+
+Sub-agents inherit the same provider/model resolution, so a per-model cap applies
+to them too.
+
+== Persisted stop notices
+
+When the loop stops on an exhausted window (or on an exploration plateau), a
+display-only notice is appended to the session with role `system` - for example
+`Maximum iterations reached (250): turn stopped; resume starts a fresh window.`
+These entries are *never* sent to the LLM (they are filtered out of the working
+history) but are rendered in the transcript on replay, so a capped turn no
+longer looks like one seamless run. Resuming after such a notice emits an
+informational "resuming after an iteration-cap stop" notice.

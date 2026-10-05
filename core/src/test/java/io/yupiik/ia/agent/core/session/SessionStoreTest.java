@@ -169,6 +169,30 @@ class SessionStoreTest {
         assertEquals("c1", loaded.get(1).toolCallId());
     }
 
+    @Test
+    void systemStopNoticesSurviveTheRoundTrip() {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "user", "question", null, null));
+        store.append(
+                id,
+                SessionEntry.of(
+                        2,
+                        "system",
+                        "Maximum iterations reached (250): turn stopped; resume starts a fresh window.",
+                        null,
+                        null,
+                        "notice"));
+
+        final var loaded = store.load(id);
+        assertEquals(2, loaded.size(), "the system notice must survive append -> load");
+        assertEquals("system", loaded.get(1).role(), "the persisted notice keeps its role");
+        assertEquals(
+                "Maximum iterations reached (250): turn stopped; resume starts a fresh window.",
+                loaded.get(1).content(),
+                "the persisted notice content round-trips verbatim");
+    }
+
     /**
      * P5: the {@code is_error} flag of a failed tool result must survive the session round-trip
      * (append -> load), so a resumed session and the compaction summary still know the attempt

@@ -20,6 +20,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
@@ -82,6 +83,22 @@ public class AgentLoop {
 
     /** P2: after this many consecutive tool rounds with no new information, the turn is stopped. */
     private static final int NO_PROGRESS_ROUNDS_LIMIT = 5;
+
+    /** Exploration-plateau markers used in the per-round coverage set (see {@link #appendToolResult}). */
+    private static final String WRITE_MARKER = "\u0000write";
+
+    private static final String REDUNDANT_MARKER = "\u0000seen:";
+
+    /**
+     * One-shot nudge injected before the exploration-plateau hard stop (plateauFeedback nudge_1 /
+     * nudge_2): the model keeps re-reading already-seen files/results with novel signatures, so it
+     * is told to change strategy instead of silently losing the turn at the limit.
+     */
+    static final String PLATEAU_NUDGE_PROMPT =
+            "Your recent tool rounds re-read only files/results already present in this conversation."
+                    + " Stop re-reading: use the information you already collected, batch any remaining"
+                    + " independent reads or searches into a single reply, and if you are stuck state"
+                    + " exactly what information is still missing instead of probing the same targets.";
 
     /** Nudge sent to the model after a truncated reply so it resumes instead of restarting. */
     private static final String TRUNCATION_CONTINUE_PROMPT =
@@ -248,6 +265,20 @@ public class AgentLoop {
 
     /** Consecutive tool rounds with no new information (reset on any informative round), see P2. */
     private int noProgressRounds;
+
+    /**
+     * Exploration-plateau breaker state for the current turn: tracks which normalized paths (and
+     * bash command fingerprints) the turn already covered with read-only tools, so a model that
+     * keeps re-reading the same files/results with novel-but-redundant calls can be stopped instead
+     * of burning the iteration window (see the plateauRounds cascade).
+     */
+    private final java.util.Set<String> seenFiles = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
+    /** Consecutive read-only rounds re-covering only already-seen files (reset on any informative round or write). */
+    private int plateauRounds;
+
+    /** Whether the plateau nudge (plateauFeedback nudge_1/nudge_2) was already injected this turn. */
+    private boolean plateauNudged;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -536,6 +567,20 @@ public class AgentLoop {
         return doRun(lastUserPrompt(history), null, agentName, sessionId, history, cancelled, queuedPrompt);
     }
 
+    private void emitResumeAfterCapNotice(final List<Message> history, final String sessionId) {
+        if (history == null || history.isEmpty() || currentSessionId == null) {
+            return;
+        }
+        final var last = history.get(history.size() - 1);
+        if ("system".equals(last.role())
+                && last.content() instanceof final String content
+                && content.startsWith("Maximum iterations reached")) {
+            emit(notice(
+                    AgentEvent.Notice.Level.INFO,
+                    "resuming after an iteration-cap stop: this turn starts with a fresh window."));
+        }
+    }
+
     private String doRun(
             final String promptForBuilding,
             final String userMessage,
@@ -558,11 +603,21 @@ public class AgentLoop {
         // fresh per-turn loop-guard state: repeat counts must not leak across turns
         repeats = new ToolRepeats();
         noProgressRounds = 0;
+        seenFiles.clear();
+        plateauRounds = 0;
+        plateauNudged = false;
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
                 + snapshotBlock(sessionId)));
         if (history != null) {
-            messages.addAll(history);
+            // persisted session notices (role "system", e.g. an iteration-cap stop) must never reach
+            // the LLM wire: they are display-only markers for the transcript. Everything else
+            // (system prompt, user/assistant/tool turns) is replayed verbatim.
+            for (final var m : history) {
+                if (!"system".equals(m.role())) {
+                    messages.add(m);
+                }
+            }
         }
         if (userMessage != null) {
             messages.add(Message.user(userMessage));
@@ -581,6 +636,11 @@ public class AgentLoop {
                             ? status(pause.message())
                             : notice(AgentEvent.Notice.Level.INFO, pause.message()));
         };
+        // a resume right after an iteration-cap stop is a fresh window: make it visible instead of
+        // looking like one seamless turn in the transcript
+        if (userMessage == null && history != null) {
+            emitResumeAfterCapNotice(history, sessionId);
+        }
 
         try {
             return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt, memoryVersionAtStart());
@@ -757,9 +817,13 @@ public class AgentLoop {
             final int memoryVersionAtStart)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
-        final var maxIterations = configuration.llm().maxIterations();
+        // iteration window cap cascade: per-model behavior > per-provider tuning > global default
+        final var resolved = providerManager.resolveDefault();
+        final var maxIterations = resolvedMaxIterations(resolved);
+        final var plateauLimit = resolvedPlateauRounds(resolved);
+        final var plateauFeedback = resolvedPlateauFeedback(resolved);
         final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
-        final var model = providerManager.resolveDefault().model();
+        final var model = resolved.model();
         final var tools = toolRegistry.toWireTools();
         final var toolsTokens = toolTokens(tools);
         var overflowRetried = false;
@@ -1038,6 +1102,7 @@ public class AgentLoop {
                     break;
                 }
                 final var roundInformative = new boolean[] {false};
+                final var roundCoverage = new java.util.HashSet<String>();
                 executeToolCalls(
                         sessionId,
                         messages,
@@ -1046,7 +1111,8 @@ public class AgentLoop {
                         staleReads,
                         toolsTokens,
                         cancelled,
-                        roundInformative);
+                        roundInformative,
+                        roundCoverage);
                 toolsRanThisTurn = true;
                 // a tool round is progress too: a later empty/truncated reply starts its retry budget fresh
                 emptyCompletionRetries = 0;
@@ -1070,6 +1136,42 @@ public class AgentLoop {
                         }
                     }
                 }
+                // exploration-plateau termination (P2): a read-only round re-covering only already-seen
+                // files/results (novel call signatures, same targets) is not progress for flash-class
+                // models that explore one call per round: stop after the configured plateau rounds,
+                // keeping the todo auto-continue as the escape hatch when todos are open
+                if (plateauLimit > 0 && !roundCoverage.isEmpty() && isPlateauRound(roundCoverage)) {
+                    if (unfinishedTodos(toolsRanThisTurn) != null) {
+                        plateauRounds = 0;
+                    } else {
+                        plateauRounds++;
+                        // one-shot strategy-change nudge (plateauFeedback nudge_1 / nudge_2): before the
+                        // hard stop the model gets a chance to adapt instead of losing the whole turn
+                        final var nudgeAt = plateauFeedbackNudgeAt(plateauFeedback, plateauLimit);
+                        if (nudgeAt > 0 && !plateauNudged && plateauRounds >= nudgeAt) {
+                            plateauNudged = true;
+                            emit(notice(
+                                    AgentEvent.Notice.Level.INFO,
+                                    "exploration-plateau nudge sent to the model (round " + plateauRounds + '/'
+                                            + plateauLimit + ")"));
+                            messages.add(Message.user(PLATEAU_NUDGE_PROMPT));
+                            continue windowLoop;
+                        }
+                        if (plateauRounds >= plateauLimit) {
+                            persistStopNotice(
+                                    sessionId,
+                                    "Exploration plateau: the model made " + plateauLimit
+                                            + " consecutive read-only tool rounds re-covering only already-seen files/results.");
+                            emit(error("Exploration plateau: the model made " + plateauLimit
+                                    + " consecutive read-only tool rounds re-covering only already-seen files/results."
+                                    + " Stopping the turn."));
+                            emitTurnMetrics(null, turnStartNanos);
+                            return null;
+                        }
+                    }
+                } else {
+                    plateauRounds = 0;
+                }
                 if (!toolDirectiveApplied && contextView != null) {
                     final var directive = contextView.poll();
                     if (directive != null) {
@@ -1089,6 +1191,9 @@ public class AgentLoop {
             if (tryTodoAutoContinue(messages, "max_iterations", toolsRanThisTurn, userInjected)) {
                 continue windowLoop;
             }
+            persistStopNotice(
+                    sessionId,
+                    "Maximum iterations reached (" + maxIterations + "): turn stopped; resume starts a fresh window.");
             emit(error("Maximum iterations reached (" + maxIterations + ")"));
             emitTurnMetrics(null, turnStartNanos);
             return null;
@@ -1802,6 +1907,68 @@ public class AgentLoop {
      *
      * @return the pending/total counts, or {@code null} when the todo list does not hold this turn open.
      */
+    /**
+     * A round is a plateau round when every coverage key it contributed was already seen this turn
+     * (marked {@link #REDUNDANT_MARKER}) and no write happened (a write contributes
+     * {@link #WRITE_MARKER}). Writes and first-time files/results reset the plateau counter in the
+     * caller because such rounds fall in the {@code else} branch.
+     */
+    private static boolean isPlateauRound(final java.util.Set<String> roundCoverage) {
+        for (final var key : roundCoverage) {
+            if (!key.startsWith(REDUNDANT_MARKER)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Iteration window cap cascade: per-model behavior.maxIterations > per-provider tuning.maxIterations
+     * > the global llm.maxIterations default. The provider/model come from {@code resolved} (the
+     * default provider resolved at loop start).
+     */
+    private int resolvedMaxIterations(final ProviderManager.ResolvedModel resolved) {
+        final var override = resolved == null || providerManager == null
+                ? 0
+                : providerManager.maxIterationsOverride(resolved.provider(), resolved.model());
+        return override > 0 ? override : configuration.llm().maxIterations();
+    }
+
+    /**
+     * Exploration-plateau limit cascade: per-model behavior.plateauRounds > per-provider
+     * tuning.plateauRounds > the global llm.plateauRounds default (8). 0 disables the guard.
+     */
+    private int resolvedPlateauRounds(final ProviderManager.ResolvedModel resolved) {
+        final var override = resolved == null || providerManager == null
+                ? 0
+                : providerManager.plateauRounds(resolved.provider(), resolved.model());
+        return override > 0 ? override : configuration.llm().plateauRounds();
+    }
+
+    /**
+     * Exploration-plateau feedback cascade: per-model behavior.plateauFeedback > per-provider
+     * tuning.plateauFeedback > the global llm.plateauFeedback default (nudge_2).
+     */
+    private PlateauFeedbackMode resolvedPlateauFeedback(final ProviderManager.ResolvedModel resolved) {
+        final var override = resolved == null || providerManager == null
+                ? null
+                : providerManager.plateauFeedback(resolved.provider(), resolved.model());
+        return override == null ? configuration.llm().plateauFeedback() : override;
+    }
+
+    /**
+     * Round at which the one-shot plateau nudge fires for a mode: {@code NUDGE_2} at {@code limit-2},
+     * {@code NUDGE_1} at {@code limit-1}, {@code NONE} or a limit too small for a meaningful early
+     * nudge (&le; 2) returns 0 (no nudge, hard stop only).
+     */
+    private static int plateauFeedbackNudgeAt(final PlateauFeedbackMode mode, final int limit) {
+        return switch (mode) {
+            case NUDGE_2 -> limit > 2 ? limit - 2 : 0;
+            case NUDGE_1 -> limit > 2 ? limit - 1 : 0;
+            case NONE -> 0;
+        };
+    }
+
     private PendingTodos unfinishedTodos(final boolean toolsRanThisTurn) {
         if (!toolsRanThisTurn || todoStore == null) {
             return null;
@@ -1831,6 +1998,15 @@ public class AgentLoop {
                 currentSessionId,
                 subagentId,
                 subagentName);
+    }
+
+    /**
+     * Persists a turn-stopped notice (role "system") so the transcript can render it on replay and
+     * a later resume can detect that the previous turn did not end naturally. These entries are
+     * display-only: the loop filters them out of the working message list (see {@code doRun}).
+     */
+    private void persistStopNotice(final String sessionId, final String message) {
+        sessionStore.append(sessionId, SessionEntry.of(clock.millis(), "system", message, null, null, "notice"));
     }
 
     /** Continuations allowed per turn ({@code yca.todos.maxContinues}), zero when not configured. */
@@ -1911,7 +2087,20 @@ public class AgentLoop {
             boolean persist,
             List<String> paths,
             long durationMs,
-            boolean informative) {
+            boolean informative,
+            List<String> coverage) {
+
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist,
+                final List<String> paths,
+                final long durationMs,
+                final boolean informative) {
+            this(callId, name, output, success, persist, paths, durationMs, informative, List.of());
+        }
 
         ToolOutcome(
                 final String callId,
@@ -1921,7 +2110,7 @@ public class AgentLoop {
                 final boolean persist,
                 final List<String> paths,
                 final long durationMs) {
-            this(callId, name, output, success, persist, paths, durationMs, true);
+            this(callId, name, output, success, persist, paths, durationMs, true, List.of());
         }
 
         ToolOutcome(
@@ -1958,7 +2147,8 @@ public class AgentLoop {
             final StaleReads staleReads,
             final int toolsTokens,
             final BooleanSupplier cancelled,
-            final boolean[] roundInformative)
+            final boolean[] roundInformative,
+            final java.util.Set<String> roundCoverage)
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
@@ -1990,7 +2180,8 @@ public class AgentLoop {
                         }
                     }
                     for (final var future : futures) {
-                        appendToolResult(sessionId, messages, awaitTool(future), staleReads, roundInformative);
+                        appendToolResult(
+                                sessionId, messages, awaitTool(future), staleReads, roundInformative, roundCoverage);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                     final var batchWallMs = (System.nanoTime() - batchStartNanos) / 1_000_000;
@@ -2002,7 +2193,8 @@ public class AgentLoop {
                                 messages,
                                 runGuarded(calls.get(j), repeats, cancelled),
                                 staleReads,
-                                roundInformative);
+                                roundInformative,
+                                roundCoverage);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                 }
@@ -2013,7 +2205,8 @@ public class AgentLoop {
                         messages,
                         runGuarded(calls.get(i), repeats, cancelled),
                         staleReads,
-                        roundInformative);
+                        roundInformative,
+                        roundCoverage);
                 checkRoundBudget(sessionId, messages, toolsTokens);
                 i++;
             }
@@ -2290,7 +2483,66 @@ public class AgentLoop {
         final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
         emit(toolFinished(name, result.output(), result.success()));
         return new ToolOutcome(
-                call.id(), name, result.output(), result.success(), true, touchedPaths(name, args), toolDurationMs);
+                call.id(),
+                name,
+                result.output(),
+                result.success(),
+                true,
+                touchedPaths(name, args),
+                toolDurationMs,
+                true,
+                coverageKeys(name, args));
+    }
+
+    /**
+     * Coverage keys of a successful read-only tool call, used by the exploration-plateau detector:
+     * a normalized absolute path for file tools (page-aware for read_file, pattern-aware for grep),
+     * and for bash the configured bash-rules prefix + target from {@link PermissionService} - so the
+     * recognized read-only families come from the config, never from a hardcoded command list.
+     * Returns an empty list when the call does not map to a recognisable coverage target (writes,
+     * todo updates, unrecognized commands): such calls are never plateau signals.
+     */
+    private List<String> coverageKeys(final String name, final Map<String, Object> args) {
+        if (FILE_READ_TOOLS.contains(name)) {
+            final var path = args.get("path") instanceof final String p && !p.isBlank() ? p : "";
+            if (path.isBlank()) {
+                return List.of();
+            }
+            // page-aware key: re-reading the same 2k window is redundant, advancing through the file
+            // (offset buckets) is novel - so legitimate paging never trips the plateau detector
+            final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
+            return List.of(normalizeCoveragePath(path) + "@" + (offset / 2048) + "k");
+        }
+        if ("bash".equals(name) && args.get("command") instanceof final String command && !command.isBlank()) {
+            return permissionService == null ? List.of() : permissionService.bashCoverage(command);
+        }
+        if ("grep".equals(name)) {
+            final var pattern = args.get("pattern") instanceof final String p ? p : "";
+            final var path = args.get("path") instanceof final String p && !p.isBlank() ? p : "";
+            // pattern-aware: a new search over the same root is novel, the same pattern over the
+            // same root is redundant
+            return path.isBlank()
+                    ? (pattern.isBlank() ? List.of() : List.of("grep:" + pattern))
+                    : List.of("grep:" + pattern + ":" + normalizeCoveragePath(path));
+        }
+        if (("glob".equals(name) || "list_dir".equals(name))
+                && args.get("path") instanceof final String path
+                && !path.isBlank()) {
+            return List.of(normalizeCoveragePath(path));
+        }
+        return List.of();
+    }
+
+    private static String normalizeCoveragePath(final String raw) {
+        final var trimmed = raw.strip();
+        if (trimmed.isEmpty()) {
+            return trimmed;
+        }
+        try {
+            return Path.of(trimmed).toAbsolutePath().normalize().toString();
+        } catch (final RuntimeException e) {
+            return trimmed;
+        }
     }
 
     /**
@@ -2304,7 +2556,8 @@ public class AgentLoop {
             final List<Message> messages,
             final ToolOutcome outcome,
             final StaleReads staleReads,
-            final boolean[] roundInformative) {
+            final boolean[] roundInformative,
+            final java.util.Set<String> roundCoverage) {
         final var raw = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
         final var output = capIngestionOutput(raw);
         messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
@@ -2316,6 +2569,18 @@ public class AgentLoop {
         } else if (roundInformative != null && !roundInformative[0]) {
             roundInformative[0] =
                     outcome.informative() && repeats.isNovelResult(outcome.callId(), outcome.name(), output);
+        }
+        // exploration-plateau tracking: successful read-only calls contribute their coverage keys
+        // (already-seen files flagged as such); a write is a hard reset signal for the round.
+        if (outcome.success() && roundCoverage != null) {
+            if (FILE_WRITE_TOOLS.contains(outcome.name())) {
+                roundCoverage.add(WRITE_MARKER);
+            } else {
+                for (final var key : outcome.coverage()) {
+                    final var seen = seenFiles.add(key);
+                    roundCoverage.add(seen ? key : REDUNDANT_MARKER + key);
+                }
+            }
         }
         if (outcome.persist()) {
             sessionStore.append(
