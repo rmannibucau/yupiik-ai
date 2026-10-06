@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.optimize;
 import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -27,7 +28,36 @@ import java.util.stream.Stream;
 public class GitOutputProcessor implements OutputProcessor {
     private static final int MAX_HUNK_LINES = 8;
     private static final int MAX_LOG_BODY = 3;
+    private static final int DEFAULT_MAX_BLOB_BYTES = 8192;
     private static final java.util.regex.Pattern WHITESPACE = java.util.regex.Pattern.compile("\\s+");
+    private static final java.util.regex.Pattern COMMIT_LINE =
+            java.util.regex.Pattern.compile("\\[([^\\]\\s]+)\\s+([0-9a-f]{7,40})\\]");
+    private static final java.util.regex.Pattern PUSH_BRANCH =
+            java.util.regex.Pattern.compile("\\*\\s+([^\\s]+)\\s+->");
+
+    private final int maxBlobBytes;
+
+    public GitOutputProcessor(final CodingAgentConfiguration configuration) {
+        this(resolveMaxBlobBytes(configuration));
+    }
+
+    GitOutputProcessor(final int maxBlobBytes) {
+        this.maxBlobBytes = maxBlobBytes;
+    }
+
+    protected GitOutputProcessor() {
+        this(DEFAULT_MAX_BLOB_BYTES);
+    }
+
+    private static int resolveMaxBlobBytes(final CodingAgentConfiguration configuration) {
+        if (configuration == null
+                || configuration.optimize() == null
+                || configuration.optimize().toolOutputs() == null
+                || configuration.optimize().toolOutputs().git() == null) {
+            return DEFAULT_MAX_BLOB_BYTES;
+        }
+        return configuration.optimize().toolOutputs().git().effectiveMaxBlobBytes();
+    }
 
     @Override
     public boolean supports(final String command) {
@@ -77,8 +107,10 @@ public class GitOutputProcessor implements OutputProcessor {
             case "show" ->
                 Optimizers.containsFlag(command, "--stat", "--format", "--pretty", "--name-only", "--name-status")
                         ? lines
-                        : processShow(lines);
+                        : processShow(command, lines);
             case "status" -> Optimizers.containsFlag(command, "--porcelain") ? lines : processStatus(lines);
+            case "stash" -> processStash(command, lines);
+            case "add", "commit", "push", "pull", "merge", "fetch" -> processMutation(command, lines);
             default -> lines;
         };
     }
@@ -183,8 +215,35 @@ public class GitOutputProcessor implements OutputProcessor {
         }
     }
 
-    private Stream<String> processShow(final Stream<String> lines) {
+    private Stream<String> processShow(final String command, final Stream<String> lines) {
         final var all = lines.toList();
+        if (all.stream().noneMatch(line -> line.startsWith("diff --git "))) {
+            // `git show <rev>:<path>` prints raw file/tree content, never a commit diff:
+            // compacting it to 8 lines + "..." made the model re-read the same file in
+            // tiny windows (186 calls in one session). Pass it through whole, windowing
+            // only the giant blobs so a single dump cannot blow the context. Output-based
+            // gate only: drive letters (C:\...), `-S 'a:b'` and `--pretty=format:` can
+            // never misroute a real commit diff (which always carries `diff --git`).
+            final var max = maxBlobBytes;
+            if (max <= 0) {
+                return all.stream(); // windowing disabled: byte-identical passthrough
+            }
+            final var full = String.join("\n", all);
+            if (full.length() <= max) {
+                return all.stream(); // whole file fits
+            }
+            final var cut = full.lastIndexOf('\n', max - 1); // char boundary, no UTF-8 split
+            if (cut < 0) {
+                return all.stream(); // single line over budget -> passthrough (rtk parity)
+            }
+            final var head = full.substring(0, cut + 1);
+            final var headLines = head.lines().count();
+            final var remaining = all.size() - (int) headLines;
+            final var hint = "git show " + blobArg(command) + " | sed -n '" + (headLines + 1) + ",$p'";
+            return Stream.concat(
+                    Stream.of(head, String.format("... (+%d lines truncated) [see remaining: %s]", remaining, hint)),
+                    Stream.empty());
+        }
         final var out = new ArrayList<String>();
         var inDiff = false;
         var headerLines = 0;
@@ -213,10 +272,96 @@ public class GitOutputProcessor implements OutputProcessor {
         return out.stream();
     }
 
+    private static String blobArg(final String command) {
+        final var tokens = WHITESPACE.split(command.strip());
+        // Stop at a pipe or shell operator: only the `git show ...` segment precedes it,
+        // so the trailing consumer (`sed`, `head`, ...) never leaks into the hint.
+        for (var i = tokens.length - 1; i >= 0; i--) {
+            final var token = tokens[i];
+            if (token.equals("|") || token.equals("||") || token.equals("&&") || token.equals(";")) {
+                break;
+            }
+            if (!token.isEmpty() && !token.startsWith("-")) {
+                return "'" + token + "'";
+            }
+        }
+        return "'<rev>:<path>'";
+    }
+
     private Stream<String> processStatus(final Stream<String> lines) {
         return lines.filter(line -> !line.isBlank())
                 .filter(line -> !line.strip().startsWith("(use "))
                 .filter(line -> !line.startsWith("nothing to commit"))
                 .map(Optimizers::stripAnsi);
+    }
+
+    private Stream<String> processStash(final String command, final Stream<String> lines) {
+        final var action = Optimizers.secondToken(command.replaceFirst("^git\\s+stash\\s*", ""));
+        if (!"list".equals(action) && !"".equals(action)) {
+            return lines; // push/pop/apply/... carry real output, keep it
+        }
+        // stash list: "stash@{0}: WIP on main: abc1234 message" -> "stash@{0}: abc1234 message"
+        return lines.map(Optimizers::stripAnsi).map(line -> {
+            final var i = line.indexOf(": WIP on ");
+            if (i >= 0) {
+                return line.substring(0, i) + ":"
+                        + line.substring(line.lastIndexOf(':', line.indexOf(": WIP on ") + 2));
+            }
+            return line;
+        });
+    }
+
+    private Stream<String> processMutation(final String command, final Stream<String> lines) {
+        final var out = new java.util.ArrayList<String>();
+        final var sub = Optimizers.firstToken(command.replaceFirst("^git\\s+", ""));
+        for (final var raw : lines.toList()) {
+            final var line = Optimizers.stripAnsi(raw).strip();
+            if (line.isEmpty()) {
+                continue;
+            }
+            // pull/fetch progress noise
+            if (line.startsWith("remote:")
+                    || line.startsWith("Receiving objects")
+                    || line.startsWith("Resolving deltas")
+                    || line.startsWith("Unpacking objects")
+                    || line.startsWith("Counting objects")
+                    || line.startsWith("Compressing objects")
+                    || line.startsWith("From ")
+                    || line.startsWith(" * branch")) {
+                continue;
+            }
+            // commit confirmation: "[main abc1234] message"
+            final var c = COMMIT_LINE.matcher(line);
+            if (c.find()) {
+                out.add("ok " + c.group(2));
+                continue;
+            }
+            // push confirmation: "To github.com:repo.git" / "* [new branch] main -> main"
+            if (line.startsWith("To ") || PUSH_BRANCH.matcher(line).find() || line.startsWith(" * ")) {
+                out.add(line);
+                continue;
+            }
+            if ("pull".equals(sub)) {
+                final var files = java.util.regex.Pattern.compile(
+                                "(\\d+) files? changed, (\\d+) insertions?\\(\\+\\), (\\d+) deletions?\\(-\\)")
+                        .matcher(line);
+                if (files.matches()) {
+                    out.add("ok " + files.group(1) + " files changed");
+                    continue;
+                }
+                if (line.startsWith("Already up to date") || line.startsWith("Already up-to-date")) {
+                    out.add("ok (already up to date)");
+                    continue;
+                }
+            }
+            if ("merge".equals(sub)) {
+                if (line.startsWith("Merge made by") || line.startsWith("Fast-forward")) {
+                    out.add("ok (merged)");
+                    continue;
+                }
+            }
+            out.add(line);
+        }
+        return out.stream();
     }
 }

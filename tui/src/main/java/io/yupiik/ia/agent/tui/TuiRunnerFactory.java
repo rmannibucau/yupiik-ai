@@ -31,7 +31,7 @@ public class TuiRunnerFactory {
     }
 
     public TuiRunner create(final TuiCommand.TuiConf conf, final boolean hideCursor) throws Exception {
-        return TuiRunner.create(TuiConfig.builder()
+        final var runner = TuiRunner.create(TuiConfig.builder()
                 .mouseCapture(true)
                 // bracketed paste (ESC[?2004h): ctrl+shift+v / middle-click pastes arrive as a
                 // single PasteEvent preserving newlines instead of a keystroke burst
@@ -44,5 +44,11 @@ public class TuiRunnerFactory {
                 .bindings(conf.bindings().toBindings())
                 .hideCursor(hideCursor)
                 .build());
+        // tamboui only enables ?1000h/?1002h (button/press tracking): motion (MOVE) events
+        // are what drive the tab-bar hover tooltip, so additionally enable ?1003h
+        // (any-motion tracking). Terminals without it simply never report MOVE events.
+        runner.backend().writeRaw("\u001b[?1003h");
+        runner.backend().flush();
+        return runner;
     }
 }

@@ -441,6 +441,21 @@ public class ConversationTranscript {
             touch();
         } else if (event
                 instanceof
+                AgentEvent.Pause(
+                        AgentEvent.Pause.Kind kind,
+                        String message,
+                        long durationMs,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
+            // transient provider-imposed delay (throttle/retry backoff): side feedback only.
+            // Never overwrite the leading status nor write a durable transcript line - the
+            // TUI renders it in the trailing notification slot and the next pause or turn
+            // progress replaces it. The failure itself is reported by the caller if the
+            // retries exhaust (AgentEvent.Error), so nothing durable is lost.
+            touch();
+        } else if (event
+                instanceof
                 AgentEvent.Notice(
                         AgentEvent.Notice.Level level,
                         String message,
@@ -459,9 +474,10 @@ public class ConversationTranscript {
             retryableErrorSeen |= isRetryableLlmError(message);
             if (level == AgentEvent.Notice.Level.ERROR) {
                 status = "error: " + message;
-            } else {
-                status = message;
             }
+            // INFO/WARN notices are durable transcript lines only: they must not overwrite
+            // the leading status slot, which stays on the short busy/ready state (the TUI
+            // right notification slot is fed by the dedicated Pause/status channels).
         } else if (event
                 instanceof
                 AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
@@ -704,23 +720,27 @@ public class ConversationTranscript {
             sb.append(pending);
         }
         // one running block per pending tool: parallel read-only tools each show
-        // their own command and streamed output instead of aliasing a single slot
-        for (final var entry : runningTools.entrySet()) {
-            for (final var tool : entry.getValue()) {
-                sb.append("\n\n")
-                        .append(TOOL_BEGIN)
-                        .append("\n`")
-                        .append(spinner)
-                        .append(" running ")
-                        .append(tool.command == null || tool.command.isBlank() ? tool.name : tool.command)
-                        .append("`");
-                if (!tool.stream.isEmpty()) {
-                    sb.append("\n\n```text\n")
-                            .append(tool.stream.toString().stripTrailing())
-                            .append("\n```\n");
-                }
-                sb.append(TOOL_END).append('\n');
+        // their own command and streamed output instead of aliasing a single slot.
+        // the header carries the (#ordinal) stamped by the runner on ToolStarted so
+        // the TUI can anchor the live block (clickable running-tool overlay, per-tool
+        // cancel) before the call finishes
+        for (final var tool : runningTools.values().stream()
+                .flatMap(java.util.Collection::stream)
+                .toList()) {
+            sb.append("\n\n")
+                    .append(TOOL_BEGIN)
+                    .append("\n`")
+                    .append(spinner)
+                    .append(" running ")
+                    .append(tool.command == null || tool.command.isBlank() ? tool.name : tool.command)
+                    .append(tool.ordinal() > 0 ? " (#" + tool.ordinal() + ")" : "")
+                    .append("`");
+            if (!tool.stream.isEmpty()) {
+                sb.append("\n\n```text\n")
+                        .append(tool.stream.toString().stripTrailing())
+                        .append("\n```\n");
             }
+            sb.append(TOOL_END).append('\n');
         }
         final var md = sb.toString().strip();
         final var result = md.isBlank() ? fallback : md;

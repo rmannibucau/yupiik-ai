@@ -52,6 +52,17 @@ public final class Glyphs {
         return ascii ? "o" : "◌";
     }
 
+    /**
+     * Tab-bar mode marker: distinct shapes per mode (plan vs build) so the mode
+     * stays readable even when NO_COLOR collapses every color to the terminal
+     * default (the same concern {@link #roleMark(boolean)} addresses).
+     *
+     * @param build {@code true} for the heaviest (build) shape
+     */
+    public String modeMark(final boolean build) {
+        return ascii ? (build ? "O" : "o") : (build ? "◆" : "▪");
+    }
+
     /** Accent gutter bar (thick). */
     public String bar() {
         return ascii ? "|" : "┃";

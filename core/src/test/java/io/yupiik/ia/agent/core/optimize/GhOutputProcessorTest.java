@@ -57,4 +57,41 @@ class GhOutputProcessorTest {
                 .toList();
         assertEquals(List.of("text", "", "more"), out);
     }
+
+    @Test
+    void prViewDropsDecorationMetadata() {
+        final var out = processor
+                .process(
+                        "gh pr view 42",
+                        List.of(
+                                "title: Fix the thing",
+                                "head: feature/foo",
+                                "base: main",
+                                "author: me",
+                                "labels: bug, enhancement",
+                                "body:",
+                                "This is the actual PR body",
+                                "with a second line")
+                                .stream())
+                .toList();
+        assertTrue(out.stream().anyMatch(l -> l.contains("This is the actual PR body")));
+        assertFalse(out.stream().anyMatch(l -> l.startsWith("title:")));
+        assertFalse(out.stream().anyMatch(l -> l.startsWith("head:")));
+        assertFalse(out.stream().anyMatch(l -> l.startsWith("labels:")));
+    }
+
+    @Test
+    void runListKeepsStatusAndName() {
+        final var out = processor
+                .process(
+                        "gh run list",
+                        List.of(
+                                "STATUS  NAME         BRANCH  EVENT  ID",
+                                "✓       integration  main    push   1",
+                                "✗       unit         main    push   2")
+                                .stream())
+                .toList();
+        assertTrue(out.stream().anyMatch(l -> l.startsWith("✓") && l.contains("integration")));
+        assertTrue(out.stream().anyMatch(l -> l.startsWith("✗")));
+    }
 }

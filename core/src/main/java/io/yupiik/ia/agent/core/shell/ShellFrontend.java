@@ -89,6 +89,16 @@ public interface ShellFrontend {
             status(message);
         } else if (event
                 instanceof
+                AgentEvent.Pause(
+                        var kind,
+                        String message,
+                        long durationMs,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
+            status(message);
+        } else if (event
+                instanceof
                 AgentEvent.Notice(
                         var level,
                         String message,

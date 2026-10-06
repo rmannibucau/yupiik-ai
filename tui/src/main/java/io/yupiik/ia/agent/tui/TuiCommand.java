@@ -44,6 +44,9 @@ import dev.tamboui.widgets.gauge.Gauge;
 import dev.tamboui.widgets.input.TextArea;
 import dev.tamboui.widgets.input.TextAreaState;
 import dev.tamboui.widgets.paragraph.Paragraph;
+import dev.tamboui.widgets.spinner.Spinner;
+import dev.tamboui.widgets.spinner.SpinnerFrameSet;
+import dev.tamboui.widgets.spinner.SpinnerState;
 import dev.tamboui.widgets.spinner.SpinnerStyle;
 import dev.tamboui.widgets.tabs.Tabs;
 import dev.tamboui.widgets.tabs.TabsState;
@@ -94,6 +97,7 @@ import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -158,6 +162,7 @@ public class TuiCommand implements Runnable {
     private final SpeakerLabels speakerLabels;
     private final AutoLogConfigurer autoLogConfigurer;
     private final McpManager mcpManager;
+    private final ProcessService processes;
     private final VirtualThreadExecutor executor;
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
@@ -268,6 +273,7 @@ public class TuiCommand implements Runnable {
             final SpeakerLabels speakerLabels,
             final AutoLogConfigurer autoLogConfigurer,
             final McpManager mcpManager,
+            final ProcessService processes,
             final VirtualThreadExecutor executor,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
@@ -298,6 +304,7 @@ public class TuiCommand implements Runnable {
         this.speakerLabels = speakerLabels;
         this.autoLogConfigurer = autoLogConfigurer;
         this.mcpManager = mcpManager;
+        this.processes = processes;
         this.executor = executor;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
@@ -413,7 +420,7 @@ public class TuiCommand implements Runnable {
                     documentation = "Key binding preset: STANDARD, VIM, EMACS, INTELLIJ or VSCODE.")
             KeyBindingPreset bindings,
 
-            @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream by default.")
+            @Property(defaultValue = "false", documentation = "Show the reasoning/thinking stream by default.")
             boolean showThinking,
 
             @Property(defaultValue = "\"dark\"", documentation = "UI theme: dark or light.")
@@ -513,8 +520,9 @@ public class TuiCommand implements Runnable {
         this.toolBg = palette.mono() ? null : TuiColors.blend(palette.text(), palette.backgroundPanel(), 0.95);
         final var toolOpacity = Math.clamp(tuiConfiguration.toolOutputOpacity(), 0.05, 0.95);
         this.toolStyle = palette.blended(palette.text(), toolOpacity);
-        // captured log body text keeps the readable text tone; the per-level color lives on
-        // the bar and background so severities stay distinguishable (see logStyles(Level))
+        // captured log body text keeps the readable text tone (bold for WARNING+,
+        // see logStrong(Level)); the per-level color lives on the thin left bar and
+        // the [LEVEL] token - no background tint for captured logs
         this.logStyle = palette.blended(palette.text(), opacity);
         // the markdown theme follows the same palette/code-theme switch so /theme (and
         // NO_COLOR) restyles bold and inline code too
@@ -1231,6 +1239,14 @@ public class TuiCommand implements Runnable {
             notify(state, status.message());
             return;
         }
+        if (event instanceof AgentEvent.Pause pause) {
+            // transient provider-imposed delay (throttle/retry backoff): trailing right-slot
+            // feedback only - the leading status stays on "thinking"/"working", and the message
+            // stays until the next pause or the TTL expiry. The renderer already adds the ⓘ
+            // glyph and the warning tint to the notification slot.
+            notify(state, pause.message());
+            return;
+        }
         if (event instanceof AgentEvent.PromptIntegrated) {
             // the queued prompt already landed in the transcript (**You** block): keep the
             // leading agent state stable (spinner/status) and surface the integration in the
@@ -1262,22 +1278,78 @@ public class TuiCommand implements Runnable {
             state.model.onEvent(event);
         }
         if (event instanceof AgentEvent.ToolStarted started) {
-            state.spinnerTick = 0;
+            state.spinnerState.reset();
             state.pendingToolArgs
                     .computeIfAbsent(started.name(), n -> new java.util.ArrayDeque<>())
                     .addLast(started.args());
             // reserve the ordinal this call will be stamped with so the running tool
             // opens its overlay immediately; the ToolFinished event overwrites it
             final var ordinal = started.ordinal() > 0 ? started.ordinal() : state.model.toolCallCount() + 1;
+            state.pendingToolOrdinals
+                    .computeIfAbsent(started.name(), n -> new java.util.ArrayDeque<>())
+                    .addLast(ordinal);
+            // the renderer resolves the running card's ordinal from the command label
+            // (a running card's ToolCard.name holds the command, not the tool name)
+            final var cmd = commandOfArgs(started.args());
+            if (cmd != null && !cmd.isBlank()) {
+                state.pendingToolOrdinals
+                        .computeIfAbsent(cmd, n -> new java.util.ArrayDeque<>())
+                        .addLast(ordinal);
+            }
             state.toolOutputs.record(
                     ordinal, new ToolOutputStore.Entry(started.name(), started.args(), "", false, -1L));
+        } else if (event instanceof AgentEvent.ToolStream stream) {
+            // a running tool's output streams into the store so the running-tool overlay
+            // (opened by clicking the live card) shows the live tail, not a blank body
+            final var deque = state.pendingToolOrdinals.get(stream.name());
+            if (deque != null && !deque.isEmpty()) {
+                final var ordinal = deque.peekLast();
+                final var current = state.toolOutputs.get(ordinal);
+                if (current != null) {
+                    var output = current.output();
+                    if (output.length() < ToolOutputStore.DEFAULT_MAX_OUTPUT_CHARS) {
+                        output += stream.fragment();
+                        if (current.output().length() >= ToolOutputStore.DEFAULT_MAX_OUTPUT_CHARS - 65536) {
+                            output = output.substring(output.length() - 65536) + "\n... older output truncated";
+                        }
+                    }
+                    state.toolOutputs.record(
+                            ordinal, new ToolOutputStore.Entry(current.name(), current.args(), output, false, -1L));
+                    // keep an open running-tool overlay live: swap the entry the modal renders
+                    final var overlay = state.toolOverlay;
+                    if (overlay != null && overlay.ordinal() == ordinal) {
+                        state.toolOverlay = overlay.withEntry(state.toolOutputs.get(ordinal));
+                    }
+                }
+            }
         } else if (event instanceof AgentEvent.ToolFinished finished) {
             // the transcript just stamped this call with ordinal #toolCallCount: keep the
             // full uncapped output around so the Ctrl+O overlay can expand the truncated card
             final var args = state.pendingToolArgs.get(finished.name());
             final var argsValue = args == null || args.isEmpty() ? "" : args.pollFirst();
+            if (args != null && args.isEmpty()) {
+                state.pendingToolArgs.remove(finished.name());
+            }
+            final var ordinals = state.pendingToolOrdinals.get(finished.name());
+            final var ordinal =
+                    ordinals == null || ordinals.isEmpty() ? state.model.toolCallCount() : ordinals.pollFirst();
+            if (ordinals != null && ordinals.isEmpty()) {
+                state.pendingToolOrdinals.remove(finished.name());
+            }
+            // drop the command-keyed alias (same ordinal) so the renderer fallback
+            // cannot resurrect a finished card as if it were still running
+            final var cmd = commandOfArgs(argsValue == null ? "" : argsValue);
+            if (cmd != null && !cmd.isBlank()) {
+                final var alias = state.pendingToolOrdinals.get(cmd);
+                if (alias != null) {
+                    alias.remove(ordinal);
+                    if (alias.isEmpty()) {
+                        state.pendingToolOrdinals.remove(cmd);
+                    }
+                }
+            }
             state.toolOutputs.record(
-                    state.model.toolCallCount(),
+                    ordinal,
                     new ToolOutputStore.Entry(
                             finished.name(),
                             argsValue == null ? "" : argsValue,
@@ -1360,6 +1432,9 @@ public class TuiCommand implements Runnable {
         if (event instanceof final MouseEvent wheel && wheel.isScroll()) {
             return scrollTopOverlay(wheel, state);
         }
+        if (event instanceof final MouseEvent move && move.kind() == MouseEventKind.MOVE) {
+            return onTabHover(move, state);
+        }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
         }
@@ -1407,6 +1482,10 @@ public class TuiCommand implements Runnable {
         if (event instanceof final MouseEvent mouse) {
             // the wheel is already routed to the topmost scrollable view by scrollTopOverlay
             if (mouse.isPress() && mouse.isLeftButton()) {
+                // a press anywhere dismisses the tab tooltip (the click either acts or lands elsewhere)
+                if (state.hoverTitle != null) {
+                    state.hoverTitle = null;
+                }
                 // tab close zones first: they are sub-rects of the tab cells
                 for (var i = 0; i < tabCloseRects.size(); i++) {
                     if (i < tabManager.size() && tabCloseRects.get(i).contains(mouse.x(), mouse.y())) {
@@ -1444,6 +1523,17 @@ public class TuiCommand implements Runnable {
                         return true;
                     }
                 }
+                // run headers: clicking toggles that run (collapse/expand)
+                for (final var h : state.runHeaders) {
+                    if (h.header().contains(mouse.x(), mouse.y())) {
+                        state.selection.clear();
+                        final var key = h.id();
+                        final var current = state.runCollapsed.getOrDefault(
+                                key, state.showToolActions == ToolOutputVisibility.COLLAPSED);
+                        state.runCollapsed.put(key, !current);
+                        return true;
+                    }
+                }
                 // truncated tool cards: clicking the "click to expand" footer opens the full output
                 for (final var link : state.toolFooterLinks) {
                     if (link.ordinal() >= 0 && link.header().contains(mouse.x(), mouse.y())) {
@@ -1453,10 +1543,14 @@ public class TuiCommand implements Runnable {
                     }
                 }
                 // tool card headers: clicking toggles that card's collapse
+                // (a running card opens the live overlay instead: it has nothing to collapse)
                 for (final var anchor : state.toolAnchors) {
                     if (anchor.ordinal() >= 0 && anchor.header().contains(mouse.x(), mouse.y())) {
                         state.selection.clear();
-                        if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
+                        final var runningEntry = state.toolOutputs.get(anchor.ordinal());
+                        if (runningEntry != null && runningEntry.running()) {
+                            openToolOverlay(state, anchor.ordinal());
+                        } else if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
                             // condensed mode: the dim one-liner itself opens the full output
                             openToolOverlay(state, anchor.ordinal());
                         } else if (state.showToolActions == ToolOutputVisibility.SHOWN
@@ -1602,6 +1696,7 @@ public class TuiCommand implements Runnable {
             state.toolNavIndex = -1;
             state.focusedToolOrdinal = -1;
             state.collapsedTools.clear();
+            state.runCollapsed.clear();
             notify(state, "transcript cleared");
             return true;
         }
@@ -1886,7 +1981,7 @@ public class TuiCommand implements Runnable {
         if (text == null || text.isBlank()) {
             return;
         }
-        final var via = Clipboard.copy(text);
+        final var via = Clipboard.copy(text, null);
         final var payload = SelectionState.osc52Payload(text);
         final var copied = text.length();
         runLater(state, () -> {
@@ -2604,10 +2699,42 @@ public class TuiCommand implements Runnable {
      * @return always {@code true}, the wheel is consumed even by overlays with nothing to scroll so
      *         it can never leak to the transcript while a dialog is up
      */
+    /**
+     * Mouse motion over the tab bar: shows the full tab title as a tooltip below
+     * the strip, or clears it when the pointer leaves the bar. Only repaints when
+     * the hovered tab actually changed (a MOVE elsewhere returns {@code false}),
+     * so mouse motion never causes idle repaints by itself.
+     */
+    private boolean onTabHover(final MouseEvent move, final UiState state) {
+        final var index = tabIndexAt(move.x(), move.y());
+        final var hovered = index < 0 ? null : tabManager.get(index);
+        final var next = hovered == null ? null : tabTitle(hovered);
+        final var current = state.hoverTitle;
+        if (java.util.Objects.equals(current, next)) {
+            return false;
+        }
+        state.hoverTitle = next;
+        return true;
+    }
+
+    /** Index of the tab whose bar cell contains the given coordinates, or {@code -1}. */
+    private int tabIndexAt(final int x, final int y) {
+        for (var i = 0; i < tabRects.size(); i++) {
+            if (tabRects.get(i).contains(x, y)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     private boolean scrollTopOverlay(final MouseEvent wheel, final UiState state) {
         final var delta = scrollService.wheelDelta(wheel);
         if (delta == 0) {
             return false;
+        }
+        // scrolling anywhere dismisses the tab tooltip: the pointer is acting, not hovering
+        if (state.hoverTitle != null) {
+            state.hoverTitle = null;
         }
         if (state.toolOverlay != null) {
             scrollToolOverlay(state, delta);
@@ -3104,7 +3231,7 @@ public class TuiCommand implements Runnable {
             frame.buffer().fill(frame.area(), new dev.tamboui.buffer.Cell(" ", Style.EMPTY.bg(screenBackground)));
         }
         if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
-            state.spinnerTick++;
+            state.spinnerState.advance();
         }
         // thinking timer lifecycle: armed on the first frame with live reasoning and
         // cleared as soon as it stops, independent of busy/runningTool so both the
@@ -3192,6 +3319,9 @@ public class TuiCommand implements Runnable {
         frameZones.add(root.get(bottomIndex - 1));
         renderStatus(root.get(bottomIndex), frame, state, narrow);
         frameZones.add(root.get(bottomIndex));
+        if (state.hoverTitle != null && !state.hoverTitle.isBlank()) {
+            renderTabTooltip(frame, state);
+        }
         if (state.searchOpen) {
             renderSearchBar(frame, state);
         }
@@ -3285,7 +3415,10 @@ public class TuiCommand implements Runnable {
             final var selected = i == tabManager.activeTab();
             // the close marker reserves its columns before the title is ellipsized, so it never truncates
             final var closeable = width >= 6;
-            final var body = " " + tabStatusIcon(state) + " " + tabTitle(state) + " ";
+            // the leading mode mark (▪ plan / ◆ build) is tinted with that tab's own
+            // mode color, so every tab - background ones included - shows its mode
+            final var mark = glyphs.modeMark(tabBuildMode(state));
+            final var body = " " + tabStatusIcon(state) + " " + mark + " " + tabTitle(state) + " ";
             // a padded label always fills the cell exactly: Paragraph aligns by
             // width, so a shorter line would drift away from the close zone
             final var title = closeable ? ellipsize(body, width - 2) : ellipsize(body, width);
@@ -3296,11 +3429,27 @@ public class TuiCommand implements Runnable {
                 if (closeable) {
                     tabCloseRects.add(new Rect(cell.x() + cell.width() - 2, cell.y(), 2, cell.height()));
                 }
-                frame.renderWidget(
-                        Paragraph.builder()
-                                .text(Text.from(Line.from(Span.styled(label, selected ? activeStyle : muted))))
-                                .build(),
-                        cell);
+                // the mode mark keeps its own hue even on the active (accent-bold) title;
+                // when the cell is too narrow for the mark to survive the ellipsis, the
+                // whole label falls back to a single plain span
+                final var markIdx = label.indexOf(mark);
+                final var cellStyle = selected ? activeStyle : muted;
+                if (markIdx >= 0) {
+                    frame.renderWidget(
+                            Paragraph.builder()
+                                    .text(Text.from(Line.from(
+                                            Span.styled(label.substring(0, markIdx), cellStyle),
+                                            Span.styled(mark, Style.EMPTY.fg(tabModeColor(state))),
+                                            Span.styled(label.substring(markIdx + mark.length()), cellStyle))))
+                                    .build(),
+                            cell);
+                } else {
+                    frame.renderWidget(
+                            Paragraph.builder()
+                                    .text(Text.from(Line.from(Span.styled(label, cellStyle))))
+                                    .build(),
+                            cell);
+                }
                 x += width;
             }
         }
@@ -3485,12 +3634,14 @@ public class TuiCommand implements Runnable {
         final var rows = new ArrayList<String>();
         final var toolTops = new ArrayList<UiState.ToolTop>();
         final var footerLinks = new ArrayList<UiState.FooterLink>();
+        final var runHeaders = new ArrayList<UiState.RunHeader>();
         final var chunks = chunks(
                 state.model.markdown(RUNNING_TOOL_MARKER, WELCOME),
                 content.width(),
                 state,
                 toolTops,
                 footerLinks,
+                runHeaders,
                 rows);
         state.flatRows = rows;
         final var total = chunks.stream().mapToInt(RenderedChunk::height).sum();
@@ -3528,6 +3679,18 @@ public class TuiCommand implements Runnable {
                     top.row()));
         }
         state.toolAnchors = anchors;
+        // run headers: absolute transcript row per run, converted to a screen hit-area
+        final var convertedRunHeaders = new ArrayList<UiState.RunHeader>();
+        for (final var h : runHeaders) {
+            final var y = inner.y() + h.row() - viewOffset;
+            convertedRunHeaders.add(new UiState.RunHeader(
+                    h.id(), new Rect(content.x(), y, h.header().width(), 1), h.row()));
+            // collapsed run headers participate in Alt+Up/Down tool navigation as a single
+            // stop: a negative ordinal marks the run header (never a real card ordinal)
+            anchors.add(new UiState.ToolAnchor(
+                    -h.id(), new Rect(content.x(), y, h.header().width(), 1), h.row()));
+        }
+        state.runHeaders = convertedRunHeaders;
         // "click to expand" links of truncated tool cards: screen hit-areas, only when on screen
         // (these are click targets, unlike anchors, so visibility filtering is correct here)
         final var links = new ArrayList<UiState.ToolAnchor>();
@@ -3577,7 +3740,7 @@ public class TuiCommand implements Runnable {
             final var indY = inner.y() + inner.height() - indH;
             frame.buffer().setStyle(new Rect(x, indY, 1, indH), Style.EMPTY.reversed());
         }
-        if (state.model.busy() && state.spinnerTick % 2 == 0 && inner.height() > 0) {
+        if (state.model.busy() && state.spinnerState.tick() % 2 == 0 && inner.height() > 0) {
             final var caretRect = new Rect(x, inner.y() + inner.height() - 1, 1, 1);
             frame.renderWidget(
                     Paragraph.builder()
@@ -3602,13 +3765,15 @@ public class TuiCommand implements Runnable {
             ToolOutputVisibility showToolActions,
             long toolOutputs,
             int collapsedToolsHash,
+            int runStateHash,
             int paletteId) {}
 
     private record ContentResult(
             List<RenderedChunk> chunks,
             List<String> rows,
             List<UiState.ToolTop> toolTops,
-            List<UiState.FooterLink> footerLinks) {}
+            List<UiState.FooterLink> footerLinks,
+            List<UiState.RunHeader> runHeaders) {}
 
     private List<RenderedChunk> chunks(
             final String md,
@@ -3616,9 +3781,10 @@ public class TuiCommand implements Runnable {
             final UiState state,
             final List<UiState.ToolTop> toolTops,
             final List<UiState.FooterLink> footerLinks,
+            final List<UiState.RunHeader> runHeaders,
             final List<String> rows) {
         final var out = new ArrayList<RenderedChunk>();
-        contentChunks(out, md, width, state, toolTops, footerLinks, rows);
+        contentChunks(out, md, width, state, toolTops, footerLinks, runHeaders, rows);
         final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
         // live (not yet flushed) thinking streams inline on the thought panel; it
         // grows every tick so it stays outside the chunk memo (spinner-sensitive)
@@ -3650,6 +3816,7 @@ public class TuiCommand implements Runnable {
             final UiState state,
             final List<UiState.ToolTop> toolTops,
             final List<UiState.FooterLink> footerLinks,
+            final List<UiState.RunHeader> runHeaders,
             final List<String> rows) {
         final var key = new ContentKey(
                 md,
@@ -3658,6 +3825,7 @@ public class TuiCommand implements Runnable {
                 state.showToolActions,
                 state.toolOutputs.size() + state.toolOutputs.latestOrdinal(),
                 state.collapsedTools.hashCode(),
+                state.runCollapsed.hashCode(),
                 System.identityHashCode(palette));
         final ContentResult cached;
         contentLock.lock();
@@ -3671,29 +3839,49 @@ public class TuiCommand implements Runnable {
             rows.addAll(cached.rows());
             toolTops.addAll(cached.toolTops());
             footerLinks.addAll(cached.footerLinks());
+            runHeaders.addAll(cached.runHeaders());
             return;
         }
         final var contentWidth = Math.max(1, width - 2); // room for the per-region left bar
         final var local = new ArrayList<RenderedChunk>();
         final var localRows = new ArrayList<String>();
+        final var localRunHeaders = new ArrayList<UiState.RunHeader>();
         final var localToolTops = new ArrayList<UiState.ToolTop>();
         final var localFooterLinks = new ArrayList<UiState.FooterLink>();
+        final var pendingRuns = new ArrayList<ToolRun.Builder>();
+        final Runnable flushRuns = () -> pendingRuns.forEach(builder -> addToolRunChunk(
+                local, builder.build(), width, state, localToolTops, localFooterLinks, localRunHeaders, localRows));
         for (final var region : TuiTranscriptModel.regions(md)) {
             if (region.thought()) {
+                flushRuns.run();
                 if (!state.showThinking) {
                     continue;
                 }
                 addThoughtChunk(local, thoughtLines(region.text(), contentWidth), localRows);
             } else if (region.tool()) {
-                addToolCardChunk(local, region.text(), width, state, localToolTops, localFooterLinks, localRows);
+                // consecutive tool regions accumulate into a run (rendered as one collapsible
+                // group); a live/running card breaks the run so it never shifts under streaming
+                final var card = ToolCard.parse(region.text());
+                if (!card.running() && !pendingRuns.isEmpty()) {
+                    pendingRuns.get(pendingRuns.size() - 1).add(new ToolRun.Member(card, region.text()));
+                } else {
+                    pendingRuns.add(ToolRun.builder(new ToolRun.Member(card, region.text())));
+                }
             } else if (region.log()) {
-                addLogChunk(local, logLines(region.text(), contentWidth), localRows);
+                flushRuns.run();
+                addMarkdownChunk(local, logLines(region.text(), contentWidth), localRows);
             } else if (!region.text().isBlank()) {
+                flushRuns.run();
                 appendChunks(local, region.text(), contentWidth, state, localRows);
             }
         }
+        flushRuns.run();
         final var result = new ContentResult(
-                List.copyOf(local), List.copyOf(localRows), List.copyOf(localToolTops), List.copyOf(localFooterLinks));
+                List.copyOf(local),
+                List.copyOf(localRows),
+                List.copyOf(localToolTops),
+                List.copyOf(localFooterLinks),
+                List.copyOf(localRunHeaders));
         contentLock.lock();
         try {
             lastContentKey = key;
@@ -3705,6 +3893,7 @@ public class TuiCommand implements Runnable {
         rows.addAll(result.rows());
         toolTops.addAll(result.toolTops());
         footerLinks.addAll(result.footerLinks());
+        runHeaders.addAll(result.runHeaders());
     }
 
     /**
@@ -3727,22 +3916,25 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Renders a captured log region inline: the first row carries the rendered block label
-     * (see {@link #appendLogRegion}) then the level and shortened logger name as bracket
-     * groups, and the message on the same row - so a log reads as one compact timeline
-     * entry instead of a header plus body. The label and logger groups are muted, the level
-     * group is bold in its level color, and the message keeps the shared {@link #logStyle}.
-     * A blank label (timestamp disabled) omits its group. The message remainder (wrapped
-     * continuation or fenced blocks) is rendered on following rows by
-     * {@link #appendLogBody}; the region keeps its level tint ({@link #logStyles}).
+     * Renders a captured log region inline, as plain text: the first row carries the
+     * rendered block label (see {@link #appendLogRegion}) then the level and shortened
+     * logger name as bracket groups, and the message on the same row - so a log reads
+     * as one compact timeline entry instead of a header plus body. The label and logger
+     * groups are muted, the level group is bold in its level color, and the message
+     * keeps the shared {@link #logStyle} (bold for WARNING and above, see
+     * {@link #logStrong}). A blank label (timestamp disabled) omits its group. The
+     * message remainder (wrapped continuation or fenced blocks) is rendered on following
+     * rows by {@link #appendLogBody}; there is no background tint, only the thin
+     * level-colored left bar and the level token carry the level tone.
      */
-    private RenderedLog logLines(final String text, final int width) {
+    private List<Line> logLines(final String text, final int width) {
         var source = text.stripLeading();
         final var nl = source.indexOf('\n');
         final var label = nl < 0 ? source : source.substring(0, nl).strip();
         source = nl < 0 ? "" : source.substring(nl + 1).stripLeading();
         final var level = logLevel(source);
-        final var styles = logStyles(level);
+        final var strong = logStrong(level);
+        final var bar = Span.styled("│ ", palette.blended(logLevelColor(palette, tuiConfiguration.log(), level), 0.25));
         final var lines = new ArrayList<Line>();
         // the body head is "<LEVEL> <shortLogger>", the message starts on the next line
         final var headEnd = source.indexOf('\n');
@@ -3757,7 +3949,10 @@ public class TuiCommand implements Runnable {
         }
         final var meta = new ArrayList<Span>();
         if (!label.isBlank()) {
-            meta.add(Span.styled("[" + label + "]", palette.muted()));
+            // the rendered logsTemplate label already carries its own brackets
+            // (default "[{{formatDate \"HH:mm:ss\"}}]"): render it verbatim instead
+            // of wrapping it again, or "[18:41:41]" becomes "[[18:41:41]]"
+            meta.add(Span.styled(label, palette.muted()));
         }
         if (!levelToken.isBlank()) {
             meta.add(Span.styled(
@@ -3770,23 +3965,30 @@ public class TuiCommand implements Runnable {
         final var firstMessage = messageEnd < 0 ? message : message.substring(0, messageEnd);
         final var messageTail =
                 messageEnd < 0 ? "" : message.substring(messageEnd + 1).stripLeading();
+        final var messageStyle = strong ? logStyle.bold() : logStyle;
         final var row = new ArrayList<Span>();
-        row.add(styles.bar());
+        row.add(bar);
         row.addAll(meta);
         if (!firstMessage.isBlank()) {
+            // one separating space between the "[<LEVEL>][<shortLogger>]" group and the
+            // message, so a log reads "...StructuralCodeGraph] CodeGraph loadIndex..."
+            final var separator = Span.styled(" ", messageStyle);
             final var metaWidth =
-                    meta.stream().mapToInt(s -> s.content().length()).sum();
-            final var barWidth = styles.bar().content().length();
+                    meta.stream().mapToInt(s -> s.content().length()).sum()
+                            + separator.content().length();
+            final var barWidth = bar.content().length();
             final var wrapped = MarkdownLines.wrapCode(
-                    List.of(Line.from(Span.styled(firstMessage, logStyle))), Math.max(1, width - barWidth - metaWidth));
+                    List.of(Line.from(Span.styled(firstMessage, messageStyle))),
+                    Math.max(1, width - barWidth - metaWidth));
+            row.add(separator);
             row.addAll(wrapped.get(0).spans());
             for (var i = 1; i < wrapped.size(); i++) {
-                lines.add(Line.from(styles.bar()).append(wrapped.get(i)));
+                lines.add(Line.from(bar).append(wrapped.get(i)));
             }
         }
         lines.add(0, Line.from(row));
-        appendLogBody(lines, messageTail, width, styles.bar());
-        return new RenderedLog(lines, styles.bg());
+        appendLogBody(lines, messageTail, width, bar, messageStyle);
+        return lines;
     }
 
     /**
@@ -3810,26 +4012,13 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * One log region resolved from its level: the thin bar span and the background
-     * tint (null in mono terminals). The body text keeps the shared
-     * {@link #logStyle} so the message stays readable against any tint.
+     * Whether a level renders its log body bold: only WARNING and above, so severe
+     * rows stand out from the plain text of INFO and the debug levels. Kept
+     * package-private so the mapping is unit-testable without a TUI.
      */
-    private record RenderedLog(List<Line> lines, Color bg) {}
-
-    /**
-     * Per-level log styles resolved from {@code yca.tui.log.<level>.color}: a hex
-     * value wins, blank/auto follows the closest palette accent (error for SEVERE,
-     * warning for WARNING, info otherwise, dimmed for the debug levels) so the log
-     * regions never borrow the user (primary) or assistant (accent) role colors.
-     */
-    private LogStyles logStyles(final Level level) {
-        final var color = logLevelColor(palette, tuiConfiguration.log(), level);
-        return new LogStyles(
-                Span.styled("│ ", palette.blended(color, 0.25)),
-                palette.mono() ? null : TuiColors.blend(color, palette.backgroundPanel(), 0.94));
+    static boolean logStrong(final Level level) {
+        return level.intValue() >= Level.WARNING.intValue();
     }
-
-    private record LogStyles(Span bar, Color bg) {}
 
     /**
      * Resolves the log color for a level: the configured {@code color} hex wins,
@@ -3895,9 +4084,12 @@ public class TuiCommand implements Runnable {
     /**
      * Renders one log body into existing output lines, mirroring
      * {@link #appendThoughtBody} so fenced blocks in a log message keep their
-     * code layout but on the level-tinted log bar and plain (non-italic) style.
+     * code layout but on the plain log bar and non-italic style: there is no
+     * background tint, only the level-colored left bar, and the prose keeps the
+     * message style (bold for WARNING+ levels, see {@link #logStrong}).
      */
-    private void appendLogBody(final List<Line> lines, final String source, final int width, final Span bar) {
+    private void appendLogBody(
+            final List<Line> lines, final String source, final int width, final Span bar, final Style messageStyle) {
         final var body = new ArrayList<Line>();
         for (final var seg : syntaxHighlighter.split(source)) {
             final List<Line> rendered;
@@ -3907,7 +4099,8 @@ public class TuiCommand implements Runnable {
                                 boldedCode(syntaxHighlighter.highlightLines(seg.language(), seg.text())), width),
                         bar);
             } else if (!seg.text().isBlank()) {
-                rendered = withBar(transcriptRenderer.renderRegion(seg.text(), width, logStyle, markdownStyles), bar);
+                rendered =
+                        withBar(transcriptRenderer.renderRegion(seg.text(), width, messageStyle, markdownStyles), bar);
             } else {
                 continue;
             }
@@ -4123,24 +4316,112 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Like {@link #addThoughtChunk} but paints the log panel: a subtle full-width
-     * level-colored background tint (pre-blended solid color - terminals have no
-     * alpha) so captured logs read as their own category, colored by severity.
+     * Renders a finished-tool run as one collapsible group. In {@code HIDDEN} mode
+     * nothing is rendered; otherwise a one-line header (chevron + summary) is always
+     * shown, and the members follow when the run is open. The default state follows
+     * the current output mode ({@code SHOWN} open, {@code COLLAPSED} collapsed) unless
+     * the user toggled this run explicitly ({@link UiState#runCollapsed}).
      */
-    private void addLogChunk(final List<RenderedChunk> out, final RenderedLog log, final List<String> rows) {
-        final var lines = log.lines();
-        final var innerH = Math.max(lines.size(), 1);
-        final var text = Text.from(lines);
-        for (final var line : lines) {
-            rows.add(plainText(line));
+    private void addToolRunChunk(
+            final List<RenderedChunk> out,
+            final ToolRun run,
+            final int width,
+            final UiState state,
+            final List<UiState.ToolTop> toolTops,
+            final List<UiState.FooterLink> footerLinks,
+            final List<UiState.RunHeader> runHeaders,
+            final List<String> rows) {
+        if (state.showToolActions == ToolOutputVisibility.HIDDEN
+                || run == null
+                || run.members().isEmpty()) {
+            return;
         }
-        out.add(new RenderedChunk(innerH, skip -> {
-            final var paragraph = Paragraph.builder().text(text).overflow(Overflow.CLIP);
-            if (log.bg() != null) {
-                paragraph.background(log.bg());
+        if (run.size() == 1) {
+            // a lone tool keeps its historical rendering (no run header): the grouping is
+            // only meaningful for bursts of consecutive calls
+            final var member = run.members().get(0);
+            addToolCardChunk(out, member.regionText(), width, state, toolTops, footerLinks, rows);
+            return;
+        }
+        final var collapsed = runCollapsedState(run, state);
+        final var header = runHeaderLine(run, collapsed);
+        final int top = out.stream().mapToInt(RenderedChunk::height).sum();
+        rows.add(plainText(header));
+        runHeaders.add(new UiState.RunHeader(run.id(), new Rect(0, top, width, 1), top));
+        out.add(new RenderedChunk(
+                1,
+                skip -> Paragraph.builder()
+                        .text(Text.from(header))
+                        .overflow(Overflow.CLIP)
+                        .build()));
+        if (collapsed) {
+            return;
+        }
+        if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
+            // collapsed mode with an open run: one dim line per member, indented under the header
+            var y = top + 1;
+            for (final var member : run.members()) {
+                final var card = member.card();
+                final var line = indentLine(hiddenToolLine(card), "  ");
+                rows.add(plainText(line));
+                final var cardTop = y;
+                if (card.ordinal() >= 0) {
+                    toolTops.add(new UiState.ToolTop(card.ordinal(), cardTop));
+                }
+                out.add(new RenderedChunk(
+                        1,
+                        skip -> Paragraph.builder()
+                                .text(Text.from(line))
+                                .overflow(Overflow.CLIP)
+                                .build()));
+                y++;
             }
-            return paragraph.scroll(Math.clamp(innerH - 1, 0, skip)).build();
-        }));
+        } else {
+            // SHOWN mode with an open run: full cards, indented under the header
+            for (final var member : run.members()) {
+                addToolCardChunk(out, member.regionText(), width, state, toolTops, footerLinks, rows);
+            }
+        }
+    }
+
+    /** True when a run is collapsed: explicit override first, else the mode default. */
+    private boolean runCollapsedState(final ToolRun run, final UiState state) {
+        return state.runCollapsed.getOrDefault(run.id(), state.showToolActions == ToolOutputVisibility.COLLAPSED);
+    }
+
+    /** The always-visible run header line: chevron + summary + failure/duration details. */
+    private Line runHeaderLine(final ToolRun run, final boolean collapsed) {
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var chevron = collapsed ? "▶ " : "▼ ";
+        final var spans = new ArrayList<Span>();
+        spans.add(
+                Span.styled(chevron, Style.EMPTY.fg(Color.hex(palette.accent())).bold()));
+        spans.add(Span.styled(summary(run), muted));
+        final var failures = run.failures();
+        if (failures > 0) {
+            spans.add(Span.styled(
+                    " · " + failures + " failed",
+                    Style.EMPTY.fg(Color.hex(palette.error())).bold()));
+        }
+        spans.add(Span.styled(" · " + DurationFormat.humanize(run.elapsedMs()), muted));
+        return Line.from(spans.toArray(Span[]::new));
+    }
+
+    /** Short run summary: {@code 5 tools · grep ×3 · read_file ×2}. */
+    private String summary(final ToolRun run) {
+        final var counts = run.commandCounts();
+        final var sb = new StringBuilder(run.size() == 1 ? "1 tool" : run.size() + " tools");
+        counts.forEach((cmd, n) -> sb.append(" · ").append(cmd).append(n > 1 ? " ×" + n : ""));
+        return sb.toString();
+    }
+
+    /** Indents every line of a {@link Line} by the given prefix. */
+    private Line indentLine(final Line line, final String prefix) {
+        final var spans = line.spans();
+        final var out = new ArrayList<Span>(spans.size() + 1);
+        out.add(Span.styled(prefix, Style.EMPTY));
+        out.addAll(spans);
+        return Line.from(out.toArray(Span[]::new));
     }
 
     /** One-row in-pane "thinking..." activity line shown while a reasoning round runs. */
@@ -4151,7 +4432,7 @@ public class TuiCommand implements Runnable {
         final var line = Line.from(
                 thoughtBar(),
                 Span.styled(
-                        spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " " + BusyLabels.thinking(secs),
+                        spinnerPrefix(state, SpinnerStyle.SQUARE_CORNERS) + BusyLabels.thinking(secs),
                         thoughtBarStyle));
         addThoughtChunk(out, List.of(line), rows);
     }
@@ -4165,7 +4446,17 @@ public class TuiCommand implements Runnable {
             final List<UiState.ToolTop> toolTops,
             final List<UiState.FooterLink> footerLinks,
             final List<String> rows) {
-        final var card = ToolCard.parse(regionText);
+        var card = ToolCard.parse(regionText);
+        if (card.running() && card.ordinal() < 0) {
+            // first render before a (#n) header exists: resolve from the started-not-
+            // finished FIFO so the live card is still anchored (clickable overlay).
+            // the card name is the command when the tool carries one (bash) and the
+            // tool name otherwise (read_file); the FIFO holds both keys
+            final var ordinals = state.pendingToolOrdinals.get(card.name());
+            if (ordinals != null && !ordinals.isEmpty()) {
+                card = new ToolCard(card.name(), card.args(), card.output(), false, 0, true, ordinals.peekLast());
+            }
+        }
         if (state.showToolActions == ToolOutputVisibility.HIDDEN) {
             // hidden mode (Ctrl+Y): render nothing at all for tool blocks
             return;
@@ -4174,9 +4465,9 @@ public class TuiCommand implements Runnable {
         if (state.showToolActions == ToolOutputVisibility.COLLAPSED || collapsed) {
             // collapsed mode (Ctrl+Y) or per-card collapse: keep a single dim summary line
             final var top = out.stream().mapToInt(RenderedChunk::height).sum();
-            if (card.ordinal() >= 0) {
-                toolTops.add(new UiState.ToolTop(card.ordinal(), top));
-            }
+            // the running card is clickable too: its ordinal is stamped by the runner
+            // (or resolved by the renderer), so the running-tool overlay opens on click
+            toolTops.add(new UiState.ToolTop(card.ordinal(), top));
             final var line = hiddenToolLine(card);
             rows.add(plainText(line));
             out.add(new RenderedChunk(
@@ -4188,9 +4479,10 @@ public class TuiCommand implements Runnable {
             return;
         }
         final var top = out.stream().mapToInt(RenderedChunk::height).sum();
-        if (card.ordinal() >= 0) {
-            toolTops.add(new UiState.ToolTop(card.ordinal(), top));
-        }
+        // the running card is clickable too: the ordinal is stamped by the runner
+        // (or resolved by the renderer via pendingToolOrdinals), so clicking the live
+        // block opens the running-tool overlay instead of doing nothing
+        toolTops.add(new UiState.ToolTop(card.ordinal(), top));
         final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
         final var blockBuilder = Block.builder()
                 .borders(Borders.ALL)
@@ -4708,8 +5000,7 @@ public class TuiCommand implements Runnable {
                         ? state.model.runningTool()
                         : state.model.runningToolCommand();
                 final var line = Line.from(Span.styled(
-                        spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " "
-                                + BusyLabels.calling(ellipsize(name, 60)),
+                        spinnerPrefix(state, SpinnerStyle.SQUARE_CORNERS) + BusyLabels.calling(ellipsize(name, 60)),
                         accent));
                 frame.renderWidget(
                         Paragraph.builder()
@@ -4718,20 +5009,12 @@ public class TuiCommand implements Runnable {
                                 .build(),
                         halves.getFirst());
             } else {
-                final Line line;
-                if (state.model.thinkingLength() > 0) {
-                    // pinned "thinking" progress line with elapsed time, stays at the
-                    // bottom while the reasoning streams inline above (timer lifecycle
-                    // is managed once per frame in render())
-                    final var secs = Math.max(0, (clock.millis() - state.thinkingStartedAtMillis) / 1000);
-                    line = Line.from(Span.styled(
-                            spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " "
-                                    + BusyLabels.thinking(secs),
-                            palette.blended(palette.info(), 0.35)));
-                } else {
-                    line = Line.from(Span.styled(
-                            spinnerFrame(SpinnerStyle.DOTS, state.spinnerTick) + " " + BusyLabels.working(), muted));
-                }
+                final var busy = busyIndicator(state);
+                final var line = busy == null
+                        ? Line.from(Span.styled(BusyLabels.working(), muted))
+                        : Line.from(Span.styled(
+                                spinnerPrefix(state, busy.getKey()) + busy.getValue(),
+                                state.model.thinkingLength() > 0 ? palette.blended(palette.info(), 0.35) : muted));
                 frame.renderWidget(
                         Paragraph.builder()
                                 .text(Text.from(line))
@@ -4755,9 +5038,17 @@ public class TuiCommand implements Runnable {
                 activeError(state) ? palette.error() : (state.model.busy() ? palette.warning() : palette.success()));
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var parts = new java.util.ArrayList<Span>();
-        final var frameStyle = state.model.runningTool() != null ? SpinnerStyle.SQUARE_CORNERS : activeWait(state);
-        final var prefix = frameStyle == null ? "" : spinnerFrame(frameStyle, state.spinnerTick) + " ";
-        parts.add(Span.styled(" " + prefix + state.model.status() + "  ", Style.EMPTY.fg(statusColor)));
+        final var busy = busyIndicator(state);
+        final String prefix;
+        final String status;
+        if (busy == null) {
+            prefix = "";
+            status = state.model.status();
+        } else {
+            prefix = spinnerPrefix(state, busy.getKey());
+            status = busy.getValue();
+        }
+        parts.add(Span.styled(" " + prefix + status + "  ", Style.EMPTY.fg(statusColor)));
         final var statusModel = chatClient.model(state.session.chatSettings());
         final var activeModel = ellipsize(statusModel, 40);
         final var activeVariant = chatClient.variant(state.session.chatSettings());
@@ -5055,6 +5346,28 @@ public class TuiCommand implements Runnable {
     }
 
     /** Modal listing every open tab with its full title; opened by "/tabs" (or an arg to switch directly). */
+    private void renderTabTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var title = state.hoverTitle;
+        if (title == null || title.isBlank()) {
+            return;
+        }
+        // the tooltip floats on the first transcript row right under the tab strip:
+        // a single-line chip so the full title is readable without reserving layout
+        final var width = Math.max(1, Math.min(frame.area().width() - 2, title.length() + 4));
+        final var inner = new Rect(1, 1, width, 1);
+        final var tooltipBg =
+                palette.mono() ? null : TuiColors.blend(palette.borderActive(), palette.backgroundPanel(), 0.85);
+        final var tooltipStyle = palette.mono()
+                ? Style.EMPTY
+                : Style.EMPTY.fg(Color.hex(palette.text())).bg(tooltipBg);
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(Line.from(Span.styled(" " + title + " ", tooltipStyle))))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                inner);
+    }
+
     private void renderTabsListOverlay(final dev.tamboui.terminal.Frame frame) {
         final var width = Math.min(Math.max(64, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(10, frame.height() * 4 / 5), frame.height());
@@ -5074,9 +5387,13 @@ public class TuiCommand implements Runnable {
             final var isActive = i == activeIndex;
             final var index = Span.styled(String.format("%2d ", i + 1), isActive ? accent : muted);
             final var icon = Span.styled(tabStatusIcon(tab) + " ", isActive ? accent : muted);
+            // the mode badge (same mark/color contract as the tab bar) sits between the status icon and the full title
+            final var modeMark = Span.styled(glyphs.modeMark(tabBuildMode(tab)), Style.EMPTY.fg(tabModeColor(tab)));
+            final var modeLabel =
+                    Span.styled(" " + (tabBuildMode(tab) ? "build" : "plan") + "  ", isActive ? accent : muted);
             final var title = Span.styled(tabTitle(tab), isActive ? accent : textStyle);
             final var marker = isActive ? Span.styled("  (active)", accent) : Span.styled("", muted);
-            rows.add(Line.from(index, icon, title, marker));
+            rows.add(Line.from(index, icon, modeMark, modeLabel, title, marker));
         }
         if (rows.isEmpty()) {
             rows.add(Line.from(Span.styled("no open tabs", muted)));
@@ -5552,15 +5869,31 @@ public class TuiCommand implements Runnable {
         if (entry.args() == null || entry.args().isBlank()) {
             return null;
         }
+        return commandOfArgs(entry.args());
+    }
+
+    /** Command extraction shared by the running-tool FIFO alias and the overlay. */
+    private String commandOfArgs(final String rawArgs) {
+        if (rawArgs == null || rawArgs.isBlank() || "{}".equals(rawArgs.strip())) {
+            return null;
+        }
+        // mirror ConversationTranscript.toolCommand(): any of command/path/workdir
+        // can be the live label, so the command-keyed alias matches the running header
+        final var sb = new StringBuilder();
         try {
-            final var args = toolOutputFormat.parseArguments(entry.args());
-            if (args != null && args.get("command") instanceof final String command && !command.isBlank()) {
-                return command;
+            final var args = toolOutputFormat.parseArguments(rawArgs);
+            if (args != null) {
+                for (final var key : java.util.List.of("command", "path", "workdir")) {
+                    if (args.get(key) instanceof final String value && !value.isBlank()) {
+                        sb.append(value).append(' ');
+                    }
+                }
             }
         } catch (final RuntimeException e) {
             // not JSON: no command hint, the output signals then have to speak
         }
-        return null;
+        final var cmd = sb.toString().strip();
+        return cmd.isEmpty() ? null : cmd;
     }
 
     private void renderToolOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -5569,8 +5902,9 @@ public class TuiCommand implements Runnable {
         final var height = Math.min(Math.max(14, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.1);
         final var running = entry.running();
-        final var title = " " + (running ? glyphs.running() + " " : entry.failed() ? glyphs.cross() + " " : "")
-                + entry.name() + " - full output ";
+        final var title = " "
+                + (running ? glyphs.running() + " " : entry.failed() ? glyphs.cross() + " " : "")
+                + entry.name() + (running ? " - running " : " - full output ");
         final var inner = modal(
                 frame,
                 rect,
@@ -5579,10 +5913,11 @@ public class TuiCommand implements Runnable {
         if (inner == null) {
             return;
         }
-        final var body = toolBodyLines(
-                entry.name(), toolCommandOf(entry), entry.args(), running ? "" : entry.output(), inner.width(), false);
+        final var body =
+                toolBodyLines(entry.name(), toolCommandOf(entry), entry.args(), entry.output(), inner.width(), false);
         if (running) {
-            // the running tool streams into the overlay: show a live "pending" marker
+            // a running tool streams into the overlay: keep the live output visible
+            // and mark the call as still executing (Esc cancels it)
             body.add(Line.from(Span.styled("pending… (executing)", Style.EMPTY.fg(Color.hex(palette.textMuted())))));
         }
         final var splits = Layout.vertical()
@@ -5724,8 +6059,10 @@ public class TuiCommand implements Runnable {
 
     /** Alt+Up/Alt+Down (or Alt+K/Alt+J): jump to the previous/next tool card in the transcript. */
     private void navigateTools(final UiState state, final int direction) {
-        final var anchors =
-                state.toolAnchors.stream().filter(a -> a.ordinal() >= 0).toList();
+        // include run headers (negative ordinals: -runId) so a collapsed run is a single stop
+        final var anchors = state.toolAnchors.stream()
+                .filter(a -> a.ordinal() >= 0 || a.ordinal() < 0 && a.row() >= 0)
+                .toList();
         if (anchors.isEmpty()) {
             state.toolNavIndex = -1;
             state.focusedToolOrdinal = -1;
@@ -5743,6 +6080,14 @@ public class TuiCommand implements Runnable {
         final var anchor = anchors.get(idx);
         state.focusedToolOrdinal = anchor.ordinal();
         state.pendingJumpRow = anchor.row();
+        if (anchor.ordinal() < 0) {
+            // -runId: the run header stop
+            final var runId = -anchor.ordinal();
+            final var collapsed =
+                    state.runCollapsed.getOrDefault(runId, state.showToolActions == ToolOutputVisibility.COLLAPSED);
+            notify(state, "tool run #" + runId + (collapsed ? " (collapsed - click chevron to expand)" : ""));
+            return;
+        }
         notify(
                 state,
                 "tool #" + anchor.ordinal()
@@ -5844,9 +6189,76 @@ public class TuiCommand implements Runnable {
                 inner);
     }
 
-    private static String spinnerFrame(final SpinnerStyle style, final int tick) {
-        final var frames = style.frames();
-        return frames[tick % frames.length];
+    /**
+     * Shared busy spinner per tab: one cached {@link Spinner} widget per style (ascii
+     * frame sets when {@code tui.glyphs=ascii}) driven by the single per-tab
+     * {@link SpinnerState} advanced once per frame. All busy lines (pinned progress,
+     * in-pane thinking indicator, status strip) render through this helper so two
+     * different spinners (e.g. the first-token {@code CLOCK} and the streaming
+     * {@code SQUARE_CORNERS}) can never animate on screen at the same time.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<SpinnerStyle, Spinner> spinnerCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Spinner spinnerOf(final SpinnerStyle style) {
+        return spinnerCache.computeIfAbsent(style, key -> {
+            final var builder = Spinner.builder();
+            if (glyphs.ascii()) {
+                builder.frameSet(
+                        switch (key) {
+                            case CLOCK -> SpinnerFrameSet.of("|", "/", "-", "\\");
+                            case SQUARE_CORNERS -> SpinnerFrameSet.of("+", "x", "*", "x");
+                            case DOTS -> SpinnerFrameSet.of(".", "o", "O", "o");
+                            case BOUNCING_BALL -> SpinnerFrameSet.of(".", "o", "O", "o");
+                            default -> SpinnerFrameSet.of("|", "/", "-", "\\");
+                        });
+            } else {
+                builder.spinnerStyle(key);
+            }
+            return builder.build();
+        });
+    }
+
+    /** Leading busy glyph + separating space for the given phase, from the shared spinner. */
+    private String spinnerPrefix(final UiState state, final SpinnerStyle style) {
+        final var spinner = spinnerOf(style);
+        final var maxWidth = spinner.maxFrameWidth();
+        final var frame = spinner.frameSet().frame((int) state.spinnerState.tick());
+        // reserve the widest frame's columns so the label never shifts as frames cycle
+        // (a 2-column CLOCK emoji next to 1-column box frames)
+        return frame + " ".repeat(Math.max(0, maxWidth - CharWidth.of(frame))) + " ";
+    }
+
+    /**
+     * Single busy-phase derivation shared by every busy line (status strip, pinned bottom
+     * line, in-pane thinking indicator): a running tool, then live reasoning, then the armed
+     * wait, then generic work. Priority matters: while thought deltas stream the first-token
+     * CLOCK wait must yield to the SQUARE_CORNERS thinking phase so two spinners can never
+     * animate at once.
+     *
+     * @return the {@code (spinner style, label)} of the current busy phase, or {@code null}
+     *     when the agent is not busy
+     */
+    private java.util.Map.Entry<SpinnerStyle, String> busyIndicator(final UiState state) {
+        if (state.model.runningTool() != null) {
+            final var name = state.model.runningToolCommand() == null
+                            || state.model.runningToolCommand().isBlank()
+                    ? state.model.runningTool()
+                    : state.model.runningToolCommand();
+            return Map.entry(SpinnerStyle.SQUARE_CORNERS, BusyLabels.calling(ellipsize(name, 60)));
+        }
+        if (state.model.thinkingLength() > 0) {
+            final var secs = Math.max(0, (clock.millis() - state.thinkingStartedAtMillis) / 1000);
+            return Map.entry(SpinnerStyle.SQUARE_CORNERS, BusyLabels.thinking(secs));
+        }
+        final var wait = activeWait(state);
+        if (wait != null) {
+            return Map.entry(wait, state.model.status());
+        }
+        if (state.model.busy()) {
+            return Map.entry(SpinnerStyle.DOTS, BusyLabels.working());
+        }
+        return null;
     }
 
     private static void waiting(final UiState state, final String message, final SpinnerStyle style) {
@@ -6417,6 +6829,19 @@ public class TuiCommand implements Runnable {
         return modeName();
     }
 
+    /** Whether the given tab's session runs in build mode (its own permissions, not the active tab's). */
+    private boolean tabBuildMode(final UiState state) {
+        final var runtime = state.session == null ? null : state.session.runtime();
+        return runtime != null
+                && runtime.permissions() != null
+                && runtime.permissions().mode() == AgentMode.BUILD;
+    }
+
+    /** The mode badge color of a specific tab: plan uses the warning tone, build the accent one. */
+    private Color tabModeColor(final UiState state) {
+        return Color.hex(tabBuildMode(state) ? palette.accent() : palette.warning());
+    }
+
     private Color modeColor() {
         return Color.hex(planMode() ? palette.warning() : palette.accent());
     }
@@ -6923,13 +7348,21 @@ public class TuiCommand implements Runnable {
         private record Wait(String message, SpinnerStyle style) {}
 
         /** Full-screen expandable view of one captured tool output (Ctrl+O). */
-        private record ToolOverlay(long ordinal, ToolOutputStore.Entry entry, int scroll) {}
+        private record ToolOverlay(long ordinal, ToolOutputStore.Entry entry, int scroll) {
+            /** Replaces the entry of a focused overlay, keeping the scroll offset (live running-tool output). */
+            private ToolOverlay withEntry(final ToolOutputStore.Entry fresh) {
+                return new ToolOverlay(ordinal, fresh, scroll);
+            }
+        }
 
         /** Persisted detail of the last error (message + optional stack trace) for the Alt+E modal. */
         private record ErrorDetail(String message, String stack) {}
 
         /** Screen hit-area of a rendered tool card header (click to collapse/expand, Alt+Up/Down to navigate). */
         private record ToolAnchor(long ordinal, Rect header, int row) {}
+
+        /** Screen hit-area of a tool run header (click to collapse/expand the run). */
+        private record RunHeader(long id, Rect header, int row) {}
 
         /** Transcript row of a truncated tool card "click to expand" footer (click opens the full output). */
         private record FooterLink(long ordinal, int row) {}
@@ -6993,7 +7426,7 @@ public class TuiCommand implements Runnable {
          */
         private volatile java.util.List<Rect> paneZones = java.util.List.of();
 
-        private volatile int spinnerTick;
+        private final SpinnerState spinnerState = new SpinnerState();
         private volatile String lastTodosRender = "";
         private volatile Toast toast;
         private volatile long toastShownAt;
@@ -7016,6 +7449,14 @@ public class TuiCommand implements Runnable {
         /** Millis when {@link #notification} was set; {@code 0} when none is pending. */
         private volatile long notificationShownAt;
 
+        /**
+         * Full title of the tab the mouse currently hovers (tab bar tooltip), or
+         * {@code null} when the pointer is not over the bar. Set by the event thread
+         * on MOVE, cleared on leave/click/scroll; rendered by the render thread as a
+         * single-line floating panel under the tab strip.
+         */
+        private volatile String hoverTitle;
+
         private volatile ToolOverlay toolOverlay;
         private volatile BtwOverlay btw;
 
@@ -7034,8 +7475,17 @@ public class TuiCommand implements Runnable {
         private volatile int maxViewOffset;
         private volatile int pendingJumpRow = -1;
         private final java.util.Set<Long> collapsedTools = new java.util.HashSet<>();
+        /**
+         * Per-run collapse overrides keyed by the run's first tool ordinal; a run with no
+         * entry follows the current mode default (SHOWN open, COLLAPSED collapsed). Cleared
+         * on Ctrl+L together with {@link #collapsedTools}.
+         */
+        private final java.util.Map<Long, Boolean> runCollapsed = new java.util.HashMap<>();
+
         private volatile List<ToolAnchor> toolAnchors = List.of();
         private volatile List<ToolAnchor> toolFooterLinks = List.of();
+        /** Rendered run header hit-areas (click to toggle the run), populated each frame. */
+        private volatile List<RunHeader> runHeaders = List.of();
         /** Wall-clock millis when the current live thinking stream started, -1 when idle. */
         private volatile long thinkingStartedAtMillis = -1;
 
@@ -7050,6 +7500,14 @@ public class TuiCommand implements Runnable {
         private volatile String lastCodeBlock;
         /** Pending tool args per name (FIFO), mirroring the core transcript's running tools. */
         private final java.util.Map<String, java.util.ArrayDeque<String>> pendingToolArgs = new java.util.HashMap<>();
+        /**
+         * Ordinals of the started-not-finished tools per name (FIFO), aligned with
+         * {@link #pendingToolArgs}: the running block parsed by {@link ToolCard} carries
+         * the (#ordinal) emitted by the core transcript, and the renderer falls back to
+         * this queue when the header has no suffix yet, so the running card is always
+         * anchored (clickable running-tool overlay) even before the first marked header.
+         */
+        private final java.util.Map<String, java.util.ArrayDeque<Long>> pendingToolOrdinals = new java.util.HashMap<>();
 
         private volatile long focusedToolOrdinal = -1;
         private volatile int toolNavIndex = -1;

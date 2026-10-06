@@ -26,6 +26,7 @@ import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import io.yupiik.maven.knowledge.llm.LlmText;
 import io.yupiik.maven.knowledge.llm.MvnProjectDeps;
 import io.yupiik.maven.knowledge.llm.SkillPrompts;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.StringReader;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -50,6 +51,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
     private final JsonMapper mapper;
     private final String projectDir;
     private final java.nio.file.Path dependencyCache;
+    private final ProcessService processes;
     private final long timeoutSeconds;
 
     public MCPKnowledgeLlm(
@@ -57,12 +59,14 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
             final io.yupiik.fusion.http.server.api.Request request,
             final JsonMapper mapper,
             final String projectDir,
-            final java.nio.file.Path dependencyCache) {
+            final java.nio.file.Path dependencyCache,
+            final ProcessService processes) {
         this.sessions = sessions;
         this.request = request;
         this.mapper = mapper;
         this.projectDir = projectDir;
         this.dependencyCache = dependencyCache;
+        this.processes = processes;
         this.timeoutSeconds = 300;
     }
 
@@ -73,7 +77,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
 
     @Override
     public List<Gav> resolveProjectDeps() {
-        return MvnProjectDeps.resolve(Path.of(resolveProjectDir()), MVN_TIMEOUT_MS, dependencyCache);
+        return MvnProjectDeps.resolve(Path.of(resolveProjectDir()), MVN_TIMEOUT_MS, dependencyCache, processes);
     }
 
     /** Project directory used to resolve the deps: configured value, else the process working directory. */

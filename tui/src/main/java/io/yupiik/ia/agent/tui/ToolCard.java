@@ -30,6 +30,9 @@ import java.util.regex.Pattern;
 public record ToolCard(
         String name, String args, String output, boolean failed, long elapsedMs, boolean running, long ordinal) {
     private static final Pattern DURATION = Pattern.compile("\\(\\s*(?:#(\\d+)\\s*,\\s*)?(\\d+)\\s*ms\\s*\\)");
+    /** Trailing {@code (#n)} ordinal suffix of a live running-tool header. */
+    private static final Pattern RUNNING_ORDINAL = Pattern.compile("^(.*)\\(\\s*#(\\d+)\\s*\\)\\s*$");
+
     private static final int KEY_COMMAND_MAX = 48;
 
     public static ToolCard parse(final String regionText) {
@@ -37,13 +40,24 @@ public record ToolCard(
         final var newline = text.indexOf('\n');
         final var header = newline < 0 ? text : text.substring(0, newline);
         final var failed = header.contains(" failed: ");
-        // live running block from ConversationTranscript.markdown(): "`<spinner> running <command>`"
+        // live running block from ConversationTranscript.markdown(): "`<spinner> running <command>`",
+        // optionally carrying a trailing "(#ordinal)" so the UI can anchor the running card
         if (!failed && header.startsWith("`")) {
             final var content = header.endsWith("`") ? header.substring(1, header.length() - 1) : header.substring(1);
             final var idx = content.indexOf(" running ");
-            final var command =
+            var command =
                     idx >= 0 ? content.substring(idx + " running ".length()).strip() : content.strip();
-            return new ToolCard(command, "", extractCode(text), false, 0, true, -1);
+            long ordinal = -1;
+            final var ordinalMatcher = RUNNING_ORDINAL.matcher(command);
+            if (ordinalMatcher.matches()) {
+                command = ordinalMatcher.group(1).stripTrailing();
+                try {
+                    ordinal = Long.parseLong(ordinalMatcher.group(2));
+                } catch (final NumberFormatException e) {
+                    ordinal = -1;
+                }
+            }
+            return new ToolCard(command, "", extractCode(text), false, 0, true, ordinal);
         }
         final var name = nameOf(header);
         final var argsAndDuration = failed ? failedArgs(header) : successArgs(header);

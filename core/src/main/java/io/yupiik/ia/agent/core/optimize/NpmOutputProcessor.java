@@ -27,7 +27,7 @@ public class NpmOutputProcessor implements OutputProcessor {
 
     @Override
     public boolean supports(final String command) {
-        return matchesHead(command, "npm", "pnpm");
+        return matchesHead(command, "npm", "pnpm", "yarn", "bun");
     }
 
     @Override
@@ -37,7 +37,7 @@ public class NpmOutputProcessor implements OutputProcessor {
 
     @Override
     public Set<String> names() {
-        return Set.of("npm", "pnpm");
+        return Set.of("npm", "pnpm", "yarn", "bun");
     }
 
     @Override

@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -37,13 +38,16 @@ import java.util.concurrent.TimeUnit;
 @ApplicationScoped
 public class BashTool implements EmbeddedTool {
     private final Emitter emitter;
+    private final ProcessService processes;
 
-    public BashTool(final Emitter emitter) {
+    public BashTool(final Emitter emitter, final ProcessService processes) {
         this.emitter = emitter;
+        this.processes = processes;
     }
 
     protected BashTool() {
         this.emitter = null;
+        this.processes = null;
     }
 
     @Override
@@ -100,6 +104,9 @@ public class BashTool implements EmbeddedTool {
         } catch (final IOException e) {
             return ToolResult.error("Cannot start command: " + e.getMessage());
         }
+        if (processes != null) {
+            processes.track(process);
+        }
         emitter.emit(new AgentEvent.ToolStream(
                 "bash", "$ " + command, context.sessionId(), context.subagentId(), context.subagentName()));
         final var out = new StringBuilder();
@@ -133,7 +140,7 @@ public class BashTool implements EmbeddedTool {
         final var deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
         while (true) {
             if (context.isCancelled() || context.isCallCancelled()) {
-                process.destroyForcibly();
+                dispose(process);
                 return ToolResult.error("Interrupted");
             }
             final var remainingNanos = deadlineNanos - System.nanoTime();
@@ -149,13 +156,13 @@ public class BashTool implements EmbeddedTool {
                 }
                 // not finished yet: loop back to re-check cancellation/deadline before the next slice
             } catch (final InterruptedException e) {
-                process.destroyForcibly();
+                dispose(process);
                 Thread.currentThread().interrupt();
                 return ToolResult.error("Interrupted");
             }
         }
         if (!finished) {
-            process.destroyForcibly();
+            dispose(process);
             return ToolResult.error("Command timed out after " + timeout + "s\n" + snapshot(out));
         }
         try {
@@ -165,6 +172,15 @@ public class BashTool implements EmbeddedTool {
         }
         final var code = process.exitValue();
         return ToolResult.ok(snapshot(out) + "\nExit code: " + code);
+    }
+
+    /** Kills and reaps the whole process tree through the service (null-safe for standalone tests). */
+    private void dispose(final Process process) {
+        if (processes != null) {
+            processes.dispose(process);
+        } else if (process != null && process.isAlive()) {
+            process.destroyForcibly();
+        }
     }
 
     private static String snapshot(final StringBuilder out) {

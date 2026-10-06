@@ -2,8 +2,99 @@
 :minisite-breadcrumb: Home[index.html] > Features > Output optimization
 
 Tool-heavy workflows can drown the model in verbose output. yca compacts the
-output of common commands (maven, gradle, git, gh, npm, prettier) before it
-enters the model context, keeping only what matters.
+output of common commands (maven, gradle, git, gh, npm, prettier, ls/find/grep,
+tsc/eslint, kubectl/docker and JSON-producing tools) before it enters the model
+context, keeping only what matters.
 
 The compaction is pluggable: you can register your own `OutputProcessor`
 implementations to compact other tools.
+
+## Processors
+
+Each processor targets a family of commands and is applied, in `order()`, to the
+successful output of the `bash` tool only (tools with their own truncation such
+as `read_file`/`grep` are left alone). A processor only replaces the output when
+it actually shrinks it by at least `yca.optimize.minReductionPercent`
+(default 10%).
+
+| Processor | Commands | What it does |
+|-----------|----------|--------------|
+| `MavenOutputProcessor` | `mvn`, `mvnd`, `mvnw` | Build result, error/warning summary, failing and passing tests (wrapped), reactor summary, surefire/failsafe report enrichment on quiet runs, framework stack frames collapsed |
+| `GradleOutputProcessor` | `gradle`, `gradlew` | Build result, failures, warnings (marker-based), passing task summary |
+| `GitOutputProcessor` | `git` | Compact `status`, condensed `diff`/`log`/`show`, one-line `stash list`, `add`/`commit`/`push`/`pull` confirmations, raw blob windowing for `git show <rev>:<path>` |
+| `GhOutputProcessor` | `gh` | Compact `pr view`/`issue view` (description + body), `pr checks` status, `run list`/`run view`, noise removal |
+| `NpmOutputProcessor` | `npm`, `pnpm`, `yarn`, `bun` | Drops warnings/notices noise, `ok` for silent installs |
+| `PrettierOutputProcessor` | `prettier` | File lists capped (`--check` reports only the files needing formatting) |
+| `FilesystemSearchOutputProcessor` | `ls`, `find`, `tree`, `du`, `grep`, `rg`, `egrep`, `fgrep`, `ast-grep` | Listings grouped with counts, grep matches grouped per file with long lines truncated, repeated lines collapsed |
+| `JsOutputProcessor` | `tsc`, `eslint`, `biome`, `next` | Errors/violations grouped per file with rule/code and location, capped |
+| `DockerOutputProcessor` | `docker` | Column-aware `ps`/`images` (essential columns), `logs` deduped tail, `compose up` service status |
+| `KubectlOutputProcessor` | `kubectl`, `k` | `get` with essential columns and degraded-state highlighting, `logs` deduped tail |
+| `JsonOutputProcessor` | `kubectl -o json`, `docker inspect`, `gh api`, `aws` | Parses JSON (fusion `JsonMapper`), projects essential fields; non-JSON passes through to the generic processor |
+| `GenericOutputProcessor` | fallback | Head+tail truncation, blank-line collapsing |
+
+## Configuration
+
+`yca.optimize.*`:
+
+- `enabled` (default `true`): master switch.
+- `genericMaxLines` (default `400`): lines kept by the generic fallback.
+- `maxEntries` (default `20`): file/test/rule entries kept by the processors.
+- `minReductionPercent` (default `10`): minimum size reduction for a processor
+  result to replace the original output.
+- `disabled` (default empty): processor or tool names to disable globally
+  (loose matching, same as the granted command prefix matching).
+- `toolOutputs.<tool>.enabled` (default `true`): per-processor switch; a
+  disabled processor behaves as an identity (passthrough) implementation, so
+  the output is left untouched and no processor error can surface. The per-tool
+  entries also carry the processor-specific tuning (`git.maxBlobBytes`, ...).
+
+Example configuration disabling the JS processor and capping the filesystem
+processor entries:
+
+```json
+{
+  "yca": {
+    "optimize": {
+      "toolOutputs": {
+        "js": { "enabled": false },
+        "filesystem": { "enabled": true }
+      },
+      "maxEntries": 30
+    }
+  }
+}
+```
+
+## Raw file content (`git show <rev>:<path>`)
+
+`git show <rev>:<path>` prints a raw blob, not a commit diff. The git processor
+detects this by checking the output (no `diff --git` header - never by scanning
+the command for `:`, which would misroute drive-relative paths or `-S 'a:b'`
+values) and passes it through byte-identical: compacting every read window to
+8 lines + `...` made the model re-read the same file in tiny slices.
+
+Huge blobs are windowed: below the budget the whole file is passed through;
+above it, a head cut at the last line boundary is returned with a recovery
+hint. The budget is configurable:
+
+```json
+{
+  "yca": {
+    "optimize": {
+      "toolOutputs": {
+        "git": { "maxBlobBytes": 8192 }
+      }
+    }
+  }
+}
+```
+
+Set `maxBlobBytes` to `0` to disable windowing and always pass blobs through
+byte-identical.
+
+## Alignment with permissions
+
+The read-only bash families of `yca.permissions.bash.rules` are the same
+commands the processors compact (`ls`, `find`, `grep`, `rg`, `git diff/log/show`,
+`gh pr view`, `kubectl get`, `docker ps`, ...), so the plan mode sees both the
+same pre-approved commands and the same compacted shapes.

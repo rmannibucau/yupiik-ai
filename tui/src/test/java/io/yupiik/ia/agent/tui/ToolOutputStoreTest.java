@@ -114,4 +114,30 @@ class ToolOutputStoreTest {
         assertNotNull(store.get(2));
         assertTrue(store.get(2).output().isEmpty());
     }
+
+    @Test
+    void streamAppendsToRunningEntryUntilItReplacesIt() {
+        final var store = new ToolOutputStore();
+        store.record(1, new ToolOutputStore.Entry("bash", "{\"command\":\"mvn test\"}", "", false, -1L));
+        // each ToolStream chunk is recorded under the same ordinal; the running entry
+        // accumulates the live tail without stacking new ring entries
+        store.record(1, new ToolOutputStore.Entry("bash", "{\"command\":\"mvn test\"}", "compiling", false, -1L));
+        store.record(
+                1, new ToolOutputStore.Entry("bash", "{\"command\":\"mvn test\"}", "compiling\nBUILD", false, -1L));
+        final var running = store.get(1);
+        assertTrue(running.running());
+        assertEquals("compiling\nBUILD", running.output());
+        assertEquals(1, store.size(), "stream chunks must not stack entries");
+    }
+
+    @Test
+    void streamAppendIsCappedToMaxOutputChars() {
+        final var store = new ToolOutputStore(4, 16);
+        store.record(1, new ToolOutputStore.Entry("bash", "{}", "", false, -1L));
+        store.record(1, new ToolOutputStore.Entry("bash", "{}", "0123456789abcdef", false, -1L));
+        store.record(1, new ToolOutputStore.Entry("bash", "{}", "0123456789abcdefghijklmnopqrstuv", false, -1L));
+        final var output = store.get(1).output();
+        assertTrue(output.length() <= 16 + "\n... older output truncated".length(), "output=" + output);
+        assertTrue(output.endsWith("\n... older output truncated"), output);
+    }
 }

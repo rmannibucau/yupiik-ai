@@ -257,7 +257,7 @@ public class CliCommand implements Runnable {
                             "Tool output verbosity: compact (summaries and live progress), verbose (full dimmed stream) or raw (verbatim, legacy behaviour).")
             String presentation,
 
-            @Property(defaultValue = "true", documentation = "Show the reasoning/thinking stream on stderr.")
+            @Property(defaultValue = "false", documentation = "Show the reasoning/thinking stream on stderr.")
             boolean showThinking,
 
             @Property(

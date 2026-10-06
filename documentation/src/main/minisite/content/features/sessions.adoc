@@ -36,6 +36,22 @@ process-default path left is genuinely session-less startup work (the
 deterministic maven dependency scan and the model completion prefetch before
 the first tab exists).
 
+== Per-tab mode badge and hover tooltip
+
+Because the mode can differ per session (a tab can run in `build` while another
+stays in `plan`), the tab bar shows a per-tab mode badge: a small `▪` for
+`plan` and `◆` for `build`, tinted with that session's mode color (the warning
+tone for plan, the accent tone for build) - including for background tabs, so
+the mode of every open session is visible at a glance without switching to it.
+The same badge and mode label appear in the `/tabs` overlay next to the full
+session title.
+
+When the mouse hovers a tab, the full session title is displayed as a small
+floating tooltip under the tab strip, so titles truncated by the bar remain
+reachable; it disappears as soon as the pointer leaves the bar (or on click /
+scroll). This relies on mouse-motion tracking (`?1003h`), which most modern
+terminals support; terminals without it simply never show the tooltip.
+
 A memory store is maintained automatically at both the global and per-project
 levels, letting yca remember recurring facts across sessions.
 

@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.nio.charset.StandardCharsets;
@@ -35,8 +36,11 @@ public final class Clipboard {
      * Copies the text and returns the name of the channel that worked
      * ('system clipboard', 'pbcopy', 'wl-copy', 'xclip' or 'clip.exe'),
      * or null when no system-level channel is available.
+     *
+     * @param processes the shared {@link ProcessService}; when non-null the native tool is tracked
+     *                  (and disposed on timeout / JVM exit) instead of being left to a detached thread.
      */
-    public static String copy(final String text) {
+    public static String copy(final String text, final ProcessService processes) {
         if (text == null || text.isEmpty()) {
             return null;
         }
@@ -52,22 +56,23 @@ public final class Clipboard {
         }
         try {
             final var process = new ProcessBuilder(command).start();
+            if (processes != null) {
+                processes.track(process);
+            }
             try (var stdin = process.getOutputStream()) {
                 stdin.write(text.getBytes(StandardCharsets.UTF_8));
             }
-            final var name = command[0];
-            // reap asynchronously so a wedged tool can never block the UI thread
-            Thread.ofVirtual().start(() -> {
-                try {
-                    if (!process.waitFor(2, TimeUnit.SECONDS)) {
-                        process.destroyForcibly();
-                    }
-                } catch (final InterruptedException e) {
-                    process.destroyForcibly();
-                    Thread.currentThread().interrupt();
+            // synchronous bounded reap: never leave a wedged tool running, and never let it
+            // outlive the JVM (the detached-thread version could race with process exit)
+            if (process.isAlive()) {
+                final var reaped = processes != null
+                        ? processes.dispose(process)
+                        : (process.waitFor(2, TimeUnit.SECONDS) ? process.exitValue() : null);
+                if (reaped == null) {
+                    return null;
                 }
-            });
-            return name;
+            }
+            return command[0];
         } catch (final Exception ignore) {
             // tool missing or failed: caller falls back to OSC 52
             return null;

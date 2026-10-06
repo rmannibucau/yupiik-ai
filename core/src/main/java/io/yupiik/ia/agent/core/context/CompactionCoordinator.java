@@ -606,9 +606,15 @@ public class CompactionCoordinator {
                                             null,
                                             null)
                                     .withSettings(settings),
-                            // surface provider throttles/backoffs during compaction too
-                            pause -> emit(new AgentEvent.Status(
-                                    "compacting " + label + ": " + pause.message(), sessionId, null, null)),
+                            // surface provider throttles/backoffs during compaction too:
+                            // transient right-slot feedback, never the leading status
+                            pause -> emit(new AgentEvent.Pause(
+                                    pause.kind() == io.yupiik.ia.agent.core.llm.PauseEvent.Pause.THROTTLE
+                                            ? AgentEvent.Pause.Kind.THROTTLE
+                                            : AgentEvent.Pause.Kind.RETRY,
+                                    "compacting " + label + ": " + pause.message(),
+                                    pause.durationMs(),
+                                    sessionId)),
                             cancelled);
                     calls++;
                     if (usageTracker != null) {
@@ -633,11 +639,11 @@ public class CompactionCoordinator {
                     if (cancelled.getAsBoolean()) {
                         return new Outcome("", label + " cancelled", calls, false);
                     }
-                    emit(new AgentEvent.Status(
+                    emit(new AgentEvent.Pause(
+                            AgentEvent.Pause.Kind.RETRY,
                             "compacting " + label + ": retrying in ~" + (backoff(attempt) / 1000) + "s...",
-                            sessionId,
-                            null,
-                            null));
+                            backoff(attempt),
+                            sessionId));
                     sleep(backoff(attempt));
                 }
             }

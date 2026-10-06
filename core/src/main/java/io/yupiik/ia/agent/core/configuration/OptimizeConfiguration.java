@@ -21,6 +21,14 @@ import io.yupiik.ia.agent.core.optimize.Optimizers;
 import java.util.Collection;
 import java.util.List;
 
+/**
+ * Tool output optimization settings (rtk style token reduction).
+ *
+ * <p>Every processor can be individually disabled either globally ({@code disabled},
+ * loose command-name matching) or per tool through {@code toolOutputs.<tool>.enabled}
+ * (default {@code true}): a disabled processor behaves as an identity (passthrough)
+ * implementation, so no processor error ever surfaces from a disabled path.</p>
+ */
 @JsonModel
 public record OptimizeConfiguration(
         @Property(defaultValue = "true", documentation = "Enable the rtk style tool output optimization.")
@@ -28,7 +36,7 @@ public record OptimizeConfiguration(
 
         @Property(
                 defaultValue = "400",
-                documentation = "Maximum number of lines kept by the generic fallback processor.")
+                documentation = "Maximum number of lines kept by the generic fallback processor (head+tail).")
         int genericMaxLines,
 
         @Property(
@@ -46,15 +54,81 @@ public record OptimizeConfiguration(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Processor or tool names to disable. Processors: mvn, mvnd, mvnw, gradle, gradlew, git, gh, npm, pnpm, prettier, generic. Matched loosely: './' and path prefixes are dropped, only the file name is kept, known extensions (.cmd, .exe, .sh) are ignored and comparison is case insensitive.")
-        List<String> disabled) {
+        List<String> disabled,
 
-    public boolean isDisabled(final Collection<String> names) {
-        if (disabled == null || disabled.isEmpty()) {
-            return false;
+        @Property(
+                documentation =
+                        "Per-tool output tuning, one field per processor; every entry carries an `enabled` flag "
+                                + "(true by default) to disable a single processor (identity passthrough). "
+                                + "Absent entries use the built-in defaults.")
+        ProcessorOutputConfiguration toolOutputs) {
+
+    /**
+     * @return true when the processor/command is disabled by the global {@code disabled} list
+     *     (loose alias matching) or by its per-tool {@code enabled} flag in {@code toolOutputs}.
+     */
+    public boolean isDisabled(final java.util.Collection<String> aliases) {
+        if (disabled != null && aliases.stream().anyMatch(a -> matches(disabled, a))) {
+            return true;
         }
-        for (final var value : disabled) {
-            if (Optimizers.matchesAlias(value, names)) {
-                return true;
+        return !isToolEnabled(aliases);
+    }
+
+    private boolean matches(final List<String> configured, final String alias) {
+        return configured.stream().anyMatch(c -> Optimizers.matchesAlias(c, java.util.Set.of(alias)));
+    }
+
+    /** Per-tool enabled flag, default true when the tool entry is absent. */
+    private boolean isToolEnabled(final Collection<String> aliases) {
+        if (toolOutputs == null) {
+            return true;
+        }
+        // Resolve the tool entry by processor alias set; unknown entries default to enabled.
+        if (aliasMatches(aliases, "mvn", "mvnd", "mvnw")) {
+            return toolOutputs.maven() == null || toolOutputs.maven().enabled();
+        }
+        if (aliasMatches(aliases, "gradle", "gradlew")) {
+            return toolOutputs.gradle() == null || toolOutputs.gradle().enabled();
+        }
+        if (aliasMatches(aliases, "git")) {
+            return toolOutputs.git() == null || toolOutputs.git().enabled();
+        }
+        if (aliasMatches(aliases, "gh")) {
+            return toolOutputs.gh() == null || toolOutputs.gh().enabled();
+        }
+        if (aliasMatches(aliases, "npm", "pnpm", "yarn", "bun")) {
+            return toolOutputs.npm() == null || toolOutputs.npm().enabled();
+        }
+        if (aliasMatches(aliases, "prettier")) {
+            return toolOutputs.prettier() == null || toolOutputs.prettier().enabled();
+        }
+        if (aliasMatches(aliases, "generic")) {
+            return toolOutputs.generic() == null || toolOutputs.generic().enabled();
+        }
+        if (aliasMatches(aliases, "ls", "find", "tree", "du", "grep", "rg", "egrep", "fgrep", "ast-grep")) {
+            return toolOutputs.filesystem() == null || toolOutputs.filesystem().enabled();
+        }
+        if (aliasMatches(aliases, "tsc", "eslint", "biome", "next")) {
+            return toolOutputs.js() == null || toolOutputs.js().enabled();
+        }
+        if (aliasMatches(aliases, "kubectl")) {
+            return toolOutputs.kubectl() == null || toolOutputs.kubectl().enabled();
+        }
+        if (aliasMatches(aliases, "docker", "docker-compose", "docker compose")) {
+            return toolOutputs.docker() == null || toolOutputs.docker().enabled();
+        }
+        if (aliasMatches(aliases, "json")) {
+            return toolOutputs.json() == null || toolOutputs.json().enabled();
+        }
+        return true;
+    }
+
+    private boolean aliasMatches(final Collection<String> aliases, final String... names) {
+        for (final var alias : aliases) {
+            for (final var name : names) {
+                if (alias.equalsIgnoreCase(name)) {
+                    return true;
+                }
             }
         }
         return false;

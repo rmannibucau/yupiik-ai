@@ -88,6 +88,51 @@ class LlmClientResilienceWrapperTest {
     }
 
     @Test
+    void concurrencyLimitEmitsAPauseWhileBlocked() throws Exception {
+        final var firstStarted = new java.util.concurrent.CountDownLatch(1);
+        final var releaseFirst = new java.util.concurrent.CountDownLatch(1);
+        final var count = new java.util.concurrent.atomic.AtomicInteger();
+        final var dial = new ScriptedDialect() {
+            @Override
+            public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
+                if (count.getAndIncrement() == 0) {
+                    firstStarted.countDown();
+                    return CompletableFuture.supplyAsync(() -> {
+                        try {
+                            releaseFirst.await();
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        return response();
+                    });
+                }
+                return CompletableFuture.completedFuture(response());
+            }
+        };
+        final var pauseSeen = new java.util.concurrent.CountDownLatch(1);
+        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var wrapper = new LlmClientResilienceWrapper(config(1, 0, 1), pause -> {
+            pauses.add(pause);
+            if (pause.reason() != null && pause.reason().contains("concurrency limit reached")) {
+                pauseSeen.countDown();
+            }
+        });
+
+        final var first = wrapper.chat(dial, null, () -> false);
+        assertTrue(firstStarted.await(5, TimeUnit.SECONDS), "first request must start");
+        // the second request blocks on the concurrency permit: the pause must be emitted
+        // without waiting for the first request to finish (run it on a worker thread)
+        final var second = CompletableFuture.supplyAsync(() ->
+                wrapper.chat(dial, null, () -> false).toCompletableFuture().join());
+        assertTrue(
+                pauseSeen.await(5, TimeUnit.SECONDS),
+                "a blocked request must surface a concurrency pause, got: " + pauses);
+        releaseFirst.countDown();
+        assertEquals("ok", first.toCompletableFuture().get(5, TimeUnit.SECONDS).text());
+        assertEquals("ok", second.get(5, TimeUnit.SECONDS).text());
+    }
+
+    @Test
     void retryAfterIsHonoredAndSurfacedInThePauseReason() {
         final var dial = new ScriptedDialect(new IOException("LLM request failed (429): {\"error\":{}} retry-after=2"));
         final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();

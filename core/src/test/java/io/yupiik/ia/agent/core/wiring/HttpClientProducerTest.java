@@ -25,9 +25,11 @@ import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Handler;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
@@ -121,5 +123,81 @@ class HttpClientProducerTest {
                     .build());
         }
         Assertions.assertTrue(logs.size() == 0, () -> "no curl trace expected when debug disabled, got: " + logs);
+    }
+
+    @Test
+    void proxyHostConfiguresSelector() throws Exception {
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.httpClient.proxy.host", "proxy.example.com",
+                "yca.httpClient.proxy.port", "3128"));
+        try (final var client = new HttpClientProducer().httpClient(config)) {
+            final var selector = client.proxy().orElseThrow(() -> new AssertionError("proxy selector expected"));
+            final var proxies = selector.select(
+                    URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/"));
+            assertFalse(proxies.isEmpty(), "select() must return the configured proxy");
+            final var address = proxies.getFirst().address();
+            Assertions.assertEquals("proxy.example.com", ((java.net.InetSocketAddress) address).getHostString());
+            Assertions.assertEquals(3128, ((java.net.InetSocketAddress) address).getPort());
+        }
+    }
+
+    @Test
+    void noProxyKeepsJdkDefaultSelection() throws Exception {
+        final var config = TestConfigs.codingAgent(Map.of());
+        try (final var client = new HttpClientProducer().httpClient(config)) {
+            Assertions.assertTrue(client.proxy().isEmpty(), "no explicit proxy selector expected without proxy config");
+        }
+    }
+
+    @Test
+    void proxyCredentialsWireProxyAuthenticator() throws Exception {
+        // a local fake HTTP proxy: challenges with 407 + Basic realm, accepts once the
+        // client retries with the expected Proxy-Authorization header (JDK AuthenticationFilter)
+        final var proxy = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        final var challenged = new AtomicInteger();
+        final var expected =
+                "Basic " + Base64.getEncoder().encodeToString("alice:s3cret".getBytes(StandardCharsets.UTF_8));
+        proxy.createContext("/", exchange -> {
+            final var auth = exchange.getRequestHeaders().getFirst("Proxy-Authorization");
+            if (expected.equals(auth)) {
+                exchange.sendResponseHeaders(200, 2);
+                try (final var out = exchange.getResponseBody()) {
+                    out.write("ok".getBytes(StandardCharsets.UTF_8));
+                }
+            } else {
+                challenged.incrementAndGet();
+                exchange.getResponseHeaders().add("Proxy-Authenticate", "Basic realm=\"test\"");
+                exchange.sendResponseHeaders(407, -1);
+                exchange.close();
+            }
+        });
+        proxy.start();
+        try {
+            final var config = TestConfigs.codingAgent(Map.of(
+                    "yca.httpClient.proxy.host", "127.0.0.1",
+                    "yca.httpClient.proxy.port",
+                            String.valueOf(proxy.getAddress().getPort()),
+                    "yca.httpClient.proxy.user", "alice",
+                    "yca.httpClient.proxy.password", "s3cret"));
+            try (final var client = new HttpClientProducer().httpClient(config)) {
+                final var resp = client.send(HttpRequest.newBuilder(URI.create("http://test.invalid/"))
+                        .build());
+                Assertions.assertEquals(200, resp.statusCode(), "the proxy must accept the authenticated retry");
+                Assertions.assertTrue(challenged.get() > 0, "the proxy must have challenged the client first");
+            }
+        } finally {
+            proxy.stop(0);
+        }
+    }
+
+    @Test
+    void proxyWithoutUserLeavesAuthenticatorUnset() throws Exception {
+        final var config = TestConfigs.codingAgent(Map.of(
+                "yca.httpClient.proxy.host", "proxy.example.com",
+                "yca.httpClient.proxy.port", "3128"));
+        try (final var client = new HttpClientProducer().httpClient(config)) {
+            Assertions.assertTrue(
+                    client.authenticator().isEmpty(), "no authenticator expected without proxy credentials");
+        }
     }
 }

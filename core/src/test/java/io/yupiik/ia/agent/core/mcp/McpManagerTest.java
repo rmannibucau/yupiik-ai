@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -141,7 +142,8 @@ class McpManagerTest {
                                 List.of()))),
                 mapper,
                 List.of(),
-                httpClient);
+                httpClient,
+                new ProcessService());
 
         manager.start();
         assertEquals(1, initializations.get());
@@ -202,7 +204,8 @@ class McpManagerTest {
                         return ToolResult.error("File not found: nope.txt. Did you mean: nope.md?");
                     }
                 }),
-                httpClient);
+                httpClient,
+                new ProcessService());
 
         manager.start();
         final var tools = manager.tools();

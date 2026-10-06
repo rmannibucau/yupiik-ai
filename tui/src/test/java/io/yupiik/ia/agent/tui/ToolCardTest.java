@@ -110,6 +110,22 @@ class ToolCardTest {
     }
 
     @Test
+    void parsesRunningCardOrdinal() {
+        final var card = ToolCard.parse("`| running mvn -q test (#3)`\n\n```text\nbuilding\n```");
+        assertTrue(card.running());
+        assertEquals("mvn -q test", card.name());
+        assertEquals(3, card.ordinal());
+        assertEquals("building", card.output());
+    }
+
+    @Test
+    void parsesRunningCardWithoutOrdinalAsNegative() {
+        final var card = ToolCard.parse("`| running tail -f log`");
+        assertTrue(card.running());
+        assertEquals(-1, card.ordinal());
+    }
+
+    @Test
     void detectsDiff() {
         final var card = ToolCard.parse(
                 "*streaming `apply_patch`* (9 ms)\n\n```text\n--- a/File.java\n+++ b/File.java\n@@ -1,3 +1,4 @@\n-old\n+new\n context\n```");

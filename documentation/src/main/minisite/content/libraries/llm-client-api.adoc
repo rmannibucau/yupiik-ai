@@ -83,7 +83,9 @@ so the logic is written once, per dialect.
 limiting in-flight requests, and retries with exponential backoff and jitter
 (capped at 60s), all driven by `LlmResilienceConfig` (defaults: 3 attempts,
 500 ms base delay, throttling off, 4 concurrent). `PauseEvent`s are emitted
-while throttling or backing off if a listener is registered.
+while throttling, backing off, or waiting for a concurrency permit if a listener
+is registered; the concurrency wait reports how many requests are queued behind
+the limit.
 
 == Error classification
 

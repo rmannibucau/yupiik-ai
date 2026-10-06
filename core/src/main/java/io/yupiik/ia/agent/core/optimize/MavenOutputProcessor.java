@@ -18,7 +18,12 @@ package io.yupiik.ia.agent.core.optimize;
 import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -82,7 +87,7 @@ public class MavenOutputProcessor implements OutputProcessor {
                 continue;
             }
             if (line.startsWith("[ERROR]")) {
-                errors.add(line);
+                errors.add(collapseStack(line));
                 continue;
             }
             if (line.startsWith("[WARNING]")) {
@@ -154,6 +159,85 @@ public class MavenOutputProcessor implements OutputProcessor {
                 out.add(current.toString());
             }
         }
-        return out.stream();
+        // enrich a quiet run with the fresh surefire/failsafe report summaries
+        return enrichFromSurefire(command, out).stream();
+    }
+
+    /**
+     * Collapses common framework stack frames of a maven error line so a failing build keeps
+     * the meaningful application frames instead of tens of org.junit/java.base lines.
+     * Applied per-line: a "[ERROR] Failed to execute goal ..." line keeps its head, and any
+     * following "[ERROR] Caused by:" lines are kept but their known framework frames dropped.
+     */
+    private static String collapseStack(final String line) {
+        if (!line.startsWith("[ERROR]")
+                || !line.contains(".junit.")
+                        && !line.contains("org.junit")
+                        && !line.contains("java.base")
+                        && !line.contains("org.apache.maven")) {
+            return line;
+        }
+        return line.replaceAll("\\s+at (org\\.junit|java\\.base|org\\.apache\\.maven)[^\n]*", "");
+    }
+
+    /**
+     * Enriches a quiet ({@code -q}) test run from the fresh surefire/failsafe report files:
+     * parses {@code target/surefire-reports/*.txt} and {@code target/failsafe-reports/*.txt}
+     * summaries (each has a "{@code Tests run: X, Failures: Y, Errors: Z, Skipped: W}" line and a
+     * "{@code <<< FAILURE!}" marker) into per-class pass/fail lists. No report files means the
+     * input is returned unchanged (offline/CI without reports keeps the current behavior).
+     */
+    static List<String> enrichFromSurefire(final String command, final List<String> lines) {
+        return enrichFromSurefire(command, lines, Path.of(""));
+    }
+
+    static List<String> enrichFromSurefire(final String command, final List<String> lines, final Path baseDir) {
+        if (!command.contains("-q")) {
+            return lines;
+        }
+        final var quiet = lines.stream().anyMatch(l -> l.matches("Tests run: \\d+, Failures: \\d+, Errors: \\d+.*"));
+        if (quiet) {
+            return lines; // already has the per-class lines
+        }
+        final var dirs = List.of(
+                baseDir.resolve("target/surefire-reports").toAbsolutePath(),
+                baseDir.resolve("target/failsafe-reports").toAbsolutePath());
+        final var out = new ArrayList<String>();
+        var added = false;
+        for (final var dir : dirs) {
+            if (!Files.isDirectory(dir)) {
+                continue;
+            }
+            try (var files = Files.list(dir)) {
+                final var reports = files.filter(p -> p.getFileName().toString().endsWith(".txt"))
+                        .sorted()
+                        .toList();
+                for (final var report : reports) {
+                    final var content = Files.readString(report, StandardCharsets.UTF_8);
+                    final var tests = TESTS_RUN.matcher(content);
+                    if (!tests.find()) {
+                        continue;
+                    }
+                    final var name = report.getFileName().toString().replace(".txt", "");
+                    final var failures = Integer.parseInt(tests.group(2)) + Integer.parseInt(tests.group(3));
+                    if (failures > 0) {
+                        out.add("FAIL " + name + "  (" + tests.group(0) + ")");
+                    } else {
+                        out.add(name);
+                    }
+                    added = true;
+                }
+            } catch (final IOException e) {
+                // ignore unreadable reports and continue with what we have
+            }
+        }
+        if (!added) {
+            return lines;
+        }
+        final var result = new ArrayList<String>(lines);
+        result.add("");
+        result.add("test reports:");
+        result.addAll(out);
+        return result;
     }
 }

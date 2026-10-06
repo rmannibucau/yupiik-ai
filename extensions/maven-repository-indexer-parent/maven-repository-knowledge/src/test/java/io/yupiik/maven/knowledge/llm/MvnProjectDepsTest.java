@@ -16,11 +16,16 @@
 package io.yupiik.maven.knowledge.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.maven.knowledge.Gav;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -131,5 +136,40 @@ class MvnProjectDepsTest {
                 List.of(Gav.of("io.yupiik.fake", "fake-util", "2.0"), Gav.of("io.yupiik.fake", "fake-lib", "1.0")),
                 MvnProjectDeps.resolve(project, 120_000),
                 "a stale cache entry (different fingerprint) must not be reused");
+    }
+
+    /**
+     * When the resolution thread is interrupted while {@code mvn} is running, the spawned process
+     * must be disposed (tree-kill + reap) and not left to run to completion. Uses a slow local
+     * {@code mvnw} and a thread interrupt, so the test is fast and deterministic.
+     */
+    @Test
+    void interruptDisposesTheRunningMaven(@TempDir final Path tmp) throws Exception {
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        final var project = tmp.resolve("project");
+        Files.createDirectories(project);
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        // a real (slow) wrapper: without it the fake `mvn` on PATH would finish before the interrupt
+        final var mvnw = project.resolve("mvnw");
+        Files.writeString(mvnw, "#!/bin/sh\nsleep 30\n");
+        mvnw.toFile().setExecutable(true);
+
+        final var service = new ProcessService();
+        service.reapGrace(200);
+        final var result = new AtomicReference<List<Gav>>();
+        final var thread = Thread.ofPlatform()
+                .name("mvn-resolve-interrupt-test")
+                .start(() -> result.set(MvnProjectDeps.resolve(project, 60_000, null, service)));
+        // let the wrapper spawn and get tracked, then interrupt the resolution
+        final var deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+        while (service.trackedCount() == 0 && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(1, service.trackedCount(), "the spawned mvnw must be tracked before the interrupt");
+        thread.interrupt();
+        thread.join(5_000);
+        assertFalse(thread.isAlive(), "resolution must return promptly after the interrupt");
+        assertEquals(0, service.trackedCount(), "the interrupted mvnw must be disposed");
+        assertTrue(result.get() == null || result.get().isEmpty(), "a cancelled resolution yields no deps");
     }
 }

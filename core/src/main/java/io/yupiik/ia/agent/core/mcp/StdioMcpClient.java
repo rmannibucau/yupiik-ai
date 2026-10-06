@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.mcp;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -26,23 +27,34 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 class StdioMcpClient implements McpClient {
+    private static final Logger LOGGER = Logger.getLogger(StdioMcpClient.class.getName());
+
     private final String name;
     private final List<String> command;
     private final List<String> env;
     private final JsonMapper mapper;
+    private final ProcessService processes;
     private final AtomicLong ids = new AtomicLong();
 
-    private Process process;
-    private BufferedReader reader;
-    private OutputStream writer;
+    private volatile Process process;
+    private volatile BufferedReader reader;
+    private volatile OutputStream writer;
 
-    StdioMcpClient(final String name, final List<String> command, final List<String> env, final JsonMapper mapper) {
+    StdioMcpClient(
+            final String name,
+            final List<String> command,
+            final List<String> env,
+            final JsonMapper mapper,
+            final ProcessService processes) {
         this.name = name;
         this.command = command;
         this.env = env;
         this.mapper = mapper;
+        this.processes = processes;
     }
 
     @Override
@@ -58,6 +70,24 @@ class StdioMcpClient implements McpClient {
         process = pb.start();
         reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
         writer = process.getOutputStream();
+        if (processes != null) {
+            processes.track(process);
+        }
+        // drain stderr on a daemon thread: an MCP server that logs to stderr must not wedge
+        // the request/response loop on a full pipe (the pipe is drained, the log is tail-logged)
+        final var stderr = process.getErrorStream();
+        final var stderrReader = new BufferedReader(new InputStreamReader(stderr, StandardCharsets.UTF_8));
+        Thread.ofVirtual().start(() -> {
+            try {
+                String line;
+                while ((line = stderrReader.readLine()) != null) {
+                    final var captured = line;
+                    LOGGER.log(Level.FINE, () -> "MCP " + StdioMcpClient.this.name + " stderr: " + captured);
+                }
+            } catch (final IOException e) {
+                // process exit closed the stream: nothing to do
+            }
+        });
         IOException last = null;
         for (final var candidate : SUPPORTED_PROTOCOL_VERSIONS) {
             try {
@@ -80,7 +110,7 @@ class StdioMcpClient implements McpClient {
                 last = e;
             }
         }
-        process.destroyForcibly();
+        dispose(process);
         throw last == null ? new IOException("MCP " + name + ": empty initialize response") : last;
     }
 
@@ -175,11 +205,24 @@ class StdioMcpClient implements McpClient {
 
     @Override
     public synchronized void close() {
-        if (process != null && process.isAlive()) {
-            process.destroy();
+        final var current = process;
+        if (current != null && current.isAlive()) {
+            dispose(current);
         }
         closeQuietly(reader);
         closeQuietly(writer);
+        process = null;
+        reader = null;
+        writer = null;
+    }
+
+    /** Kills and reaps the whole subprocess tree through the shared service. */
+    private void dispose(final Process process) {
+        if (processes != null) {
+            processes.dispose(process);
+        } else if (process != null && process.isAlive()) {
+            process.destroyForcibly();
+        }
     }
 
     private static void closeQuietly(final AutoCloseable resource) {

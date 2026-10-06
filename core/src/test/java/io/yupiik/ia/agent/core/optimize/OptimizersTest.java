@@ -78,17 +78,17 @@ class OptimizersTest {
 
     @Test
     void isDisabledMatchesConfiguredNames() {
-        final var maven = new OptimizeConfiguration(true, 400, 20, 10, List.of("mvn"));
+        final var maven = new OptimizeConfiguration(true, 400, 20, 10, List.of("mvn"), null);
         assertTrue(maven.isDisabled(List.of("mvn", "mvnd", "mvnw")));
         assertFalse(maven.isDisabled(List.of("git")));
 
-        final var mvnw = new OptimizeConfiguration(true, 400, 20, 10, List.of("./mvnw.cmd"));
+        final var mvnw = new OptimizeConfiguration(true, 400, 20, 10, List.of("./mvnw.cmd"), null);
         assertTrue(mvnw.isDisabled(List.of("mvn", "mvnd", "mvnw")));
 
-        final var tools = new OptimizeConfiguration(true, 400, 20, 10, List.of("bash"));
+        final var tools = new OptimizeConfiguration(true, 400, 20, 10, List.of("bash"), null);
         assertTrue(tools.isDisabled(List.of("bash")));
 
-        final var none = new OptimizeConfiguration(true, 400, 20, 10, List.of());
+        final var none = new OptimizeConfiguration(true, 400, 20, 10, List.of(), null);
         assertFalse(none.isDisabled(List.of("mvn")));
     }
 
@@ -104,9 +104,31 @@ class OptimizersTest {
         assertEquals(Set.of("gradle", "gradlew"), new GradleOutputProcessor().names());
         assertEquals(Set.of("git"), new GitOutputProcessor().names());
         assertEquals(Set.of("gh"), new GhOutputProcessor().names());
-        assertEquals(Set.of("npm", "pnpm"), new NpmOutputProcessor().names());
+        assertEquals(Set.of("npm", "pnpm", "yarn", "bun"), new NpmOutputProcessor().names());
         assertEquals(Set.of("prettier"), new PrettierOutputProcessor().names());
         assertEquals(Set.of("generic"), new GenericOutputProcessor(null).names());
+        assertEquals(
+                Set.of("ls", "find", "tree", "du", "grep", "rg", "egrep", "fgrep", "ast-grep"),
+                new FilesystemSearchOutputProcessor(null).names());
+        assertEquals(Set.of("tsc", "eslint", "biome", "next"), new JsOutputProcessor(null).names());
+        assertEquals(Set.of("kubectl"), new KubectlOutputProcessor().names());
+        assertEquals(Set.of("docker", "docker-compose", "docker compose"), new DockerOutputProcessor().names());
+        assertEquals(Set.of("json"), new JsonOutputProcessor(null, null).names());
+    }
+
+    @Test
+    void secondTokenSkipsFlags() {
+        assertEquals("build", Optimizers.secondToken("gradle --no-daemon build"));
+        assertEquals("", Optimizers.secondToken("mvn"));
+        assertEquals("stash", Optimizers.secondToken("git stash list"));
+    }
+
+    @Test
+    void thirdTokenGetsGhSubcommand() {
+        assertEquals("view", Optimizers.thirdToken("gh pr view 42"));
+        assertEquals("list", Optimizers.thirdToken("gh run list"));
+        assertEquals("", Optimizers.thirdToken("gh"));
+        assertEquals("", Optimizers.thirdToken("gh api"));
     }
 
     private static class Fake$FusionSubclass extends GenericOutputProcessor {}

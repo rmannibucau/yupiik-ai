@@ -93,6 +93,11 @@ error hue, `warning` the warning hue and the remaining levels the info hue
 (dimmed for the debug levels), so the light-theme remap keeps log regions
 readable. Replace it with a hex color to pin a level tone.
 
+Log regions render as plain text: there is no background tint, the level color
+lives on the thin left bar and the bracketed `[LEVEL]` marker, and the logger
+and timestamp groups stay muted. WARNING and SEVERE additionally render their
+message bold so severe rows stand out from the INFO/debug noise.
+
 == Side questions (/btw)
 
 While a turn runs, `/btw <question>` asks a side question without interrupting

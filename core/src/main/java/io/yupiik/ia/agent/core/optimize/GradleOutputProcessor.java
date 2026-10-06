@@ -46,13 +46,14 @@ public class GradleOutputProcessor implements OutputProcessor {
         if (containsFlag(command, "--info", "--debug", "--stacktrace", "--scan")) {
             return lines;
         }
+        final var all = lines.toArray(String[]::new);
         final var failures = new ArrayList<String>();
         final var warnings = new ArrayList<String>();
         String lastTask = null;
         String buildResult = null;
         var inFailure = false;
 
-        for (final var raw : lines.toArray(String[]::new)) {
+        for (final var raw : all) {
             final var line = Optimizers.stripAnsi(raw);
             if (line.startsWith("Download ")) {
                 continue;
@@ -87,7 +88,7 @@ public class GradleOutputProcessor implements OutputProcessor {
                 failures.add(line.strip());
                 continue;
             }
-            if (line.startsWith("Deprecated ") || (line.contains("warning") && !line.isBlank())) {
+            if (line.startsWith("Deprecated ") || isWarningLine(line)) {
                 if (warnings.size() < 10) {
                     warnings.add(line.strip());
                 }
@@ -114,6 +115,28 @@ public class GradleOutputProcessor implements OutputProcessor {
         if (lastTask != null) {
             out.add("Last task: " + lastTask);
         }
+        final var passing = new java.util.LinkedHashSet<String>();
+        for (final var raw : all) {
+            final var line = Optimizers.stripAnsi(raw);
+            final var m = java.util.regex.Pattern.compile("> Task (:[^ ]+)").matcher(line);
+            if (m.find()
+                    && !line.contains("FAILED")
+                    && !line.contains("FROM-CACHE")
+                    && !line.contains("NO-SOURCE")
+                    && !line.contains("UP-TO-DATE")) {
+                passing.add(m.group(1));
+            }
+        }
+        if (!passing.isEmpty()) {
+            out.add("Passing tasks (" + passing.size() + "): " + String.join(", ", passing));
+        }
         return out.stream();
+    }
+
+    private boolean isWarningLine(final String line) {
+        return line.startsWith("w:")
+                || line.contains(": warning")
+                || line.contains("warning:")
+                || line.contains("Note:");
     }
 }

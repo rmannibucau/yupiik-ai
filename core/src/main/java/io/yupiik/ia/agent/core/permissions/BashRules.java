@@ -158,7 +158,7 @@ public final class BashRules {
                 if (!decision.allowed()) {
                     allowed = false;
                     if (deniedSegment == null) {
-                        deniedSegment = join(segment, masked);
+                        deniedSegment = renderSegment(segment, masked);
                         deniedCause = decision.cause();
                     }
                 }
@@ -178,18 +178,39 @@ public final class BashRules {
                     deniedCause);
         }
 
-        private static String join(final Segment segment, final MaskedCommand masked) {
+        /**
+         * Normalized text of a segment for reporting and allow/deny pattern matching: tolerated
+         * {@code /dev/null} redirects, shell control keywords ({@code do}, {@code done}, {@code if},
+         * {@code fi}, ...) and leading env assignments are syntax/plumbing, not command material - so
+         * a loop body {@code do rm -rf $j 2>/dev/null} is reported and matched as {@code rm -rf $j}
+         * and a deny entry like {@code bash:rm *} cannot be bypassed by a preceding {@code do}. The
+         * substitution placeholders are expanded back (eg. {@code YCA_SUB_0} -> {@code $(...)}).
+         */
+        private static String renderSegment(final Segment segment, final MaskedCommand masked) {
+            var tokens = withoutToleratedRedirects(segment.tokens());
+            final var structural = structuralPrefixLength(tokens);
+            if (structural > 0) {
+                tokens = new ArrayList<>(tokens.subList(structural, tokens.size()));
+            }
+            var i = 0;
+            while (i < tokens.size() && isEnvAssignment(tokens.get(i).text())) {
+                i++;
+            }
             final var sb = new StringBuilder();
-            for (final var token : segment.tokens()) {
+            for (; i < tokens.size(); i++) {
                 if (sb.length() > 0) {
                     sb.append(' ');
                 }
-                sb.append(expand(token.text(), masked));
+                sb.append(expand(tokens.get(i).text(), masked));
             }
             return sb.toString();
         }
 
-        /** Command segments (quote aware, operators stripped) as normalized text, for allow/deny pattern matching. */
+        /**
+         * Command segments (quote aware, operators stripped) as normalized text, for allow/deny pattern
+         * matching: tolerated redirects, control keywords and env assignments are stripped the same way
+         * as during evaluation, so deny/allow entries match the real command of each segment.
+         */
         public List<String> segments(final String command) {
             if (command == null || command.isBlank()) {
                 return List.of();
@@ -197,12 +218,22 @@ public final class BashRules {
             final var masked = mask(command);
             final var segments = new ArrayList<String>();
             for (final var segment : tokenize(masked.text())) {
-                final var text = join(segment, masked);
+                final var text = renderSegment(segment, masked);
                 if (!text.isEmpty()) {
                     segments.add(text);
                 }
             }
             return segments;
+        }
+
+        private static List<Token> withoutToleratedRedirects(final List<Token> tokens) {
+            final var effective = new ArrayList<Token>(tokens.size());
+            for (final var token : tokens) {
+                if (!TOLERATED_REDIRECTS.contains(token.text())) {
+                    effective.add(token);
+                }
+            }
+            return effective;
         }
 
         /**

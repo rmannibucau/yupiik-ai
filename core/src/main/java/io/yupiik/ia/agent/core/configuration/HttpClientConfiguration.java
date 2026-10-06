@@ -43,4 +43,9 @@ public record HttpClientConfiguration(
                 defaultValue = "false",
                 documentation =
                         "Log every HTTP exchange (method, URL, headers and payload) as a curl-style trace. Only for debugging; the authorization header is redacted.")
-        boolean debug) {}
+        boolean debug,
+
+        @Property(
+                documentation =
+                        "HTTP proxy settings of the shared client. When host is blank the JDK default proxy selection is kept (http.proxyHost system property, HTTPS_PROXY environment variable, ...). Applies to every request sent through the shared HTTP client: LLM calls, webfetch, websearch, MCP over HTTP and maven repository knowledge lookups.")
+        HttpClientProxyConfiguration proxy) {}

@@ -22,6 +22,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.McpServerConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ public class McpManager {
     private final JsonMapper mapper;
     private final List<EmbeddedTool> localTools;
     private final ExtendedHttpClient httpClient;
+    private final ProcessService processes;
     private final Map<String, McpClient> clients = new ConcurrentHashMap<>();
     private final Map<String, List<EmbeddedTool>> toolsByServer = new ConcurrentHashMap<>();
 
@@ -46,11 +48,13 @@ public class McpManager {
             final CodingAgentConfiguration configuration,
             final JsonMapper mapper,
             final List<EmbeddedTool> localTools,
-            final ExtendedHttpClient httpClient) {
+            final ExtendedHttpClient httpClient,
+            final ProcessService processes) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.localTools = localTools;
         this.httpClient = httpClient;
+        this.processes = processes;
     }
 
     protected McpManager() {
@@ -58,6 +62,7 @@ public class McpManager {
         this.mapper = null;
         this.localTools = null;
         this.httpClient = null;
+        this.processes = null;
     }
 
     public void start() {
@@ -158,7 +163,8 @@ public class McpManager {
             if (server.args() != null) {
                 command.addAll(server.args());
             }
-            return new StdioMcpClient(server.name(), command, server.env() == null ? List.of() : server.env(), mapper);
+            return new StdioMcpClient(
+                    server.name(), command, server.env() == null ? List.of() : server.env(), mapper, processes);
         }
         throw new IllegalArgumentException("MCP server " + server.name() + " has neither url nor command");
     }

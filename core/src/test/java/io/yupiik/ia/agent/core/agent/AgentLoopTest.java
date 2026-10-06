@@ -234,6 +234,7 @@ class AgentLoopTest {
     void settingsChangeMidTurnAppliesToTheNextRequestOnly() {
         final var requests = new ArrayList<List<Message>>();
         final var capturedSettings = new ArrayList<ChatSettings>();
+        final var capturedModels = new ArrayList<String>();
         final var loopRef = new java.util.concurrent.atomic.AtomicReference<AgentLoop>();
         final var replies = new ArrayDeque<>(
                 List.of(toolCallReply("t1", "noop"), new ScriptedReply("final answer", "stop", false)));
@@ -246,6 +247,7 @@ class AgentLoopTest {
                     final BooleanSupplier cancelled) {
                 requests.add(List.copyOf(request.messages()));
                 capturedSettings.add(request.settings());
+                capturedModels.add(request.model());
                 // mid-turn: the /model or /provider command runs on another thread; the running
                 // request already carries the old selection, only the next one must pick it up
                 if (capturedSettings.size() == 1) {
@@ -270,6 +272,96 @@ class AgentLoopTest {
                 ChatSettings.EMPTY.withModel("next-model"),
                 capturedSettings.get(1),
                 "the next request picks up the mid-turn selection change");
+        assertEquals(
+                List.of("test-model", "next-model"),
+                capturedModels,
+                "the model is re-resolved per request: the round after the switch carries the new model");
+    }
+
+    /**
+     * The reported regression: a plain {@code /model} switch (no per-tab provider) used to only
+     * change the name the UI reads from the settings while the wire kept the process default model,
+     * because the loop pinned the model resolved at turn start and {@code ChatClient} ranks an
+     * explicit request model above {@code settings.model()}.
+     */
+    @Test
+    void modelSwitchBetweenTurnsWithoutProviderOverrideUsesTheNewModel() {
+        final var capturedModels = new ArrayList<String>();
+        final var replies = new ArrayDeque<>(
+                List.of(new ScriptedReply("first", "stop", false), new ScriptedReply("second", "stop", false)));
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                capturedModels.add(request.model());
+                final var reply = replies.poll();
+                if (reply.finishReason() != null) {
+                    onDelta.accept(new End(reply.finishReason(), null));
+                }
+                return reply.toMessage();
+            }
+        };
+        final var loop = loop(client, null, configuration(true));
+
+        assertEquals("first", loop.run("do it", null, "s1", null, () -> false));
+        // no per-tab provider: the plain /model switch must still reach the wire
+        loop.updateChatSettings(ChatSettings.EMPTY.withModel("other-model"));
+        assertEquals("second", loop.run("and now", null, "s1", null, () -> false));
+
+        assertEquals(
+                List.of("test-model", "other-model"),
+                capturedModels,
+                "the next turn must send the switched model, not the process default one");
+    }
+
+    /**
+     * The provider branch of the same resolution: a per-tab provider carries its configured model
+     * until an explicit model override replaces it.
+     */
+    @Test
+    void providerOverrideKeepsItsModelUntilTheSelectionOverridesIt() {
+        final var capturedModels = new ArrayList<String>();
+        final var replies = new ArrayDeque<>(
+                List.of(new ScriptedReply("first", "stop", false), new ScriptedReply("second", "stop", false)));
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                capturedModels.add(request.model());
+                final var reply = replies.poll();
+                if (reply.finishReason() != null) {
+                    onDelta.accept(new End(reply.finishReason(), null));
+                }
+                return reply.toMessage();
+            }
+        };
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.length", "2",
+                        "yca.provider.providers.1.id", "other",
+                        "yca.provider.providers.1.baseUrl", "http://localhost:1/v1",
+                        "yca.provider.providers.1.apiKey", "test-key",
+                        "yca.provider.providers.1.model", "other-model",
+                        "yca.provider.providers.1.api", "auto"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+        final var loop = loop(client, null, cfg);
+
+        loop.updateChatSettings(ChatSettings.EMPTY.withProviderId("other"));
+        assertEquals("first", loop.run("do it", null, "s1", null, () -> false));
+        loop.updateChatSettings(ChatSettings.EMPTY.withProviderId("other").withModel("switched"));
+        assertEquals("second", loop.run("and now", null, "s1", null, () -> false));
+
+        assertEquals(
+                List.of("other-model", "switched"),
+                capturedModels,
+                "the per-tab provider's model applies alone, then the model override wins");
     }
 
     /**
@@ -419,15 +511,27 @@ class AgentLoopTest {
         assertEquals("done", result);
         assertTrue(
                 events.stream()
-                        .anyMatch(e -> e instanceof AgentEvent.Notice n
-                                && AgentEvent.Notice.Level.INFO == n.level()
-                                && n.message().contains("retrying")),
-                "retry pauses must surface as an info notice");
+                        .anyMatch(e -> e instanceof AgentEvent.Pause p
+                                && p.kind() == AgentEvent.Pause.Kind.RETRY
+                                && p.message().contains("retrying")),
+                "retry pauses must surface as a dedicated Pause event");
         assertTrue(
                 events.stream()
-                        .anyMatch(e ->
-                                e instanceof AgentEvent.Status s && s.message().contains("Rate limit")),
-                "throttle pauses must surface as a status");
+                        .anyMatch(e -> e instanceof AgentEvent.Pause p
+                                && p.kind() == AgentEvent.Pause.Kind.THROTTLE
+                                && p.message().contains("Rate limit")),
+                "throttle pauses must surface as a dedicated Pause event");
+        // pauses are transient: never a durable notice or leading-status replacement
+        assertTrue(
+                events.stream()
+                        .noneMatch(e ->
+                                (e instanceof AgentEvent.Notice n && n.message().contains("retrying"))
+                                        || (e instanceof AgentEvent.Status s
+                                                && s.message().contains("Rate limit"))),
+                "pauses must not leak into notices/status: "
+                        + events.stream()
+                                .filter(e -> e instanceof AgentEvent.Notice || e instanceof AgentEvent.Status)
+                                .toList());
 
         // each call carries its own listener, so a later turn on the same loop can never re-fire the previous one
         final var pausesAfterFirstTurn = pauseEvents();
@@ -439,8 +543,9 @@ class AgentLoopTest {
 
     private long pauseEvents() {
         return events.stream()
-                .filter(e -> (e instanceof AgentEvent.Notice n && n.message().contains("retrying"))
-                        || (e instanceof AgentEvent.Status s && s.message().contains("Rate limit")))
+                .filter(e -> (e instanceof AgentEvent.Pause p && p.message().contains("retrying"))
+                        || (e instanceof AgentEvent.Pause retry
+                                && retry.message().contains("Rate limit")))
                 .count();
     }
 
@@ -4349,6 +4454,13 @@ class AgentLoopTest {
                         return providerManagerOverride == null
                                 ? new ResolvedModel(null, "test-model")
                                 : providerManagerOverride.resolveDefault();
+                    }
+
+                    @Override
+                    public io.yupiik.ia.agent.core.configuration.ProviderConfiguration provider(final String id) {
+                        // the bare fixture has no configuration: only a test-provided override can
+                        // answer a per-tab provider lookup (null keeps the default-provider path)
+                        return providerManagerOverride == null ? null : providerManagerOverride.provider(id);
                     }
 
                     @Override

@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class MavenOutputProcessorTest {
     private final MavenOutputProcessor processor = new MavenOutputProcessor();
@@ -98,5 +99,46 @@ class MavenOutputProcessorTest {
 
         assertEquals(1, out.size());
         assertEquals("[INFO] BUILD SUCCESS", out.get(0));
+    }
+
+    @Test
+    void collapsesFrameworkStackFrames() {
+        final var out = processor
+                .process(
+                        "mvn test",
+                        List.of(
+                                "[ERROR] Failed to execute goal org.apache.maven.plugins:maven-surefire-plugin:3.0.0:test (default-test) on project core: Execution failed",
+                                "[ERROR] at org.junit.jupiter.engine.descriptor.TestMethodTestDescriptor.lambda$invokeTestMethod$7 (TestMethodTestDescriptor.java:196)",
+                                "[ERROR] at java.base/java.util.ArrayList.forEach (ArrayList.java:1541)",
+                                "[ERROR] at com.example.MyTest.shouldWork (MyTest.java:42)",
+                                "[INFO] BUILD FAILURE")
+                                .stream())
+                .toList();
+        assertTrue(out.get(0).startsWith("[INFO] BUILD FAILURE"));
+        assertTrue(out.stream().anyMatch(l -> l.contains("com.example.MyTest.shouldWork")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("org.junit.jupiter.engine")));
+        assertFalse(out.stream().anyMatch(l -> l.contains("java.base")));
+    }
+
+    @Test
+    void enrichFromSurefireReadsQuietReports(@TempDir final java.nio.file.Path temp) throws Exception {
+        final var reports = temp.resolve("target/surefire-reports");
+        java.nio.file.Files.createDirectories(reports);
+        java.nio.file.Files.writeString(
+                reports.resolve("io.example.GoodTest.txt"), "Tests run: 4, Failures: 0, Errors: 0, Skipped: 0");
+        java.nio.file.Files.writeString(
+                reports.resolve("io.example.BadTest.txt"), "Tests run: 2, Failures: 1, Errors: 0, Skipped: 0");
+
+        final var enriched = MavenOutputProcessor.enrichFromSurefire("-q install", List.of("", "BUILD SUCCESS"), temp);
+
+        assertTrue(enriched.stream().anyMatch(l -> l.startsWith("FAIL io.example.BadTest")));
+        assertTrue(enriched.stream().anyMatch(l -> l.equals("io.example.GoodTest")));
+    }
+
+    @Test
+    void enrichFromSurefireSkipsWhenAlreadyVerbose() {
+        final var out = MavenOutputProcessor.enrichFromSurefire(
+                "-q install", List.of("Tests run: 1, Failures: 0, Errors: 0, Skipped: 0", "BUILD SUCCESS"));
+        assertEquals(2, out.size());
     }
 }

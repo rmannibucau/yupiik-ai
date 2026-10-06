@@ -220,11 +220,41 @@ class AgentSessionServiceTest {
         final var permissions = new PermissionService(cfg());
         final var service = service(permissions);
         final var runtime = runtime(permissions);
+        permissions.setMode(AgentMode.BUILD); // a true build -> build switch, not plan -> build
         service.setPermissions("yolo", runtime);
 
         service.setMode("build", "s1", runtime);
 
         assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+    }
+
+    @Test
+    void setModeDefaultsApprovalToAutoEditWhenEnteringBuild() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+        final var runtime = runtime(permissions);
+        assertEquals(PermissionMode.ASK, permissions.permissionMode());
+
+        final var change = service.setMode("build", "s1", runtime);
+
+        assertEquals(PermissionMode.AUTO_EDIT, permissions.permissionMode(), "plan -> build must default to auto_edit");
+        assertTrue(change.message().contains("permissions: auto_edit"), change.message());
+    }
+
+    @Test
+    void setModeOverwritesExplicitOverrideWhenEnteringBuildFromPlan() {
+        final var permissions = new PermissionService(cfg());
+        final var service = service(permissions);
+        final var runtime = runtime(permissions);
+        service.setPermissions("yolo", runtime);
+        assertEquals(PermissionMode.YOLO, permissions.permissionMode());
+
+        service.setMode("build", "s1", runtime);
+
+        assertEquals(
+                PermissionMode.AUTO_EDIT,
+                permissions.permissionMode(),
+                "the plan -> build default must win even over an explicit session override");
     }
 
     @Test

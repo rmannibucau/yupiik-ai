@@ -11,3 +11,26 @@ A single turn can run many LLM round-trips. Iteration bounds (the per-window
 cap, the exploration-plateau guard and the persisted stop notices) follow a
 per-model / per-provider / global cascade and are covered in detail in
 xref:features/iteration-guards.adoc[Iteration guards].
+
+== Spawned processes
+
+Every subprocess yca starts (the `bash` tool, stdio MCP servers, the Maven
+`dependency:list` resolver, clipboard helpers) is tracked by the shared
+`ProcessService` so a running command can always be stopped as a _tree_ and no
+subprocess outlives the JVM:
+
+* Cancelling a turn, a tool call or a bash timeout disposes the whole process
+  tree (`ProcessHandle.descendants()` first, then the leader), so orphaned
+  foreground children (`mvn`, `npm`, a `sleep … & wait` script) are reaped too,
+  not just the direct shell.
+* Closing is two-phase: at shutdown every tracked tree is killed first, then all
+  of them are awaited with a single shared deadline (`onExit()` +
+  `CompletableFuture.allOf`), so the total wait is the slowest single reap, not
+  a per-process sum.
+* The disposal runs on the container `@Destroy`, i.e. at the end of every
+  command (fusion's `CliAwaiter`) and, when fusion's launcher hook is enabled
+  (`fusion.launcher.useHook=true`), on raw JVM exit too - so a Ctrl-C
+  force-exit or `SIGTERM` still reaps tracked processes. With the hook off,
+  graceful exits (normal command return, the cooperative Ctrl-C path) still run
+  the container close; a hard `kill -9` cannot run any code, so nothing can
+  clean up in that case.

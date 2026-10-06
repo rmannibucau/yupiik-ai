@@ -25,6 +25,10 @@ import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.httpclient.core.listener.impl.SetUserAgent;
 import io.yupiik.fusion.httpclient.core.request.UnlockedHttpRequest;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import java.net.Authenticator;
+import java.net.InetSocketAddress;
+import java.net.PasswordAuthentication;
+import java.net.ProxySelector;
 import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
@@ -53,6 +57,22 @@ public class HttpClientProducer {
                 .version(version(cfg.version()))
                 .connectTimeout(Duration.ofSeconds(cfg.connectTimeoutSeconds() <= 0 ? 30 : cfg.connectTimeoutSeconds()))
                 .followRedirects(HttpClient.Redirect.NORMAL);
+        final var proxy = cfg.proxy();
+        if (proxy != null && proxy.host() != null && !proxy.host().isBlank()) {
+            builder.proxy(ProxySelector.of(InetSocketAddress.createUnresolved(proxy.host(), proxy.port())));
+            if (proxy.user() != null && !proxy.user().isBlank()) {
+                builder.authenticator(new Authenticator() {
+                    @Override
+                    protected PasswordAuthentication getPasswordAuthentication() {
+                        if (getRequestorType() == RequestorType.PROXY) {
+                            return new PasswordAuthentication(
+                                    proxy.user(), (proxy.password() == null ? "" : proxy.password()).toCharArray());
+                        }
+                        return null;
+                    }
+                });
+            }
+        }
         if (cfg.disableTlsCheck()) {
             builder.sslContext(trustAllSslContext());
             builder.sslParameters(new javax.net.ssl.SSLParameters() {

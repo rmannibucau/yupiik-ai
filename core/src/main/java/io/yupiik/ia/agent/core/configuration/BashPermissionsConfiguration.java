@@ -34,7 +34,7 @@ public record BashPermissionsConfiguration(
 
         @Property(
                 defaultValue =
-                        "\"Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, ...); commands that mutate repository state such as git add are denied.\"",
+                        "\"Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, unzip -l, jar tf, tar tf, ...); commands that mutate repository state such as git add are denied.\"",
                 documentation = "Free text injected into the plan-mode system prompt summarizing which bash command"
                         + " families are treated as read-only (eg. \"git status/diff/log/show, ls, cat,"
                         + " grep, ...\"). Kept as curated prose rather than a dynamic render of `rules`"

@@ -124,4 +124,46 @@ class ToolExecutionServiceTest {
         assertEquals(1, reports.size(), reports.toString());
         assertTrue(reports.get(0).contains("output optimized by Generic"), reports.toString());
     }
+
+    @Test
+    void perToolDisabledProcessorBehavesAsIdentity() {
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                Map.of("yca.storageHome", storageHome.toString(), "yca.optimize.toolOutputs.generic.enabled", "false"));
+        final var service = new ToolExecutionService(
+                configuration,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        // no-op
+                    }
+                },
+                List.of(new GenericOutputProcessor(configuration)));
+        final var output = "kept line 0\nkept line 1\n".repeat(50);
+        final var reports = new ArrayList<String>();
+        final var result = service.execute(tool("bash", output), Map.of("command", "cat big.txt"), context(reports));
+        assertEquals(output, result.output(), "disabled processor must leave the output byte-identical");
+        assertTrue(reports.isEmpty(), reports.toString());
+    }
+
+    @Test
+    void globalDisabledStillWins() {
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.optimize.toolOutputs.generic.enabled", "true",
+                "yca.optimize.disabled", "generic"));
+        final var service = new ToolExecutionService(
+                configuration,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        // no-op
+                    }
+                },
+                List.of(new GenericOutputProcessor(configuration)));
+        final var output = "line\n".repeat(50);
+        final var reports = new ArrayList<String>();
+        final var result = service.execute(tool("bash", output), Map.of("command", "cat big.txt"), context(reports));
+        assertEquals(output, result.output());
+        assertTrue(reports.isEmpty());
+    }
 }

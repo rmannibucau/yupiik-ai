@@ -181,8 +181,18 @@ public class AgentSessionService {
      * Switches the agent working mode and, when entering {@code BUILD} mode,
      * attempts to seed the todo list from the last assistant plan. The mode and
      * the todo list belong to the session owning {@code runtime}.
+     *
+     * <p>Crossing from {@code PLAN} to {@code BUILD} also sets the session
+     * approval mode to {@code AUTO_EDIT}: build implies a default posture where
+     * file edits apply without prompting (bash still follows the plan/resolved
+     * rules or the gate). The override applies unconditionally - even over an
+     * explicit {@code /permissions} selection - so the symmetric
+     * {@code BUILD -> PLAN} reset (back to the configured default) always
+     * restores a clean plan posture. Switching {@code BUILD -> BUILD} keeps the
+     * current approval mode untouched.
      */
     public ModeChange setMode(final String arg, final String sessionId, final SessionRuntime runtime) {
+        final var previousMode = runtime.permissions().mode();
         final var mode = AgentMode.fromConfigurationString(arg);
         runtime.permissions().setMode(mode);
         if (mode == AgentMode.PLAN) {
@@ -193,6 +203,10 @@ public class AgentSessionService {
             // default (ASK unless explicitly configured otherwise). An explicit /permissions
             // override in plan remains possible.
             runtime.permissions().setPermissionMode(null);
+        } else if (previousMode != AgentMode.BUILD) {
+            // plan -> build: build means "apply the work" by default; edits become silent until
+            // the next build -> plan round-trip restores the configured default.
+            runtime.permissions().setPermissionMode(PermissionMode.AUTO_EDIT);
         }
         String seedMessage = null;
         String seedError = null;
@@ -209,7 +223,9 @@ public class AgentSessionService {
                 seedError = "todo seeding failed: " + e.getMessage();
             }
         }
-        return new ModeChange("mode: " + mode.name().toLowerCase(Locale.ROOT), seedMessage, seedError);
+        final var message = "mode: " + mode.name().toLowerCase(Locale.ROOT)
+                + (mode == AgentMode.BUILD && previousMode != AgentMode.BUILD ? " - permissions: auto_edit" : "");
+        return new ModeChange(message, seedMessage, seedError);
     }
 
     /**

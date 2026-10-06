@@ -18,11 +18,42 @@ package io.yupiik.ia.agent.core.optimize;
 import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.stream.Stream;
 
+/**
+ * Compacts GitHub CLI output for the read-only inspection commands an agent runs most:
+ * {@code gh pr view} / {@code gh issue view} keep the short description and remove ASCII
+ * decoration and verbose metadata, {@code gh pr checks} keeps status+name with failures
+ * highlighted, {@code gh run list} keeps the run name/status, {@code gh run view} the jobs,
+ * and {@code gh issue list} / {@code gh pr list} a compact one-line-per-item shape.
+ * Matches the read-only gh families of {@code yca.permissions.bash.rules}.
+ */
 @ApplicationScoped
 public class GhOutputProcessor implements OutputProcessor {
+    private static final String[] DECORATION = {
+        "title:",
+        "head:",
+        "base:",
+        "labels:",
+        "assignee:",
+        "author:",
+        "milestone:",
+        "reviewers:",
+        "projects:",
+        "linked issues:",
+        "number:",
+        "state:",
+        "draft:",
+        "auto-merge:",
+        "url:",
+        "created:",
+        "updated:",
+        "closed:"
+    };
 
     @Override
     public boolean supports(final String command) {
@@ -41,7 +72,116 @@ public class GhOutputProcessor implements OutputProcessor {
 
     @Override
     public Stream<String> process(final String command, final Stream<String> lines) {
-        return lines.filter(l -> !isNoise(l));
+        final var all = lines.map(Optimizers::stripAnsi).toList();
+        final var sub = subCommand(command);
+        return switch (sub) {
+            case "pr", "issue" -> processPrIssue(command, all);
+            case "run" -> processRun(command, all);
+            default -> all.stream().filter(l -> !isNoise(l));
+        };
+    }
+
+    private Stream<String> processPrIssue(final String command, final List<String> all) {
+        // list/status shapes: "123  title  branch  state" or a status line "checks: ..."
+        final var verb = thirdToken(command);
+        if ("list".equals(verb)) {
+            final var seen = new LinkedHashSet<String>();
+            for (final var raw : all) {
+                final var line = raw.strip();
+                if (line.isBlank() || line.startsWith("Showing") || line.startsWith("--") || line.startsWith("Draft")) {
+                    continue;
+                }
+                // drop the trailing state column noise: keep #number + title + branch
+                if (line.matches("^#?\\d+\\s+.*")) {
+                    seen.add(line.replaceAll("\\s{2,}", " "));
+                }
+            }
+            return seen.stream().limit(30);
+        }
+        // view: keep the first title line and the body; drop decoration metadata and markdown noise
+        final var out = new ArrayList<String>();
+        var inBody = false;
+        for (final var raw : all) {
+            final var line = raw.strip();
+            if (line.isBlank()) {
+                continue;
+            }
+            if (isNoise(line)) {
+                continue;
+            }
+            if (startsAny(line, DECORATION) && !inBody) {
+                continue;
+            }
+            if (line.startsWith("## ")) {
+                inBody = true;
+            }
+            out.add(line);
+        }
+        return out.stream();
+    }
+
+    private Stream<String> processRun(final String command, final List<String> all) {
+        final var verb = thirdToken(command);
+        if ("view".equals(verb)) {
+            final var out = new ArrayList<String>();
+            for (final var raw : all) {
+                final var line = raw.strip();
+                if (line.isBlank() || startsAny(line, "You can also", "Use `gh run view")) {
+                    continue;
+                }
+                out.add(line);
+            }
+            return out.stream();
+        }
+        // list: "STATUS  NAME  WORKFLOW  BRANCH  EVENT  ID" -> keep STATUS NAME BRANCH
+        final var out = new ArrayList<String>();
+        for (final var raw : all) {
+            final var line = raw.strip();
+            if (line.isBlank() || line.startsWith("Showing") || line.startsWith("No runs")) {
+                continue;
+            }
+            if (line.matches("^(✓|✗|X|\\*|\\?)\\s+.*")) {
+                out.add(line);
+            } else if (line.matches("^(completed|in_progress|queued|action_required|cancelled)\\s+.*")) {
+                out.add(line);
+            }
+        }
+        return out.stream();
+    }
+
+    /** The token right after {@code gh <sub>}: {@code gh pr view} -> {@code view}, {@code gh run list} -> {@code list}. */
+    private static String thirdToken(final String command) {
+        final var tokens = command.strip().split("\\s+");
+        int found = 0;
+        for (var i = 1; i < tokens.length; i++) {
+            if (tokens[i].startsWith("-")) {
+                continue;
+            }
+            found++;
+            if (found == 2) {
+                return tokens[i];
+            }
+        }
+        return "";
+    }
+
+    private static String subCommand(final String command) {
+        final var tokens = command.strip().split("\\s+");
+        for (final var t : tokens) {
+            if (!t.equals("gh") && !t.startsWith("-")) {
+                return t;
+            }
+        }
+        return "";
+    }
+
+    private static boolean startsAny(final String line, final String... prefixes) {
+        for (final var p : prefixes) {
+            if (line.startsWith(p)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean isNoise(final String line) {

@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -65,6 +66,7 @@ import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
@@ -474,7 +476,8 @@ class TuiCommandRenderTest {
         Logger.getLogger("io.yupiik").severe("LLM request failed (429) retry-after=1");
 
         // the content view log region carries the level/logger bracket groups and the message
-        awaitText("[SEVERE][io.yupiik]");
+        // on the same row, with one separating space: "[SEVERE][io.yupiik] LLM request failed ..."
+        awaitText("[SEVERE][io.yupiik] LLM request failed (429) retry-after=1");
         awaitText("LLM request failed (429) retry-after=1");
         // the status-strip notification carries the message (red while an error is active)
         awaitText("ⓘ LLM request failed (429) retry-after=1");
@@ -556,6 +559,41 @@ class TuiCommandRenderTest {
 
         awaitText("✗ Response truncated by the output token limit");
         awaitText("ready");
+
+        quit();
+    }
+
+    @Test
+    void pauseRendersInTrailingInfoSlotAndLeavesLeadingStatusUntouched() throws Exception {
+        // provider-imposed delays (throttle/retry backoff) are transient side feedback: they must
+        // land in the trailing ⓘ notification slot (right side) and never replace the leading
+        // "ready"/"working" state on the left
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-pause-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Pause(
+                        AgentEvent.Pause.Kind.RETRY,
+                        "LLM call failed, retrying in ~0s (attempt 2/3)",
+                        2000,
+                        sessionId));
+
+        // the ⓘ notification slot carries the message; the leading status stays "ready"
+        awaitText("ⓘ LLM call failed, retrying in ~0s (attempt 2/3)");
+        awaitText("ready");
+        // the ⓘ sits to the right of the leading status column
+        final var infoCol = columnOfLineContaining("ⓘ LLM call failed");
+        final var readyCol = columnOfLineContaining("ready");
+        assertTrue(infoCol > readyCol, "the pause notification must render to the right of the leading status");
 
         quit();
     }
@@ -779,7 +817,8 @@ class TuiCommandRenderTest {
                 new io.yupiik.fusion.httpclient.core.ExtendedHttpClient(
                         new io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration()
                                 .setDelegate(
-                                        java.net.http.HttpClient.newBuilder().build())));
+                                        java.net.http.HttpClient.newBuilder().build())),
+                new io.yupiik.maven.knowledge.process.ProcessService());
         final var factory = new TuiRunnerFactory() {
             @Override
             public TuiRunner create(final TuiCommand.TuiConf tuiConf, final boolean hideCursor) throws Exception {
@@ -854,6 +893,7 @@ class TuiCommandRenderTest {
                         new ProviderManager(configuration, formatMapper)),
                 new AutoLogConfigurer(configuration),
                 mcpManager,
+                new ProcessService(),
                 new VirtualThreadExecutor(),
                 providerManager,
                 new AgentProvider(configuration),
@@ -906,6 +946,59 @@ class TuiCommandRenderTest {
         awaitTextGone("pondering");
         tuiRef.get().dispatch(KeyEvent.ofChar('t', KeyModifiers.CTRL));
         awaitText("pondering");
+
+        quit();
+    }
+
+    @Test
+    void thinkingShowsOneSpinnerFamilyAcrossStripAndPinnedLine() throws Exception {
+        // regression: the status strip picked CLOCK (the first-token wait armed at turn start)
+        // while the pinned/in-pane thinking line hard-coded SQUARE_CORNERS, so a reasoning
+        // round animated two different spinners at once (🕐 + ◰). All busy lines must render
+        // through the same shared SpinnerState so only one family is ever on screen.
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-thinking-single-spinner-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // submit a real prompt so the first-token CLOCK wait is armed, then stream thinking:
+        // the strip must switch to the same SQUARE_CORNERS family as the pinned/in-pane line
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering same spinner", sid(shellRegistry)));
+
+        awaitText("thinking... (0s)");
+        // both busy lines must show the SQUARE_CORNERS family: the clock frames (U+1F550-1F55B)
+        // must never share the screen with a square-corner frame. The spinner advances with the
+        // tick, so polling for a square frame and then checking a single grab is racy: assert
+        // the invariant on the very frame that shows a square.
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        var squareFrame = (String) null;
+        while (squareFrame == null && System.nanoTime() < deadline) {
+            final var text = backend.text();
+            if (text.contains("◰") || text.contains("◳") || text.contains("◲") || text.contains("◱")) {
+                squareFrame = text;
+            } else {
+                backend.awaitFrame(1_000);
+            }
+        }
+        assertTrue(squareFrame != null, "expected the square-corner thinking spinner on screen:\n" + backend.text());
+        final var hasClock = squareFrame.contains("\ud83d\udd50")
+                || squareFrame.contains("\ud83d\udd51")
+                || squareFrame.contains("\ud83d\udd52")
+                || squareFrame.contains("\ud83d\udd53")
+                || squareFrame.contains("\ud83d\udd54")
+                || squareFrame.contains("\ud83d\udd55")
+                || squareFrame.contains("\ud83d\udd56")
+                || squareFrame.contains("\ud83d\udd57")
+                || squareFrame.contains("\ud83d\udd58")
+                || squareFrame.contains("\ud83d\udd59")
+                || squareFrame.contains("\ud83d\udd5a")
+                || squareFrame.contains("\ud83d\udd5b");
+        assertFalse(hasClock, "the CLOCK spinner must not animate while SQUARE_CORNERS is shown:\n" + squareFrame);
 
         quit();
     }
@@ -1206,6 +1299,35 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void toolRunGroupsConsecutiveFinishedCallsIntoOneCollapsibleHeader() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-run-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // two consecutive finished calls (grep then read_file) become one run
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class A {}", true, sid(shellRegistry)));
+
+        // collapsed by default in COLLAPSED mode: only the run header survives (the header
+        // carries the command names in its summary, but member outputs are hidden)
+        awaitText("2 tools");
+        awaitTextGone("class A {}");
+
+        // clicking the run header expands the members (COLLAPSED open shows one-liners, not outputs)
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("2 tools")));
+        awaitText("✓ read_file #2 - a.java");
+        awaitText("✓ bash #1 - grep x src");
+
+        quit();
+    }
+
+    @Test
     void clickingCondensedToolLineOpensFullOutput() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
@@ -1327,6 +1449,26 @@ class TuiCommandRenderTest {
         awaitTextGone("streamed line"); // condensed default hides the live stream
         awaitText("tail -f log"); // dim one-liner with the significant command
         awaitText("running...");
+
+        // clicking the running card opens the live running-tool overlay immediately
+        // (no need to wait for ToolFinished): title carries "running", body streams.
+        // NB: target the topmost "tail -f log" row (the card), not the status bar
+        // which also shows the command while the tool runs
+        final var row = rowOf("tail -f log");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, row));
+        tuiRef.get().dispatch(MouseEvent.release(MouseButton.LEFT, 2, row));
+        awaitText("bash - running"); // overlay title marks the call as running
+        awaitText("pending"); // pending marker in the overlay body
+        awaitText("streamed line"); // the ToolStream fragment reached the overlay body
+
+        // a later stream chunk keeps the open modal live
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "second line", sid(shellRegistry)));
+        awaitText("second line");
+
+        // Esc closes the running overlay (no tool cancel: the loop is the stub)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("bash - running ");
+        awaitText("running..."); // back to the condensed one-liner
 
         tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
         awaitText("streamed line"); // cards shown: live stream visible
@@ -1502,6 +1644,112 @@ class TuiCommandRenderTest {
         awaitTextWithin("bg-for-two", 2_000);
         awaitTextWithin(" " + Glyphs.of("unicode").check() + " ", 2_000);
         awaitTextWithin(" +", 2_000); // the trailing new-tab affordance is on the bar
+
+        quit();
+    }
+
+    @Test
+    void tabBarShowsPerTabModeBadge() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tab-mode-badge-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // plan by default: the bar carries the plan mark in the warning tone
+        final var planMark = Glyphs.of("unicode").modeMark(false);
+        final var buildMark = Glyphs.of("unicode").modeMark(true);
+        awaitText(planMark);
+        var col = columnOfLineContaining(planMark);
+        var row = rowOf(planMark);
+        var fg = backend.fg(col, row).orElseThrow().toRgb();
+        assertEquals(0xf5, fg.r(), "plan badge red channel");
+        assertEquals(0xa7, fg.g(), "plan badge green channel");
+        assertEquals(0x42, fg.b(), "plan badge blue channel");
+
+        // switch to build: the badge flips to the heavy shape and the accent tone
+        tuiRef.get().dispatch(new PasteEvent("/mode build"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText(buildMark);
+        col = columnOfLineContaining(buildMark);
+        row = rowOf(buildMark);
+        fg = backend.fg(col, row).orElseThrow().toRgb();
+        assertEquals(0x9d, fg.r(), "build badge red channel");
+        assertEquals(0x7c, fg.g(), "build badge green channel");
+        assertEquals(0xd8, fg.b(), "build badge blue channel");
+
+        // back to plan: the plan tone returns
+        tuiRef.get().dispatch(new PasteEvent("/mode plan"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText(planMark);
+        fg = backend.fg(columnOfLineContaining(planMark), rowOf(planMark))
+                .orElseThrow()
+                .toRgb();
+        assertEquals(0xf5, fg.r(), "plan badge red channel after switching back");
+
+        quit();
+    }
+
+    @Test
+    void tabHoverShowsFullTitleTooltip() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var lastSid = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                lastSid.set(sessionId);
+                shellRegistry.onEvent(new AgentEvent.TurnDone("ran:" + sessionId, sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop, true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tab-tooltip-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a second tab whose title is long enough to be ellipsized in the bar
+        final var fullTitle = "a session title long enough that the tab cell must ellipsize it away from view";
+        tuiRef.get().dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+        awaitTextWithin(Glyphs.of("unicode").cross() + " ", 2_000);
+        tuiRef.get().dispatch(new PasteEvent(fullTitle));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitTextWithin("ran:", 2_000); // the turn completed: tab two's title is now fullTitle
+
+        // back on tab one: the bar still shows the ellipsized tab-two title (not the full one)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB, KeyModifiers.CTRL));
+        awaitTextGone("ran:");
+        final var prefix = fullTitle.substring(0, 18); // ellipsized prefix visible on the bar
+        final var bar = backend.text().split("\n")[0];
+        final var titleCol = bar.indexOf(prefix);
+        assertTrue(titleCol >= 0, "the tab bar must contain the ellipsized tab-two title:\n" + backend.text());
+
+        // hover the tab-two cell: the floating tooltip shows the full title
+        tuiRef.get().dispatch(MouseEvent.move(titleCol, 0));
+        awaitTextWithin(fullTitle, 2_000);
+
+        // move the pointer out of the bar: the tooltip disappears
+        tuiRef.get().dispatch(MouseEvent.move(5, 20));
+        awaitTextGoneWithin(fullTitle, 2_000);
 
         quit();
     }

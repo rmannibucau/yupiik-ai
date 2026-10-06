@@ -30,6 +30,7 @@ import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import io.yupiik.maven.knowledge.llm.LlmText;
 import io.yupiik.maven.knowledge.llm.MvnProjectDeps;
 import io.yupiik.maven.knowledge.llm.SkillPrompts;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.StringReader;
 import java.nio.file.Files;
@@ -54,21 +55,27 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
     private final ChatClient chatClient;
     private final JsonMapper mapper;
     private final CodingAgentConfiguration configuration;
+    private final ProcessService processes;
     /** The triggering session's provider/model selection, set by the caller around one index run and
      * resolved lazily at each LLM call (never captured at construction). Null = process default. */
     private volatile ChatSettings runSettings;
 
     public YcaKnowledgeLlm(
-            final ChatClient chatClient, final JsonMapper mapper, final CodingAgentConfiguration configuration) {
+            final ChatClient chatClient,
+            final JsonMapper mapper,
+            final CodingAgentConfiguration configuration,
+            final ProcessService processes) {
         this.chatClient = chatClient;
         this.mapper = mapper;
         this.configuration = configuration;
+        this.processes = processes;
     }
 
     protected YcaKnowledgeLlm() {
         this.chatClient = null;
         this.mapper = null;
         this.configuration = null;
+        this.processes = null;
     }
 
     /** Binds one index run to the requesting session's provider/model; pass null to fall back to process default. */
@@ -94,7 +101,8 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         if (configuration == null || configuration.resolveProjectDir() == null) {
             return List.of();
         }
-        return MvnProjectDeps.resolve(configuration.resolveProjectDir(), MVN_TIMEOUT_MS, dependencyCacheDir());
+        return MvnProjectDeps.resolve(
+                configuration.resolveProjectDir(), MVN_TIMEOUT_MS, dependencyCacheDir(), processes);
     }
 
     /** Where the {@code mvn dependency:list} result is cached (the local repository, by default {@code ~/.m2}). */

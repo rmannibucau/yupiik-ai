@@ -151,6 +151,9 @@ Configuration is resolved from (highest priority first): CLI arguments
       "defaultProvider": "openai"
     },
     "permissions": { "mode": "ask", "allow": [], "deny": ["bash:rm -rf *"] },
+    "httpClient": {
+      "proxy": { "host": "proxy.corp", "port": 3128, "user": "alice", "password": "s3cret" }
+    },
     "mcp": {
       "servers": [
         { "name": "docs", "command": "npx", "args": ["-y", "@upstreamapi/context7-mcp"], "readonly": ["*"] },
@@ -167,6 +170,20 @@ Configuration is resolved from (highest priority first): CLI arguments
   }
 }
 ```
+
+The shared HTTP client honors an optional `yca.httpClient.proxy` group
+(`host`, `port` default 8080, `user`, `password`). A blank `host` keeps the
+JDK default proxy selection (the `http.proxyHost`/`https.proxyHost` system
+properties or the `HTTPS_PROXY`/`HTTP_PROXY` environment variables). When a
+host is set, every request of the shared client goes through that proxy - LLM
+calls, `webfetch`, `websearch`, MCP servers over HTTP and the maven repository
+knowledge lookups. `user`/`password` enable Basic proxy authentication
+(`Proxy-Authorization`, JDK `Authenticator`); note the JDK disables Basic
+authentication for HTTPS CONNECT tunneling by default
+(`jdk.http.auth.tunneling.disabledSchemes=Basic` in `$JAVA_HOME/conf/net.properties`),
+so proxy-authenticated HTTPS needs the JVM started with
+`-Djdk.http.auth.tunneling.disabledSchemes=` (plain-HTTP proxying works out of
+the box).
 
 The `provider` group can hold a list of providers (`providers`), each with a
 unique `id` used to reference it as `$<id>/<model>` anywhere a model is
@@ -245,7 +262,8 @@ nudgeIterationThreshold, nudgeTemplate), `memory` (enabled, maxChars), `optimize
 (disabled processors and tools, matched loosely - `mvn`, `./mvnw`,
 `git.exe` and `git` all match the git/maven processors), `permissions` (mode, allow, deny, bash rules), `sessions`
 (retentionDays, compressDays), `mode` (plan by default, or build), `skills` (enabled),
-`mcp` (servers), `structuralCodeGraph` (enabled, enrich, storeDir), `agents`
+`mcp` (servers), `httpClient` (headers, version, connectTimeoutSeconds, disableTlsCheck,
+debug, proxy host/port/user/password), `structuralCodeGraph` (enabled, enrich, storeDir), `agents`
 (name, prompt - inline text or a file path). The
 `workingDir` option (default `.`) is the directory from
 which project instructions and skills are discovered. The `projectDir` option
@@ -283,7 +301,11 @@ follows the `ask`/`auto_edit`/`yolo` permission mode (denied without an
 interactive gate). `build` mode (full access, respecting the `permissions`
 allow/deny lists and the default-resolved bash rules) is opt-in: switch to it
 with `/mode build`, set `yca.mode=build`, or pass `--yca-run-mode build` for
-`run`.
+`run`. Note that `/mode build` from `plan` also defaults the session approval
+mode to `auto_edit`, while the headless `--yca-run-mode build` startup path
+keeps its configured permission mode (no session switch is involved): a
+headless `run` in `build` with `ask` still requires
+`yca.permissions.mode=auto_edit/yolo` (or the TUI) for state-changing tools.
 
 ## Structural code graph
 
@@ -363,6 +385,14 @@ Project instructions and skills are loaded into the system prompt:
   counts, session LLM call count and a context gauge; the panel also shows the
   permission mode (`ask`, `auto_edit`, `yolo`), with `yolo` rendered as a red
   `yolo ⚠` badge in `yca.tui.yolo` (default `#ff5555`)
+- Provider throttling, retry backoffs and concurrency-limit waits surface as
+  status-bar messages in the trailing slot (ⓘ, a few seconds) instead of
+  blocking silently: rate limits and backoffs are labelled, and a blocked
+  request reports `concurrency limit reached, N requests waiting` in the
+  message. This only happens when a limit is configured -
+  `yca.llm.rateLimitRequestsPerMinute` / `yca.llm.maxConcurrent` (or the
+  per-provider `maxConcurrent`) - with the defaults (throttle off, unlimited
+  concurrency) there is nothing to report
 - Transcript and prompt have a mode-colored left bar (thin orange in `plan`,
   heavy bold purple in `build`); transcript renders as
   markdown with long lines wrapped at the panel width. Bold (`**strong**`)
@@ -431,6 +461,12 @@ Project instructions and skills are loaded into the system prompt:
   `btw`, `/model`, `/tabs`, shortcuts, subagents, search, full tool output,
   last error); the amount is configurable with `yca.tui.scrollLines` (per notch,
   default 3) and `yca.tui.scrollPageLines` (per `PgUp`/`PgDn`, default 10)
+- Each tab shows its own mode: a per-tab badge (▪ plan / ◆ build) in the tab
+  bar tinted with that session's mode color (warning for plan, accent for
+  build) - background tabs included, so the mode never depends on which tab is
+  active. Moving the mouse over a tab shows the full session title as a small
+  floating tooltip under the strip (truncated titles stay reachable). The
+  `/tabs` overlay lists the badge + mode + full title too.
 - While a tool runs, a line under the input shows `calling <command>` with a
   spinner (and `esc to interrupt` on the right) and its output is streamed live
   into the transcript
@@ -446,7 +482,7 @@ Project instructions and skills are loaded into the system prompt:
   `Ctrl+O`/`q`/`Esc` on a finished card just closes the modal
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name; per-tab in the TUI, per-session in the CLI), `/provider [id]` (show or switch the provider - also per-tab: the choice lands in the session's settings, not the shared process default; `default`/blank restores the process default provider, resetting the model/variant/sampling selection since they are provider-scoped), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact; switching back to `plan` resets the session approval mode to the configured default and clears the in-memory session grants), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions ask|auto_edit|yolo|none|show` (switch the approval mode interactively; `none` restores interactive approval, `show` lists the current mode and in-memory session grants - approvals granted in `build` are cleared when switching back to `plan`), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name; per-tab in the TUI, per-session in the CLI), `/provider [id]` (show or switch the provider - also per-tab: the choice lands in the session's settings, not the shared process default; `default`/blank restores the process default provider, resetting the model/variant/sampling selection since they are provider-scoped), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact; switching back to `plan` resets the session approval mode to the configured default and clears the in-memory session grants; entering `build` from `plan` defaults the session approval mode to `auto_edit`), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions ask|auto_edit|yolo|none|show` (switch the approval mode interactively; `none` restores interactive approval, `show` lists the current mode and in-memory session grants - approvals granted in `build` are cleared when switching back to `plan`), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

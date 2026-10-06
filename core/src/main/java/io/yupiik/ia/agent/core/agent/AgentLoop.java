@@ -667,13 +667,20 @@ public class AgentLoop {
         statusReporter.setSink(message -> emitter.emit(status(message)));
         // surface provider throttles and retry backoffs: without this the UI only shows a
         // spinner while the resilience layer can silently wait up to minutes between attempts.
-        // the wait is also accumulated so the throughput metric ignores it.
+        // Pauses are transient feedback rendered in the status-strip notification slot (right
+        // side) without touching the leading agent state; the wait is also accumulated so the
+        // throughput metric ignores it.
         this.pauseListener = pause -> {
             turnLlmPausedMs += Math.max(0L, pause.durationMs());
-            emit(
+            emit(new AgentEvent.Pause(
                     pause.kind() == PauseEvent.Pause.THROTTLE
-                            ? status(pause.message())
-                            : notice(AgentEvent.Notice.Level.INFO, pause.message()));
+                            ? AgentEvent.Pause.Kind.THROTTLE
+                            : AgentEvent.Pause.Kind.RETRY,
+                    pause.message(),
+                    pause.durationMs(),
+                    currentSessionId,
+                    subagentId,
+                    subagentName));
         };
         // a resume right after an iteration-cap stop is a fresh window: make it visible instead of
         // looking like one seamless turn in the transcript
@@ -906,13 +913,14 @@ public class AgentLoop {
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         // iteration window cap cascade: per-model behavior > per-provider tuning > global default;
-        // the provider is the session's effective one (per-tab override or process default)
+        // the provider is the session's effective one (per-tab override or process default); only
+        // these window caps are computed once here - the model is re-resolved for every request
+        // below so a mid-turn /model or /provider switch applies from the next round.
         final var resolved = resolvedModel();
         final var maxIterations = resolvedMaxIterations(resolved);
         final var plateauLimit = resolvedPlateauRounds(resolved);
         final var plateauFeedback = resolvedPlateauFeedback(resolved);
         final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
-        final var model = resolved.model();
         final var tools = wireTools();
         final var toolsTokens = toolTokens(tools);
         var overflowRetried = false;
@@ -1021,6 +1029,11 @@ public class AgentLoop {
                 // snapshot of what goes on the wire, for /context llm-payload: taken here so it
                 // carries the pruned/compacted list and the volatile tail, and copied because the
                 // live list keeps growing (messages/tools are immutable, so a shallow copy is enough)
+                // resolved (and tracked) per request: the window caps above stay the turn's ones but
+                // the selection the provider sees is the session's current one, so a /model run
+                // while busy lands on this round instead of only on the next turn
+                attachSessionSettings();
+                final var model = requestModel(resolved);
                 lastLlmPayload = new LlmPayload(
                         sessionId, model, List.copyOf(messages), List.copyOf(tools), "auto", toolsTokens);
                 final var request = new ChatCompletionRequest(
@@ -2027,34 +2040,52 @@ public class AgentLoop {
     }
 
     /**
-     * Iteration window cap cascade: per-model behavior.maxIterations > per-provider tuning.maxIterations
-     * > the global llm.maxIterations default. The provider/model come from {@code resolved} (the
-     * default provider resolved at loop start).
+     * The session's effective provider + model: the per-tab provider/model selection when set,
+     * else the process default one. The model override applies even without a per-tab provider -
+     * a plain {@code /model} (no {@code /provider}) must change what goes on the wire, not only
+     * the name the UI reads from {@code chatClient.model(settings)}.
      */
-    /** The session's effective provider + model: per-session override, else the process default. */
     private ProviderManager.ResolvedModel resolvedModel() {
         if (providerManager == null) {
             return null;
         }
+        final var overrideModel =
+                chatSettings.model() == null || chatSettings.model().isBlank() ? null : chatSettings.model();
         if (chatSettings.providerId() != null) {
             final var provider = providerManager.provider(chatSettings.providerId());
             if (provider != null) {
-                final var model =
-                        chatSettings.model() != null && !chatSettings.model().isBlank()
-                                ? chatSettings.model()
-                                : provider.model();
-                return new ProviderManager.ResolvedModel(provider, model);
+                return new ProviderManager.ResolvedModel(
+                        provider, overrideModel != null ? overrideModel : provider.model());
             }
         }
         final var defaultModel = providerManager.resolveDefault();
+        if (defaultModel != null) {
+            return overrideModel == null
+                    ? defaultModel
+                    : new ProviderManager.ResolvedModel(defaultModel.provider(), overrideModel);
+        }
         final var configModel = configuration == null || configuration.provider() == null
                 ? null
                 : configuration.provider().model();
-        return defaultModel != null
-                ? defaultModel
-                : new ProviderManager.ResolvedModel(providerManager.current(), configModel);
+        return new ProviderManager.ResolvedModel(
+                providerManager.current(), overrideModel != null ? overrideModel : configModel);
     }
 
+    /**
+     * The model the next request must carry: the session's selection resolved right now (a
+     * mid-turn {@code /model} applies from the next round, not only from the next turn), falling
+     * back to the model resolved at window start when this loop has no provider wiring.
+     */
+    private String requestModel(final ProviderManager.ResolvedModel windowModel) {
+        final var current = resolvedModel();
+        return current == null ? (windowModel == null ? null : windowModel.model()) : current.model();
+    }
+
+    /**
+     * Iteration window cap cascade: per-model behavior.maxIterations > per-provider tuning.maxIterations
+     * > the global llm.maxIterations default. The provider/model come from {@code resolved} (the
+     * default provider resolved at loop start).
+     */
     private int resolvedMaxIterations(final ProviderManager.ResolvedModel resolved) {
         final var override = resolved == null || providerManager == null
                 ? 0

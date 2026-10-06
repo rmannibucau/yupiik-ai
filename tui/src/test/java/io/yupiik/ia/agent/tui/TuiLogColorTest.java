@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -37,6 +38,17 @@ class TuiLogColorTest {
         // the debug levels never borrow a role color: they stay on the info hue, only dimmed
         assertNotEquals(palette.primary(), TuiCommand.logLevelColor(palette, null, Level.FINE));
         assertNotEquals(palette.accent(), TuiCommand.logLevelColor(palette, null, Level.FINEST));
+    }
+
+    @Test
+    void onlyWarningsAndAboveRenderBold() {
+        assertTrue(TuiCommand.logStrong(Level.SEVERE));
+        assertTrue(TuiCommand.logStrong(Level.WARNING));
+        assertFalse(TuiCommand.logStrong(Level.INFO));
+        assertFalse(TuiCommand.logStrong(Level.CONFIG));
+        assertFalse(TuiCommand.logStrong(Level.FINE));
+        assertFalse(TuiCommand.logStrong(Level.FINER));
+        assertFalse(TuiCommand.logStrong(Level.FINEST));
     }
 
     @Test

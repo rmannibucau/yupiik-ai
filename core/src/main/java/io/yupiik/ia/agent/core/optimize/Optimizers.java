@@ -77,9 +77,96 @@ public final class Optimizers {
         return space < 0 ? trimmed : trimmed.substring(0, space);
     }
 
+    public static String secondToken(final String command) {
+        final var tokens = command.strip().split("\\s+");
+        for (var i = 1; i < tokens.length; i++) {
+            if (!tokens[i].startsWith("-")) {
+                return tokens[i];
+            }
+        }
+        return "";
+    }
+
+    /**
+     * The third significant (non-flag) token: {@code gh pr view 42} -> {@code view},
+     * {@code gh run list} -> {@code list}, {@code gh api} -> {@code ""}.
+     */
+    public static String thirdToken(final String command) {
+        final var tokens = command.strip().split("\\s+");
+        int found = 0;
+        for (var i = 1; i < tokens.length; i++) {
+            if (tokens[i].startsWith("-")) {
+                continue;
+            }
+            found++;
+            if (found == 2) {
+                return tokens[i];
+            }
+        }
+        return "";
+    }
+
     public static String baseName(final String path) {
         final var i = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
         return i < 0 ? path : path.substring(i + 1);
+    }
+
+    /**
+     * @return true when the first significant head token of {@code command} matches one of {@code names}
+     *     (token-wise, after dropping env assignments and leading {@code cd <dir> &&} segments).
+     */
+    public static boolean matchesHeadToken(final String command, final String... names) {
+        final var tokens = tokenize(command);
+        var i = 0;
+        boolean progressed;
+        do {
+            progressed = false;
+            while (i < tokens.size() && isEnvAssignment(tokens.get(i))) {
+                i++;
+                progressed = true;
+            }
+            if (i + 1 < tokens.size() && "cd".equals(tokens.get(i)) && !"&&".equals(tokens.get(i + 1))) {
+                i += 2;
+                if (i < tokens.size() && "&&".equals(tokens.get(i))) {
+                    i++;
+                }
+                progressed = true;
+            }
+        } while (progressed);
+        if (i >= tokens.size()) {
+            return false;
+        }
+        final var token = baseName(tokens.get(i));
+        for (final var n : names) {
+            if (token.equals(n) || token.equals(n + ".cmd") || token.equals(n + ".bat")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @return the first significant head token, or {@code null} when the command is empty.
+     */
+    public static String headToken(final String command) {
+        final var tokens = tokenize(command);
+        var i = 0;
+        boolean progressed;
+        do {
+            progressed = false;
+            while (i < tokens.size() && isEnvAssignment(tokens.get(i))) {
+                i++;
+                progressed = true;
+            }
+            if (i + 1 < tokens.size() && "cd".equals(tokens.get(i)) && !"&&".equals(tokens.get(i + 1))) {
+                i += 2;
+                if (i < tokens.size() && "&&".equals(tokens.get(i))) {
+                    i++;
+                }
+                progressed = true;
+            }
+        } while (progressed);
+        return i < tokens.size() ? baseName(tokens.get(i)) : null;
     }
 
     public static boolean matchesHead(final String command, final String... names) {

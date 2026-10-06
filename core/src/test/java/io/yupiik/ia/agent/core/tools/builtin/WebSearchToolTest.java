@@ -31,6 +31,7 @@ import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.mcp.WebSearchManager;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
@@ -114,7 +115,7 @@ class WebSearchToolTest {
                 Map.of("yca.storageHome", tempDir.toString(), "yca.tools.websearch.providers.length", "0"));
         final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
         assertFalse(tool.usable());
-        final var mcpManager = new McpManager(config, mapper, List.of(tool), client);
+        final var mcpManager = new McpManager(config, mapper, List.of(tool), client, new ProcessService());
         mcpManager.start();
         final var registry = new ToolRegistry(mcpManager);
         assertFalse(registry.describe().contains("websearch"));
@@ -130,7 +131,7 @@ class WebSearchToolTest {
         final var config = TestConfigs.codingAgent(defaultConfig());
         final var tool = new WebSearchTool(new WebSearchManager(mapper, config, client), config);
         assertTrue(tool.usable());
-        final var mcpManager = new McpManager(config, mapper, List.of(tool), client);
+        final var mcpManager = new McpManager(config, mapper, List.of(tool), client, new ProcessService());
         mcpManager.start();
         final var registry = new ToolRegistry(mcpManager);
         assertTrue(registry.describe().contains("websearch"));

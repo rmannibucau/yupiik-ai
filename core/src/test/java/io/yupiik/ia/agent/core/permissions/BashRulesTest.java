@@ -105,12 +105,46 @@ class BashRulesTest {
             assertTrue(compiled.evaluate(agentMode, "df -h .").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "id -u").allowed(), agentMode.name());
             assertTrue(compiled.evaluate(agentMode, "uname -a").allowed(), agentMode.name());
+            // archive inspection: listing / metadata / extract-to-stdout
+            assertTrue(compiled.evaluate(agentMode, "unzip -l app.zip").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "unzip -Z app.zip").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "unzip -p app.zip META-INF/MANIFEST.MF")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "zipinfo app.zip").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "zipinfo -v app.zip").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "jar tf app.jar").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "jar t app.jar").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "jar tvf app.jar").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "tar tzf app.tgz").allowed(), agentMode.name());
+            assertTrue(compiled.evaluate(agentMode, "tar tvf app.tar").allowed(), agentMode.name());
+            // archive inspection in a loop body with the reported stdin/stderr plumbing
+            assertTrue(
+                    compiled.evaluate(agentMode, "for j in *.jar; do unzip -l $j 2>/dev/null; done")
+                            .allowed(),
+                    agentMode.name());
             // the write forms of these families are carved out
             assertFalse(compiled.evaluate(agentMode, "diff -o out.txt a b").allowed(), agentMode.name());
             assertFalse(
                     compiled.evaluate(agentMode, "diff --output=out.txt a b").allowed(), agentMode.name());
             assertFalse(compiled.evaluate(agentMode, "date -s '2026-01-01'").allowed(), agentMode.name());
             assertFalse(compiled.evaluate(agentMode, "date --set=2026-01-01").allowed(), agentMode.name());
+            // archive writes/extraction match no listing prefix and stay gated
+            assertFalse(compiled.evaluate(agentMode, "unzip app.zip").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "unzip -o app.zip").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "unzip -d out app.zip").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "zip app.zip p1 p2").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "jar xf app.jar").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "jar cf out.jar .").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "jar uf app.jar").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "tar xzf app.tgz").allowed(), agentMode.name());
+            assertFalse(compiled.evaluate(agentMode, "tar czf out.tgz d/").allowed(), agentMode.name());
+            // a mutating command inside a loop body stays gated
+            assertFalse(
+                    compiled.evaluate(agentMode, "for j in *.jar; do rm -rf $j 2>/dev/null; done")
+                            .allowed(),
+                    agentMode.name());
         }
     }
 
@@ -297,6 +331,21 @@ class BashRulesTest {
         assertEquals(List.of("echo a b", "ls -la"), compiled.segments("echo \"a b\" | ls -la"));
         assertEquals(List.of("git status"), compiled.segments("  git   status  "));
         assertEquals(List.of(), compiled.segments(""));
+    }
+
+    @Test
+    void segmentsStripLoopKeywordsAndToleratedRedirectsForPatternMatching() {
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        // structural keywords are syntax, not command material: `for` is stripped from the header
+        // segment (leaving the bare iteration words), `do` and the tolerated /dev/null plumbing are
+        // stripped from the body and the keyword-only `done` segment renders empty (so it is omitted)
+        assertEquals(
+                List.of("f in x", "unzip -l $f"), compiled.segments("for f in x; do unzip -l $f 2>/dev/null; done"));
+        // env assignments are stripped from the segment view
+        assertEquals(List.of("env grep foo bar"), compiled.segments("A=1 env grep foo bar"));
+        // non-tolerated redirects stay in the view: the denial message quotes the segment as-is
+        // ("segment '...' carries a redirection or command substitution") and the segment is gated
+        assertEquals(List.of("grep foo bar > out.txt"), compiled.segments("grep foo bar > out.txt"));
     }
 
     @Test

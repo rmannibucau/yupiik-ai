@@ -165,17 +165,43 @@ class ConversationTranscriptTest {
     void runningToolBlockIsWrappedInToolMarkers() {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", 3, "s1", null, null));
         t.onEvent(new AgentEvent.ToolStream("bash", "streamed line", "s1"));
 
         final var md = t.markdown("|", "welcome");
         assertTrue(md.contains(ConversationTranscript.TOOL_BEGIN));
         assertTrue(md.contains(ConversationTranscript.TOOL_END));
-        assertTrue(md.contains("`| running tail -f log`"));
+        assertTrue(md.contains("`| running tail -f log (#3)`"));
         assertTrue(md.contains("```text\nstreamed line\n```"));
 
         final var regions = ConversationTranscript.regions(md);
         assertTrue(regions.stream().anyMatch(ConversationTranscript.Region::tool));
+    }
+
+    @Test
+    void runningToolBlockOmitsOrdinalWhenUnknown() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.ToolStarted("read", "{}", 0, "s1", null, null));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("`| running read`"), md);
+        assertFalse(md.contains("(#"), md);
+    }
+
+    @Test
+    void parallelRunningToolsEachCarryTheirOrdinal() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", 1, "s1", null, null));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"tail -f log\"}", 2, "s1", null, null));
+        // stream events must land on the matching (last-started) in-flight call
+        t.onEvent(new AgentEvent.ToolStream("bash", "line 1", "s1"));
+
+        final var md = t.markdown("|", "welcome");
+        assertTrue(md.contains("`| running mvn test (#1)`"), md);
+        assertTrue(md.contains("`| running tail -f log (#2)`"), md);
+        assertTrue(md.contains("line 1"), md);
     }
 
     @Test
@@ -378,7 +404,9 @@ class ConversationTranscriptTest {
     void statusNoticeAndUsageAreTracked() {
         final var t = new ConversationTranscript();
         t.onEvent(AgentEvent.Notice.warn("careful", "s1"));
-        assertEquals("careful", t.status());
+        // WARN notices are durable transcript lines only: the leading status slot stays empty
+        // (it is reserved for the busy/ready state, errors and the dedicated Status channel)
+        assertEquals("", t.status());
         assertTrue(t.transcript().toString().contains("> ⚠ warning: careful"));
 
         t.onEvent(new AgentEvent.Status("working", "s1"));
@@ -660,19 +688,16 @@ class ConversationTranscriptTest {
     }
 
     @Test
-    void retryWaitNoticeIsRenderedAsInfoNotError() {
-        // the resilience layer surfaces a retry wait through the pause listener; it must reach the
-        // transcript as an informational notice (the user sees feedback during the backoff) without
-        // tripping the error/status path reserved for real failures
+    void retryWaitPauseIsTransientAndNeverTouchesStatus() {
+        // provider-imposed delays (throttle/retry backoff) surface as a dedicated Pause event:
+        // they must never write a durable transcript line nor replace the leading status
         final var t = new ConversationTranscript();
-        t.onEvent(new AgentEvent.Notice(
-                AgentEvent.Notice.Level.INFO,
-                "LLM call failed (429: {\"error\":{\"message\":\"rate limited\"}}), retrying in ~30s (attempt 1/3)",
-                "s1"));
+        t.onEvent(new AgentEvent.Pause(
+                AgentEvent.Pause.Kind.RETRY, "LLM call failed, retrying in ~0s (attempt 2/3)", 0, "s1"));
         assertFalse(t.status().startsWith("error:"), t.status());
+        assertFalse(t.status().startsWith("LLM"), "a pause must not leak into the leading status: " + t.status());
         final var md = t.transcript().toString();
-        assertTrue(md.contains("LLM call failed (429"), md);
-        assertTrue(md.contains("retrying in ~30s (attempt 1/3)"), md);
+        assertFalse(md.contains("retrying in ~0s"), "a pause must not write a durable transcript line: " + md);
     }
 
     @Test

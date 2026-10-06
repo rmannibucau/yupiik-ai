@@ -124,6 +124,37 @@ public sealed interface AgentEvent {
     }
 
     /**
+     * A transient provider-imposed delay: rate-limit throttling or a retry backoff
+     * surfaced by the chat resilience layer. Unlike {@link Status}, a pause must
+     * never replace the leading agent state (it is a side fact about the current
+     * call, not the turn's state); frontends render it in their trailing
+     * notification slot - the TUI's right-side {@code ⓘ} slot - and the next
+     * pause overwrites it. It is not persisted: like {@link Status} it is
+     * transient feedback, the caller reports the failure itself if retries
+     * eventually exhaust.
+     */
+    record Pause(Kind kind, String message, long durationMs, String sessionId, String subagentId, String subagentName)
+            implements AgentEvent {
+
+        public enum Kind {
+            THROTTLE,
+            RETRY
+        }
+
+        public Pause(final Kind kind, final String message, final long durationMs, final String sessionId) {
+            this(kind, message, durationMs, sessionId, null, null);
+        }
+
+        public static Pause throttle(final String message, final long durationMs, final String sessionId) {
+            return new Pause(Kind.THROTTLE, message, durationMs, sessionId);
+        }
+
+        public static Pause retry(final String message, final long durationMs, final String sessionId) {
+            return new Pause(Kind.RETRY, message, durationMs, sessionId);
+        }
+    }
+
+    /**
      * A durable, user-visible non-conversation notice. Unlike {@link Status},
      * this is rendered as a distinct transcript line (not only the transient
      * status bar) so feedback survives and is understandable in all cases,

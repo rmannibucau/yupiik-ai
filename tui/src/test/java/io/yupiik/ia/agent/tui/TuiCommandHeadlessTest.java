@@ -55,6 +55,7 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.lang.reflect.Type;
 import java.nio.file.Files;
@@ -382,6 +383,7 @@ class TuiCommandHeadlessTest {
                             d.providerManager()),
                     autoLogConfigurer.instance(),
                     d.mcpManager(),
+                    new ProcessService(),
                     runExecutor,
                     d.providerManager(),
                     d.agentProvider(),
@@ -714,7 +716,7 @@ class TuiCommandHeadlessTest {
         logger.info("captured info log");
         awaitText("captured info log");
         // inline log shape: [label][LEVEL][short logger] message on the same row
-        awaitText("[INFO][core.codegraph.StructuralCodeGraph]");
+        awaitText("[INFO][core.codegraph.StructuralCodeGraph] captured info log");
 
         logger.warning("captured warning log");
         awaitText("captured warning log");

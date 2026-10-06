@@ -417,6 +417,45 @@ class PermissionServiceTest {
     }
 
     @Test
+    void planModeAllowsArchiveInspectionLoops() {
+        // regression: `for j in *.jar; do unzip -l $j 2>/dev/null; done` was denied headless in plan
+        // mode because `unzip -l` was not a read-only family (the `do`/`done` keywords are syntax,
+        // and the tolerated 2>/dev/null redirect stays allowed)
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setMode(AgentMode.PLAN);
+        assertTrue(service.check(
+                        "bash",
+                        ToolCategory.BASH,
+                        Map.of("command", "for j in *.jar; do unzip -l $j 2>/dev/null; done"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "unzip -Z dist.zip | head -20"))
+                .allowed());
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "jar tf app.jar | grep Main"))
+                .allowed());
+        // extraction writes are not part of the family
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "unzip dist.zip -d out/"))
+                .allowed());
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "jar xf app.jar"))
+                .allowed());
+    }
+
+    @Test
+    void denyListMatchesNormalizedLoopSegments() {
+        // `do rm -rf $f 2>/dev/null` must not bypass a `rm *` deny through the `do` keyword
+        // and the tolerated redirect: the segment is normalized to `rm -rf $f` before matching
+        final var service = service(PermissionMode.ASK, List.of(), List.of("rm *"));
+        final var decision = service.check(
+                "bash", ToolCategory.BASH, Map.of("command", "for f in *.jar; do rm -rf $f 2>/dev/null; done"));
+        assertFalse(decision.allowed());
+        assertTrue(decision.reason().contains("denied by configuration"));
+        assertTrue(decision.reason().contains("rm -rf $f"));
+        // the harmless loop body stays allowed
+        final var ok = service(PermissionMode.ASK, List.of(), List.of("rm *"));
+        assertTrue(ok.check("bash", ToolCategory.BASH, Map.of("command", "for f in *.jar; do ls -la $f; done"))
+                .allowed());
+    }
+
+    @Test
     void planModeBashAllowsReadOnlySedButNotInPlace() {
         final var service =
                 service(PermissionMode.ASK, List.of(), List.of(), ruleWithExcludes(PermissionMode.YOLO, "sed", "-i"));

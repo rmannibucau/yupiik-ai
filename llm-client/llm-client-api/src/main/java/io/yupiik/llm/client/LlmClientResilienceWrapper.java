@@ -615,6 +615,14 @@ public final class LlmClientResilienceWrapper {
             throttle(null, listener);
             relaxAdaptedConcurrency();
             if (semaphore != null) {
+                // a concurrency wait is invisible to the UI otherwise: surface it once per
+                // blocked attempt through the same pause listener as throttling/backoffs
+                if (semaphore.availablePermits() == 0 && listener != null) {
+                    listener.accept(new PauseEvent(
+                            0,
+                            "concurrency limit reached, " + (semaphore.getQueueLength() + 1) + " requests waiting",
+                            0));
+                }
                 semaphore.acquire();
             }
             return completedFuture(null);

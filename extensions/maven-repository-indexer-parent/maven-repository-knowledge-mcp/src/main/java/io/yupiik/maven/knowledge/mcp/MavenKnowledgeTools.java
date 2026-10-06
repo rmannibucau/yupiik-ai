@@ -33,6 +33,7 @@ import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import io.yupiik.maven.knowledge.mcp.configuration.MavenKnowledgeConfiguration;
 import io.yupiik.maven.knowledge.mcp.llm.MCPKnowledgeLlm;
 import io.yupiik.maven.knowledge.mcp.model.IndexResponse;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import io.yupiik.maven.knowledge.write.KnowledgeWriter;
 import java.io.IOException;
 import java.net.URI;
@@ -57,16 +58,19 @@ public class MavenKnowledgeTools {
     private final ExtendedHttpClient httpClient;
     private final KnowledgeConfig knowledgeConfig;
     private final LocalRepository localRepository;
+    private final ProcessService processes;
 
     public MavenKnowledgeTools(
             final MavenKnowledgeConfiguration configuration,
             final MCPSessions sessions,
             final JsonMapper mapper,
-            final ExtendedHttpClient httpClient) {
+            final ExtendedHttpClient httpClient,
+            final ProcessService processes) {
         this.configuration = configuration;
         this.sessions = sessions;
         this.mapper = mapper;
         this.httpClient = httpClient;
+        this.processes = processes;
         final var repo = KnowledgeConfig.defaults(
                 java.nio.file.Path.of(configuration.localRepository().replace("~", System.getProperty("user.home"))));
         this.knowledgeConfig = new KnowledgeConfig(
@@ -127,7 +131,7 @@ public class MavenKnowledgeTools {
                         knowledgeConfig.maxJavadocPages())
                 : knowledgeConfig;
         final var llm = new MCPKnowledgeLlm(
-                sessions, request, mapper, configuration.projectDir(), knowledgeConfig.localRepository());
+                sessions, request, mapper, configuration.projectDir(), knowledgeConfig.localRepository(), processes);
         final var indexer = newIndexer(effective, llm);
         try {
             final var results = indexer.index(gavList, null);

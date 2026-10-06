@@ -38,6 +38,7 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.BashTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetSocketAddress;
@@ -139,7 +140,8 @@ class BtwAnswererTest {
      * and the real bash tool whose plan-mode rules gate which commands may actually run.
      */
     private ToolRegistry registry() {
-        final var tools = List.<EmbeddedTool>of(readFileTool(), writeFileTool(), new BashTool(NOOP));
+        final var tools =
+                List.<EmbeddedTool>of(readFileTool(), writeFileTool(), new BashTool(NOOP, new ProcessService()));
         return new ToolRegistry(null) {
             @Override
             public List<EmbeddedTool> tools() {

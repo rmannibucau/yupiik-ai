@@ -105,6 +105,26 @@ public record CommandPermissionConfiguration(
                 command("git submodule", "add", "update", "init", "deinit", "set-url", "sync"),
 
                 // -----------------------------------------------------------------
+                // Archives: read-only inspection (listing / metadata / extract-to-stdout)
+                // -----------------------------------------------------------------
+                // Only the listing prefixes below are allowlisted: extraction, creation
+                // and update forms (`unzip app.zip`, `jar xf`, `tar xzf`, ...) match no
+                // prefix and stay gated. Bundled flags beyond these (eg. `tar -tf`,
+                // `jar tzvf`) are not covered by the defaults - add a rule in
+                // yca.permissions.bash.rules if a workspace needs them.
+                command("unzip -l"),
+                command("unzip -p"),
+                command("unzip -Z"),
+                command("zipinfo"),
+                command("jar t"),
+                command("jar tf"),
+                command("jar tvf"),
+                command("tar t"),
+                command("tar tf"),
+                command("tar tvf"),
+                command("tar tzf"),
+
+                // -----------------------------------------------------------------
                 // Filesystem inspection
                 // -----------------------------------------------------------------
                 command("ls"),
@@ -248,6 +268,37 @@ public record CommandPermissionConfiguration(
 
                 // date is read-only unless setting the system clock.
                 command("date", "-s", "--set"),
+
+                // -----------------------------------------------------------------
+                // GitHub CLI: read-only inspection families
+                // -----------------------------------------------------------------
+                command("gh pr view"),
+                command("gh pr checks"),
+                command("gh pr diff"),
+                command("gh pr list"),
+                command("gh issue view"),
+                command("gh issue list"),
+                command("gh run list"),
+                command("gh run view"),
+                command("gh run watch"),
+                command("gh api"),
+
+                // -----------------------------------------------------------------
+                // Kubernetes / Docker: read-only inspection families
+                // -----------------------------------------------------------------
+                command("kubectl get"),
+                command("kubectl describe"),
+                command("kubectl logs"),
+                command("kubectl explain"),
+                command("kubectl version"),
+                command("kubectl api-resources"),
+                command("kubectl top"),
+                command("docker ps"),
+                command("docker images"),
+                command("docker logs"),
+                command("docker inspect"),
+                command("docker version"),
+                command("docker compose ps"),
 
                 // -----------------------------------------------------------------
                 // Java

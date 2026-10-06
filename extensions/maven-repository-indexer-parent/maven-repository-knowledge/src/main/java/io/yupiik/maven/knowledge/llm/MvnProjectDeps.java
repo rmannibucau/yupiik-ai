@@ -16,6 +16,7 @@
 package io.yupiik.maven.knowledge.llm;
 
 import io.yupiik.maven.knowledge.Gav;
+import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -62,6 +63,38 @@ public final class MvnProjectDeps {
      *         empty when Maven is not runnable, times out, fails or the directory is absent.
      */
     public static List<Gav> resolve(final Path projectDir, final long timeoutMs, final Path localRepository) {
+        return resolve(projectDir, timeoutMs, localRepository, null);
+    }
+
+    /**
+     * {@code resolve} with the project-local cache under {@code $projectDir/.yca}.
+     *
+     * @param projectDir the Maven project directory.
+     * @param timeoutMs  how long to wait for {@code mvn} to complete before killing it.
+     * @return the resolved coordinates (same semantics as {@link #resolve(Path, long, Path)}).
+     */
+    public static List<Gav> resolve(final Path projectDir, final long timeoutMs) {
+        return resolve(projectDir, timeoutMs, null, null);
+    }
+
+    /**
+     * Resolves the project dependencies, caching the result under the project tree at
+     * {@code $projectDir/.yca/maven.dependency.list}, exactly like
+     * {@link #resolve(Path, long, Path)} but handing every spawned {@code mvn} process to the
+     * given {@link ProcessService} so interruptions and shutdowns can dispose the whole tree.
+     *
+     * @param projectDir       the Maven project directory; when it is not an existing directory an empty list is
+     *                         returned.
+     * @param timeoutMs        how long to wait for {@code mvn} to complete before killing it.
+     * @param localRepository  retained for backward compatibility with callers; the cache now lives under the
+     *                         project tree and this parameter no longer controls its location.
+     * @param processes        the {@link ProcessService} to track spawned Maven processes with (may be {@code null}
+     *                         for callers that do not need tree disposal).
+     * @return the project's resolved, de-duplicated dependency coordinates ordered by {@link DependencyScope#order()},
+     *         empty when Maven is not runnable, times out, fails or the directory is absent.
+     */
+    public static List<Gav> resolve(
+            final Path projectDir, final long timeoutMs, final Path localRepository, final ProcessService processes) {
         if (projectDir == null || !Files.isDirectory(projectDir)) {
             return List.of();
         }
@@ -73,7 +106,7 @@ public final class MvnProjectDeps {
         if (cached != null) {
             return cached;
         }
-        final var deps = resolveFromMaven(projectDir, timeoutMs);
+        final var deps = resolveFromMaven(projectDir, timeoutMs, processes);
         if (deps.isEmpty()) {
             // dependency:list failed (build extension not resolvable offline, reactor incoherence, ...): a
             // project with zero resolved dependencies is implausible, so do not cache an empty failure and
@@ -84,18 +117,8 @@ public final class MvnProjectDeps {
         return deps;
     }
 
-    /**
-     * {@code resolve} with the project-local cache under {@code $projectDir/.yca}.
-     *
-     * @param projectDir the Maven project directory.
-     * @param timeoutMs  how long to wait for {@code mvn} to complete before killing it.
-     * @return the resolved coordinates (same semantics as {@link #resolve(Path, long, Path)}).
-     */
-    public static List<Gav> resolve(final Path projectDir, final long timeoutMs) {
-        return resolve(projectDir, timeoutMs, null);
-    }
-
-    private static List<Gav> resolveFromMaven(final Path projectDir, final long timeoutMs) {
+    private static List<Gav> resolveFromMaven(
+            final Path projectDir, final long timeoutMs, final ProcessService processes) {
         final var isWindows =
                 System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
         final var mvnw = projectDir.resolve(isWindows ? "mvnw.cmd" : "mvnw");
@@ -113,43 +136,122 @@ public final class MvnProjectDeps {
         }
         // try offline first (fast when everything is cached); if the project's build extensions or plugins are
         // not yet in the local repo, offline resolution aborts before any goal runs, so fall back to online.
-        var deps = runMaven(launcher, true, projectDir, timeoutMs);
+        var deps = runMaven(launcher, true, projectDir, timeoutMs, processes);
         if (deps.isEmpty()) {
-            deps = runMaven(launcher, false, projectDir, timeoutMs);
+            deps = runMaven(launcher, false, projectDir, timeoutMs, processes);
         }
         return deps;
     }
 
+    /** Upper bound on the captured Maven output; beyond it the tail is dropped (the pipe still gets drained). */
+    private static final int MAX_MAVEN_OUTPUT_CHARS = 2_000_000;
+
     private static List<Gav> runMaven(
-            final List<String> launcher, final boolean offline, final Path projectDir, final long timeoutMs) {
+            final List<String> launcher,
+            final boolean offline,
+            final Path projectDir,
+            final long timeoutMs,
+            final ProcessService processes) {
+        final var command = new ArrayList<>(launcher);
+        if (offline) {
+            command.add("-o");
+        }
+        command.add("dependency:list");
+        final var pb = new ProcessBuilder(command);
+        pb.directory(projectDir.toFile());
+        pb.redirectErrorStream(true);
+        final Process process;
         try {
-            final var command = new ArrayList<>(launcher);
-            if (offline) {
-                command.add("-o");
-            }
-            command.add("dependency:list");
-            final var pb = new ProcessBuilder(command);
-            pb.directory(projectDir.toFile());
-            pb.redirectErrorStream(true);
-            final var process = pb.start();
-            final String output;
-            try (final var in = process.getInputStream()) {
-                output = new String(in.readAllBytes(), StandardCharsets.UTF_8);
-            }
-            if (!process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)) {
-                process.destroyForcibly();
-                return List.of();
-            }
-            if (process.exitValue() != 0) {
-                return List.of();
-            }
-            return parse(output);
-        } catch (final IOException | InterruptedException e) {
-            if (e instanceof InterruptedException ie) {
-                Thread.currentThread().interrupt();
-            }
+            process = pb.start();
+        } catch (final IOException e) {
             return List.of();
         }
+        if (processes != null) {
+            processes.track(process);
+        }
+        // read the merged stream on a daemon thread with a capped buffer: the main thread polls the
+        // deadline (so a wedged mvn that never exits cannot hang the read) and disposes the whole tree
+        // on interrupt/timeout instead of leaving an orphaned mvn behind.
+        final var output = new java.util.concurrent.atomic.AtomicReference<String>();
+        final var reader = new Thread(
+                () -> {
+                    try (final var in = process.getInputStream()) {
+                        output.set(readCapped(in, MAX_MAVEN_OUTPUT_CHARS));
+                    } catch (final IOException e) {
+                        output.set("");
+                    }
+                },
+                "mvn-dependency-list-reader");
+        reader.setDaemon(true);
+        reader.start();
+        var finished = false;
+        final var deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        while (true) {
+            final var remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                break;
+            }
+            try {
+                finished =
+                        process.waitFor(Math.min(100, Math.max(1, remainingNanos / 1_000_000)), TimeUnit.MILLISECONDS);
+                if (finished) {
+                    break;
+                }
+            } catch (final InterruptedException e) {
+                dispose(process, processes);
+                Thread.currentThread().interrupt();
+                return List.of();
+            }
+        }
+        if (!finished) {
+            dispose(process, processes);
+            return List.of();
+        }
+        try {
+            reader.join(500);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (process.exitValue() != 0) {
+            return List.of();
+        }
+        final var text = output.get();
+        return parse(text == null ? "" : text);
+    }
+
+    /** Kills and reaps the process tree through the service when available, else plain destroy. */
+    private static void dispose(final Process process, final ProcessService processes) {
+        if (processes != null) {
+            processes.dispose(process);
+        } else if (process.isAlive()) {
+            process.destroyForcibly();
+        }
+    }
+
+    /**
+     * Reads the stream into a capped buffer while still draining it to the end, so a huge or
+     * endless output cannot blow the heap nor block the child on a full pipe.
+     */
+    private static String readCapped(final java.io.InputStream in, final int maxChars) throws IOException {
+        final var out = new StringBuilder(Math.min(maxChars, 4096));
+        final byte[] buffer = new byte[8192];
+        var overflow = false;
+        int n;
+        while ((n = in.read(buffer)) != -1) {
+            if (!overflow) {
+                final var chunk = new String(buffer, 0, n, StandardCharsets.UTF_8);
+                if (out.length() + chunk.length() > maxChars) {
+                    out.append(chunk, 0, Math.max(0, maxChars - out.length()));
+                    overflow = true;
+                } else {
+                    out.append(chunk);
+                }
+            }
+        }
+        if (overflow) {
+            out.append("\n... output truncated");
+        }
+        return out.toString();
     }
 
     // -- dependency-resolution caching (keyed by the project build files fingerprint) --

@@ -478,6 +478,20 @@ public class AnsiShellFrontend implements ShellFrontend {
             notice(level, prefix + message);
         } else if (event
                 instanceof
+                AgentEvent.Pause(
+                        AgentEvent.Pause.Kind kind,
+                        String message,
+                        long durationMs,
+                        String sessionId,
+                        String subagentId,
+                        String subagentName)) {
+            stopSpinner();
+            ensureStderrNewline();
+            printlnErr(MarkdownColorizer.status(
+                    prefix + (kind == AgentEvent.Pause.Kind.RETRY ? symbols.warningMarker() : symbols.infoMarker())
+                            + " " + message));
+        } else if (event
+                instanceof
                 AgentEvent.Status(String message, String sessionId, String subagentId, String subagentName)) {
             status(prefix + message);
         } else if (event
@@ -531,6 +545,10 @@ public class AnsiShellFrontend implements ShellFrontend {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.Error(var _, var _, String id, String name)) {
+            subagentId = id;
+            subagentName = name;
+        } else if (event
+                instanceof AgentEvent.Pause(var _, String message, long durationMs, String _, String id, String name)) {
             subagentId = id;
             subagentName = name;
         } else if (event
