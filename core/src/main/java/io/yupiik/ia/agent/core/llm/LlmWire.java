@@ -160,6 +160,7 @@ final class LlmWire {
                 Math.toIntExact(usage.total()),
                 Math.toIntExact(usage.cacheRead()),
                 Math.toIntExact(usage.cacheWrite()),
+                Math.toIntExact(usage.reasoning()),
                 usage.generationTime());
     }
 

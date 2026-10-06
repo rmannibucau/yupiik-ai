@@ -229,14 +229,20 @@ public sealed interface AgentEvent {
      *
      * @param outputTokens output tokens produced in the turn, as reported by the provider or estimated
      *        when the provider reports no usage
+     * @param reasoningTokens output tokens spent on internal reasoning within {@code outputTokens}, 0
+     *        when the provider does not report a breakdown
      * @param activeMs time spent inside LLM requests, excluding provider throttles, retry backoffs and
      *        everything outside of the LLM calls (tool executions, compaction, user typing, ...)
      * @param reportedMs generation time as reported by the provider itself, {@code 0} when the provider
      *        does not publish any
      */
-    record Throughput(int outputTokens, long activeMs, long reportedMs) {
+    record Throughput(int outputTokens, int reasoningTokens, long activeMs, long reportedMs) {
         /** Zeroed throughput, used when a turn produced nothing. */
-        public static final Throughput EMPTY = new Throughput(0, 0, 0);
+        public static final Throughput EMPTY = new Throughput(0, 0, 0, 0);
+
+        public Throughput(final int outputTokens, final long activeMs, final long reportedMs) {
+            this(outputTokens, 0, activeMs, reportedMs);
+        }
 
         /**
          * Our own measurement: output tokens over the time actually spent producing them. This is the
@@ -246,6 +252,25 @@ public sealed interface AgentEvent {
          */
         public double tokensPerSecond() {
             return activeMs > 0 && outputTokens > 0 ? outputTokens * 1000.0 / activeMs : 0;
+        }
+
+        /**
+         * The output tokens that were not spent reasoning: {@code outputTokens} minus
+         * {@code reasoningTokens}, never negative.
+         *
+         * @return the visible output token count.
+         */
+        public int outputTokensOnly() {
+            return Math.max(0, outputTokens - reasoningTokens);
+        }
+
+        /**
+         * The reasoning throughput: reasoning tokens over the time actually spent producing them.
+         *
+         * @return the average reasoning tokens per second, {@code 0} when it cannot be computed.
+         */
+        public double reasoningTokensPerSecond() {
+            return activeMs > 0 && reasoningTokens > 0 ? reasoningTokens * 1000.0 / activeMs : 0;
         }
 
         /**

@@ -16,8 +16,15 @@
 package io.yupiik.ia.agent.core.shell;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.Usage;
+import java.time.Clock;
 import org.junit.jupiter.api.Test;
 
 class MetricsFormatTest {
@@ -43,5 +50,61 @@ class MetricsFormatTest {
         assertEquals("", MetricsFormat.tokPerSec(new AgentEvent.Throughput(0, 1_000, 0)), "no output token");
         assertEquals("", MetricsFormat.tokPerSec(new AgentEvent.Throughput(100, 0, 0)), "no time known");
         assertEquals("", MetricsFormat.tokPerSec(null));
+    }
+
+    @Test
+    void reasoningBreakdownIsHiddenInCompactMode() {
+        final var transcript = transcriptWithReasoningTurn();
+        final var usage = usageWithReasoning();
+        final var report = MetricsFormat.report(
+                new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT), transcript, usage);
+        final var lines = report.split("\n");
+        assertEquals(2, lines.length, "the report contract stays exactly two lines: " + report);
+        assertEquals("metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT", lines[0]);
+        assertFalse(lines[1].contains("reasoning"), "compact must not surface the reasoning drill-down: " + lines[1]);
+        assertTrue(lines[1].contains("2 LLM (1234ms think)"), lines[1]);
+        assertTrue(lines[1].contains("3 tools (600/700ms)"), lines[1]);
+        assertTrue(lines[1].contains("session: 1 LLM calls"), lines[1]);
+    }
+
+    @Test
+    void reasoningBreakdownIsSurfacedInFullMode() {
+        final var transcript = transcriptWithReasoningTurn();
+        final var usage = usageWithReasoning();
+        final var report =
+                MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, usage);
+        final var lines = report.split("\n");
+        assertEquals(2, lines.length, "the report contract stays exactly two lines: " + report);
+        assertEquals(
+                "2 LLM (1234ms think) · out 953 tok · reasoning 251 tok · 3 tools (600/700ms)"
+                        + " · 602.0 tok/s (real 566.6 tok/s) · reasoning 125.5 tok/s · 12.3s"
+                        + " · session: 1 LLM calls · reasoning 500 tok",
+                lines[1]);
+    }
+
+    @Test
+    void fullModeKeepsTheCompactShapeWithoutReasoning() {
+        final var transcript = new ConversationTranscript();
+        transcript.onEvent(new AgentEvent.TurnMetrics(
+                1, 0, 300, 400, 2, 5_000, new AgentEvent.Throughput(120, 0, 1_000, 0), "s1", null, null));
+        final var report =
+                MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
+        assertEquals(
+                "metrics: showPerTurn=true showSessionTotals=true displayMode=FULL\n"
+                        + "1 LLM · 2 tools (300/400ms) · 120.0 tok/s · 5.0s",
+                report);
+    }
+
+    private static ConversationTranscript transcriptWithReasoningTurn() {
+        final var transcript = new ConversationTranscript();
+        transcript.onEvent(new AgentEvent.TurnMetrics(
+                2, 1_234, 600, 700, 3, 12_300, new AgentEvent.Throughput(1_204, 251, 2_000, 2_125), "s1", null, null));
+        return transcript;
+    }
+
+    private static UsageTracker usageWithReasoning() {
+        final var usage = new UsageTracker(null, null, null, Clock.systemUTC());
+        usage.record(new Usage(5_000, 3_000, 8_000, 0, 0, 500, 0));
+        return usage;
     }
 }

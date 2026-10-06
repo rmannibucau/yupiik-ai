@@ -161,6 +161,17 @@ class UsageTrackerTest {
     }
 
     @Test
+    void reasoningTokensAreCountedAndReset() {
+        final var tracker = new UsageTracker(null, null, null, Clock.systemUTC());
+        tracker.record(new Usage(100, 120, 220, 0, 0, 50, 0));
+        assertEquals(50, tracker.reasoningTokens(), "reasoning must accumulate regular calls");
+        tracker.recordAuxiliary(new Usage(11, 13, 24, 0, 0, 7, 0));
+        assertEquals(57, tracker.reasoningTokens(), "auxiliary spend adds to the same reasoning total");
+        tracker.reset();
+        assertEquals(0, tracker.reasoningTokens());
+    }
+
+    @Test
     void detectsFromModelsAndCachesIt() {
         modelsBody =
                 "{\"data\":[{\"id\":\"test-model\",\"owned_by\":\"llamacpp\",\"meta\":{\"n_ctx\":196608,\"n_ctx_train\":262144}}]}";

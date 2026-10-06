@@ -249,6 +249,81 @@ class OpenAIDialectTest {
     }
 
     @Test
+    void completionsDialectReadsTheReasoningTokensFromTheOutputBreakdown(final JsonMapper mapper) throws Exception {
+        server.createContext(
+                "/v1/chat/completions",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                                + "\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,"
+                                + "\"completion_tokens\":100,\"total_tokens\":103,"
+                                + "\"completion_tokens_details\":{\"reasoning_tokens\":40}}}"));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals(
+                40L,
+                response.usage().reasoning(),
+                "the completion_tokens_details.reasoning_tokens breakdown must reach the neutral usage");
+        assertEquals(100, response.usage().completion(), "reasoning tokens stay inside the completion aggregate");
+    }
+
+    @Test
+    void completionsDialectReadsTheReasoningTokensFromANonStandardTopLevelField(final JsonMapper mapper)
+            throws Exception {
+        server.createContext(
+                "/v1/chat/completions",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                                + "\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,"
+                                + "\"completion_tokens\":100,\"total_tokens\":103,\"reasoning_tokens\":25}}"));
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                ProviderSpec.of(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals(
+                25L,
+                response.usage().reasoning(),
+                "a non-standard top-level reasoning_tokens field is the fallback when no breakdown object exists");
+    }
+
+    @Test
+    void responsesDialectReadsTheReasoningTokensFromTheOutputBreakdown(final JsonMapper mapper) throws Exception {
+        server.createContext(
+                "/v1/responses",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"r1\",\"model\":\"m\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\","
+                                + "\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}],\"usage\":{\"input_tokens\":3,"
+                                + "\"output_tokens\":100,\"total_tokens\":103,"
+                                + "\"output_tokens_details\":{\"reasoning_tokens\":30}}}"));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var response = dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals(
+                30L,
+                response.usage().reasoning(),
+                "the output_tokens_details.reasoning_tokens breakdown must reach the neutral usage");
+    }
+
+    @Test
     void completionsDialectStreamsTextDeltas(final JsonMapper mapper) throws Exception {
         final var sse = String.join(
                 "\n",

@@ -44,6 +44,7 @@ public class UsageTracker {
     private final ContextWindowCache contextWindowCache;
     private final AtomicLong promptTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
+    private final AtomicLong reasoningTokens = new AtomicLong();
     private final AtomicLong cacheReadTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
     private final AtomicLong auxiliaryPromptTokens = new AtomicLong();
@@ -94,6 +95,7 @@ public class UsageTracker {
         }
         promptTokens.addAndGet(usage.promptTokens());
         completionTokens.addAndGet(usage.completionTokens());
+        reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
     }
@@ -110,6 +112,7 @@ public class UsageTracker {
         }
         promptTokens.addAndGet(usage.promptTokens());
         completionTokens.addAndGet(usage.completionTokens());
+        reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
         auxiliaryPromptTokens.addAndGet(usage.promptTokens());
@@ -185,6 +188,10 @@ public class UsageTracker {
         return completionTokens.get();
     }
 
+    public long reasoningTokens() {
+        return reasoningTokens.get();
+    }
+
     public long cacheReadTokens() {
         return cacheReadTokens.get();
     }
@@ -208,6 +215,7 @@ public class UsageTracker {
     public void reset() {
         promptTokens.set(0);
         completionTokens.set(0);
+        reasoningTokens.set(0);
         requests.set(0);
         auxiliaryPromptTokens.set(0);
         auxiliaryCompletionTokens.set(0);

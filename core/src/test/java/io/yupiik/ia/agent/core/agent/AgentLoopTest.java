@@ -477,7 +477,7 @@ class AgentLoopTest {
     void turnThroughputExposesTheServerSideRateWhenTheProviderReportsOne() {
         // 100 output tokens, 2s of generation as reported by the server itself
         final var reply = new ScriptedReply(
-                "done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, 2_000L));
+                "done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, null, 2_000L));
         loop(chatClient(new ArrayDeque<>(List.of(reply)), new ArrayList<>()), null, configuration(true))
                 .run("do it", null, "s1", null, () -> false);
 
@@ -502,6 +502,21 @@ class AgentLoopTest {
                 TokenEstimator.estimate(content),
                 lastTurnMetrics().throughput().outputTokens(),
                 "without provider usage the produced tokens are estimated from what came back");
+    }
+
+    @Test
+    void turnThroughputKeepsTheReasoningBreakdownWhenTheProviderReportsOne() {
+        // 100 output tokens including 40 spent on internal reasoning
+        final var reply = new ScriptedReply(
+                "done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, 40L, 0L));
+        loop(chatClient(new ArrayDeque<>(List.of(reply)), new ArrayList<>()), null, configuration(true))
+                .run("do it", null, "s1", null, () -> false);
+
+        final var throughput = lastTurnMetrics().throughput();
+        assertEquals(100, throughput.outputTokens(), "the aggregate stays the completion tokens, reasoning included");
+        assertEquals(40, throughput.reasoningTokens());
+        assertEquals(60, throughput.outputTokensOnly(), "visible output is the aggregate minus the reasoning");
+        assertEquals(0, throughput.reasoningTokensPerSecond(), "no generation time was measured by the stub");
     }
 
     private AgentEvent.TurnMetrics lastTurnMetrics() {

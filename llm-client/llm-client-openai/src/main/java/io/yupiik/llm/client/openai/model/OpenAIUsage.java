@@ -29,8 +29,10 @@ import java.util.Map;
  * @param completionTokens completion tokens produced.
  * @param totalTokens total tokens consumed.
  * @param promptTokensDetails prompt token breakdown (cached tokens, ...).
+ * @param completionTokensDetails output token breakdown (reasoning tokens, ...).
  * @param others non standard usage fields published by some servers and proxies, used to recover
- *        the provider side generation time when present.
+ *        the provider side generation time when present and a top-level {@code reasoning_tokens}
+ *        fallback when the breakdown object is absent.
  */
 @JsonModel
 public record OpenAIUsage(
@@ -38,6 +40,7 @@ public record OpenAIUsage(
         @JsonProperty("completion_tokens") Long completionTokens,
         @JsonProperty("total_tokens") Long totalTokens,
         @JsonProperty("prompt_tokens_details") PromptTokensDetails promptTokensDetails,
+        @JsonProperty("completion_tokens_details") CompletionTokensDetails completionTokensDetails,
         @JsonOthers Map<String, Object> others) {
 
     public OpenAIUsage(
@@ -45,7 +48,7 @@ public record OpenAIUsage(
             final Long completionTokens,
             final Long totalTokens,
             final PromptTokensDetails promptTokensDetails) {
-        this(promptTokens, completionTokens, totalTokens, promptTokensDetails, null);
+        this(promptTokens, completionTokens, totalTokens, promptTokensDetails, null, null);
     }
 
     /**
@@ -56,6 +59,16 @@ public record OpenAIUsage(
     @JsonModel
     public record PromptTokensDetails(
             @JsonProperty("cached_tokens") Long cachedTokens) {}
+
+    /**
+     * Output token breakdown reported by OpenAI endpoints.
+     *
+     * @param reasoningTokens output tokens spent on internal reasoning, already counted in
+     *        {@code completion_tokens}.
+     */
+    @JsonModel
+    public record CompletionTokensDetails(
+            @JsonProperty("reasoning_tokens") Long reasoningTokens) {}
 
     /**
      * Maps the wire usage to the neutral model, summing prompt and completion when the total is absent.
@@ -78,6 +91,23 @@ public record OpenAIUsage(
                         : totalTokens,
                 promptTokensDetails == null ? null : promptTokensDetails.cachedTokens(),
                 null,
+                reasoningTokens(),
                 generationTimeMs);
+    }
+
+    /**
+     * The output token count spent on internal reasoning, read from the {@code completion_tokens_details}
+     * breakdown when present, falling back to a non-standard top-level {@code reasoning_tokens} field.
+     *
+     * @return the reasoning token count, {@code null} when the provider does not report any.
+     */
+    private Long reasoningTokens() {
+        if (completionTokensDetails != null && completionTokensDetails.reasoningTokens() != null) {
+            return completionTokensDetails.reasoningTokens();
+        }
+        if (others != null && others.get("reasoning_tokens") instanceof final Number n) {
+            return n.longValue();
+        }
+        return null;
     }
 }

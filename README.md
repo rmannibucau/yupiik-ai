@@ -408,7 +408,10 @@ Project instructions and skills are loaded into the system prompt:
   `yca.metrics.displayMode` (compact/full/hidden, runtime-tunable with
   `/metrics compact|full`), plus session totals (`session: N LLM calls`) when
   `yca.metrics.showSessionTotals` is on (`/metrics session on|off`); `/metrics`
-  alone prints the current configuration and the last turn values
+  alone prints the current configuration and the last turn values, and in `full`
+  mode additionally breaks output down into visible vs. reasoning tokens
+  (`out X tok · reasoning Y tok`, a reasoning-specific throughput) plus the
+  session reasoning total when the provider reports one (`reasoning_tokens`)
 - The transcript is capped in memory at
   `yca.tui.transcript.maxHistoryCharacters` (default `10000000`): once
   exceeded, the oldest content is truncated from the beginning

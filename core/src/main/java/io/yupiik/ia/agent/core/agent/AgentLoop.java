@@ -250,6 +250,7 @@ public class AgentLoop {
     private long turnLlmActiveMs;
     private long turnLlmPausedMs;
     private int turnOutputTokens;
+    private int turnReasoningTokens;
     private long turnLlmReportedMs;
     // todo auto-continuation budget consumed by the current turn (bounded by yca.todos.maxContinues)
     private int unfinishedTodoContinues;
@@ -883,7 +884,7 @@ public class AgentLoop {
                 toolDurationWallMs,
                 toolsRun,
                 turnDurationMs,
-                new AgentEvent.Throughput(turnOutputTokens, turnLlmActiveMs, turnLlmReportedMs),
+                new AgentEvent.Throughput(turnOutputTokens, turnReasoningTokens, turnLlmActiveMs, turnLlmReportedMs),
                 currentSessionId,
                 subagentId,
                 subagentName);
@@ -1382,6 +1383,9 @@ public class AgentLoop {
         turnLlmActiveMs += Math.max(0L, wallMs - pausedMs);
         if (usage != null && usage.completionTokens() > 0) {
             turnOutputTokens += usage.completionTokens();
+            if (usage.reasoningTokens() > 0) {
+                turnReasoningTokens += usage.reasoningTokens();
+            }
             if (usage.generationTimeMs() > 0) {
                 turnLlmReportedMs += usage.generationTimeMs();
             }
@@ -2792,6 +2796,7 @@ public class AgentLoop {
                         Math.toIntExact(upper.totalTokens()),
                         upper.cacheRead(),
                         upper.cacheWrite(),
+                        Math.toIntExact(upper.reasoning()),
                         upper.generationTime());
             }
             turnLlmCalls++;

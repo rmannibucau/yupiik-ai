@@ -32,21 +32,23 @@ class SubagentUsageTrackerTest {
         final var subagent = new SubagentUsageTracker(parent, "sub-1");
 
         assertEquals("sub-1", subagent.subagentId());
-        subagent.record(new Usage(50, 30, 80, 10, 0));
-        subagent.record(new Usage(20, 20, 40, 5, 0));
+        subagent.record(new Usage(50, 30, 80, 10, 0, 12, 0));
+        subagent.record(new Usage(20, 20, 40, 5, 0, 3, 0));
 
         assertEquals(70, subagent.promptTokens());
         assertEquals(50, subagent.completionTokens());
+        assertEquals(15, subagent.reasoningTokens());
         // before merge nothing reaches the parent
         assertEquals(0, parent.promptTokens());
         assertEquals(0, parent.auxiliaryPromptTokens());
+        assertEquals(0, parent.reasoningTokens());
     }
 
     @Test
     void mergeRollsSubagentUsageIntoParentAuxiliary() {
         final var parent = new UsageTracker(null, null, null, Clock.systemUTC());
         final var subagent = new SubagentUsageTracker(parent, "sub-1");
-        subagent.record(new Usage(50, 30, 80, 10, 0));
+        subagent.record(new Usage(50, 30, 80, 10, 0, 12, 0));
 
         subagent.mergeToParent();
 
@@ -56,6 +58,7 @@ class SubagentUsageTrackerTest {
         assertEquals(1, parent.auxiliaryRequests());
         assertEquals(1, parent.requests());
         assertEquals(50, parent.promptTokens());
+        assertEquals(12, parent.reasoningTokens(), "the merged usage must carry the reasoning tokens");
     }
 
     @Test

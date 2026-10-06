@@ -329,12 +329,17 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
                     ? n.longValue()
                     : null;
             final var completion = number(map.get("output_tokens"));
+            final Long reasoning = map.get("output_tokens_details") instanceof Map<?, ?> details
+                            && details.get("reasoning_tokens") instanceof Number n
+                    ? n.longValue()
+                    : map.get("reasoning_tokens") instanceof Number n ? n.longValue() : null;
             return new Usage(
                     number(map.get("input_tokens")),
                     completion,
                     number(map.get("total_tokens")),
                     cacheRead,
                     null,
+                    reasoning,
                     UsageExtensions.generationTimeMs(extensions(map), completion));
         }
         return Usage.EMPTY;

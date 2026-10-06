@@ -450,6 +450,7 @@ public final class AnthropicDialect extends AbstractDialect {
                 in + out,
                 usage.cacheReadInputTokens(),
                 usage.cacheCreationInputTokens(),
+                null,
                 UsageExtensions.generationTimeMs(usage.others(), out));
     }
 }

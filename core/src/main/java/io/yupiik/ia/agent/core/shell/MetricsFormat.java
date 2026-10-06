@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.shell;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
+import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import java.util.Locale;
 
@@ -60,7 +61,9 @@ public final class MetricsFormat {
      * The {@code /metrics} report, always exactly two lines: the current display
      * configuration, then the last turn values (and the session totals when any
      * request ran). The CLI prints it as-is and the TUI shows it through its
-     * notification channel, so both keep the same shape.
+     * notification channel, so both keep the same shape. When the display mode is
+     * {@link MetricsDisplayMode#FULL} the second line adds the output/reasoning
+     * token breakdown and a reasoning-specific throughput.
      *
      * @param metrics   the display configuration.
      * @param transcript the conversation transcript holding the last turn metrics,
@@ -76,13 +79,23 @@ public final class MetricsFormat {
                 .append(metrics.showSessionTotals())
                 .append(" displayMode=")
                 .append(metrics.displayMode().name());
+        final var full = metrics.displayMode() == MetricsDisplayMode.FULL;
         final var hasTurn = transcript != null
                 && (transcript.turnLlmCalls() > 0 || transcript.turnToolsRun() > 0 || transcript.turnDurationMs() > 0);
         sb.append('\n');
         if (hasTurn) {
+            final var throughput = transcript.turnThroughput();
+            final var reasoning = throughput == null ? 0 : throughput.reasoningTokens();
             sb.append(transcript.turnLlmCalls()).append(" LLM");
             if (transcript.turnThinkingMs() > 0) {
                 sb.append(" (").append(transcript.turnThinkingMs()).append("ms think)");
+            }
+            if (full && reasoning > 0) {
+                sb.append(" · out ")
+                        .append(throughput.outputTokensOnly())
+                        .append(" tok · reasoning ")
+                        .append(reasoning)
+                        .append(" tok");
             }
             sb.append(" · ")
                     .append(transcript.turnToolsRun())
@@ -91,9 +104,13 @@ public final class MetricsFormat {
                     .append('/')
                     .append(transcript.turnToolWallMs())
                     .append("ms)");
-            final var throughput = tokPerSec(transcript.turnThroughput());
-            if (!throughput.isEmpty()) {
-                sb.append(" · ").append(throughput);
+            final var throughputSegment = tokPerSec(throughput);
+            if (!throughputSegment.isEmpty()) {
+                sb.append(" · ").append(throughputSegment);
+            }
+            if (full && throughput != null && throughput.reasoningTokensPerSecond() > 0) {
+                sb.append(" · reasoning ")
+                        .append(String.format(Locale.ROOT, "%.1f tok/s", throughput.reasoningTokensPerSecond()));
             }
             sb.append(" · ").append(String.format(Locale.ROOT, "%.1fs", transcript.turnDurationMs() / 1000.0));
         } else {
@@ -101,6 +118,9 @@ public final class MetricsFormat {
         }
         if (usage != null && usage.requests() > 0) {
             sb.append(" · session: ").append(usage.requests()).append(" LLM calls");
+            if (full && usage.reasoningTokens() > 0) {
+                sb.append(" · reasoning ").append(usage.reasoningTokens()).append(" tok");
+            }
         }
         return sb.toString();
     }

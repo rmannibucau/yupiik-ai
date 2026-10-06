@@ -23,6 +23,8 @@ package io.yupiik.llm.client.model;
  * @param totalTokens total tokens, may be {@code null} when the provider omits it.
  * @param cacheReadTokens prompt tokens served from a provider-side prompt cache, when reported.
  * @param cacheWriteTokens prompt tokens written to a provider-side prompt cache, when reported.
+ * @param reasoningTokens output tokens spent on internal reasoning (hidden chain of thought), when the
+ *        provider reports a breakdown; these are already counted in {@code completionTokens}.
  * @param generationTimeMs provider-side generation time in milliseconds, when reported. This is a
  *        non-standard field only emitted by some OpenAI compatible servers and proxies (e.g.
  *        {@code generation_time}, {@code tokens_per_second}), {@code null} otherwise.
@@ -33,12 +35,13 @@ public record Usage(
         Long totalTokens,
         Long cacheReadTokens,
         Long cacheWriteTokens,
+        Long reasoningTokens,
         Long generationTimeMs) {
 
-    public static final Usage EMPTY = new Usage(0L, 0L, 0L, 0L, 0L, null);
+    public static final Usage EMPTY = new Usage(0L, 0L, 0L, 0L, 0L, null, null);
 
     public Usage(final Long promptTokens, final Long completionTokens, final Long totalTokens) {
-        this(promptTokens, completionTokens, totalTokens, null, null, null);
+        this(promptTokens, completionTokens, totalTokens, null, null, null, null);
     }
 
     public Usage(
@@ -47,7 +50,7 @@ public record Usage(
             final Long totalTokens,
             final Long cacheReadTokens,
             final Long cacheWriteTokens) {
-        this(promptTokens, completionTokens, totalTokens, cacheReadTokens, cacheWriteTokens, null);
+        this(promptTokens, completionTokens, totalTokens, cacheReadTokens, cacheWriteTokens, null, null);
     }
 
     /**
@@ -75,6 +78,15 @@ public record Usage(
      */
     public long completion() {
         return completionTokens == null ? 0 : completionTokens;
+    }
+
+    /**
+     * The output token count spent on internal reasoning.
+     *
+     * @return the reasoning token count, 0 when absent.
+     */
+    public long reasoning() {
+        return reasoningTokens == null ? 0 : reasoningTokens;
     }
 
     /**

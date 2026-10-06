@@ -25,12 +25,13 @@ public record Usage(
         @JsonProperty("total_tokens") int totalTokens,
         @JsonProperty("cache_read_tokens") long cacheReadTokens,
         @JsonProperty("cache_write_tokens") long cacheWriteTokens,
+        @JsonProperty("reasoning_tokens") int reasoningTokens,
         @JsonProperty("generation_time_ms") long generationTimeMs) {
 
-    public static Usage EMPTY = new Usage(0, 0, 0, 0, 0, 0);
+    public static Usage EMPTY = new Usage(0, 0, 0, 0, 0, 0, 0);
 
     public Usage(final int promptTokens, final int completionTokens, final int totalTokens) {
-        this(promptTokens, completionTokens, totalTokens, 0, 0, 0);
+        this(promptTokens, completionTokens, totalTokens, 0, 0, 0, 0);
     }
 
     public Usage(
@@ -39,6 +40,6 @@ public record Usage(
             final int totalTokens,
             final long cacheReadTokens,
             final long cacheWriteTokens) {
-        this(promptTokens, completionTokens, totalTokens, cacheReadTokens, cacheWriteTokens, 0);
+        this(promptTokens, completionTokens, totalTokens, cacheReadTokens, cacheWriteTokens, 0, 0);
     }
 }

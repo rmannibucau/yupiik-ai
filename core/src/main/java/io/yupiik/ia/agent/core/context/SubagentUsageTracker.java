@@ -27,6 +27,7 @@ public class SubagentUsageTracker extends UsageTracker {
     private final String subagentId;
     private final AtomicLong promptTokens = new AtomicLong();
     private final AtomicLong completionTokens = new AtomicLong();
+    private final AtomicLong reasoningTokens = new AtomicLong();
     private final AtomicLong cacheReadTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
     private volatile Anchor anchor;
@@ -46,6 +47,7 @@ public class SubagentUsageTracker extends UsageTracker {
         }
         promptTokens.addAndGet(usage.promptTokens());
         completionTokens.addAndGet(usage.completionTokens());
+        reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
     }
@@ -57,6 +59,7 @@ public class SubagentUsageTracker extends UsageTracker {
         }
         promptTokens.addAndGet(usage.promptTokens());
         completionTokens.addAndGet(usage.completionTokens());
+        reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
     }
@@ -112,6 +115,11 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
+    public long reasoningTokens() {
+        return reasoningTokens.get();
+    }
+
+    @Override
     public long cacheReadTokens() {
         return cacheReadTokens.get();
     }
@@ -140,6 +148,7 @@ public class SubagentUsageTracker extends UsageTracker {
     public void reset() {
         promptTokens.set(0);
         completionTokens.set(0);
+        reasoningTokens.set(0);
         cacheReadTokens.set(0);
         requests.set(0);
         anchor = null;
@@ -191,6 +200,8 @@ public class SubagentUsageTracker extends UsageTracker {
                     (int) completionTokens.get(),
                     (int) (promptTokens.get() + completionTokens.get()),
                     (int) cacheReadTokens.get(),
+                    0,
+                    (int) reasoningTokens.get(),
                     0));
         }
     }

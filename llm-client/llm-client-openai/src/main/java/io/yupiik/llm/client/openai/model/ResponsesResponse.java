@@ -89,10 +89,33 @@ public record ResponsesResponse(
      * @param inputTokens prompt tokens consumed.
      * @param outputTokens completion tokens produced.
      * @param totalTokens total tokens consumed.
+     * @param inputTokensDetails input token breakdown (cached tokens, ...).
+     * @param outputTokensDetails output token breakdown (reasoning tokens, ...).
      */
     @JsonModel
     public record ResponsesUsage(
             @JsonProperty("input_tokens") Long inputTokens,
             @JsonProperty("output_tokens") Long outputTokens,
-            @JsonProperty("total_tokens") Long totalTokens) {}
+            @JsonProperty("total_tokens") Long totalTokens,
+            @JsonProperty("input_tokens_details") InputTokensDetails inputTokensDetails,
+            @JsonProperty("output_tokens_details") OutputTokensDetails outputTokensDetails) {}
+
+    /**
+     * Input token breakdown reported by the Responses API.
+     *
+     * @param cachedTokens input tokens served from the automatic prompt cache.
+     */
+    @JsonModel
+    public record InputTokensDetails(
+            @JsonProperty("cached_tokens") Long cachedTokens) {}
+
+    /**
+     * Output token breakdown reported by the Responses API.
+     *
+     * @param reasoningTokens output tokens spent on internal reasoning, already counted in
+     *        {@code output_tokens}.
+     */
+    @JsonModel
+    public record OutputTokensDetails(
+            @JsonProperty("reasoning_tokens") Long reasoningTokens) {}
 }
