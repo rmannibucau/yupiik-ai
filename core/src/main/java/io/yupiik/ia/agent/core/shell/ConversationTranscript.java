@@ -66,6 +66,8 @@ public class ConversationTranscript {
     private volatile int promptTokens;
     private volatile int completionTokens;
     private volatile int estimatedContext;
+    private volatile int lastRealPromptTokens;
+    private volatile double calibrationRatio;
     private volatile int contextPercent;
     private volatile long maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
 
@@ -403,12 +405,16 @@ public class ConversationTranscript {
                         io.yupiik.ia.agent.core.llm.Usage usage,
                         int estimatedContextTokens,
                         double percent,
+                        int lastRealPromptTokens,
+                        double calibrationRatio,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
             estimatedContext = estimatedContextTokens;
+            this.lastRealPromptTokens = lastRealPromptTokens;
+            this.calibrationRatio = calibrationRatio;
             contextPercent = (int) Math.round(percent);
         } else if (event
                 instanceof
@@ -943,6 +949,8 @@ public class ConversationTranscript {
         promptTokens = 0;
         completionTokens = 0;
         estimatedContext = 0;
+        lastRealPromptTokens = 0;
+        calibrationRatio = -1;
         contextPercent = 0;
         maxHistoryCharacters = DEFAULT_MAX_HISTORY_CHARACTERS;
         turnLlmCalls = 0;
@@ -1057,6 +1065,16 @@ public class ConversationTranscript {
 
     public int estimatedContext() {
         return estimatedContext;
+    }
+
+    /** Provider-billed prompt tokens of the last anchored request; {@code 0} until the first LLM response (no anchor). */
+    public int lastRealPromptTokens() {
+        return lastRealPromptTokens;
+    }
+
+    /** Clamped calibration ratio of the anchored estimate; {@code -1} until the first LLM response (no anchor). */
+    public double calibrationRatio() {
+        return calibrationRatio;
     }
 
     public int contextPercent() {

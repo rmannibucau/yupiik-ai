@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.llm.client.ContextWindowExceededException;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -39,8 +40,11 @@ import java.util.logging.Logger;
  * <p>{@link #compact(List, boolean, String, int)} summarizes the older conversation with an LLM
  * using a structured template, keeping a turn-aligned, token-budgeted verbatim tail that never
  * splits an assistant tool call from its results, re-anchoring on the previous summary when one
- * exists and replaying the last user message when the tail does not cover it. When the summarizer
- * fails it degrades to a deterministic local truncation.
+ * exists and replaying the last user message when the tail does not cover it. The summarizer
+ * input is chunked to fit the summarizer model: the chunk cap derives from the usable window (or
+ * an explicit {@code yca.compaction.summarizerChunkChars}), and when a call fails because the
+ * input is too large the cap is halved down to the configured floor and compaction retried. When
+ * the summarizer eventually fails it degrades to a deterministic local truncation.
  *
  * <p>{@link #prune(List)} is a local, LLM-free reduction of old tool outputs (the way to reclaim
  * bulk space cheaply): recent turns and a token budget of recent tool outputs are protected, then
@@ -50,30 +54,6 @@ import java.util.logging.Logger;
  */
 public class CompactionCoordinator {
     private static final Logger LOGGER = Logger.getLogger(CompactionCoordinator.class.getName());
-
-    /**
-     * Upper bound (in characters) of the flattened conversation passed to the summarizer in a single call.
-     * Above this the history is split into chunks and summarized incrementally (a rolling digest), so a huge
-     * transcript can never blow the compact model's input window with one oversized prompt.
-     */
-    private static final int MAX_SUMMARY_INPUT_CHARS = 12_000;
-
-    /**
-     * Upper bound (in characters) of the accumulated rolling digest injected into a merge call.
-     * Keeping this well below the per-call input cap guarantees the rolling-summary merge prompt
-     * plus the current chunk always stays inside the compact model's window.
-     */
-    private static final int MAX_ROLLING_SUMMARY_CHARS = 6_000;
-
-    /**
-     * Cap applied to kept-tail messages when the assembled context still exceeds the window after
-     * compaction. Kept deliberately roomier than the local-truncation fallback cap so the tail's tool
-     * results stay meaningful; the digest (generated summary) is never spliced regardless.
-     */
-    private static final int TAIL_SPLICE_CAP = 500;
-
-    /** Per-message cap of tool outputs serialized into the summarizer input. */
-    private static final int TOOL_OUTPUT_CAP_CHARS = 2_000;
 
     /** Replacement content of tool outputs cleared by {@link #prune(List)}. */
     public static final String PRUNE_CLEARED_MARKER = "[old tool result cleared]";
@@ -277,16 +257,44 @@ public class CompactionCoordinator {
             return new CompactionResult(messages, Mode.NONE, "cancelled");
         }
         final var prior = previousSummary(messages);
-        final var chunks = chunkCompact(messages.subList(from, boundary));
-        final var outcome = summarizeRolling(
-                "compaction",
-                configSystemPrompt(),
-                chunks,
-                prior,
-                focus,
-                configuration.model().compact(),
-                cancelled,
-                settings);
+        final var compactCfg = configuration.compaction();
+        var chunkCap = effectiveChunkCap();
+        var halvings = 0;
+        var lastSizeError = (String) null;
+        Outcome outcome;
+        while (true) {
+            final var chunks = chunkCompact(messages.subList(from, boundary), chunkCap);
+            outcome = summarizeReducing(
+                    "compaction",
+                    configSystemPrompt(),
+                    chunks,
+                    prior,
+                    focus,
+                    chunkCap,
+                    compactCfg.summarizerChunkChars() > 0
+                            ? null
+                            : configuration.model().compact(),
+                    cancelled,
+                    settings);
+            if (!outcome.sizeError()) {
+                break;
+            }
+            // a size-caused failure means the chunk cap is too optimistic for the effective model
+            // window: halve it down to the floor and restart from the prior summary (the partial
+            // digest was built at the wrong granularity and is discarded)
+            final var floor = Math.max(1, compactCfg.summarizerMinChunkChars());
+            lastSizeError = outcome.error();
+            if (chunkCap <= floor) {
+                break;
+            }
+            halvings++;
+            chunkCap = Math.max(floor, chunkCap / 2);
+            emit(new AgentEvent.Notice(
+                    AgentEvent.Notice.Level.WARN,
+                    "Compaction exceeded the summarizer context window; retrying with chunks of ~" + chunkCap
+                            + " chars.",
+                    sessionId));
+        }
         if (!outcome.summary().isBlank()) {
             List<Message> out = new ArrayList<>();
             if (system != null) {
@@ -302,21 +310,29 @@ public class CompactionCoordinator {
             }
             final var digestIndex = system == null ? 0 : 1;
             out = ensureUnderWindow(out, force, digestIndex);
+            if (halvings == 0
+                    && configuration.compaction().summarizerChunkChars() == 0
+                    && configuration.model().compact() == null) {
+                emit(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.INFO,
+                        "Compacted the context in " + (outcome.calls() >= 1 ? outcome.calls() : 1)
+                                + " summarizer call(s) using a window-derived chunk size.",
+                        sessionId));
+            }
             return new CompactionResult(out, Mode.SUMMARY, "");
         }
         final var truncated = localTruncate(messages, from, boundary);
         final var keptTruncated = ensureUnderWindow(truncated, force, -1);
-        LOGGER.warning(
-                outcome.error() == null || outcome.error().isBlank()
-                        ? "compaction failed; truncated locally"
-                        : outcome.error());
+        final var failureMessage = (outcome.error() == null || outcome.error().isBlank()
+                        ? (lastSizeError != null ? lastSizeError : "Summary failed")
+                        : outcome.error())
+                + (halvings > 0 ? " after " + halvings + " chunk-size reduction(s)" : "");
+        LOGGER.warning(failureMessage.isBlank() ? "compaction failed; truncated locally" : failureMessage);
         emit(new AgentEvent.Notice(
                 AgentEvent.Notice.Level.WARN,
-                outcome.error() == null || outcome.error().isBlank()
-                        ? "Summary failed; context truncated locally."
-                        : outcome.error(),
+                failureMessage.isBlank() ? "Summary failed; context truncated locally." : failureMessage,
                 sessionId));
-        return new CompactionResult(keptTruncated, Mode.TRUNCATE, outcome.error());
+        return new CompactionResult(keptTruncated, Mode.TRUNCATE, failureMessage);
     }
 
     /**
@@ -424,7 +440,7 @@ public class CompactionCoordinator {
         final var window = usageTracker.contextWindow();
         final var headroom = Math.max(1_000, (int) (window * 0.1));
         var list = out;
-        final var cap = tight ? TAIL_SPLICE_CAP / 2 : TAIL_SPLICE_CAP;
+        final var cap = tight ? effectiveSpliceChars() / 2 : effectiveSpliceChars();
         for (var guard = 0; guard < 8; guard++) {
             if (usageTracker.estimateContext(list) <= window - headroom) {
                 break;
@@ -475,12 +491,11 @@ public class CompactionCoordinator {
                 + content.substring(content.length() - half);
     }
 
-    /** Renders a message for the summarizer input, capping tool outputs at {@link #TOOL_OUTPUT_CAP_CHARS}. */
+    /** Renders a message for the summarizer input, capping tool outputs at the configured summarizer tool-output cap. */
     private String renderForSummary(final Message m) {
+        final var cap = effectiveToolOutputChars();
         final var content = str(m.content());
-        final var truncated = content.length() > TOOL_OUTPUT_CAP_CHARS
-                ? content.substring(0, TOOL_OUTPUT_CAP_CHARS) + " [truncated]"
-                : content;
+        final var truncated = content.length() > cap ? content.substring(0, cap) + " [truncated]" : content;
         if ("tool".equals(m.role())) {
             final var failed =
                     m.others() != null && Boolean.TRUE.equals(m.others().get("is_error"));
@@ -519,19 +534,19 @@ public class CompactionCoordinator {
         return splice(arguments, cap);
     }
 
-    /** Flattens old compact messages into chunks, each bounded by {@link #MAX_SUMMARY_INPUT_CHARS}. */
-    private List<String> chunkCompact(final List<Message> old) {
+    /** Flattens old compact messages into chunks, each bounded by the effective chunk cap. */
+    List<String> chunkCompact(final List<Message> old, final int chunkCap) {
         final var chunks = new ArrayList<String>();
         final var current = new StringBuilder();
         for (final var m : old) {
             final var line = renderForSummary(m) + '\n';
-            if (line.length() > MAX_SUMMARY_INPUT_CHARS) {
+            if (line.length() > chunkCap) {
                 if (!current.isEmpty()) {
                     chunks.add(current.toString());
                     current.setLength(0);
                 }
                 chunks.add(line);
-            } else if (current.length() + line.length() > MAX_SUMMARY_INPUT_CHARS) {
+            } else if (current.length() + line.length() > chunkCap) {
                 chunks.add(current.toString());
                 current.setLength(0);
                 current.append(line);
@@ -548,26 +563,31 @@ public class CompactionCoordinator {
     /**
      * Summarizes chunked history with a rolling digest, retrying each call with backoff.
      * When multiple chunks must be summarized, each chunk (including the running digest) is passed
-     * separately so no single call ever exceeds the compact model's input window.
+     * separately (the digest never exceeds {@code digestCap}) so no single call ever exceeds the
+     * compact model's input window. A single chunk is a single LLM call: the common large-window case.
      */
-    private Outcome summarizeRolling(
+    private Outcome summarizeReducing(
             final String label,
             final String systemPrompt,
             final List<String> chunks,
             final String priorSummary,
             final String focus,
+            final int chunkCap,
             final String modelOverride,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
+        final var digestCap = effectiveDigestCap();
         final var summary = new StringBuilder();
+        var calls = 0;
+        var sizeError = false;
         warnOnceWhenNoCompactModel();
         emit(new AgentEvent.Status(
                 "compacting (" + label + ", chunk 1/" + chunks.size() + ")...", sessionId, null, null));
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
-                return new Outcome("", label + " cancelled");
+                return new Outcome("", label + " cancelled", calls, false);
             }
-            final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus);
+            final var prompt = chunkPrompt(chunks, c, summary, priorSummary, focus, digestCap);
             String part = null;
             String error = null;
             for (var attempt = 0; attempt < retries(); attempt++) {
@@ -590,6 +610,7 @@ public class CompactionCoordinator {
                             pause -> emit(new AgentEvent.Status(
                                     "compacting " + label + ": " + pause.message(), sessionId, null, null)),
                             cancelled);
+                    calls++;
                     if (usageTracker != null) {
                         usageTracker.recordAuxiliary(res.usage());
                     }
@@ -598,16 +619,19 @@ public class CompactionCoordinator {
                         break;
                     }
                     part = null;
+                } catch (final ContextWindowExceededException e) {
+                    // the chunk (+ rolling digest + template) is larger than the model's real window:
+                    // signal the caller to halve the chunk cap and retry from scratch
+                    return new Outcome("", label + " summarizer input exceeds the context window", calls, true);
                 } catch (final IOException e) {
                     error = label + " summarizer failed: " + e.getMessage();
                 } catch (final InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    error = label + " interrupted";
-                    return new Outcome("", error);
+                    return new Outcome("", label + " interrupted", calls, false);
                 }
                 if (attempt + 1 < retries()) {
                     if (cancelled.getAsBoolean()) {
-                        return new Outcome("", label + " cancelled");
+                        return new Outcome("", label + " cancelled", calls, false);
                     }
                     emit(new AgentEvent.Status(
                             "compacting " + label + ": retrying in ~" + (backoff(attempt) / 1000) + "s...",
@@ -621,9 +645,9 @@ public class CompactionCoordinator {
                 if (error == null) {
                     error = label + " produced no summary; truncated locally";
                 }
-                return new Outcome("", error);
+                return new Outcome("", error, calls, false);
             }
-            appendBounded(summary, part, MAX_ROLLING_SUMMARY_CHARS);
+            appendBounded(summary, part, digestCap);
             if (c + 1 < chunks.size()) {
                 emit(new AgentEvent.Status(
                         "compacting (" + label + ", chunk " + (c + 2) + "/" + chunks.size() + ")...",
@@ -632,12 +656,12 @@ public class CompactionCoordinator {
                         null));
             }
         }
-        return new Outcome(summary.toString(), "");
+        return new Outcome(summary.toString(), "", calls, false);
     }
 
     /**
      * Appends a digest part to the running summary, never letting the running summary exceed
-     * {@link #MAX_ROLLING_SUMMARY_CHARS}; oldest content is dropped first so the digest stays a
+     * the effective digest cap; oldest content is dropped first so the digest stays a
      * compact rolling record rather than growing without bound (which would itself blow the
      * compact model's input window on the merge calls for long conversations).
      */
@@ -670,7 +694,8 @@ public class CompactionCoordinator {
             final int index,
             final StringBuilder rollingSummary,
             final String priorSummary,
-            final String focus) {
+            final String focus,
+            final int digestCap) {
         final var sb = new StringBuilder();
         if (rollingSummary.isEmpty() && priorSummary != null && !priorSummary.isBlank()) {
             sb.append("Below is the previous summary of this conversation, followed by more conversation.")
@@ -682,8 +707,8 @@ public class CompactionCoordinator {
         } else if (rollingSummary.isEmpty()) {
             sb.append("Create a new summary of the conversation below.");
         } else {
-            final var summaryText = rollingSummary.length() > MAX_ROLLING_SUMMARY_CHARS
-                    ? rollingSummary.substring(rollingSummary.length() - MAX_ROLLING_SUMMARY_CHARS)
+            final var summaryText = rollingSummary.length() > digestCap
+                    ? rollingSummary.substring(rollingSummary.length() - digestCap)
                     : rollingSummary.toString();
             sb.append(
                             "Below is a summary of earlier context, followed by more conversation. Merge them into one concise, lossless summary. Preserve key decisions, file paths, commands, results, current state and next steps.\n\nEarlier context summary:\n")
@@ -713,7 +738,12 @@ public class CompactionCoordinator {
                 + " and URLs. Do not mention the summary process or that context was compacted.";
     }
 
-    private record Outcome(String summary, String error) {}
+    /**
+     * Outcome of a summarization run: the generated summary, an error/fallback note, the number of
+     * LLM calls spent (for the success INFO feedback) and whether the failure was size-caused (a
+     * {@link ContextWindowExceededException}), which triggers the chunk-cap halving restart.
+     */
+    private record Outcome(String summary, String error, int calls, boolean sizeError) {}
 
     private List<Message> localTruncate(final List<Message> messages, final int from, final int to) {
         final var out = new ArrayList<Message>();
@@ -737,6 +767,85 @@ public class CompactionCoordinator {
 
     private int retries() {
         return Math.max(1, configuration.llm() == null ? 1 : configuration.llm().retriesMaxAttempts());
+    }
+
+    /*
+     * Cap resolution. Defaults live in @Property(defaultValue) (summarizerChunkChars=0 auto,
+     * summarizerMinChunkChars=12000, summarizerDigestChars=0 auto, summarizerToolOutputChars=2000,
+     * overflowSpliceChars=500); the null-config/test fallback mirrors those defaults without
+     * duplicating them as code constants.
+     */
+
+    private boolean compactionConfigured() {
+        return configuration != null && configuration.compaction() != null;
+    }
+
+    private int summarizerChunkChars() {
+        return compactionConfigured() ? configuration.compaction().summarizerChunkChars() : 0;
+    }
+
+    private int summarizerMinChunkChars() {
+        return compactionConfigured() ? configuration.compaction().summarizerMinChunkChars() : 12_000;
+    }
+
+    private int summarizerDigestChars() {
+        return compactionConfigured() ? configuration.compaction().summarizerDigestChars() : 0;
+    }
+
+    private int summarizerToolOutputChars() {
+        return compactionConfigured() ? configuration.compaction().summarizerToolOutputChars() : 2_000;
+    }
+
+    private int overflowSpliceChars() {
+        return compactionConfigured() ? configuration.compaction().overflowSpliceChars() : 500;
+    }
+
+    /**
+     * The effective chunk cap for a single summarizer call: an explicit
+     * {@code yca.compaction.summarizerChunkChars} wins; otherwise a quarter of the compact model's
+     * usable window (in chars, ~4 chars/token), floored at the configured minimum so small models
+     * stay safe. No upper ceiling: the fraction itself is self-bounding (a quarter of the window can
+     * never exceed the window), and a too-optimistic estimate is recovered by the halving retry.
+     */
+    int effectiveChunkCap() {
+        final var explicit = summarizerChunkChars();
+        if (explicit > 0) {
+            return explicit;
+        }
+        final var floor = Math.max(1, summarizerMinChunkChars());
+        if (usageTracker == null) {
+            return floor;
+        }
+        final var usable = usageTracker.usableWindow();
+        // ~4 chars per token: the classic code/JSON average; conservative (window is already
+        // reduced by the output reserve), and a too-large cap is recovered by the halving retry
+        final var derived = (usable / 4L) * 4L;
+        return (int) Math.max(floor, Math.min(Integer.MAX_VALUE, derived));
+    }
+
+    /**
+     * The effective rolling-digest cap: an explicit {@code yca.compaction.summarizerDigestChars}
+     * wins; otherwise half the chunk cap (the merge call then carries at most ~1.5x a chunk, well
+     * inside the window for any chunk that fits).
+     */
+    int effectiveDigestCap() {
+        final var explicit = summarizerDigestChars();
+        if (explicit > 0) {
+            return explicit;
+        }
+        return Math.max(1, effectiveChunkCap() / 2);
+    }
+
+    /** The per-tool-output cap used when the history is serialized into the summarizer input. */
+    int effectiveToolOutputChars() {
+        final var cap = summarizerToolOutputChars();
+        return cap > 0 ? cap : Integer.MAX_VALUE;
+    }
+
+    /** The head+tail cap applied to kept-tail messages when the compacted context still overflows. */
+    int effectiveSpliceChars() {
+        final var cap = overflowSpliceChars();
+        return cap > 0 ? cap : Integer.MAX_VALUE;
     }
 
     /**

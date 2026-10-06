@@ -87,12 +87,31 @@ falls back to the configured `yca.permissions.mode` (default `ask`) while an
 explicit `/permissions yolo|auto_edit` in `plan` remains possible as a
 deliberate override.
 
+When a bash command is not auto-allowed by the rules and reaches the approval
+gate (in TUI/CLI), the modal detail explains *why* it is asked with a
+`Why asked: segment 'git add -A' is not in the read-only bash families
+(yca.permissions.bash.rules)` line naming the first failing segment. If the
+user denies, that same cause is carried into the denial feedback the model
+sees (`refused by the user: segment ...`); headless runs without an
+interactive gate append the cause to the denial reason too. The gate flow
+itself is unchanged: allow-once and allow-session approvals still work in
+both modes.
+
+The plan-mode system prompt summarizes the read-only families for the model
+through `yca.permissions.bash.readOnlyPromptHints` (free text, defaulting to a
+concise "git status/diff/log/show, ls, cat, grep, head, tail, ...; commands
+that mutate repository state such as git add are denied" sentence). It is
+curated prose rather than a dynamic render of `rules` for brevity and
+scalability - the full rule list is long and per-workspace - and the rules
+remain the enforcement gate. Set it to a blank string to omit the sentence.
+
 [source,json]
 ----
 {
   "permissions": {
     "mode": "ask",
     "bash": {
+      "readOnlyPromptHints": "Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, ...); commands that mutate repository state such as git add are denied.",
       "rules": [
         {
           "matcher": { "commandStart": { "options": ["docker", "run"] } },

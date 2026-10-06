@@ -85,6 +85,62 @@ class UsageTrackerTest {
     }
 
     @Test
+    void perModelContextWindowOverridesProviderAndDetection() {
+        final var cfg = configuration(32000); // provider window
+        // re-resolve with a per-model override the provider's own model name
+        final var entries = new java.util.HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "default");
+        entries.put(
+                "yca.provider.providers.0.baseUrl",
+                "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "test-key");
+        entries.put("yca.provider.providers.0.model", "test-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.contextWindow", "32000");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "5");
+        entries.put("yca.provider.providers.0.models.length", "1");
+        entries.put("yca.provider.providers.0.models.0.model", "test-model");
+        entries.put("yca.provider.providers.0.models.0.contextWindow", "1000000");
+        final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        final var pm = new ProviderManager(cfgOverride, mapper);
+        final var tracker = new UsageTracker(pm, client, null, Clock.systemUTC());
+        assertEquals(1_000_000, tracker.contextWindow(), "the per-model override must win over the provider value");
+        assertEquals("explicit", tracker.windowOrigin(), "a per-model override counts as explicit, never auto-halved");
+    }
+
+    @Test
+    void perModelOverrideIsNeverHalvedAndPersisted() throws Exception {
+        // provider has no window -> detection via /v1/models (empty here) -> baseline; but the
+        // per-model override pins it, and rememberShrinkOnOverflow must not persist the halved value
+        final var cfg = configuration(-1);
+        final var entries = new java.util.HashMap<String, String>();
+        entries.put("yca.storageHome", storageHome.toString());
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "default");
+        entries.put(
+                "yca.provider.providers.0.baseUrl",
+                "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions");
+        entries.put("yca.provider.providers.0.apiKey", "test-key");
+        entries.put("yca.provider.providers.0.model", "test-model");
+        entries.put("yca.provider.providers.0.api", "auto");
+        entries.put("yca.provider.providers.0.timeoutSeconds", "5");
+        entries.put("yca.provider.providers.0.models.length", "1");
+        entries.put("yca.provider.providers.0.models.0.model", "test-model");
+        entries.put("yca.provider.providers.0.models.0.contextWindow", "1000000");
+        final var cfgOverride = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(entries);
+        final var pm = new ProviderManager(cfgOverride, mapper);
+        final var tracker = new UsageTracker(pm, client, null, Clock.systemUTC());
+        assertEquals(1_000_000, tracker.contextWindow());
+        // an overflow-triggered shrink must not persist (the override is explicit, not auto)
+        tracker.rememberShrinkOnOverflow();
+        // a fresh tracker resolves the same 1M again, never a halved/cached 500k
+        final var fresh = new UsageTracker(pm, client, null, Clock.systemUTC());
+        assertEquals(1_000_000, fresh.contextWindow(), "the per-model override must survive overflow auto-halving");
+    }
+
+    @Test
     void auxiliarySpendIsCountedGloballyAndSeparately() {
         final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
         tracker.record(new Usage(100, 20, 120));

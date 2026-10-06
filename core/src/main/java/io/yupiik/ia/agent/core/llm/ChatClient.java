@@ -205,6 +205,9 @@ public class ChatClient implements AutoCloseable {
                         configuration.llm().retriesBaseDelayMs(),
                         configuration.llm().rateLimitRequestsPerMinute(),
                         providerBounds,
+                        // the summarizer has its own halving loop for context overflow (the agent
+                        // loop owns overflow recovery for conversation requests); the library must
+                        // not absorb the exception into its own retry, or halving would never see it
                         false,
                         true,
                         configuration.llm().retryAfterMaxWaitMs(),
@@ -598,9 +601,10 @@ public class ChatClient implements AutoCloseable {
     }
 
     /**
-     * The resolved context window (tokens) for the current provider + model: an explicit per-provider
-     * {@code contextWindow} wins, then the value detected from {@code /v1/models}/cached; {@code 0} when
-     * unknown. Used by callers that must stay under the model input budget (e.g. batch sizing).
+     * The resolved context window (tokens) for the current provider + model: an explicit per-model
+     * {@code models[].contextWindow} wins, then the per-provider {@code contextWindow}, then the value
+     * detected from {@code /v1/models}/cached; {@code 0} when unknown. Used by callers that must stay
+     * under the model input budget (e.g. batch sizing).
      */
     public int contextWindow() {
         return contextWindow(null);
@@ -612,13 +616,18 @@ public class ChatClient implements AutoCloseable {
         if (provider == null) {
             return 0;
         }
+        final var model = model(settings);
+        final var override = providerManager == null ? 0 : providerManager.contextWindowOverride(provider, model);
+        if (override > 0) {
+            return override;
+        }
         if (provider.contextWindow() > 0) {
             return provider.contextWindow();
         }
         final var id = providerIdOf(provider);
         return contextWindowCache == null
                 ? 0
-                : contextWindowCache.get(id, model(settings)).orElse(0);
+                : contextWindowCache.get(id, model).orElse(0);
     }
 
     /**

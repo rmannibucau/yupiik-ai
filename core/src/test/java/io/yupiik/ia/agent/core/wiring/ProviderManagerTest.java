@@ -56,7 +56,7 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.length", "2"),
                 Map.entry("yca.provider.providers.0.id", "p0"),
                 Map.entry("yca.provider.providers.0.model", "fallback-0"),
-                Map.entry("yca.provider.providers.0.models.length", "3"),
+                Map.entry("yca.provider.providers.0.models.length", "4"),
                 Map.entry("yca.provider.providers.0.models.0.model", "claude"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.outputTokens", "1000"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.reasoningEffort", "low"),
@@ -73,6 +73,8 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.models.2.behavior.outputTokens", "-1"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.reasoningEffort", ""),
                 Map.entry("yca.provider.providers.0.models.2.behavior.systemPromptMaxChars", "-1"),
+                Map.entry("yca.provider.providers.0.models.3.model", "deepseek-v4-flash"),
+                Map.entry("yca.provider.providers.0.models.3.contextWindow", "1000000"),
                 Map.entry("yca.provider.providers.1.id", "p1"),
                 Map.entry("yca.provider.providers.1.model", "fallback-1")));
     }
@@ -100,6 +102,61 @@ class ProviderManagerTest {
         assertEquals(0, manager.outputTokensOverride(provider, "haiku-4-5"));
         // unlisted model
         assertEquals(0, manager.outputTokensOverride(provider, "gpt-5"));
+    }
+
+    @Test
+    void contextWindowOverrideFollowsExactContainsAndProviderFallback() {
+        final var manager = twoProviders();
+        final var provider = manager.providers().get(0);
+        // per-model override wins over the provider value
+        assertEquals(1_000_000, manager.contextWindowOverride(provider, "deepseek-v4-flash"));
+        // contains fallback: a configured "deepseek" entry matches "deepseek-v4-flash"
+        final var withContains = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "deepseek-v4-flash"),
+                Map.entry("yca.provider.providers.0.contextWindow", "64000"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "deepseek"),
+                Map.entry("yca.provider.providers.0.models.0.contextWindow", "1000000")));
+        final var pContains = withContains.providers().get(0);
+        assertEquals(1_000_000, withContains.contextWindowOverride(pContains, "deepseek-v4-flash"));
+        // no per-model entry for this model -> provider value
+        // forces a provider contextWindow to verify the fallback
+        final var withProviderWindow = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "gpt-5"),
+                Map.entry("yca.provider.providers.0.contextWindow", "64000"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "deepseek"),
+                Map.entry("yca.provider.providers.0.models.0.contextWindow", "1000000")));
+        final var pWithModel = withProviderWindow.providers().get(0);
+        assertEquals(1_000_000, withProviderWindow.contextWindowOverride(pWithModel, "deepseek-v4-flash"));
+        // model has no entry -> provider window wins
+        assertEquals(64_000, withProviderWindow.contextWindowOverride(pWithModel, "gpt-5"));
+        // unset provider + unset model -> 0 (unset)
+        final var noWindow = manager(Map.of("yca.storageHome", storageHome.toString(), "yca.provider.model", "m"));
+        final var pNoWindow = noWindow.providers().get(0);
+        assertEquals(0, noWindow.contextWindowOverride(pNoWindow, "m"));
+    }
+
+    @Test
+    void contextWindowOverrideZeroMeansUnsetAndFallsThrough() {
+        final var manager = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "m"),
+                Map.entry("yca.provider.providers.0.contextWindow", "32000"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "m"),
+                // not set -> falls through to provider
+                Map.entry("yca.provider.providers.0.models.0.style.color", "#fff")));
+        final var provider = manager.providers().get(0);
+        assertEquals(32_000, manager.contextWindowOverride(provider, "m"));
     }
 
     @Test

@@ -600,6 +600,75 @@ class SystemPromptBuilderTest {
     }
 
     @Test
+    void planModeInjectsTheReadOnlyBashHintsDefault() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "plan"));
+        final var svc = new PermissionService(cfg);
+        svc.setMode(AgentMode.PLAN);
+        final var prompt = new SystemPromptBuilder(
+                        cfg, null, null, svc, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null)
+                .build();
+        assertTrue(
+                prompt.contains("read-only command families"),
+                "the plan-mode tail should inject the configured bash hints: " + prompt);
+        assertTrue(
+                prompt.contains("such as git add are denied"), "the default hints should mention git add: " + prompt);
+    }
+
+    @Test
+    void planModeInjectsCustomReadOnlyBashHints() {
+        final var cfg = config(Map.of(
+                "yca.storageHome",
+                storageHome.toString(),
+                "yca.workingDir",
+                project.toString(),
+                "yca.mode",
+                "plan",
+                "yca.permissions.bash.readOnlyPromptHints",
+                "only git status and git diff are safe"));
+        final var svc = new PermissionService(cfg);
+        svc.setMode(AgentMode.PLAN);
+        final var prompt = new SystemPromptBuilder(
+                        cfg, null, null, svc, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null)
+                .build();
+        assertTrue(prompt.contains("only git status and git diff are safe"));
+        assertFalse(prompt.contains("such as git add"), "a custom value must replace the default sentence");
+    }
+
+    @Test
+    void planModeOmitsReadOnlyBashHintsWhenBlank() {
+        final var cfg = config(Map.of(
+                "yca.storageHome",
+                storageHome.toString(),
+                "yca.workingDir",
+                project.toString(),
+                "yca.mode",
+                "plan",
+                "yca.permissions.bash.readOnlyPromptHints",
+                ""));
+        final var svc = new PermissionService(cfg);
+        svc.setMode(AgentMode.PLAN);
+        final var prompt = new SystemPromptBuilder(
+                        cfg, null, null, svc, new AgentProvider(cfg), providerManager(cfg), todoResolver(), null)
+                .build();
+        assertFalse(
+                prompt.contains("read-only command families"),
+                "a blank hint must omit the sentence entirely: " + prompt);
+    }
+
+    @Test
+    void buildModeOmitsTheReadOnlyBashHints() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString(),
+                "yca.mode", "build"));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertFalse(prompt.contains("read-only command families"), "the bash hints are plan-mode only: " + prompt);
+    }
+
+    @Test
     void systemPromptCapShrinksToFitSmallWindow() {
         final var cfg = config(Map.of(
                 "yca.storageHome", storageHome.toString(),

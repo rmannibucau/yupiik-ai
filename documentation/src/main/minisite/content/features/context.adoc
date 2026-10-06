@@ -16,9 +16,46 @@ heuristic never turns into an over-aggressive trigger once real data exists.
 Before the first response of a session (no anchor yet), the raw heuristic
 estimate is used.
 
+In the TUI sidebar the estimate is labeled `context ~` and, when the provider
+has reported usage at least once, a `last real` row underneath shows the exact
+provider-billed `prompt_tokens` of the last anchored request (the real base the
+estimate is built on). The absence of that row means no anchor exists yet, so the
+`~` value is heuristic only. `/context llm-payload` prints the same contract as
+text: the footprint estimate, the last real prompt tokens and the calibration
+ratio, plus whether the context window came from an explicit value or the
+auto-detected baseline.
+
 All percentages are computed against the _usable_ window: the configured or
 auto-detected context window minus an output headroom of
 `min(20000, window / 4)` tokens, so prompts leave room for completions.
+
+=== Context window resolution
+
+The context window used by the gauges, pruning and compaction resolves in this
+order:
+
+1. a per-model override: `yca.provider.providers[i].models[j].contextWindow`
+   (an `int` in tokens, `0` or negative = unset) - wins over everything for the
+   matched model (exact id first, then the configured model id as a substring);
+2. the provider value `yca.provider.providers[i].contextWindow` (an `int` in
+   tokens, `0` or negative = unset);
+3. a value auto-detected once a day from the provider `/v1/models` vendor
+   extensions (`context_window`, `model_context_window`, `context_length`,
+   `max_model_len`, `max_input_tokens`, llama.cpp `meta.n_ctx`, or
+   `meta.n_ctx_train` when smaller), cached per provider and model under the
+   storage home;
+4. a conservative `32000`-token baseline when nothing is known (guessing too
+   high on a small-window model would turn every request into a context-window
+   overflow).
+
+Detected and configured values are totals (prompt + completion combined) in
+_tokens_. The per-model and provider values count as explicit configuration: an
+overflow-triggered auto-shrink never persists a halved window for a model or
+provider carrying an explicit value, it only affects the auto-detected cache.
+
+This lets one base URL serve models of very different windows (e.g. a 32k qwen
+and a 1M deepseek): give each model its own `contextWindow` entry and the
+pruning/compaction thresholds follow the active model.
 
 == Pruning: cheap local clearing
 
@@ -69,9 +106,30 @@ a single bash or JSON argument blob can otherwise dominate the input and
 multiply the rolling-summary LLM calls for no digest value. The exact payload
 stays available in the verbatim tail for recent calls.
 
-If the summarizer fails, compaction degrades to a deterministic local
-truncation (`yca.pruning.toolOutputMaxChars` caps old message content) and
-reports the fallback honestly instead of a fake success.
+The summarizer input is chunked adaptively to the compact model's window. By
+default (`yca.compaction.summarizerChunkChars`, `0` = auto) each summarizer
+call covers a quarter of the compact model's usable window in characters
+(~4 chars/token), floored at `yca.compaction.summarizerMinChunkChars`
+(default `12000`, the legacy fixed 12k chunk): most compact models therefore
+run in a *single* LLM call instead of ten small ones. The rolling digest kept
+across chunks is capped by `yca.compaction.summarizerDigestChars` (default
+`0` = half the chunk cap), so a merge call always stays inside the window.
+
+When a summarizer call is rejected because the input exceeds the model's real
+context window (a size-caused failure, not a transient error), the chunk cap
+is *halved* down to the configured floor and compaction restarts from the
+previous summary (the partial digest is discarded). The restart is bounded:
+each halving bisects the space, so a 1M-token model degrades through at most
+~6 rounds before giving up. Non-size failures (auth, 5xx, timeouts) keep the
+per-call retry/backoff and never trigger a halving. Both the halving restarts
+and the final degradation are surfaced as warnings so the user sees that
+compaction took the slower path (and with which chunk size).
+
+If the summarizer eventually fails, compaction degrades to a deterministic
+local truncation (`yca.pruning.toolOutputMaxChars` caps old message content)
+and reports the fallback honestly instead of a fake success. Old tail
+messages that still overflow after compaction are spliced to their head and
+tail (`yca.compaction.overflowSpliceChars`, default `500`).
 
 The digest is delivered to the model as a user message wrapped in
 `<compacted-context>` followed by explicit guidance: it must treat the

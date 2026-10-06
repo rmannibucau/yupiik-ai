@@ -30,4 +30,16 @@ public record BashPermissionsConfiguration(
                                 + " agent mode allows the command without prompting, any other value falls back to the"
                                 + " normal ask/gate flow. Rules are evaluated per segment: every segment of a compound"
                                 + " command must match an allowing rule, otherwise the whole command asks.")
-        List<CommandPermissionConfiguration> rules) {}
+        List<CommandPermissionConfiguration> rules,
+
+        @Property(
+                defaultValue =
+                        "\"Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, ...); commands that mutate repository state such as git add are denied.\"",
+                documentation = "Free text injected into the plan-mode system prompt summarizing which bash command"
+                        + " families are treated as read-only (eg. \"git status/diff/log/show, ls, cat,"
+                        + " grep, ...\"). Kept as curated prose rather than a dynamic render of `rules`"
+                        + " for brevity and scalability: the full rule list is long and per-workspace,"
+                        + " so the model only needs a compact, human-maintained summary. The rules"
+                        + " remain the enforcement gate; this text only explains them to the model."
+                        + " A blank value omits the sentence entirely.")
+        String readOnlyPromptHints) {}

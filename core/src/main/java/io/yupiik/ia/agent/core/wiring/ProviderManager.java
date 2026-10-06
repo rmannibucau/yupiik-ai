@@ -202,6 +202,20 @@ public class ProviderManager {
     }
 
     /**
+     * Resolve the effective context window override for a model of a provider: the {@code contextWindow} of the
+     * first matching model entry - exact id first, then first pattern contained in the model name - else the
+     * provider-level {@code contextWindow}, else 0 when no override applies. The 0-means-unset convention lets the
+     * caller continue the chain (per-model > provider > /v1/models detection > baseline).
+     */
+    public int contextWindowOverride(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.contextWindow() > 0) {
+            return entry.contextWindow();
+        }
+        return provider == null || provider.contextWindow() <= 0 ? 0 : provider.contextWindow();
+    }
+
+    /**
      * Resolve the effective tool call arguments repair mode for a model of a provider: the
      * {@code behavior.repairToolCallArguments} of the first matching model entry when it is not AUTO,
      * else the provider-level {@code tuning.repairToolCallArguments} when not AUTO, else the AUTO

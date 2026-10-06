@@ -177,6 +177,56 @@ class PermissionServiceTest {
     }
 
     @Test
+    void bashGateIsEnrichedWithTheFailingSegmentCauseAndStillPrompts() {
+        // git add is not a read-only family: the gate must prompt (not hard-deny) and its detail must
+        // explain why it is asked, in both plan and build modes
+        final var command = "cd /opt/x && git add -A && git status --short";
+        for (final var agentMode : List.of(AgentMode.BUILD, AgentMode.PLAN)) {
+            final var service = service(PermissionMode.ASK, List.of(), List.of());
+            service.setMode(agentMode);
+            final var detail = new AtomicReference<String>();
+            service.setGate((title, d, tool, args) -> {
+                detail.set(d);
+                return ApprovalGate.Result.ALLOW_ONCE;
+            });
+            assertTrue(
+                    service.check("bash", ToolCategory.BASH, Map.of("command", command))
+                            .allowed(),
+                    "an unclassified bash segment must still be gate-approvable (" + agentMode + ')');
+            assertTrue(
+                    detail.get() != null
+                            && detail.get().contains("Why asked")
+                            && detail.get().contains("git add -A")
+                            && detail.get().contains("read-only bash families"),
+                    "the gate detail must explain the failing segment (" + agentMode + "): " + detail.get());
+        }
+    }
+
+    @Test
+    void bashUserDenialCarriesTheFailingSegmentCause() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setMode(AgentMode.PLAN);
+        service.setGate((title, detail, tool, args) -> ApprovalGate.Result.DENY);
+        final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "git add -A"));
+        assertFalse(decision.allowed());
+        assertTrue(decision.reason().contains("refused by the user"));
+        assertTrue(decision.reason().contains("git add -A"));
+        assertTrue(decision.reason().contains("read-only bash families"));
+    }
+
+    @Test
+    void headlessBashDenialAppendsTheFailingSegmentCause() {
+        final var service = service(PermissionMode.ASK, List.of(), List.of());
+        service.setMode(AgentMode.PLAN);
+        final var decision = service.check("bash", ToolCategory.BASH, Map.of("command", "git add -A"));
+        assertFalse(decision.allowed());
+        // the existing message is kept and the cause is appended, not replaced
+        assertTrue(decision.reason().contains("no interactive approval"));
+        assertTrue(decision.reason().contains("git add -A"));
+        assertTrue(decision.reason().contains("read-only bash families"));
+    }
+
+    @Test
     void gateApprovedAndRefused() {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         service.setGate((title, detail, tool, args) -> ApprovalGate.Result.ALLOW_ONCE);

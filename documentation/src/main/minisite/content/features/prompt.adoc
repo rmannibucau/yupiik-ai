@@ -58,7 +58,11 @@ The context percent is colored dim below 30, warning below 70 and error above.
 
 |`model.contextTokens`
 |number
-|Estimated tokens currently in context; `0` until the first turn.
+|Estimated tokens currently in context; `0` until the first turn. The `~` in
+the TUI sidebar marks this as an estimate; when the provider has reported usage
+at least once the sidebar adds a `last real` row with the exact provider-billed
+`prompt_tokens` of the last anchored request (its absence means the estimate is
+heuristic only).
 
 |`model.contextWindow`
 |number

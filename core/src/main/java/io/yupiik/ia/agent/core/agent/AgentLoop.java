@@ -822,9 +822,18 @@ public class AgentLoop {
     private AgentEvent.UsageUpdated usageUpdated(
             final io.yupiik.ia.agent.core.llm.Usage usage,
             final int estimatedContextTokens,
-            final double contextPercent) {
+            final double contextPercent,
+            final int lastRealPromptTokens,
+            final double calibrationRatio) {
         return new AgentEvent.UsageUpdated(
-                usage, estimatedContextTokens, contextPercent, currentSessionId, subagentId, subagentName);
+                usage,
+                estimatedContextTokens,
+                contextPercent,
+                lastRealPromptTokens,
+                calibrationRatio,
+                currentSessionId,
+                subagentId,
+                subagentName);
     }
 
     private AgentEvent.Compacted compacted(final String kind, final String mode) {
@@ -2803,7 +2812,9 @@ public class AgentLoop {
                                 0)
                         : io.yupiik.ia.agent.core.llm.Usage.EMPTY,
                 effective,
-                usageTracker.contextPercent(effective)));
+                usageTracker.contextPercent(effective),
+                usageTracker.lastRealPromptTokens(),
+                usageTracker.calibrationRatio()));
     }
 
     /**

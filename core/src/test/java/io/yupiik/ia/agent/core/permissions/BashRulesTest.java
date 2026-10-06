@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 class BashRulesTest {
 
     private static BashRules.Compiled compile(final List<CommandPermissionConfiguration> rules) {
-        return BashRules.compile(new BashPermissionsConfiguration(rules));
+        return BashRules.compile(new BashPermissionsConfiguration(rules, null));
     }
 
     private static CommandPermissionConfiguration rule(
@@ -242,6 +242,36 @@ class BashRulesTest {
         final var compiled = compile(List.of(rule));
         assertFalse(compiled.evaluate(AgentMode.BUILD, "find . rm -rf x").allowed());
         assertTrue(compiled.evaluate(AgentMode.BUILD, "find . rm x -rf").allowed());
+    }
+
+    @Test
+    void deniedEvaluationReportsTheFailingSegmentAndCause() {
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        // git add is not a read-only family: the compound reports it as the failing segment
+        final var compound = compiled.evaluate(AgentMode.PLAN, "git status && git add -A && git diff --cached");
+        assertFalse(compound.allowed());
+        assertEquals("git add -A", compound.deniedSegment());
+        assertEquals(BashRules.Cause.NO_MATCH, compound.deniedCause());
+
+        // a rule matching but resolving to interactive approval is a different cause
+        final var ask = compile(List.of(rule(PermissionMode.ASK, null, "docker run")));
+        final var matched = ask.evaluate(AgentMode.BUILD, "docker run nginx");
+        assertFalse(matched.allowed());
+        assertEquals("docker run nginx", matched.deniedSegment());
+        assertEquals(BashRules.Cause.NOT_YOLO, matched.deniedCause());
+        assertEquals("docker run", matched.prefix());
+
+        // a redirect makes the segment fall back to the gate with its dedicated cause
+        final var redirect = compile(List.of(rule(PermissionMode.YOLO, null, "grep")));
+        final var redirected = redirect.evaluate(AgentMode.BUILD, "grep foo bar > out.txt");
+        assertFalse(redirected.allowed());
+        assertEquals(BashRules.Cause.REDIRECT_OR_SUBSTITUTION, redirected.deniedCause());
+
+        // fully allowed commands carry no denial info
+        final var allowed = compiled.evaluate(AgentMode.PLAN, "git status --short");
+        assertTrue(allowed.allowed());
+        assertNull(allowed.deniedSegment());
+        assertNull(allowed.deniedCause());
     }
 
     @Test

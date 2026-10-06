@@ -3303,6 +3303,14 @@ public class TuiCommand implements Runnable {
                 Span.styled(
                         formatTokens(state.model.estimatedContext()) + " tok (" + state.model.contextPercent() + "%)",
                         value)));
+        // the provider-billed prompt tokens of the last anchored request: only shown when an anchor
+        // exists (absent = raw heuristic estimate only), so the row doubles as the "is this real?"
+        // indicator for the `context ~` estimate above it
+        if (state.model.lastRealPromptTokens() > 0) {
+            text.add(Line.from(
+                    Span.styled("last real  ", label),
+                    Span.styled(formatTokens(state.model.lastRealPromptTokens()) + " tok", value)));
+        }
         if (state.session.runtime().usage().requests() > 0) {
             text.add(Line.from(
                     Span.styled("llm calls  ", label),

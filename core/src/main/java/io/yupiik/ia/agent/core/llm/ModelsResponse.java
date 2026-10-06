@@ -80,10 +80,11 @@ public record ModelsResponse(List<Model> data) {
         /**
          * Best effort max output tokens (the cap for the {@code max_tokens} parameter) extracted
          * from the vendor extensions, or null when unknown. Anthropic exposes it as
-         * {@code max_tokens}; OpenAI models occasionally set {@code max_completion_tokens}.
+         * {@code max_tokens}; OpenAI models occasionally set {@code max_completion_tokens};
+         * sglang gateways (and some vLLM deploys) use {@code max_output_length}. All are token counts.
          */
         public Integer maxTokens() {
-            return firstPositive("/max_tokens", "/max_completion_tokens", "/output_token_limit");
+            return firstPositive("/max_tokens", "/max_completion_tokens", "/output_token_limit", "/max_output_length");
         }
 
         private Integer firstPositive(final String... pointers) {

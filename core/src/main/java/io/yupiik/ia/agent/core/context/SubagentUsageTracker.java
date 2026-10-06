@@ -73,6 +73,18 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
+    public int lastRealPromptTokens() {
+        return anchor == null ? -1 : anchor.realPromptTokens();
+    }
+
+    @Override
+    public double calibrationRatio() {
+        return anchor == null
+                ? -1
+                : Math.clamp((double) anchor.realPromptTokens() / anchor.estimateAtAnchor(), 0.5, 2.0);
+    }
+
+    @Override
     public int effectiveContext(
             final java.util.List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
         final var current = anchor;
@@ -147,6 +159,11 @@ public class SubagentUsageTracker extends UsageTracker {
     @Override
     public int contextWindow() {
         return parent.contextWindow();
+    }
+
+    @Override
+    public String windowOrigin() {
+        return parent.windowOrigin();
     }
 
     @Override

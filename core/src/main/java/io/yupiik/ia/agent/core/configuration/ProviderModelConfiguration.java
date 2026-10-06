@@ -37,4 +37,15 @@ public record ProviderModelConfiguration(
         @Property(
                 documentation =
                         "Tuning defaults (reasoning effort, output token budget, variants and provider specific options) for this model. Nullable facets keep the provider defaults.")
-        ModelTuningConfiguration behavior) {}
+        ModelTuningConfiguration behavior,
+
+        @Property(
+                defaultValue = "0",
+                documentation =
+                        "Context window size in tokens for this model, overriding the provider contextWindow value. "
+                                + "Zero or negative (the default) continues the resolution chain: provider contextWindow, "
+                                + "then the value detected from the provider /v1/models (context_length, max_model_len, ...), "
+                                + "then the conservative 32000 baseline. Useful on providers serving models of very different "
+                                + "windows (eg. a 32k qwen and a 1M deepseek on one base URL). Detected values are totals "
+                                + "(prompt + completion combined).")
+        int contextWindow) {}

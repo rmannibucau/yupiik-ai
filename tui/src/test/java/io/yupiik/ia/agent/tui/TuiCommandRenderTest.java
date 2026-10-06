@@ -254,6 +254,33 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void sidebarLastRealRowAppearsOnlyWhenAnchored() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-sidebar-lastreal-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("test-model");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var frontend = shellRegistry.active(sessionId).frontend();
+
+        // no anchor yet: the "last real" row must be absent and "context ~" stays
+        frontend.onEvent(new AgentEvent.UsageUpdated(new Usage(0, 0, 0), 72000, 7.0, "s1"));
+        awaitText("context ~");
+        awaitTextGone("last real");
+
+        // anchored: the row appears with the provider-billed prompt tokens of the last request
+        frontend.onEvent(
+                new AgentEvent.UsageUpdated(new Usage(68432, 0, 0), 72000, 7.0, 68432, 0.95, "s1", null, null));
+        awaitText("last real  68k tok");
+
+        quit();
+    }
+
+    @Test
     void slashHelpListsCommandsInTranscript() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         uiThread = new Thread(command, "tui-help-test");

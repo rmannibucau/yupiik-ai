@@ -178,34 +178,50 @@ public class PermissionService {
         if (permission == PermissionMode.YOLO) {
             return Decision.allow();
         }
-        if (command != null) {
-            // bash rules (yca.permissions.bash.rules) silently allow recognized read-only
-            // command families for the active agent mode
-            if (compiledBashRules().evaluate(mode(), command).allowed()) {
-                return Decision.allow();
-            }
+        final var asked = command != null ? compiledBashRules().evaluate(mode(), command) : null;
+        if (command != null && asked != null && asked.allowed()) {
+            return Decision.allow();
         }
         if (permission == PermissionMode.AUTO_EDIT && category == ToolCategory.EDIT) {
             return Decision.allow();
         }
-        return approve(toolName, args);
+        return approve(toolName, args, asked);
     }
 
-    private Decision approve(final String toolName, final Map<String, Object> args) {
+    private Decision approve(final String toolName, final Map<String, Object> args, final BashRules.Evaluation asked) {
         final var g = gate;
         if (g == null) {
-            return Decision.deny(
-                    "permission denied: mode is 'ask' (the default) and this run has no interactive approval wired - use the TUI, or set yca.permissions.mode=yolo/auto_edit to allow unattended writes");
+            final var base =
+                    "permission denied: mode is 'ask' (the default) and this run has no interactive approval wired - use the TUI, or set yca.permissions.mode=yolo/auto_edit to allow unattended writes";
+            return Decision.deny(bashCause(asked) == null ? base : base + " (" + bashCause(asked) + ')');
         }
-        final var result = g.approve(describe(toolName, args), detail(toolName, args), toolName, args);
+        final var result = g.approve(describe(toolName, args), detail(toolName, args, asked), toolName, args);
         return switch (result) {
             case ALLOW_ONCE -> Decision.allow();
             case ALLOW_SESSION -> {
                 grantSession(toolName, args);
                 yield Decision.allow();
             }
-            default -> Decision.deny("refused by the user");
+            default -> Decision.deny("refused by the user" + (bashCause(asked) == null ? "" : ": " + bashCause(asked)));
         };
+    }
+
+    /**
+     * The human-readable reason a bash command reached the approval gate, or {@code null} when no
+     * specific segment explains it (non-bash tools). The gate flow itself is untouched: the cause only
+     * enriches the modal detail and the denial feedback the model sees.
+     */
+    private static String bashCause(final BashRules.Evaluation asked) {
+        if (asked == null || asked.allowed() || asked.deniedSegment() == null) {
+            return null;
+        }
+        final var when =
+                switch (asked.deniedCause()) {
+                    case NO_MATCH -> "is not in the read-only bash families (yca.permissions.bash.rules)";
+                    case NOT_YOLO -> "matches a bash rule that requires interactive approval in this mode";
+                    case REDIRECT_OR_SUBSTITUTION -> "carries a redirection or command substitution";
+                };
+        return "segment '" + asked.deniedSegment() + "' " + when;
     }
 
     private String grantKey(final String toolName, final Map<String, Object> args) {
@@ -302,7 +318,8 @@ public class PermissionService {
         return toolName;
     }
 
-    private static String detail(final String toolName, final Map<String, Object> args) {
+    private static String detail(
+            final String toolName, final Map<String, Object> args, final BashRules.Evaluation asked) {
         final var shownInTitle = new HashSet<String>();
         if (args.get("command") instanceof String) {
             shownInTitle.add("command");
@@ -311,6 +328,10 @@ public class PermissionService {
             shownInTitle.add("path");
         }
         final var sb = new StringBuilder("Tool ").append(toolName).append('\n');
+        final var cause = bashCause(asked);
+        if (cause != null) {
+            sb.append("Why asked: ").append(cause).append('\n');
+        }
         for (final var e : args.entrySet()) {
             if (shownInTitle.contains(e.getKey())) {
                 continue;

@@ -43,4 +43,42 @@ public record CompactionConfiguration(
                                 + "serializes assistant history for summarization (0 disables the cap and keeps "
                                 + "arguments verbatim). Large arguments (bash scripts, big JSON payloads) dominate "
                                 + "the summarizer input and multiply the number of rolling-summary LLM calls.")
-        int toolArgumentsCapChars) {}
+        int toolArgumentsCapChars,
+
+        @Property(
+                defaultValue = "0",
+                documentation =
+                        "Character cap of a single summarizer input chunk (0 = auto: a quarter of the compact model's "
+                                + "usable window, floored at summarizerMinChunkChars). One chunk is one LLM call, so "
+                                + "large windows compact in a single call; when a summarizer call fails because the "
+                                + "input is too large, the cap is halved (down to the floor) and compaction retried.")
+        int summarizerChunkChars,
+
+        @Property(
+                defaultValue = "12000",
+                documentation =
+                        "Floor of the auto-derived summarizer chunk cap and of the halving retries: the legacy fixed "
+                                + "12k-char chunk, now just a configured lower bound, so even small summarizer models "
+                                + "can never receive a chunk below this.")
+        int summarizerMinChunkChars,
+
+        @Property(
+                defaultValue = "0",
+                documentation =
+                        "Character cap of the rolling digest accumulated across chunks and injected into merge calls "
+                                + "(0 = auto: half the effective chunk cap, so a merge call carries at most ~1.5x a chunk).")
+        int summarizerDigestChars,
+
+        @Property(
+                defaultValue = "2000",
+                documentation =
+                        "Character cap applied to each tool output when the history is serialized into the summarizer "
+                                + "input (0 disables the cap).")
+        int summarizerToolOutputChars,
+
+        @Property(
+                defaultValue = "500",
+                documentation =
+                        "Character cap (head and tail) applied to kept-tail messages when the compacted context still "
+                                + "exceeds the provider window after compaction.")
+        int overflowSpliceChars) {}

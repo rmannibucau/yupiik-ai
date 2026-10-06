@@ -337,7 +337,20 @@ public class SessionCommands implements SlashCommandSet {
                     .append(Math.round(usage.contextPercent(estimated)))
                     .append("% of ")
                     .append(usage.usableWindow())
-                    .append(" usable)\n");
+                    .append(" usable, window ")
+                    .append(usage.windowOrigin())
+                    .append(")\n");
+            final var lastReal = usage.lastRealPromptTokens();
+            if (lastReal > 0) {
+                sb.append("**Last real (provider-billed)** ")
+                        .append(lastReal)
+                        .append(" prompt tokens of the last anchored request (calibration ratio ")
+                        .append(String.format(Locale.ROOT, "%.2f", usage.calibrationRatio()))
+                        .append(")\n");
+            } else {
+                sb.append(
+                        "**Last real (provider-billed)** none yet - the context estimate is heuristic only (no anchor)\n");
+            }
         }
 
         sb.append("\n## Messages (").append(payload.messages().size()).append(")\n\n");

@@ -131,6 +131,24 @@ public class UsageTracker {
     public void clearAnchor() {
         this.anchor = null;
     }
+
+    /**
+     * The provider-billed prompt tokens of the last anchored request, the real base the hybrid
+     * estimate is built on; {@code -1} when no anchor exists yet (raw heuristic estimate).
+     */
+    public int lastRealPromptTokens() {
+        return anchor == null ? -1 : anchor.realPromptTokens();
+    }
+
+    /**
+     * The clamped calibration ratio (real/estimate at anchor time, in {@code [0.5, 2.0]}) applied to
+     * the estimated tail, or {@code -1} when no anchor exists yet.
+     */
+    public double calibrationRatio() {
+        return anchor == null
+                ? -1
+                : Math.clamp((double) anchor.realPromptTokens() / anchor.estimateAtAnchor(), 0.5, 2.0);
+    }
     /**
      * Best known context usage in tokens: the last real prompt token count when available, plus a
      * calibrated estimate of what was appended since; a raw estimate otherwise (no anchor yet, or
@@ -228,11 +246,12 @@ public class UsageTracker {
     }
 
     /**
-     * The effective context window in tokens: the provider configured value when positive, else a
-     * value detected from the provider /v1/models vendor extensions and cached for a day per
-     * provider and model, else {@link ModelsResponse#AUTO_DETECTED_BASELINE}. Detection failures
-     * are logged at warning level. Auto-detection fallbacks are tracked so callers can surface an
-     * honest once-per-session notice to the user.
+     * The effective context window in tokens: the per-model configured {@code models[].contextWindow} when set,
+     * else the provider configured value when positive, else a value detected from the provider /v1/models
+     * vendor extensions and cached for a day per provider and model, else {@link ModelsResponse#AUTO_DETECTED_BASELINE}.
+     * Detection failures are logged at warning level. Auto-detection fallbacks are tracked so callers can surface an
+     * honest once-per-session notice to the user. A per-model or provider configured value counts as explicit, so an
+     * overflow-triggered auto-halving is never persisted for it.
      */
     public int contextWindow() {
         final var current = settings == null
@@ -242,6 +261,16 @@ public class UsageTracker {
                         : providerManager == null ? null : providerManager.provider(settings.providerId()));
         if (current == null) {
             return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
+        }
+        // per-model override wins over the provider value: resolve it first when a concrete model is known
+        if (chatClient != null && providerManager != null) {
+            final var model = chatClient.model(settings);
+            if (model != null && !model.isBlank()) {
+                final var override = providerManager.contextWindowOverride(current, model);
+                if (override > 0) {
+                    return rememberExplicit(override);
+                }
+            }
         }
         if (current.contextWindow() > 0) {
             return rememberExplicit(current.contextWindow());
@@ -269,6 +298,17 @@ public class UsageTracker {
     public boolean lastResolutionWasAuto() {
         return autoContextWindowResolutions.get() > 0
                 && autoContextWindowResolutions.get() >= contextWindowResolutions.get();
+    }
+
+    /**
+     * Where the last {@link #contextWindow()} resolution came from: {@code "explicit"} for a
+     * provider-configured or vendor-detected/cached value, {@code "auto"} for the
+     * {@link ModelsResponse#AUTO_DETECTED_BASELINE} fallback. Ordered after
+     * {@link #lastResolutionWasAuto()} so a pending detection first call still reports the
+     * resolution it would pick.
+     */
+    public String windowOrigin() {
+        return lastResolutionWasAuto() ? "auto" : "explicit";
     }
 
     private int rememberExplicit(final int window) {

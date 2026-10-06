@@ -230,6 +230,13 @@ public class SystemPromptBuilder {
                     "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
             sb.append(
                     "Record the plan with write_todo and keep the list in sync with the discussion: whenever a follow-up changes the plan (scope, steps, approach, trade-offs), update it in the same turn so it always mirrors the latest agreed plan. Completed or cancelled items from earlier build sessions are progress history: keep them.\n");
+            final var hints = configuration.permissions() != null
+                            && configuration.permissions().bash() != null
+                    ? configuration.permissions().bash().readOnlyPromptHints()
+                    : null;
+            if (hints != null && !hints.isBlank()) {
+                sb.append(hints).append('\n');
+            }
         }
         return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
     }
@@ -330,7 +337,10 @@ public class SystemPromptBuilder {
         if (global > 0) {
             return global;
         }
-        final var window = provider == null ? 0 : provider.contextWindow();
+        // effective window: per-model override first, then provider value (both explicit); 0 = unknown
+        final var window = provider == null || model == null
+                ? (provider == null ? 0 : provider.contextWindow())
+                : providerManager.contextWindowOverride(provider, model);
         if (window <= 0) {
             return SYSTEM_PROMPT_CAP;
         }

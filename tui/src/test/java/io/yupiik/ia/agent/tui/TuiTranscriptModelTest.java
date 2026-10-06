@@ -298,11 +298,21 @@ class TuiTranscriptModelTest {
 
     @Test
     void usageUpdatedTracksTokens() {
-        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1"));
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, 40000, 1.05, "s1", null, null));
         assertEquals(0, model.promptTokens());
         assertEquals(0, model.completionTokens());
         assertEquals(42000, model.estimatedContext());
         assertEquals(55, model.contextPercent());
+        assertEquals(40000, model.lastRealPromptTokens());
+        assertEquals(1.05, model.calibrationRatio(), 0.0001);
+    }
+
+    @Test
+    void usageUpdatedWithoutAnchorKeepsZeroLastReal() {
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1"));
+        assertEquals(42000, model.estimatedContext());
+        assertEquals(0, model.lastRealPromptTokens(), "no anchor: lastReal must be 0");
+        assertEquals(-1, model.calibrationRatio(), 0.0001, "no anchor: ratio must be -1");
     }
 
     @Test

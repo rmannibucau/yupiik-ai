@@ -61,4 +61,13 @@ class ModelsResponseTest {
                 ModelsResponse.class, "{\"data\":[{\"id\":\"m\",\"context_length\":4096,\"meta\":{\"n_ctx\":8192}}]}");
         assertEquals(4096, res.data().get(0).contextWindow());
     }
+
+    @Test
+    void sglangContextLengthAndMaxOutputLengthAreRead(final JsonMapper mapper) {
+        final var res = mapper.fromString(
+                ModelsResponse.class,
+                "{\"data\":[{\"id\":\"deepseek-v4-flash\",\"owned_by\":\"sglang\",\"context_length\":1000000,\"max_output_length\":393216}]}");
+        assertEquals(1_000_000, res.data().get(0).contextWindow(), "context_length is a token total window");
+        assertEquals(393_216, res.data().get(0).maxTokens(), "max_output_length is a token output cap");
+    }
 }

@@ -76,6 +76,7 @@ public record LlmModel(String id, String provider, Long created, String ownedBy,
                         "max_tokens",
                         "max_completion_tokens",
                         "output_token_limit",
+                        "max_output_length",
                         "max_output_tokens",
                         "meta.n_ctx_train"),
                 AUTO_DETECTED_BASELINE);

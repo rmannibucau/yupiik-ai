@@ -37,8 +37,21 @@ import java.util.Set;
  */
 public final class BashRules {
 
-    /** Result of a command evaluation: whether the command is auto-allowed and its arity-style prefix. */
-    public record Evaluation(boolean allowed, String prefix) {}
+    /**
+     * Result of a command evaluation: whether the command is auto-allowed, its arity-style prefix and,
+     * when denied, the first segment that was not auto-allowed plus {@link Cause why}.
+     */
+    public record Evaluation(boolean allowed, String prefix, String deniedSegment, Cause deniedCause) {}
+
+    /** Why a bash segment was not auto-allowed by the rules, used to explain approval prompts and denials. */
+    public enum Cause {
+        /** No configured rule matched the segment (eg. {@code git add}). */
+        NO_MATCH,
+        /** A rule matched but resolves to interactive approval (ask/auto_edit) in the active mode. */
+        NOT_YOLO,
+        /** The segment carries a redirection or a command substitution; never auto-allowed. */
+        REDIRECT_OR_SUBSTITUTION
+    }
 
     private BashRules() {
         // no-op
@@ -110,16 +123,22 @@ public final class BashRules {
          */
         public Evaluation evaluate(final AgentMode agentMode, final String command) {
             if (command == null || command.isBlank()) {
-                return new Evaluation(true, null);
+                return new Evaluation(true, null, null, null);
             }
             final var segments = tokenize(command);
             var allowed = true;
             var matchedSegments = 0;
             var matchedStart = (String) null;
+            String deniedSegment = null;
+            Cause deniedCause = null;
             for (final var segment : segments) {
                 final var decision = evaluateSegment(segment, agentMode);
                 if (!decision.allowed()) {
                     allowed = false;
+                    if (deniedSegment == null) {
+                        deniedSegment = join(segment);
+                        deniedCause = decision.cause();
+                    }
                 }
                 if (decision.matchedStart() != null) {
                     matchedSegments++;
@@ -130,7 +149,22 @@ public final class BashRules {
             }
             // the fine grained prefix is only meaningful for plain single segment commands: a compound
             // command approved once must not silently unlock its other segments
-            return new Evaluation(allowed, segments.size() == 1 && matchedSegments == 1 ? matchedStart : null);
+            return new Evaluation(
+                    allowed,
+                    segments.size() == 1 && matchedSegments == 1 ? matchedStart : null,
+                    deniedSegment,
+                    deniedCause);
+        }
+
+        private static String join(final Segment segment) {
+            final var sb = new StringBuilder();
+            for (final var token : segment.tokens()) {
+                if (sb.length() > 0) {
+                    sb.append(' ');
+                }
+                sb.append(token.text());
+            }
+            return sb.toString();
         }
 
         /** Command segments (quote aware, operators stripped) as normalized text, for allow/deny pattern matching. */
@@ -241,7 +275,7 @@ public final class BashRules {
             return best;
         }
 
-        private record SegmentDecision(boolean allowed, String matchedStart) {}
+        private record SegmentDecision(boolean allowed, String matchedStart, Cause cause) {}
 
         private SegmentDecision evaluateSegment(final Segment segment, final AgentMode agentMode) {
             final var effective = new ArrayList<Token>(segment.tokens().size());
@@ -253,7 +287,7 @@ public final class BashRules {
             // remaining redirections (>, <) and command substitutions ($(), backticks) are never auto-allowed
             for (final var token : effective) {
                 if (token.redirect() || token.substitution()) {
-                    return new SegmentDecision(false, null);
+                    return new SegmentDecision(false, null, Cause.REDIRECT_OR_SUBSTITUTION);
                 }
             }
             var i = 0;
@@ -261,12 +295,12 @@ public final class BashRules {
                 i++;
             }
             if (i >= effective.size()) {
-                return new SegmentDecision(true, null); // pure env assignments
+                return new SegmentDecision(true, null, null); // pure env assignments
             }
 
             final var text = effective.get(i).text();
             if ("cd".equals(text)) {
-                return new SegmentDecision(true, null); // directory change has no repository side effect
+                return new SegmentDecision(true, null, null); // directory change has no repository side effect
             }
             if ("xargs".equals(text)) {
                 return evaluateXargs(effective, i, agentMode);
@@ -298,7 +332,8 @@ public final class BashRules {
                 }
             }
 
-            return new SegmentDecision(allowed, bestStart);
+            return new SegmentDecision(
+                    allowed, bestStart, allowed ? null : (bestStart != null ? Cause.NOT_YOLO : Cause.NO_MATCH));
         }
 
         private SegmentDecision evaluateXargs(
@@ -324,7 +359,7 @@ public final class BashRules {
                 if (consumed < 0) {
                     // Unknown/unsupported option or malformed option.
                     // Fail closed rather than accidentally auto-allowing it.
-                    return new SegmentDecision(false, null);
+                    return new SegmentDecision(false, null, Cause.NO_MATCH);
                 }
 
                 i += consumed;
@@ -333,7 +368,7 @@ public final class BashRules {
             // Plain `xargs` executes `echo` by default. Don't treat that as
             // an implicitly allowed command.
             if (i >= tokens.size()) {
-                return new SegmentDecision(false, null);
+                return new SegmentDecision(false, null, Cause.NO_MATCH);
             }
 
             final var command = new ArrayList<String>(tokens.size() - i);
@@ -343,7 +378,7 @@ public final class BashRules {
 
             // Do not allow xargs to hide a shell command from the evaluator.
             if (isShellCommand(command.get(0))) {
-                return new SegmentDecision(false, null);
+                return new SegmentDecision(false, null, Cause.NO_MATCH);
             }
 
             return evaluateCommandTokens(command, agentMode);

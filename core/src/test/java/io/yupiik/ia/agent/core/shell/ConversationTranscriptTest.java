@@ -384,9 +384,11 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.Status("working", "s1"));
         assertEquals("working", t.status());
 
-        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, "s1"));
+        t.onEvent(new AgentEvent.UsageUpdated(null, 42, 12.4, 40, 1.25, "s1", null, null));
         assertEquals(42, t.estimatedContext());
         assertEquals(12, t.contextPercent());
+        assertEquals(40, t.lastRealPromptTokens());
+        assertEquals(1.25, t.calibrationRatio(), 0.0001);
     }
 
     @Test
