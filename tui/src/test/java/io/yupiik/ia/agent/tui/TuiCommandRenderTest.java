@@ -99,6 +99,13 @@ class TuiCommandRenderTest {
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
     private static final Duration TICK_RATE = Duration.ofMillis(2);
     private static final Duration POLL_TIMEOUT = Duration.ofMillis(2);
+    /**
+     * How long {@link #settledCursor} waits for a second, confirming frame after its first
+     * sighting. The renderer only repaints on change (no idle tick), so a confirming frame - when
+     * the layout is still reflowing - arrives within a few ticks; once the screen is quiescent the
+     * awaited state is already stable and paying a long window here would just be dead time.
+     */
+    private static final long SETTLED_CURSOR_CONFIRM_MS = 100;
 
     @TempDir
     Path temp;
@@ -2335,7 +2342,7 @@ class TuiCommandRenderTest {
             }
             if (accept.test(cur) && cur != HeadlessBackend.Cursor.NONE) {
                 prev = cur; // first sighting: require a second identical frame
-                if (!backend.awaitFrame(1_000)) {
+                if (!backend.awaitFrame(SETTLED_CURSOR_CONFIRM_MS)) {
                     return new int[] {cur.col(), cur.row()}; // settled: no more frames coming
                 }
                 continue;
