@@ -154,8 +154,12 @@ class ChatClientFlavorTest {
     }
 
     private ChatCompletionRequest request() {
+        return request("test-model");
+    }
+
+    private ChatCompletionRequest request(final String model) {
         return new ChatCompletionRequest(
-                "test-model", List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
+                model, List.of(Message.user("hi")), null, null, null, null, null, null, null, null);
     }
 
     @Test
@@ -349,7 +353,7 @@ class ChatClientFlavorTest {
         final var cfg = configuration(Map.of("yca.provider.providers.0.model", " deepseek-v4-flash"));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
-        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals("hello there", client.chat(request(null)).message().content());
         assertTrue(bodies.getLast().contains("\"model\":\"deepseek-v4-flash\""), bodies.getLast());
         assertTrue(!bodies.getLast().contains("\"model\":\" deepseek-v4-flash\""), bodies.getLast());
     }
@@ -371,13 +375,14 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.top_p", "0.9"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.top_k", "40")));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
+        final var settings = ChatSettings.EMPTY.withVariant("balanced");
         assertEquals(1, client.variants(settings).size());
-        settings.setVariant("balanced");
 
         assertEquals(
                 "hello there",
-                client.chat(request(), settings, () -> false).message().content());
+                client.chat(request().withSettings(settings), () -> false)
+                        .message()
+                        .content());
         assertEquals("balanced", client.variant(settings));
         final var body = bodies.getLast();
         assertEquals(1, occurrences(body, "\"temperature\":0.7"), body);
@@ -392,11 +397,12 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
-        settings.setVariant("missing");
+        final var settings = ChatSettings.EMPTY.withVariant("missing");
         assertEquals(
                 "hello there",
-                client.chat(request(), settings, () -> false).message().content());
+                client.chat(request().withSettings(settings), () -> false)
+                        .message()
+                        .content());
         assertEquals("missing", client.variant(settings));
         final var body = bodies.getLast();
         // no configured variant was applied and the model has no implicit default
@@ -417,29 +423,107 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.length", "1"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced")));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
-        settings.setVariant("balanced");
+        final var settings = ChatSettings.EMPTY.withProviderId("other").withVariant("balanced");
         assertEquals("balanced", client.variant(settings));
-        client.setProvider("other");
+        assertEquals("other", client.providerId(settings), "the per-session provider override must be effective");
+        // a second session without an override falls back to the process default provider
+        final var otherSession = ChatSettings.EMPTY;
+        assertEquals("default", client.providerId(otherSession));
+    }
+
+    @Test
+    void twoSessionsResolveTheirOwnProviderModelAndFlavor() throws Exception {
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.1.id", "other"),
+                Map.entry(
+                        "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.1.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.1.model", "tab-b-model"),
+                Map.entry("yca.provider.providers.1.api", "auto")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // tab A: no override -> process default provider "default" and its model
+        final var tabA = ChatSettings.EMPTY;
+        assertEquals("test-model", client.model(tabA), "no override uses the process default provider model");
+        // tab B: explicit provider override -> its model, not the process default's
+        final var tabB = ChatSettings.EMPTY.withProviderId("other");
+        assertEquals("tab-b-model", client.model(tabB), "the override selects the other provider's model");
         assertEquals(
-                "balanced",
-                client.variant(settings),
-                "a provider change must not touch the selection owned by a session");
+                "other",
+                client.currentProvider(tabB).id(),
+                "the effective provider of tab B is its override, not the process default");
+
+        // both requests hit the shared wire endpoint with their own model/body: a null request model
+        // is resolved from the session's provider, so tab A carries the default model and tab B the
+        // overridden provider's model
+        assertEquals(
+                "hello there",
+                client.chat(request(null).withSettings(tabA), () -> false)
+                        .message()
+                        .content());
+        assertEquals(
+                "hello there",
+                client.chat(request(null).withSettings(tabB), () -> false)
+                        .message()
+                        .content());
+        final var bodiesSnapshot = bodies.stream().toList();
+        assertTrue(
+                bodiesSnapshot.stream().anyMatch(b -> b.contains("\"model\":\"test-model\"")),
+                "tab A's request carries the default provider model");
+        assertTrue(
+                bodiesSnapshot.stream().anyMatch(b -> b.contains("\"model\":\"tab-b-model\"")),
+                "tab B's request carries the overridden provider model");
+    }
+
+    @Test
+    void budgetAndFlavorArePerSessionProvider() throws Exception {
+        // provider "default" resolves to completions via AUTO probing of /v1/responses (404),
+        // and has no explicit output budget -> no budget is force-sent for OpenAI flavors
+        final var cfg = configuration(Map.ofEntries(
+                Map.entry("yca.provider.providers.length", "2"),
+                Map.entry("yca.provider.providers.1.id", "other"),
+                Map.entry(
+                        "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1"),
+                Map.entry("yca.provider.providers.1.apiKey", "test-key"),
+                Map.entry("yca.provider.providers.1.model", "tab-b-model"),
+                Map.entry("yca.provider.providers.1.api", "auto"),
+                Map.entry("yca.provider.providers.1.outputTokens", "4321")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // tab A (process default, no outputTokens) -> no max_tokens forced on the wire
+        final var tabA = ChatSettings.EMPTY;
+        assertEquals(
+                "hello there",
+                client.chat(request().withSettings(tabA), () -> false).message().content());
+        final var bodyA = bodies.getLast();
+        assertTrue(!bodyA.contains("\"max_tokens\""), bodyA);
+
+        // tab B (override with outputTokens=4321) -> 4321 is injected for its requests only
+        final var tabB = ChatSettings.EMPTY.withProviderId("other");
+        assertEquals(
+                "hello there",
+                client.chat(request().withSettings(tabB), () -> false).message().content());
+        final var bodyB = bodies.getLast();
+        assertTrue(bodyB.contains("\"max_tokens\":4321"), bodyB);
     }
 
     @Test
     void inMemorySamplingOverrideSetsTemperatureTopPAndTopK() throws Exception {
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
-        settings.setSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
+        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
                 ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.3d),
                 ChatClient.SamplingField.TOP_P, java.util.Optional.of(0.85d),
                 ChatClient.SamplingField.TOP_K, java.util.Optional.of(32d))));
 
         assertEquals(
                 "hello there",
-                client.chat(request(), settings, () -> false).message().content());
+                client.chat(request().withSettings(settings), () -> false)
+                        .message()
+                        .content());
         final var body = bodies.getLast();
         assertEquals(1, occurrences(body, "\"temperature\":0.3"), body);
         assertEquals(1, occurrences(body, "\"top_p\":0.85"), body);
@@ -453,14 +537,16 @@ class ChatClientFlavorTest {
                 Map.entry("yca.provider.providers.0.tuning.variants.0.name", "balanced"),
                 Map.entry("yca.provider.providers.0.tuning.variants.0.temperature", "0.7")));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
-        settings.setVariant("balanced");
-        settings.setSampling(ChatClient.SamplingOverride.of(
-                java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.empty())));
+        final var settings = ChatSettings.EMPTY
+                .withVariant("balanced")
+                .withSampling(ChatClient.SamplingOverride.of(
+                        java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.empty())));
 
         assertEquals(
                 "hello there",
-                client.chat(request(), settings, () -> false).message().content());
+                client.chat(request().withSettings(settings), () -> false)
+                        .message()
+                        .content());
         final var body = bodies.getLast();
         assertTrue(!body.contains("\"temperature\""), body);
     }
@@ -469,8 +555,7 @@ class ChatClientFlavorTest {
     void implicitVariantReflectsInlineSamplingOverrides() throws Exception {
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
-        settings.setSampling(ChatClient.SamplingOverride.of(
+        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.25d))));
 
         final var implicit = client.implicitVariant(settings);
@@ -487,12 +572,12 @@ class ChatClientFlavorTest {
     void setModelClearsInMemorySamplingOverrides() throws Exception {
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
-        final var settings = new ChatSettings();
-        settings.setSampling(ChatClient.SamplingOverride.of(
+        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(
                 java.util.Map.of(ChatClient.SamplingField.TOP_K, java.util.Optional.of(16d))));
         assertNotNull(client.sampling(settings));
-        settings.setModel("other-model");
-        assertNull(client.sampling(settings), "model change must clear the session's sampling overrides");
+        assertNull(
+                client.sampling(settings.withModel("other-model")),
+                "model change must clear the session's sampling overrides");
     }
 
     @Test
@@ -500,8 +585,46 @@ class ChatClientFlavorTest {
         final var cfg = configuration(Map.of("yca.provider.providers.0.model", "gpt-5"));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
-        assertEquals("hello there", client.chat(request()).message().content());
+        assertEquals("hello there", client.chat(request(null)).message().content());
         assertEquals(1, occurrences(bodies.getLast(), "\"reasoning_effort\":\"medium\""), bodies.getLast());
+    }
+
+    @Test
+    void explicitRequestModelWinsOverTheSessionSelection() throws Exception {
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.model", "default-model",
+                "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1",
+                "yca.provider.providers.1.apiKey", "test-key",
+                "yca.provider.providers.1.model", "other-model"));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // an explicit request model wins over both the settings selection and the provider model
+        final var settings = ChatSettings.EMPTY.withProviderId("other").withModel("settings-model");
+        assertEquals(
+                "hello there",
+                client.chat(request("request-model").withSettings(settings), () -> false)
+                        .message()
+                        .content());
+        assertTrue(bodies.getLast().contains("\"model\":\"request-model\""), bodies.getLast());
+    }
+
+    @Test
+    void dollarRefInRequestModelRoutesToThatProvider() throws Exception {
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.model", "default-model",
+                "yca.provider.providers.1.baseUrl",
+                        "http://localhost:" + server.getAddress().getPort() + "/v1",
+                "yca.provider.providers.1.apiKey", "test-key",
+                "yca.provider.providers.1.model", "other-model"));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // a $provider/model reference in the request model routes the request to that provider
+        assertEquals(
+                "hello there",
+                client.chat(request("$other/model-x"), () -> false).message().content());
+        assertTrue(bodies.getLast().contains("\"model\":\"model-x\""), bodies.getLast());
+        assertTrue(!bodies.getLast().contains("default-model"), bodies.getLast());
     }
 
     @Test

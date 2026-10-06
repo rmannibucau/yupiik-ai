@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -88,6 +89,10 @@ public class MemoryCompactor {
      * @return a short status message, or {@code null} when nothing ran
      */
     public String maybeCompact() {
+        return maybeCompact(ChatSettings.EMPTY);
+    }
+
+    public String maybeCompact(final ChatSettings settings) {
         if (configuration == null
                 || !configuration.memory().compactEnabled()
                 || !configuration.memory().enabled()) {
@@ -103,7 +108,7 @@ public class MemoryCompactor {
             if (!Files.isRegularFile(file) || Files.size(file) < THRESHOLD_BYTES) {
                 return null; // below the threshold: nothing to gain
             }
-            return compactNow(false);
+            return compactNow(false, ChatSettings.EMPTY);
         } catch (final IOException e) {
             LOGGER.log(Level.FINE, "memory compaction threshold check failed", e);
             return null;
@@ -116,10 +121,10 @@ public class MemoryCompactor {
      * guard (protected constructor use is only for the manual path).
      */
     public String compactNow() {
-        return compactNow(true);
+        return compactNow(true, ChatSettings.EMPTY);
     }
 
-    private String compactNow(final boolean manual) {
+    private String compactNow(final boolean manual, final ChatSettings settings) {
         if (!running.compareAndSet(false, true)) {
             return "memory compaction already running";
         }
@@ -129,7 +134,7 @@ public class MemoryCompactor {
             if (content == null || content.isBlank()) {
                 return manual ? "no project memory to compact" : null;
             }
-            final var rewritten = rewrite(content);
+            final var rewritten = rewrite(content, settings);
             if (rewritten == null || rewritten.isBlank()) {
                 return manual ? "memory compaction produced no output; left untouched" : null;
             }
@@ -161,32 +166,34 @@ public class MemoryCompactor {
         }
     }
 
-    private String rewrite(final String content) {
-        final var compact =
-                configuration.model() == null ? null : configuration.model().compact();
-        final var model = providerManager == null ? null : providerManager.resolveModel(compact);
+    private String rewrite(final String content, final ChatSettings settings) {
+        final var memory =
+                configuration.model() == null ? null : configuration.model().resolvedMemory();
+        final var model = providerManager == null ? null : providerManager.resolveModel(memory);
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(
-                    model,
-                    List.of(
-                            Message.system("You maintain a project memory file: a list of durable facts, decisions and "
-                                    + "preferences, one bullet per line, all about this repository. "
-                                    + "Rewrite the provided memory: merge near-duplicate bullets, drop facts that "
-                                    + "supersede or contradict older ones, drop one-off session observations "
-                                    + "(benchmarks, sandbox paths, single-run findings) and drop non-facts (plans, "
-                                    + "\"must be fixed\", implementation details). Keep one short bullet per fact, "
-                                    + "each at most 200 characters. Keep the same information density; only remove "
-                                    + "the noise. Reply with only the new bullet list, one per line, '-' prefixed, "
-                                    + "no preamble, no markdown fences."),
-                            Message.user(content)),
-                    null,
-                    null,
-                    false,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null));
+                            model,
+                            List.of(
+                                    Message.system(
+                                            "You maintain a project memory file: a list of durable facts, decisions and "
+                                                    + "preferences, one bullet per line, all about this repository. "
+                                                    + "Rewrite the provided memory: merge near-duplicate bullets, drop facts that "
+                                                    + "supersede or contradict older ones, drop one-off session observations "
+                                                    + "(benchmarks, sandbox paths, single-run findings) and drop non-facts (plans, "
+                                                    + "\"must be fixed\", implementation details). Keep one short bullet per fact, "
+                                                    + "each at most 200 characters. Keep the same information density; only remove "
+                                                    + "the noise. Reply with only the new bullet list, one per line, '-' prefixed, "
+                                                    + "no preamble, no markdown fences."),
+                                    Message.user(content)),
+                            null,
+                            null,
+                            false,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null)
+                    .withSettings(settings));
             if (usageTracker != null) {
                 usageTracker.recordAuxiliary(res.usage());
             }

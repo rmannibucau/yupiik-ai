@@ -195,7 +195,7 @@ public class PermissionService {
         final var g = gate;
         if (g == null) {
             return Decision.deny(
-                    "permission required but no interactive gate available (use yolo/auto_edit mode or run in the TUI)");
+                    "permission denied: mode is 'ask' (the default) and this run has no interactive approval wired - use the TUI, or set yca.permissions.mode=yolo/auto_edit to allow unattended writes");
         }
         final var result = g.approve(describe(toolName, args), detail(toolName, args), toolName, args);
         return switch (result) {

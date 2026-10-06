@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.List;
 import java.util.Map;
@@ -78,6 +79,11 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var op = ReadFileTool.arg(args, "operation");
         final Object rawGavs = args.get("gavs");
         final List<String> gavs = rawGavs instanceof List<?> list
@@ -88,7 +94,9 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
             return ToolResult.error("operation is required (index)");
         }
         try {
-            return ToolResult.ok(service.index(gavs, force));
+            // the triggering session's provider/model selection rides the context, so the index LLM
+            // calls resolve it lazily at call time instead of the process default
+            return ToolResult.ok(service.index(gavs, force, context.settings()));
         } catch (final RuntimeException e) {
             return ToolResult.error("maven repository knowledge index failed: " + e.getMessage());
         }

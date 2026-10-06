@@ -50,11 +50,11 @@ class SessionStoreTest {
         this.mapper = mapper;
     }
 
-    private SessionStore newStore() {
+    private FileSessionStore newStore() {
         return newStore(new SessionConfiguration(30, 15));
     }
 
-    private SessionStore newStore(final SessionConfiguration sessions) {
+    private FileSessionStore newStore(final SessionConfiguration sessions) {
         return new FileSessionStore(
                 io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
                         "yca.storageHome", dir.toString(),
@@ -100,7 +100,7 @@ class SessionStoreTest {
         assertTrue(Files.exists(store.path(recent)));
         assertFalse(Files.exists(store.path(expired)));
         assertFalse(Files.exists(store.path(aged)));
-        assertTrue(Files.exists(store.dir().resolve(aged + ".jsonl.gz")));
+        assertTrue(Files.exists(store.sessionDir(aged).resolve(aged + ".jsonl.gz")));
 
         final var ids = store.list().stream().map(SessionStore.SessionInfo::id).toList();
         assertTrue(ids.contains(recent));
@@ -123,7 +123,7 @@ class SessionStoreTest {
     }
 
     @Test
-    void loadDecompressesCompressedSessionAndDropsGz() throws Exception {
+    void loadReadsCompressedSessionWithoutMaterializing() throws Exception {
         final var store = newStore();
         final var id = store.create();
         store.append(id, SessionEntry.of(1, "user", "hi", null, null));
@@ -132,14 +132,15 @@ class SessionStoreTest {
         setAge(store.path(id), 20);
         store.cleanup();
         assertFalse(Files.exists(store.path(id)));
-        final var gz = store.dir().resolve(id + ".jsonl.gz");
+        final var gz = store.sessionDir(id).resolve(id + ".jsonl.gz");
         assertTrue(Files.exists(gz));
 
         final var loaded = store.load(id);
         assertEquals(2, loaded.size());
         assertEquals("user", loaded.get(0).role());
-        assertTrue(Files.exists(store.path(id)));
-        assertFalse(Files.exists(gz));
+        // read-only: the gz stays and no jsonl is materialized next to it
+        assertTrue(Files.exists(gz), "the compressed session stays compressed");
+        assertFalse(Files.exists(store.path(id)), "loading does not decompress in place");
     }
 
     @Test
@@ -309,6 +310,110 @@ class SessionStoreTest {
         final var store = newStore();
         assertTrue(store.load("missing").isEmpty());
         assertTrue(store.list().isEmpty());
+    }
+
+    @Test
+    void legacyFlatFileStaysReadable() throws Exception {
+        final var store = newStore();
+        final var id = "legacy-foo"; // not a session-shaped id: legacy flat path, no migration
+        final var flat = store.dir().resolve(id + ".jsonl");
+        Files.createDirectories(store.dir());
+        Files.writeString(flat, "{\"role\":\"user\",\"content\":\"hi\"}\n");
+
+        final var loaded = store.load(id);
+        assertEquals(1, loaded.size());
+        assertEquals("hi", loaded.get(0).content());
+
+        // a write goes to the session folder and leaves the legacy file untouched
+        store.append(id, SessionEntry.of(2, "assistant", "hello", null, null));
+        assertTrue(Files.exists(flat), "no migration: the legacy flat file is left as-is");
+        assertEquals(1, store.load(id).size(), "only the legacy file exists: the folder write is separate");
+    }
+
+    @Test
+    void loadReadsLegacyFlatGzWithoutModifyingIt() throws Exception {
+        final var store = newStore();
+        final var id = "s1a0e47e830a";
+        Files.createDirectories(store.dir());
+        final var flat = store.dir().resolve(id + ".jsonl");
+        Files.writeString(flat, mapper.toString(SessionEntry.of(1, "user", "legacy", null, null)) + "\n");
+        final var gzPath = store.dir().resolve(id + ".jsonl.gz");
+        try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(Files.newOutputStream(gzPath))) {
+            gz.write(Files.readAllBytes(flat));
+        }
+        Files.deleteIfExists(flat);
+
+        final var loaded = store.load(id);
+        assertEquals(1, loaded.size());
+        assertEquals("legacy", loaded.get(0).content());
+        // read-only: the gz stays, nothing is written next to it, no folder is created
+        assertTrue(Files.exists(gzPath), "the legacy gz is left as-is");
+        assertFalse(Files.exists(store.dir().resolve(id + ".jsonl")));
+        assertFalse(Files.exists(store.sessionDir(id)));
+    }
+
+    @Test
+    void deleteRemovesTheWholeSessionFolder() throws Exception {
+        final var store = newStore();
+        final var id = store.create();
+        store.append(id, SessionEntry.of(1, "user", "hi", null, null));
+        // a session owner also writes its sidecars into the folder
+        Files.writeString(store.sessionDir(id).resolve("todos.json"), "[{\"content\":\"x\"}]");
+        Files.writeString(store.sessionDir(id).resolve("snapshot.snap"), "SUMMARY x\n");
+
+        store.delete(id);
+
+        assertFalse(Files.exists(store.sessionDir(id)), "the whole session folder is dropped");
+        assertFalse(Files.exists(store.path(id)));
+    }
+
+    @Test
+    void sweepRemovesOrphanedRootArtifacts() throws Exception {
+        final var store = newStore();
+        // an orphaned id: created then deleted, so no session data remains anywhere
+        final var orphan = store.create();
+        store.delete(orphan);
+        assertFalse(store.list().stream().anyMatch(s -> s.id().equals(orphan)), "precondition: session gone");
+
+        // orphaned legacy artifacts for the gone session
+        final var orphanTodos = dir.resolve("todos-" + orphan + ".json");
+        final var orphanSnap = dir.resolve("snapshots").resolve(orphan + ".snap");
+        Files.createDirectories(orphanSnap.getParent());
+        Files.writeString(orphanTodos, "[]");
+        Files.writeString(orphanSnap, "SUMMARY x\n");
+        // an existing session's artifacts must survive the sweep
+        final var alive = store.create();
+        final var aliveTodos = dir.resolve("todos-" + alive + ".json");
+        Files.writeString(aliveTodos, "[]");
+
+        store.onStart(null);
+
+        assertFalse(Files.exists(orphanTodos), "orphaned root todos removed");
+        assertFalse(Files.exists(orphanSnap), "orphaned snapshot removed");
+        assertTrue(Files.exists(aliveTodos), "live session artifacts kept");
+    }
+
+    @Test
+    void compressedFolderSessionIsStillHousekept() throws Exception {
+        final var store = newStore();
+        // aged past the compress window (15d) but inside retention (30d): compressed in its folder
+        final var compressed = store.create();
+        store.append(compressed, SessionEntry.of(1, "user", "old", null, null));
+        setAge(store.path(compressed), 20);
+        store.cleanup();
+        assertTrue(
+                Files.exists(store.sessionDir(compressed).resolve(compressed + ".jsonl.gz")),
+                "aged session compressed inside its folder");
+        assertFalse(Files.exists(store.path(compressed)), "jsonl replaced by the gz twin");
+
+        // a second run still renders the compressed folder (compressed entries are kept)
+        store.cleanup();
+        assertTrue(Files.exists(store.sessionDir(compressed)));
+
+        // an expired compressed session (past retention) drops the whole folder on the next run
+        setAge(store.sessionDir(compressed).resolve(compressed + ".jsonl.gz"), 40);
+        store.cleanup();
+        assertFalse(Files.exists(store.sessionDir(compressed)), "expired compressed folder removed");
     }
 
     @Test

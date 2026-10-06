@@ -28,6 +28,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * Degraded {@link Prompt} used when the terminal widget stack is not present:
@@ -102,7 +103,7 @@ public class DefaultPromptImpl implements LinedPrompt {
      * type-ahead survive the small windows where no read is armed.
      */
     static final class QueueRouter {
-        private final Object lock = new Object();
+        private final ReentrantLock lock = new ReentrantLock();
         private final ArrayDeque<CompletableFuture<Optional<String>>> turnWaiters = new ArrayDeque<>();
         private final ArrayDeque<CompletableFuture<Optional<String>>> interactionWaiters = new ArrayDeque<>();
         private final ArrayDeque<String> turnBacklog = new ArrayDeque<>();
@@ -135,25 +136,32 @@ public class DefaultPromptImpl implements LinedPrompt {
         }
 
         Optional<String> pollTurn() {
-            synchronized (lock) {
+            lock.lock();
+            try {
                 return turnBacklog.isEmpty() ? Optional.empty() : Optional.ofNullable(turnBacklog.pollFirst());
+            } finally {
+                lock.unlock();
             }
         }
 
         void wakeAll() {
             ArrayDeque<CompletableFuture<Optional<String>>> all;
-            synchronized (lock) {
+            lock.lock();
+            try {
                 all = new ArrayDeque<>(interactionWaiters);
                 all.addAll(turnWaiters);
                 interactionWaiters.clear();
                 turnWaiters.clear();
+            } finally {
+                lock.unlock();
             }
             all.forEach(waiter -> waiter.complete(Optional.empty()));
         }
 
         private CompletableFuture<Optional<String>> arm(final ArrayDeque<CompletableFuture<Optional<String>>> waiters) {
             final var future = new CompletableFuture<Optional<String>>();
-            synchronized (lock) {
+            lock.lock();
+            try {
                 // backlog, eof and registration must be decided atomically: if the
                 // pump drains the stream between two separate checks, a turn read
                 // could see eof while the backlog still holds the typed lines.
@@ -166,6 +174,8 @@ public class DefaultPromptImpl implements LinedPrompt {
                     return future;
                 }
                 waiters.addLast(future);
+            } finally {
+                lock.unlock();
             }
             return future;
         }
@@ -179,7 +189,8 @@ public class DefaultPromptImpl implements LinedPrompt {
             final var end = line == null;
             CompletableFuture<Optional<String>> target = null;
             ArrayDeque<CompletableFuture<Optional<String>>> all = null;
-            synchronized (lock) {
+            lock.lock();
+            try {
                 if (end) {
                     eof = true;
                     all = new ArrayDeque<>(interactionWaiters);
@@ -195,6 +206,8 @@ public class DefaultPromptImpl implements LinedPrompt {
                         turnBacklog.addLast(line);
                     }
                 }
+            } finally {
+                lock.unlock();
             }
             if (target != null) {
                 target.complete(Optional.of(line));

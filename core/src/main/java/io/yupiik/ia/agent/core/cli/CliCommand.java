@@ -456,12 +456,14 @@ public class CliCommand implements Runnable {
         final var colors = new LinkedHashMap<>(configuration.prompt().colors());
         colors.put(
                 "model",
-                modelStyleService.resolve(chatClient.currentProvider(), model).ansiPrefix());
+                modelStyleService
+                        .resolve(chatClient.currentProvider(session.chatSettings()), model)
+                        .ansiPrefix());
         return colors;
     }
 
     private String styledModel(final String model) {
-        final var style = modelStyleService.resolve(chatClient.currentProvider(), model);
+        final var style = modelStyleService.resolve(chatClient.currentProvider(session.chatSettings()), model);
         return style.ansiPrefix() + model + "\u001b[0m";
     }
 

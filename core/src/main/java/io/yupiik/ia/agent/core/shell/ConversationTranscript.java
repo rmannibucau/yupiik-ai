@@ -305,6 +305,7 @@ public class ConversationTranscript {
                 AgentEvent.ToolStarted(
                         String name,
                         String args,
+                        long ordinal,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
@@ -314,7 +315,7 @@ public class ConversationTranscript {
             flushPending();
             runningTools
                     .computeIfAbsent(name, n -> new ArrayDeque<>())
-                    .addLast(new RunningTool(name, toolCommand(args)));
+                    .addLast(new RunningTool(name, toolCommand(args), ordinal > 0 ? ordinal : 0));
             touch();
         } else if (event
                 instanceof
@@ -352,8 +353,13 @@ public class ConversationTranscript {
             // worker threads) still has to close the answer chunk before the block
             flushPending();
             // one ordinal per finished call (even when nothing is rendered) so the
-            // TUI's toolCallCount() mapping to cards stays exact
-            final var ordinal = ++toolCallOrdinal;
+            // TUI's toolCallCount() mapping to cards stays exact; prefer the ordinal
+            // stamped by the runner on ToolStarted so a running tool's card number is
+            // stable before it finishes (open overlay + per-tool cancel rely on it)
+            final var ordinal = tool != null && tool.ordinal() > 0 ? tool.ordinal() : ++toolCallOrdinal;
+            if (tool != null && tool.ordinal() > toolCallOrdinal) {
+                toolCallOrdinal = tool.ordinal();
+            }
             final var elapsedMs = tool == null ? 0 : Math.max(0, (System.nanoTime() - tool.startedNanos) / 1_000_000);
             if (tool != null && (!tool.stream.isEmpty() || (success && output != null && !output.isBlank()))) {
                 final var header = tool.command == null || tool.command.isBlank()
@@ -1094,9 +1100,9 @@ public class ConversationTranscript {
     }
 
     /** One in-flight tool execution: its command label, streamed output and start clock. */
-    private record RunningTool(String name, String command, StringBuilder stream, long startedNanos) {
-        private RunningTool(final String name, final String command) {
-            this(name, command, new StringBuilder(), System.nanoTime());
+    private record RunningTool(String name, String command, StringBuilder stream, long startedNanos, long ordinal) {
+        private RunningTool(final String name, final String command, final long ordinal) {
+            this(name, command, new StringBuilder(), System.nanoTime(), ordinal);
         }
     }
 

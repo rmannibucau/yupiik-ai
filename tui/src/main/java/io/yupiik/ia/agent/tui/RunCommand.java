@@ -22,6 +22,7 @@ import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.RunShellFrontend;
@@ -161,9 +162,21 @@ public class RunCommand implements Runnable {
         if (conf.mode() != null && !conf.mode().isBlank()) {
             permissions.setMode(AgentMode.fromConfigurationString(conf.mode()));
         }
+        // tolerate PermissionService instances built without a configuration (tests): the runtime
+        // still resolves its own default; the warning is operational sugar for real runs only
+        try {
+            if (permissions.mode() == AgentMode.BUILD && permissions.permissionMode() == PermissionMode.ASK) {
+                LOGGER.warning("mode=build with permissions=ask in headless mode: state-changing tools will be "
+                        + "auto-denied because there is no interactive approval. Set yca.permissions.mode=auto_edit/yolo "
+                        + "to allow unattended runs, or use the TUI.");
+            }
+        } catch (final RuntimeException ignored) {
+            // no configuration backing the permission state: skip the startup warning
+        }
         permissions.setGate((title, detail, tool, args) -> {
-            LOGGER.severe(() -> "denied: " + title + " requires an approval in headless mode (" + detail
-                    + "); set yca.permissions.mode=yolo to auto allow.");
+            LOGGER.severe(() -> "denied: " + title
+                    + " requires an approval in headless mode (" + detail
+                    + "); set yca.permissions.mode=auto_edit/yolo to allow unattended runs, or use the TUI.");
             return ApprovalGate.Result.DENY;
         });
         runtime.feedback().setGate(questions -> {

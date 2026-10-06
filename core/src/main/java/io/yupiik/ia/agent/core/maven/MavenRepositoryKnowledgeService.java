@@ -322,6 +322,37 @@ public class MavenRepositoryKnowledgeService {
      * Index the given GAVs. Returns a human readable report.
      */
     public String index(final List<String> gavStrings, final boolean force) {
+        return index(gavStrings, force, null);
+    }
+
+    /**
+     * Index the given GAVs with the requesting session's provider/model selection. Returns a human
+     * readable report. When {@code settings} is non-null and the backing {@link YcaKnowledgeLlm} is
+     * used, the LLM calls resolve the session's provider/model lazily at call time (never captured at
+     * construction); null falls back to the process default.
+     */
+    public String index(
+            final List<String> gavStrings,
+            final boolean force,
+            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+        if (!enabled()) {
+            return "maven repository knowledge is disabled";
+        }
+        bindLlmSettings(settings);
+        try {
+            return doIndex(gavStrings, force);
+        } finally {
+            bindLlmSettings(null);
+        }
+    }
+
+    private void bindLlmSettings(final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+        if (llm instanceof YcaKnowledgeLlm yca) {
+            yca.withSettings(settings);
+        }
+    }
+
+    private String doIndex(final List<String> gavStrings, final boolean force) {
         if (!enabled()) {
             return "maven repository knowledge is disabled";
         }
@@ -404,6 +435,18 @@ public class MavenRepositoryKnowledgeService {
      * per-batch progress lines and the final summary.
      */
     public List<String> refresh(final String gav, final Consumer<String> progress, final Consumer<String> onFinished) {
+        return refresh(gav, progress, onFinished, null);
+    }
+
+    /**
+     * Same as {@link #refresh(String, Consumer, Consumer)} with the requesting session's provider/model
+     * selection; the index LLM calls resolve it lazily at call time (see {@link #index(List, boolean, ChatSettings)}).
+     */
+    public List<String> refresh(
+            final String gav,
+            final Consumer<String> progress,
+            final Consumer<String> onFinished,
+            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
         if (!enabled()) {
             return List.of("maven repository knowledge is disabled");
         }
@@ -417,7 +460,7 @@ public class MavenRepositoryKnowledgeService {
             targets = List.of(Gav.parse(gav.strip()).coordinate());
             force = true;
         }
-        return startIndex(targets, force, progress, onFinished);
+        return startIndex(targets, force, progress, onFinished, settings);
     }
 
     /**
@@ -432,6 +475,39 @@ public class MavenRepositoryKnowledgeService {
      * @return an acknowledgement of the starting run (one line).
      */
     public List<String> startIndex(
+            final List<String> gavs,
+            final boolean force,
+            final Consumer<String> progress,
+            final Consumer<String> onFinished) {
+        return startIndex(gavs, force, progress, onFinished, null);
+    }
+
+    /**
+     * {@link #startIndex(List, boolean, Consumer, Consumer)} with the requesting session's provider/model
+     * selection. The settings are bound around the whole asynchronous run and cleared when it completes.
+     */
+    public List<String> startIndex(
+            final List<String> gavs,
+            final boolean force,
+            final Consumer<String> progress,
+            final Consumer<String> onFinished,
+            final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+        if (!enabled()) {
+            return List.of("maven repository knowledge is disabled");
+        }
+        if (gavs == null || gavs.isEmpty()) {
+            return List.of("nothing to index");
+        }
+        bindLlmSettings(settings);
+        try {
+            return doStartIndex(gavs, force, progress, onFinished);
+        } catch (final RuntimeException e) {
+            bindLlmSettings(null);
+            throw e;
+        }
+    }
+
+    private List<String> doStartIndex(
             final List<String> gavs,
             final boolean force,
             final Consumer<String> progress,
@@ -483,6 +559,7 @@ public class MavenRepositoryKnowledgeService {
                 run.complete();
                 indexer.close();
                 runningIndex.compareAndSet(run, null);
+                bindLlmSettings(null);
             }
         });
         return List.of("started indexing " + total + " artifact(s)", "starting to index " + coordsPreview(parsed));

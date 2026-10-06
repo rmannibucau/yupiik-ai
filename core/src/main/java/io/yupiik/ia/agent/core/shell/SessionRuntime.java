@@ -105,8 +105,13 @@ public final class SessionRuntime {
         return systemPromptBuilder;
     }
 
-    /** The session's model selection (model/variant/sampling overrides). */
+    /** The session's per-tab provider/model selection (owned by the agent loop). */
     public ChatSettings chatSettings() {
         return loop.chatSettings();
+    }
+
+    /** Applies a new session selection (mid-turn changes take effect from the next round/tool call). */
+    public void updateChatSettings(final ChatSettings value) {
+        loop.updateChatSettings(value);
     }
 }

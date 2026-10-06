@@ -468,7 +468,7 @@ class AnsiShellFrontendTest {
         // the spinner now that the turn is over, otherwise it would spin forever
         frontend.onEvent(new AgentEvent.ThinkingDelta("subagent pondering", null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning(), "late thinking delta must not restart the spinner");
-        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", null, "sub-1", "researcher"));
+        frontend.onEvent(new AgentEvent.ToolStarted("bash", "ls", -1L, null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning(), "late tool start must not restart the spinner");
         frontend.onEvent(new AgentEvent.ThinkingDelta("subagent ponder again", null, "sub-1", "researcher"));
         assertFalse(frontend.spinnerRunning());

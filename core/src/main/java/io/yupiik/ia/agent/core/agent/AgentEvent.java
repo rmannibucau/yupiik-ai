@@ -73,10 +73,10 @@ public sealed interface AgentEvent {
         }
     }
 
-    record ToolStarted(String name, String args, String sessionId, String subagentId, String subagentName)
+    record ToolStarted(String name, String args, long ordinal, String sessionId, String subagentId, String subagentName)
             implements AgentEvent {
         public ToolStarted(String name, String args, String sessionId) {
-            this(name, args, sessionId, null, null);
+            this(name, args, -1, sessionId, null, null);
         }
     }
 

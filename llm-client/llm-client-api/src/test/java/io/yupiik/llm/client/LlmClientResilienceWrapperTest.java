@@ -131,6 +131,38 @@ class LlmClientResilienceWrapperTest {
     }
 
     @Test
+    void concurrencyLimitDuplicatedWhileGateActiveEmitsNoticeOnce() {
+        // a 429 storm while the pool is already capped at the announced limit must not
+        // re-emit the "capping concurrent requests" notice on every occurrence
+        final var dial = new ScriptedDialect(
+                new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
+                        + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
+        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4, 0.0001d), pauses::add);
+
+        assertEquals(
+                "ok",
+                wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join()
+                        .text());
+        assertEquals(
+                "ok",
+                wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join()
+                        .text());
+
+        assertEquals(
+                1,
+                pauses.stream()
+                        .filter(p -> p.reason() != null && p.reason().startsWith("concurrency limit 2 detected"))
+                        .count(),
+                "the adaptation notice must be emitted once per provider+limit while the gate is active, got: "
+                        + pauses);
+    }
+
+    @Test
     void retryAfterSecondsReadsTheTypedHeader() {
         assertEquals(7L, LlmClientResilienceWrapper.retryAfterSeconds(new LlmHttpFailureException(429, "boom", "7")));
         assertNull(LlmClientResilienceWrapper.retryAfterSeconds(new LlmHttpFailureException(429, "boom", null)));
@@ -279,6 +311,64 @@ class LlmClientResilienceWrapperTest {
 
         assertEquals(1, dial.calls.get(), "a typed 400 must not be retried");
         assertTrue(failure.getCause() instanceof LlmHttpFailureException, "got: " + failure.getCause());
+    }
+
+    @Test
+    void cancelDuringRetryBackoffAbortsTheWaitWithoutReRequesting() throws Exception {
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30")); // 30s retry-after
+        try (final var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1)) {
+            final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
+            final var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+            final var future = wrapper.chat(dial, null, cancelled::get);
+            // flip the probe far before the 30s wait elapses: the scheduler poll ends the wait early
+            cancelled.set(true);
+            final var failure = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> future.toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertTrue(
+                    failure.getCause() instanceof IOException
+                            && "Cancelled".equals(failure.getCause().getMessage()),
+                    "got: " + failure.getCause());
+            assertEquals(1, dial.calls.get(), "the cancelled wait must not re-request");
+        }
+    }
+
+    @Test
+    void cancelDuringStreamSetupBackoffAbortsTheWaitWithoutReRequesting() throws Exception {
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
+        try (final var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1)) {
+            final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
+            final var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+            final var future = wrapper.stream(dial, null, cancelled::get);
+            cancelled.set(true);
+            final var failure = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> future.toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertTrue(
+                    failure.getCause() instanceof IOException
+                            && "Cancelled".equals(failure.getCause().getMessage()),
+                    "got: " + failure.getCause());
+            assertEquals(1, dial.calls.get(), "the cancelled stream-setup wait must not re-request");
+        }
+    }
+
+    @Test
+    void cancelAlreadySetWhenFailureLandsSkipsTheWait() throws Exception {
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
+        try (final var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1)) {
+            final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
+            final var cancelled = new java.util.concurrent.atomic.AtomicBoolean(true);
+            final var failure = assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> wrapper.chat(dial, null, cancelled::get)
+                            .toCompletableFuture()
+                            .get(2, TimeUnit.SECONDS));
+            assertTrue(
+                    failure.getCause() instanceof IOException
+                            && "Cancelled".equals(failure.getCause().getMessage()),
+                    "got: " + failure.getCause());
+            assertEquals(1, dial.calls.get(), "a canceled turn must not retry");
+        }
     }
 
     private static LlmResponse response() {

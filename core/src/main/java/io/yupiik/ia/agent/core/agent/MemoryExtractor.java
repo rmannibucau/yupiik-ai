@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
@@ -88,6 +89,10 @@ public class MemoryExtractor {
     }
 
     public void maybeExtract(final List<Message> messages) {
+        maybeExtract(messages, ChatSettings.EMPTY);
+    }
+
+    public void maybeExtract(final List<Message> messages, final ChatSettings settings) {
         if (!configuration.memory().enabled()
                 || configuration.memory().maxRatio() <= 0
                 || configuration.memory().maxChars() <= 0) {
@@ -98,9 +103,10 @@ public class MemoryExtractor {
         if (now - last < DEBOUNCE_MS || !lastRun.compareAndSet(last, now)) {
             return;
         }
+        final var effective = settings == null ? ChatSettings.EMPTY : settings;
         executor.execute(() -> {
             try {
-                doExtract(messages);
+                doExtract(messages, effective);
             } catch (final RuntimeException e) {
                 if (LOGGER.isLoggable(Level.FINER)) {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
@@ -108,13 +114,13 @@ public class MemoryExtractor {
                 notifyFailure("memory extraction failed: " + e.getMessage());
             } finally {
                 if (memoryCompactor != null) {
-                    memoryCompactor.maybeCompact();
+                    memoryCompactor.maybeCompact(effective);
                 }
             }
         });
     }
 
-    private void doExtract(final List<Message> messages) {
+    private void doExtract(final List<Message> messages, final ChatSettings settings) {
         final var sb = new StringBuilder();
         var count = 0;
         for (var i = messages.size() - 1; i >= 0 && count < 20; i--) {
@@ -129,21 +135,24 @@ public class MemoryExtractor {
                     0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');
         }
         final var excerpt = sb.toString();
+        final var memoryModel =
+                configuration.model() == null ? null : configuration.model().resolvedMemory();
         try {
             final var request = new ChatCompletionRequest(
-                    null,
-                    List.of(
-                            Message.system(
-                                    "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
-                            Message.user(excerpt)),
-                    null,
-                    null,
-                    false,
-                    null,
-                    null,
-                    null,
-                    null,
-                    null);
+                            memoryModel == null || memoryModel.isBlank() ? null : memoryModel,
+                            List.of(
+                                    Message.system(
+                                            "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
+                                    Message.user(excerpt)),
+                            null,
+                            null,
+                            false,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null)
+                    .withSettings(settings);
             final var res = chatClient.chatStructured(request, "memory_facts", factsSchema());
             if (usageTracker != null && res.result() != null) {
                 usageTracker.recordAuxiliary(res.result().usage());
@@ -174,7 +183,7 @@ public class MemoryExtractor {
                 resetFailures();
                 return;
             }
-            final var snippet = compressExcerpt(excerpt);
+            final var snippet = compressExcerpt(excerpt, settings);
             if (snippet != null && !snippet.isBlank()) {
                 memoryStore.appendText(false, snippet);
             }
@@ -253,23 +262,27 @@ public class MemoryExtractor {
      * compress the excerpt into a concise, standalone memory snippet and return it as raw text.
      * Returns {@code null} when the compression call fails.
      */
-    private String compressExcerpt(final String excerpt) throws IOException, InterruptedException {
+    private String compressExcerpt(final String excerpt, final ChatSettings settings)
+            throws IOException, InterruptedException {
+        final var memoryModel =
+                configuration.model() == null ? null : configuration.model().resolvedMemory();
         final var res = chatClient.chat(new ChatCompletionRequest(
-                null,
-                List.of(
-                        Message.system(
-                                "Compress the following conversation excerpt into a concise, standalone memory snippet "
-                                        + "capturing durable facts, decisions and user preferences. Keep long-lived knowledge only, "
-                                        + "drop transient task state. Reply with only the snippet text, a few short sentences, no preamble."),
-                        Message.user(excerpt)),
-                null,
-                null,
-                false,
-                null,
-                null,
-                null,
-                null,
-                null));
+                        memoryModel == null || memoryModel.isBlank() ? null : memoryModel,
+                        List.of(
+                                Message.system(
+                                        "Compress the following conversation excerpt into a concise, standalone memory snippet "
+                                                + "capturing durable facts, decisions and user preferences. Keep long-lived knowledge only, "
+                                                + "drop transient task state. Reply with only the snippet text, a few short sentences, no preamble."),
+                                Message.user(excerpt)),
+                        null,
+                        null,
+                        false,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null)
+                .withSettings(settings));
         if (usageTracker != null) {
             usageTracker.recordAuxiliary(res.usage());
         }

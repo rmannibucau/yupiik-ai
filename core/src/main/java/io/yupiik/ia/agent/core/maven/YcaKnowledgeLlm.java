@@ -20,6 +20,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.json.EntryPointsRoot;
 import io.yupiik.ia.agent.core.maven.json.SkillRoot;
@@ -53,6 +54,9 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
     private final ChatClient chatClient;
     private final JsonMapper mapper;
     private final CodingAgentConfiguration configuration;
+    /** The triggering session's provider/model selection, set by the caller around one index run and
+     * resolved lazily at each LLM call (never captured at construction). Null = process default. */
+    private volatile ChatSettings runSettings;
 
     public YcaKnowledgeLlm(
             final ChatClient chatClient, final JsonMapper mapper, final CodingAgentConfiguration configuration) {
@@ -67,15 +71,22 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         this.configuration = null;
     }
 
+    /** Binds one index run to the requesting session's provider/model; pass null to fall back to process default. */
+    public void withSettings(final ChatSettings settings) {
+        this.runSettings = settings;
+    }
+
     @Override
     public boolean available() {
-        final var model = chatClient.model();
+        final var model = chatClient == null ? "" : chatClient.model(runSettings);
         return model != null && !model.isBlank();
     }
 
     @Override
     public io.yupiik.maven.knowledge.config.TokenBudget tokenBudget() {
-        return new io.yupiik.maven.knowledge.config.TokenBudget(chatClient.contextWindow(), chatClient.outputTokens());
+        return new io.yupiik.maven.knowledge.config.TokenBudget(
+                chatClient == null ? 0 : chatClient.contextWindow(runSettings),
+                chatClient == null ? 0 : chatClient.outputTokens(runSettings));
     }
 
     @Override
@@ -136,16 +147,17 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         try {
             final var res = chatClient.chatStructured(
                     new ChatCompletionRequest(
-                            null,
-                            List.of(Message.system(prompt + suffix)),
-                            null,
-                            null,
-                            false,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null),
+                                    null,
+                                    List.of(Message.system(prompt + suffix)),
+                                    null,
+                                    null,
+                                    false,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null)
+                            .withSettings(runSettings),
                     "entry_points",
                     schema);
             dumpSample(
@@ -199,19 +211,21 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         try {
             final var res = chatClient.chatStructured(
                     new ChatCompletionRequest(
-                            null,
-                            List.of(Message.system(
-                                    "Given this session/project, select the Maven artifacts (from this list) that are"
-                                            + " the main entry points a coding agent should know about first. Return only"
-                                            + " the chosen coordinates in the same format as received.\n\n" + sb)),
-                            null,
-                            null,
-                            false,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null),
+                                    null,
+                                    List.of(Message.system(
+                                            "Given this session/project, select the Maven artifacts (from this list) that are"
+                                                    + " the main entry points a coding agent should know about first. Return only"
+                                                    + " the chosen coordinates in the same format as received.\n\n"
+                                                    + sb)),
+                                    null,
+                                    null,
+                                    false,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null)
+                            .withSettings(runSettings),
                     "suggested_gavs",
                     schema);
             if (!res.structured()) {
@@ -261,16 +275,17 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
             final var system = SkillPrompts.systemFor(gav, entryPoints);
             final var res = chatClient.chatStructured(
                     new ChatCompletionRequest(
-                            null,
-                            List.of(Message.system(system), Message.user(content == null ? "" : content)),
-                            null,
-                            null,
-                            false,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null),
+                                    null,
+                                    List.of(Message.system(system), Message.user(content == null ? "" : content)),
+                                    null,
+                                    null,
+                                    false,
+                                    null,
+                                    null,
+                                    null,
+                                    null,
+                                    null)
+                            .withSettings(runSettings),
                     "skill",
                     schema);
             dumpSample(

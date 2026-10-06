@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ModelsResponse;
 import io.yupiik.ia.agent.core.llm.Usage;
@@ -52,6 +53,14 @@ public class UsageTracker {
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
     protected volatile Anchor anchor;
+
+    /** The session's per-tab selection (provider/model): when set, context window resolution follows it. */
+    protected volatile ChatSettings settings;
+
+    /** Attach the owning session's model/provider selection so this tracker resolves the right window. */
+    public void attach(final ChatSettings sessionSettings) {
+        this.settings = sessionSettings;
+    }
 
     /**
      * Last real API usage observation: the prompt tokens billed by the provider for the exact
@@ -226,7 +235,11 @@ public class UsageTracker {
      * honest once-per-session notice to the user.
      */
     public int contextWindow() {
-        final var current = providerManager == null ? null : providerManager.current();
+        final var current = settings == null
+                ? (providerManager == null ? null : providerManager.current())
+                : (settings.providerId() == null
+                        ? providerManager == null ? null : providerManager.current()
+                        : providerManager == null ? null : providerManager.provider(settings.providerId()));
         if (current == null) {
             return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }
@@ -236,7 +249,7 @@ public class UsageTracker {
         if (chatClient == null || contextWindowCache == null) {
             return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }
-        final var model = current.model();
+        final var model = chatClient.model(settings);
         if (model == null || model.isBlank()) {
             return rememberAuto(ModelsResponse.AUTO_DETECTED_BASELINE);
         }

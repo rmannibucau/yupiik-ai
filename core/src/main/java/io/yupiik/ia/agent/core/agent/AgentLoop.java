@@ -69,6 +69,7 @@ import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -196,7 +197,7 @@ public class AgentLoop {
      * {@link ChatClient} call made by this loop's turns so concurrent tabs never share
      * a selection. Plain holder - no scope, no thread-local.
      */
-    private final ChatSettings chatSettings = new ChatSettings();
+    private volatile ChatSettings chatSettings = ChatSettings.EMPTY;
     /**
      * Per-turn pause listener surfacing provider throttles and retry backoffs to the owning
      * tab. It is handed to each {@link ChatClient} call instead of being installed globally:
@@ -204,6 +205,11 @@ public class AgentLoop {
      * wait up to minutes between attempts.
      */
     private volatile Consumer<PauseEvent> pauseListener;
+    /** Per-tool-call cancellation handles, keyed by the tool-call ordinal (the TUI card #N). */
+    private final java.util.concurrent.ConcurrentHashMap<Long, AtomicBoolean> runningToolCancels =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** Next ordinal handed to a started tool call, shared with ConversationTranscript's numbering. */
+    private final java.util.concurrent.atomic.AtomicLong toolCallOrdinal = new java.util.concurrent.atomic.AtomicLong();
 
     /**
      * Immutable snapshot of the last request this loop handed to the provider: what the
@@ -479,6 +485,11 @@ public class AgentLoop {
         return chatSettings;
     }
 
+    /** Applies a new selection value (mid-turn changes take effect from the next round/tool call). */
+    public void updateChatSettings(final ChatSettings value) {
+        this.chatSettings = value == null ? ChatSettings.EMPTY : value;
+    }
+
     /**
      * The last request sent to the provider for this session, {@code null} when none was
      * sent yet. Backed by {@code /context llm-payload}; the snapshot is immutable so a
@@ -505,9 +516,10 @@ public class AgentLoop {
         messages.add(Message.system(systemPromptBuilder.build(prompt, null) + snapshotBlock(sessionId)));
         messages.addAll(history);
         appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart(), toolsTokens);
+        final var resolved = resolvedModel();
         return new LlmPayload(
                 sessionId,
-                providerManager.resolveDefault().model(),
+                resolved == null ? "" : resolved.model(),
                 List.copyOf(messages),
                 List.copyOf(tools),
                 "auto",
@@ -555,7 +567,15 @@ public class AgentLoop {
             final List<Message> history,
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt) {
+        attachSessionSettings();
         return doRun(prompt, prompt, agentName, sessionId, history, cancelled, queuedPrompt);
+    }
+
+    /** The per-session provider/model selection rides the session's {@link ChatSettings}; make the tracker see it. */
+    private void attachSessionSettings() {
+        if (usageTracker != null) {
+            usageTracker.attach(chatSettings);
+        }
     }
 
     /**
@@ -682,7 +702,7 @@ public class AgentLoop {
         } finally {
             pauseListener = null;
             statusReporter.setSink(null);
-            memoryExtractor.maybeExtract(messages);
+            memoryExtractor.maybeExtract(messages, chatSettings);
         }
     }
 
@@ -721,6 +741,10 @@ public class AgentLoop {
      * started the turn, never another concurrent session's.
      */
     private ToolContext toolContext(final BooleanSupplier cancelled) {
+        return toolContext(cancelled, cancelled);
+    }
+
+    private ToolContext toolContext(final BooleanSupplier cancelled, final BooleanSupplier callCancelled) {
         return new ToolContext(
                 currentSessionId,
                 subagentId,
@@ -731,7 +755,9 @@ public class AgentLoop {
                 statusReporter,
                 usageTracker,
                 contextView,
-                cancelled);
+                cancelled,
+                chatSettings,
+                callCancelled);
     }
 
     // Event helpers that include the session and subagent info
@@ -747,10 +773,44 @@ public class AgentLoop {
         return new AgentEvent.ThinkingDelta(delta, currentSessionId, subagentId, subagentName);
     }
 
-    private AgentEvent.ToolStarted toolStarted(final String name, final String args) {
-        return new AgentEvent.ToolStarted(name, args, currentSessionId, subagentId, subagentName);
+    /** Builds a ToolStarted event with the given pre-assigned ordinal (the TUI card #). */
+    private AgentEvent.ToolStarted toolStarted(final String name, final String args, final long ordinal) {
+        return new AgentEvent.ToolStarted(name, args, ordinal, currentSessionId, subagentId, subagentName);
     }
 
+    /**
+     * Cancels the tool call with the given ordinal (the TUI's #{@code n} card): flips its per-call
+     * probe so the running tool aborts on its next cancellation poll. Does nothing when the call
+     * already finished. The turn itself keeps running - the aborting tool result is fed back to the
+     * model like any other failure.
+     */
+    public void cancelTool(final long ordinal) {
+        final var handle = runningToolCancels.get(ordinal);
+        if (handle != null) {
+            handle.set(true);
+        }
+    }
+
+    /** Whether the tool call with the given ordinal is still running. */
+    public boolean isToolRunning(final long ordinal) {
+        return runningToolCancels.containsKey(ordinal);
+    }
+
+    private void registerRunningTool(final long ordinal) {
+        runningToolCancels.put(ordinal, new AtomicBoolean());
+    }
+
+    private void registerRunningTool(final long ordinal, final AtomicBoolean cancel) {
+        runningToolCancels.put(ordinal, cancel);
+    }
+
+    private void unregisterRunningTool(final long ordinal) {
+        if (ordinal > 0) {
+            runningToolCancels.remove(ordinal);
+        }
+    }
+
+    /** Builds a ToolFinished event; the ordinal registration was already cleaned up at execution end. */
     private AgentEvent.ToolFinished toolFinished(final String name, final String output, final boolean success) {
         return new AgentEvent.ToolFinished(name, output, success, currentSessionId, subagentId, subagentName);
     }
@@ -835,8 +895,9 @@ public class AgentLoop {
             final int memoryVersionAtStart)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
-        // iteration window cap cascade: per-model behavior > per-provider tuning > global default
-        final var resolved = providerManager.resolveDefault();
+        // iteration window cap cascade: per-model behavior > per-provider tuning > global default;
+        // the provider is the session's effective one (per-tab override or process default)
+        final var resolved = resolvedModel();
         final var maxIterations = resolvedMaxIterations(resolved);
         final var plateauLimit = resolvedPlateauRounds(resolved);
         final var plateauFeedback = resolvedPlateauFeedback(resolved);
@@ -915,7 +976,7 @@ public class AgentLoop {
                     }
                 }
                 if (contextManager.compactNeeded(messages, toolsTokens)) {
-                    final var compacted = contextManager.compact(messages, false, null, 0, cancelled);
+                    final var compacted = contextManager.compact(messages, false, null, 0, cancelled, chatSettings);
                     if (compacted.changed()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
@@ -952,8 +1013,9 @@ public class AgentLoop {
                 // live list keeps growing (messages/tools are immutable, so a shallow copy is enough)
                 lastLlmPayload = new LlmPayload(
                         sessionId, model, List.copyOf(messages), List.copyOf(tools), "auto", toolsTokens);
-                final var request =
-                        new ChatCompletionRequest(model, messages, null, null, null, tools, "auto", null, null, null);
+                final var request = new ChatCompletionRequest(
+                                model, messages, null, null, null, tools, "auto", null, null, null)
+                        .withSettings(chatSettings);
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
                 final var finishReason = new String[] {null};
                 final Message assistant;
@@ -978,7 +1040,7 @@ public class AgentLoop {
                             AgentEvent.Notice.Level.INFO,
                             "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
                                     + " tokens)."));
-                    final var compacted = contextManager.compactForOverflow(messages, cancelled);
+                    final var compacted = contextManager.compactForOverflow(messages, cancelled, chatSettings);
                     if (compacted.changed() && !compacted.messages().isEmpty()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
@@ -1416,7 +1478,13 @@ public class AgentLoop {
             final int toolsTokens) {
         final var result = "prune".equals(directive.action())
                 ? contextManager.prune(messages)
-                : contextManager.compact(messages, directive.force(), directive.focus(), directive.keepLast());
+                : contextManager.compact(
+                        messages,
+                        directive.force(),
+                        directive.focus(),
+                        directive.keepLast(),
+                        () -> false,
+                        chatSettings);
         if (!result.changed()) {
             emit(notice(
                     AgentEvent.Notice.Level.WARN,
@@ -1453,12 +1521,17 @@ public class AgentLoop {
                 // no provider wiring (unit tests, bootstrapping): no identity to capture
                 return null;
             }
-            final var provider = providerManager.currentProviderId();
+            final var effectiveProvider = chatSettings.providerId() == null
+                    ? providerManager.current()
+                    : providerManager.provider(chatSettings.providerId());
+            final var provider = effectiveProvider != null && effectiveProvider.id() != null
+                    ? effectiveProvider.id()
+                    : providerManager.currentProviderId();
             String model = null;
             if (chatSettings.model() != null && !chatSettings.model().isBlank()) {
                 model = chatSettings.model();
             } else {
-                final var current = providerManager.current();
+                final var current = effectiveProvider != null ? effectiveProvider : providerManager.current();
                 if (current != null
                         && current.model() != null
                         && !current.model().isBlank()) {
@@ -1769,7 +1842,7 @@ public class AgentLoop {
             }
         }
         if (contextManager.compactNeeded(messages, toolsTokens)) {
-            final var compacted = contextManager.compact(messages);
+            final var compacted = contextManager.compact(messages, false, null, 0, () -> false, chatSettings);
             if (compacted.changed()) {
                 messages.clear();
                 messages.addAll(compacted.messages());
@@ -1804,7 +1877,7 @@ public class AgentLoop {
             }
             try {
                 return chatClient.stream(
-                        request, chatSettings, pauseListener, delta -> dispatch(delta, usage, finishReason), cancelled);
+                        request, pauseListener, delta -> dispatch(delta, usage, finishReason), cancelled);
             } catch (final LlmHttpFailureException e) {
                 // llama.cpp / ollama style backends reject the whole turn with a 500 when the
                 // tool-call arguments they just produced are malformed (unescaped control chars or
@@ -1945,6 +2018,30 @@ public class AgentLoop {
      * > the global llm.maxIterations default. The provider/model come from {@code resolved} (the
      * default provider resolved at loop start).
      */
+    /** The session's effective provider + model: per-session override, else the process default. */
+    private ProviderManager.ResolvedModel resolvedModel() {
+        if (providerManager == null) {
+            return null;
+        }
+        if (chatSettings.providerId() != null) {
+            final var provider = providerManager.provider(chatSettings.providerId());
+            if (provider != null) {
+                final var model =
+                        chatSettings.model() != null && !chatSettings.model().isBlank()
+                                ? chatSettings.model()
+                                : provider.model();
+                return new ProviderManager.ResolvedModel(provider, model);
+            }
+        }
+        final var defaultModel = providerManager.resolveDefault();
+        final var configModel = configuration == null || configuration.provider() == null
+                ? null
+                : configuration.provider().model();
+        return defaultModel != null
+                ? defaultModel
+                : new ProviderManager.ResolvedModel(providerManager.current(), configModel);
+    }
+
     private int resolvedMaxIterations(final ProviderManager.ResolvedModel resolved) {
         final var override = resolved == null || providerManager == null
                 ? 0
@@ -2472,9 +2569,13 @@ public class AgentLoop {
         final var argsJson = call.function() == null || call.function().arguments() == null
                 ? "{}"
                 : call.function().arguments();
+        final var callCancel = new AtomicBoolean();
+        final var ordinal = toolCallOrdinal.incrementAndGet();
+        registerRunningTool(ordinal, callCancel);
         final EmbeddedTool tool = toolRegistry.tool(name);
         if (tool == null) {
             final var diagnostic = "Unknown tool: " + name;
+            unregisterRunningTool(ordinal);
             emit(toolFinished(name, unknownToolDiagnostic(name), false));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
@@ -2484,20 +2585,28 @@ public class AgentLoop {
             args = parsed instanceof Map<?, ?> m ? cast(m) : new LinkedHashMap<>();
         } catch (final RuntimeException e) {
             final var diagnostic = "Invalid tool arguments JSON: " + argsJson;
+            unregisterRunningTool(ordinal);
             emit(toolFinished(name, diagnostic, false));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
-        emit(toolStarted(name, argsJson));
+        emit(toolStarted(name, argsJson, ordinal));
         final PermissionService.Decision decision =
                 permissionService.check(name, tool.category(), args, tool.readonly());
         if (!decision.allowed()) {
             final var denial =
                     "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason());
+            unregisterRunningTool(ordinal);
             emit(toolFinished(name, denial, false));
             return new ToolOutcome(call.id(), name, denial, false, false);
         }
         final var toolStartNanos = System.nanoTime();
-        final ToolResult result = toolExecutionService.execute(tool, args, toolContext(cancelled));
+        final ToolResult result;
+        try {
+            result = toolExecutionService.execute(tool, args, toolContext(cancelled, callCancel::get));
+        } finally {
+            unregisterRunningTool(ordinal);
+            // the turn keeps running after a per-call cancel: only the tool result is marked
+        }
         final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
         emit(toolFinished(name, result.output(), result.success()));
         return new ToolOutcome(

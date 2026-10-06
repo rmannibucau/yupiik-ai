@@ -23,8 +23,11 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -33,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -42,7 +46,7 @@ public class FileSessionStore implements SessionStore {
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
     private final Clock clock;
-    private final Object fileLock = new Object();
+    private final ReentrantLock fileLock = new ReentrantLock();
 
     public FileSessionStore(final CodingAgentConfiguration configuration, final JsonMapper mapper, final Clock clock) {
         this.configuration = configuration;
@@ -58,6 +62,9 @@ public class FileSessionStore implements SessionStore {
 
     public void onStart(@OnEvent final Start start) {
         cleanup();
+        // root <storageHome>/todos-<key>.json and snapshots/<id>.snap whose session folder
+        // is gone are stale legacy leftovers: drop them so the storage root stays clean
+        SessionStorageLayout.sweepOrphans(Path.of(configuration.resolveStorageHome()));
     }
 
     public void cleanup() {
@@ -71,8 +78,11 @@ public class FileSessionStore implements SessionStore {
      * initial prompt. Returns a report of what was done.
      */
     public HousekeepingReport housekeeping(final boolean deleteEmpty) {
-        synchronized (fileLock) {
+        fileLock.lock();
+        try {
             return doHousekeeping(deleteEmpty);
+        } finally {
+            fileLock.unlock();
         }
     }
 
@@ -95,8 +105,26 @@ public class FileSessionStore implements SessionStore {
                     final var id = name.endsWith(JSONL_SUFFIX)
                             ? name.substring(0, name.length() - JSONL_SUFFIX.length())
                             : name.endsWith(GZ_SUFFIX) ? name.substring(0, name.length() - GZ_SUFFIX.length()) : name;
-                    final var age = now - Files.getLastModifiedTime(f).toMillis();
-                    final var isCompressed = name.endsWith(GZ_SUFFIX);
+                    final var isFolder = Files.isDirectory(f);
+                    final var folderJsonl = isFolder ? f.resolve(id + JSONL_SUFFIX) : null;
+                    final var folderGz = isFolder ? f.resolve(id + GZ_SUFFIX) : null;
+                    final Path target;
+                    final boolean isCompressed;
+                    if (isFolder) {
+                        if (Files.isRegularFile(folderJsonl)) {
+                            target = folderJsonl;
+                            isCompressed = false;
+                        } else if (Files.isRegularFile(folderGz)) {
+                            target = folderGz;
+                            isCompressed = true;
+                        } else {
+                            continue;
+                        }
+                    } else {
+                        target = f;
+                        isCompressed = name.endsWith(GZ_SUFFIX);
+                    }
+                    final var age = now - Files.getLastModifiedTime(target).toMillis();
                     if (retention >= 0 && age > retention) {
                         delete(id);
                         deleted++;
@@ -104,7 +132,7 @@ public class FileSessionStore implements SessionStore {
                         delete(id);
                         deleted++;
                     } else if (compress >= 0 && age > compress && !isCompressed) {
-                        gzip(f);
+                        gzip(target);
                         compressed++;
                     } else {
                         kept++;
@@ -134,18 +162,19 @@ public class FileSessionStore implements SessionStore {
         }
     }
 
-    private static void gunzip(final Path gz, final Path target) throws IOException {
-        try (final var in = new GZIPInputStream(new BufferedInputStream(Files.newInputStream(gz)));
-                final var out = new BufferedOutputStream(Files.newOutputStream(target))) {
-            in.transferTo(out);
-        }
-        Files.deleteIfExists(gz);
-    }
-
     public Path dir() {
         return Path.of(configuration.resolveStorageHome(), "sessions");
     }
 
+    /** The folder owning all state of a session; may not exist yet. */
+    public Path sessionDir(final String id) {
+        return SessionStorageLayout.sessionDir(Path.of(configuration.resolveStorageHome()), id);
+    }
+
+    /**
+     * Enumerates every stored session, in both layouts: a session folder
+     * ({@code sessions/<id>/}) or a legacy flat file ({@code sessions/<id>.jsonl[.gz]}).
+     */
     private Stream<Path> storedSessions() throws IOException {
         final var dir = dir();
         if (!Files.isDirectory(dir)) {
@@ -153,6 +182,11 @@ public class FileSessionStore implements SessionStore {
         }
         return Files.list(dir).filter(f -> {
             final var name = f.getFileName().toString();
+            if (Files.isDirectory(f)) {
+                // only sessions folders: must contain the session JSONL (or its gz twin)
+                return Files.isRegularFile(f.resolve(name + JSONL_SUFFIX))
+                        || Files.isRegularFile(f.resolve(name + GZ_SUFFIX));
+            }
             return name.endsWith(JSONL_SUFFIX) || name.endsWith(GZ_SUFFIX);
         });
     }
@@ -171,10 +205,11 @@ public class FileSessionStore implements SessionStore {
         writableDir();
         long stamp = clock.millis();
         var id = "s" + Long.toHexString(stamp);
-        while (Files.exists(path(id))) {
+        while (Files.exists(sessionDir(id)) || Files.exists(legacyPath(id)) || Files.exists(legacyGz(id))) {
             id = "s" + Long.toHexString(++stamp);
         }
         try {
+            Files.createDirectories(path(id).getParent());
             Files.writeString(path(id), "");
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
@@ -183,45 +218,57 @@ public class FileSessionStore implements SessionStore {
     }
 
     public Path path(final String id) {
+        return sessionDir(id).resolve(id + JSONL_SUFFIX);
+    }
+
+    /** The legacy flat file for a session ({@code sessions/<id>.jsonl}), if it still exists. */
+    private Path legacyPath(final String id) {
         return dir().resolve(id + JSONL_SUFFIX);
+    }
+
+    /** The legacy flat gz for a session ({@code sessions/<id>.jsonl.gz}), if it still exists. */
+    private Path legacyGz(final String id) {
+        return dir().resolve(id + GZ_SUFFIX);
     }
 
     @Override
     public void append(final String id, final SessionEntry entry) {
-        synchronized (fileLock) {
+        fileLock.lock();
+        try {
             writableDir();
+            // always write the session folder; a legacy flat file (if any) is left untouched
+            final var target = path(id);
             try {
+                Files.createDirectories(target.getParent());
                 Files.writeString(
-                        path(id), mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+                        target, mapper.toString(entry) + "\n", StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (final IOException e) {
                 throw new UncheckedIOException(e);
             }
+        } finally {
+            fileLock.unlock();
         }
     }
 
     @Override
     public List<Message> load(final String id) {
-        var file = path(id);
-        if (!Files.isRegularFile(file)) {
-            final var gz = dir().resolve(id + GZ_SUFFIX);
-            if (Files.isRegularFile(gz)) {
-                try {
-                    gunzip(gz, file);
-                } catch (final IOException e) {
-                    return List.of();
-                }
-            }
-        }
-        if (!Files.isRegularFile(file)) {
+        // resolve the source file: the session folder first (jsonl or gz), then the legacy flat
+        // layout (jsonl or gz) as a read-only fallback - legacy files are never modified
+        final var source = resolveLoadSource(id);
+        if (source == null) {
             return List.of();
         }
-        try {
+        try (final var in = !source.gz()
+                ? Files.newBufferedReader(source.path())
+                : new BufferedReader(new InputStreamReader(
+                        new GZIPInputStream(Files.newInputStream(source.path())), StandardCharsets.UTF_8))) {
             final var out = new ArrayList<Message>();
             // legacy sessions persisted the tool name as toolCallId: remember assistant call ids by
             // tool name so such entries can be remapped to the real call id on load
             final var allCallIds = new java.util.HashSet<String>();
             final var callIdsByTool = new java.util.HashMap<String, java.util.ArrayDeque<String>>();
-            for (final var line : Files.readAllLines(file)) {
+            String line;
+            while ((line = in.readLine()) != null) {
                 if (line.isBlank()) {
                     continue;
                 }
@@ -260,9 +307,34 @@ public class FileSessionStore implements SessionStore {
         }
     }
 
+    /** The file to read a session from, in priority order: folder jsonl, folder gz, legacy jsonl, legacy gz. */
+    private LoadSource resolveLoadSource(final String id) {
+        final var folder = sessionDir(id);
+        final var folderJsonl = folder.resolve(id + JSONL_SUFFIX);
+        if (Files.isRegularFile(folderJsonl)) {
+            return new LoadSource(folderJsonl, false);
+        }
+        final var folderGz = folder.resolve(id + GZ_SUFFIX);
+        if (Files.isRegularFile(folderGz)) {
+            return new LoadSource(folderGz, true);
+        }
+        final var legacy = legacyPath(id);
+        if (Files.isRegularFile(legacy)) {
+            return new LoadSource(legacy, false);
+        }
+        final var legacyGz = legacyGz(id);
+        if (Files.isRegularFile(legacyGz)) {
+            return new LoadSource(legacyGz, true);
+        }
+        return null;
+    }
+
+    private record LoadSource(Path path, boolean gz) {}
+
     @Override
     public void replace(final String id, final List<Message> messages) {
-        synchronized (fileLock) {
+        fileLock.lock();
+        try {
             final var sb = new StringBuilder();
             for (final var m : messages) {
                 sb.append(mapper.toString(SessionEntry.of(
@@ -271,9 +343,11 @@ public class FileSessionStore implements SessionStore {
             }
             final var target = path(id);
             writableDir();
+            // a legacy flat file (if any) is left untouched: the session folder is the write target
             final var tmp = target.resolveSibling(
                     target.getFileName() + ".tmp-" + ThreadLocalRandom.current().nextLong());
             try {
+                Files.createDirectories(target.getParent());
                 Files.writeString(tmp, sb.toString());
                 Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             } catch (final IOException e) {
@@ -284,6 +358,8 @@ public class FileSessionStore implements SessionStore {
                 }
                 throw new UncheckedIOException("Cannot replace the session " + id, e);
             }
+        } finally {
+            fileLock.unlock();
         }
     }
 
@@ -302,14 +378,31 @@ public class FileSessionStore implements SessionStore {
 
     @Override
     public void delete(final String id) {
-        synchronized (fileLock) {
+        fileLock.lock();
+        try {
             try {
-                Files.deleteIfExists(path(id));
-                Files.deleteIfExists(dir().resolve(id + GZ_SUFFIX));
+                deleteRecursively(sessionDir(id));
+                Files.deleteIfExists(legacyPath(id));
+                Files.deleteIfExists(legacyGz(id));
             } catch (final IOException e) {
                 throw new UncheckedIOException(e);
             }
+        } finally {
+            fileLock.unlock();
         }
+    }
+
+    private static void deleteRecursively(final Path dir) throws IOException {
+        if (!Files.isDirectory(dir)) {
+            Files.deleteIfExists(dir);
+            return;
+        }
+        try (final var children = Files.list(dir)) {
+            for (final var child : children.toList()) {
+                deleteRecursively(child);
+            }
+        }
+        Files.deleteIfExists(dir);
     }
 
     @Override
@@ -330,12 +423,22 @@ public class FileSessionStore implements SessionStore {
         try (final Stream<Path> files = storedSessions()) {
             return files.map(f -> {
                         final var name = f.getFileName().toString();
-                        final var id = name.endsWith(JSONL_SUFFIX)
-                                ? name.substring(0, name.length() - JSONL_SUFFIX.length())
-                                : name.substring(0, name.length() - GZ_SUFFIX.length());
+                        final String id;
+                        final Path stat;
+                        if (Files.isDirectory(f)) {
+                            id = name;
+                            stat = Files.isRegularFile(f.resolve(name + JSONL_SUFFIX))
+                                    ? f.resolve(name + JSONL_SUFFIX)
+                                    : f.resolve(name + GZ_SUFFIX);
+                        } else {
+                            id = name.endsWith(JSONL_SUFFIX)
+                                    ? name.substring(0, name.length() - JSONL_SUFFIX.length())
+                                    : name.substring(0, name.length() - GZ_SUFFIX.length());
+                            stat = f;
+                        }
                         try {
                             return new SessionInfo(
-                                    id, Files.getLastModifiedTime(f).toMillis(), Files.size(f));
+                                    id, Files.getLastModifiedTime(stat).toMillis(), Files.size(stat));
                         } catch (final IOException e) {
                             return new SessionInfo(name, 0, 0);
                         }

@@ -26,6 +26,7 @@ import dev.tamboui.terminal.Backend;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * In-memory terminal backend capturing drawn buffers so tests can assert on the
@@ -36,7 +37,7 @@ final class HeadlessBackend implements Backend {
     static final int WIDTH = 120;
     static final int HEIGHT = 40;
 
-    private final Object lock = new Object();
+    private final ReentrantLock lock = new ReentrantLock();
     private final Buffer buffer = Buffer.empty(new Rect(0, 0, WIDTH, HEIGHT));
     private final Semaphore drawn = new Semaphore(0);
     private final StringBuilder raw = new StringBuilder();
@@ -48,10 +49,13 @@ final class HeadlessBackend implements Backend {
 
     @Override
     public void draw(final DiffResult diff) {
-        synchronized (lock) {
+        lock.lock();
+        try {
             for (int i = 0; i < diff.size(); i++) {
                 buffer.set(diff.getX(i), diff.getY(i), diff.getCell(i));
             }
+        } finally {
+            lock.unlock();
         }
         drawn.release();
     }
@@ -59,16 +63,22 @@ final class HeadlessBackend implements Backend {
     /** Records what the app writes outside of the cell grid: clipboard OSC 52 payloads. */
     @Override
     public void writeRaw(final String text) {
-        synchronized (lock) {
+        lock.lock();
+        try {
             raw.append(text);
+        } finally {
+            lock.unlock();
         }
         drawn.release();
     }
 
     /** Everything written through {@link #writeRaw(String)} so far, ie. clipboard payloads. */
     String raw() {
-        synchronized (lock) {
+        lock.lock();
+        try {
             return raw.toString();
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -151,7 +161,8 @@ final class HeadlessBackend implements Backend {
     public void close() {}
 
     String text() {
-        synchronized (lock) {
+        lock.lock();
+        try {
             final var sb = new StringBuilder();
             for (int y = 0; y < buffer.height(); y++) {
                 final var line = new StringBuilder();
@@ -165,12 +176,15 @@ final class HeadlessBackend implements Backend {
                 sb.append(line.toString().stripTrailing()).append('\n');
             }
             return sb.toString();
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Symbol at a screen coordinate, or a space when the cell is empty. */
     String symbol(final int x, final int y) {
-        synchronized (lock) {
+        lock.lock();
+        try {
             return y < 0
                             || y >= buffer.height()
                             || x < 0
@@ -178,37 +192,59 @@ final class HeadlessBackend implements Backend {
                             || buffer.get(x, y).isEmpty()
                     ? " "
                     : buffer.get(x, y).symbol();
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Foreground color at a screen coordinate. */
     Optional<Color> fg(final int x, final int y) {
-        synchronized (lock) {
+        lock.lock();
+        try {
             return buffer.get(x, y).style().fg();
+        } finally {
+            lock.unlock();
         }
     }
 
     /** True when the cell at the coordinate carries the reversed-video modifier. */
     boolean reversed(final int x, final int y) {
-        synchronized (lock) {
+        lock.lock();
+        try {
             if (y < 0 || y >= buffer.height() || x < 0 || x >= buffer.width()) {
                 return false;
             }
             return buffer.get(x, y).style().effectiveModifiers().contains(Modifier.REVERSED);
+        } finally {
+            lock.unlock();
         }
     }
 
     /** Last reversed-video cell in the buffer (bottommost, rightmost), or {@code null} when none. */
     int[] lastReversed() {
-        synchronized (lock) {
+        final var cursor = cursor();
+        return cursor == Cursor.NONE ? null : new int[] {cursor.col, cursor.row};
+    }
+
+    /** Bottommost reversed-video cell (the prompt input cursor) as an atomic (col,row) snapshot, or {@link #NONE}. */
+    Cursor cursor() {
+        lock.lock();
+        try {
             for (var y = buffer.height() - 1; y >= 0; y--) {
                 for (var x = buffer.width() - 1; x >= 0; x--) {
                     if (buffer.get(x, y).style().effectiveModifiers().contains(Modifier.REVERSED)) {
-                        return new int[] {x, y};
+                        return new Cursor(x, y);
                     }
                 }
             }
-            return null;
+            return Cursor.NONE;
+        } finally {
+            lock.unlock();
         }
+    }
+
+    /** A terminal-cell position: both coordinates always come from the same rendered frame. */
+    record Cursor(int col, int row) {
+        static final Cursor NONE = new Cursor(-1, -1);
     }
 }

@@ -25,7 +25,11 @@
   switching back to `build` seeds the todo list from the last plan when the model
   did not record it itself
 - MCP server health shown in the TUI sidebar with status dots (enabled / disabled / failing)
-- Rate limiting, retries and concurrency limits for LLM calls
+- Rate limiting, retries and concurrency limits for LLM calls, shared per
+  provider across tabs: the resilient LLM client (throttle, max-concurrent and
+  retry queue) is keyed by (provider, flavor), so several tabs calling the same
+  provider share one pool - the provider's announced `concurrency_limit_exceeded`
+  adaptation is surfaced once per limit, not on every 429
 - Custom agents (`yca.agents`): named prompts injected on top of the base system
   prompt, selected with `--agent` on `run`, `/agent` in the TUI, or a `@<name>`
   prompt prefix for a single turn
@@ -218,7 +222,16 @@ name, and the whole scheme adjusts its lightness to the current background
 (dark or light, following the persisted theme). An explicit `style.color` /
 `style.bold` always wins; the resolved style can be set per model as above.
 `model.prune` defaults to `model.compact` when blank, and both fall back to the
-active provider model when unset.
+active provider model when unset. `model.memory` selects the model used by the
+memory write path (extraction and rewrite): it defaults to `model.compact`, then
+to the active provider model.
+
+The session selection (provider/model/variant/sampling) travels inside each
+`ChatCompletionRequest` (`request.settings()`): the execution API
+(`chat`/`stream`/`chatStructured`) resolves the concrete model with
+`request.model()` &gt; `settings.model()` &gt; provider default, and a
+`$provider/model` request model routes the call to that provider. The selection
+is core-internal: it never crosses into `llm-client` and is never serialized.
 
 Main groups: `provider` (providers, defaultProvider, baseUrl, apiKey, model,
 api, reasoningField, contextWindow, outputTokens, timeoutSeconds, color,
@@ -315,13 +328,19 @@ override for enrichment, falling back to the main provider), `maxFileBytes`
 (default `.yca/generated/graph`). Setting `enabled=false` disables the index
 entirely.
 
-Storage lives under `~/.yupiik/coding-agent` (`sessions/`, `memory/`,
-`todos.json`); project memory is `.yca/memory/MEMORY.md`. At startup sessions
-inactive longer than `sessions.retentionDays` (default 30) are dropped and
-those inactive longer than `sessions.compressDays` (default 15) are gzip
-compressed; a compressed session is decompressed back to JSONL on resume (the
-`.jsonl.gz` is then removed). Set a value to `0` to disable the corresponding
-cleanup.
+Storage lives under `~/.yupiik/coding-agent`: one folder per session
+(`sessions/<id>/` holding `<id>.jsonl`, `todos.json`, `plan.md` and
+`snapshot.snap`), plus `memory/`, the prompt `history` and `configuration.json`
+at the root; project memory is `.yca/memory/MEMORY.md`. Legacy flat layouts
+(`sessions/<id>.jsonl`, root `todos-<key>.json`, `plans/*.plan.md`,
+`snapshots/<id>.snap`) stay readable as a read-only fallback - nothing is
+migrated or moved; root-level session artifacts orphaned by a deleted session
+are swept at startup. At startup sessions inactive longer than
+`sessions.retentionDays` (default 30) are dropped - the whole session folder
+goes with them - and those inactive longer than `sessions.compressDays`
+(default 15) are gzip compressed in place (`<id>.jsonl.gz`); a compressed
+session is decompressed back to JSONL on resume (the `.jsonl.gz` is then
+removed). Set a value to `0` to disable the corresponding cleanup.
 
 Project instructions and skills are loaded into the system prompt:
 
@@ -412,14 +431,19 @@ Project instructions and skills are loaded into the system prompt:
 - While a tool runs, a line under the input shows `calling <command>` with a
   spinner (and `esc to interrupt` on the right) and its output is streamed live
   into the transcript
-- Waiting states get per-phase spinners: clock for agent/thinking waits
-  (`thinking...`, `busy - press Esc to interrupt`, `interrupting...`), square
-  corners for tool execution (`calling <command>`, `running <command>`), and a
-  bouncing ball for other background operations (`compacting...`, resyncing the
-  structural code graph); the status bar shows the same animated feedback
+- Waiting states get per-phase spinners: clock for first-token/agent waits
+  (`thinking... (Ns)`, `busy - press Esc to interrupt`, `interrupting...`), square
+  corners for streaming/calling a tool (`calling <command>`, `running <command>`),
+  dots for generic agent work (`agent is working...`) and a bouncing ball for
+  other background operations (`compacting (chunk i/n)...`, resyncing the
+  structural code graph); the status bar shows the same animated feedback and the
+  TUI/CLI share the same label format (`BusyLabels`)
+- While a running tool's output overlay is open, `Esc` cancels that tool only
+  (the turn keeps running and the next round sees the cancelled result);
+  `Ctrl+O`/`q`/`Esc` on a finished card just closes the modal
 - Code blocks in the transcript get basic syntax highlighting (java, ts, python,
   shell, sql, xml/json, plus a generic fallback)
-- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact; switching back to `plan` resets the session approval mode to the configured default and clears the in-memory session grants), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions ask|auto_edit|yolo|none|show` (switch the approval mode interactively; `none` restores interactive approval, `show` lists the current mode and in-memory session grants - approvals granted in `build` are cleared when switching back to `plan`), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
+- Slash commands: `/help`, `/shortcuts`, `/new`, `/resume`, `/compact [force]` (during a turn the compaction is scheduled and applied at the next agent checkpoint, at most once per turn), `/model [$name]` (list, or set the model - `Tab` completes the name; per-tab in the TUI, per-session in the CLI), `/provider [id]` (show or switch the provider - also per-tab: the choice lands in the session's settings, not the shared process default; `default`/blank restores the process default provider, resetting the model/variant/sampling selection since they are provider-scoped), `/mode build|plan` (during a turn the switch is queued and applied when the current turn ends, keeping the running turn's mode intact; switching back to `plan` resets the session approval mode to the configured default and clears the in-memory session grants), `/agent [name]` (list custom agents, or set the active agent - `Tab` completes the name), `/memory`, `/context [transcript|llm-payload|next-request|compact|prune] [path]` (`transcript` (default) shows the persisted session, `llm-payload` the exact last request sent to the LLM - full message contents and tool schemas, `next-request` the request the next round would carry, rebuilt from the persisted session; `compact|prune` trigger an idempotent context operation; write to path when given), `/permissions ask|auto_edit|yolo|none|show` (switch the approval mode interactively; `none` restores interactive approval, `show` lists the current mode and in-memory session grants - approvals granted in `build` are cleared when switching back to `plan`), `/tools [filters]` (list tools per MCP server; space separated filters must all match the lowercase server/tool name), `/clear`, `/quit`
 - Tool approvals use a modal (respecting the configured permission mode)
 
 ## Modules

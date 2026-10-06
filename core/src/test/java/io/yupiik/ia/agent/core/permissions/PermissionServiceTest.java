@@ -171,7 +171,9 @@ class PermissionServiceTest {
         final var service = service(PermissionMode.ASK, List.of(), List.of());
         final var decision = service.check("write_file", ToolCategory.EDIT, Map.of("path", "a.txt"));
         assertFalse(decision.allowed());
-        assertTrue(decision.reason().contains("no interactive gate"));
+        assertTrue(decision.reason().contains("no interactive approval"));
+        assertTrue(decision.reason().contains("ask"));
+        assertTrue(decision.reason().contains("yca.permissions.mode"));
     }
 
     @Test

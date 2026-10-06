@@ -37,6 +37,14 @@ agent.
 The `code_trace_calls` tool consults the graph and points the agent to the
 generated doc tree at the graph store root when a symbol cannot be resolved.
 
+When the Maven repository knowledge is enabled (`yca.mavenRepositoryKnowledge`,
+see xref:maven-knowledge.adoc[]), `code_resolve`/`code_trace_calls` also suggest
+the indexed artifact that provides a symbol with a short `maven_knowledge_content`
+hint - but only when the symbol is not found in the local graph (or an explicit
+`artifact` hint is given), to keep resolve output lean on local hits. Set
+`yca.tools.alwaysSuggestMavenKnowledge=true` to append the artifact-knowledge
+note even when the local graph matched.
+
 Configuration lives under the `yca.structuralCodeGraph` prefix; see
 xref:../configuration.adoc[Configuration] for the full option set, including
 `enabled`, `deep`, `enrich`, `docs`, `languageExtensions`, `maxFileBytes`,

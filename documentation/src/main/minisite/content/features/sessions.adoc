@@ -9,6 +9,33 @@ Every shell can be launched directly on an existing session: `run --session
 name the session from a JSONL file). Inside the TUI, `/resume <id>` switches
 tab to another session and `go` resumes the last turn.
 
+Each session owns one folder under the storage root:
+`~/.yupiik/coding-agent/sessions/<id>/` with `<id>.jsonl` (the transcript,
+gzipped to `<id>.jsonl.gz` when aged), `todos.json`, `plan.md` (the editable
+plan of the `/editplan` flow) and `snapshot.snap` (the retained context
+summaries), so removing a session deletes a single directory. The legacy flat
+layout (`sessions/<id>.jsonl`, root `todos-<key>.json`,
+`plans/<title>-<id>.plan.md`, `snapshots/<id>.snap`) remains readable as a
+read-only fallback; nothing is migrated or moved.
+
+== Per-tab provider and model
+
+The provider and the model are *per session*: in the TUI every tab selects its
+own via `/provider` and `/model` without affecting the others, and in the CLI
+the single session owns them. A session without an explicit selection falls
+back to the process default provider (`yca.provider.defaultProvider` or the
+first configured one - see
+link:../configuration.html#_providers[Providers]) and that provider's default
+model, so two tabs start on the same default and diverge as soon as one of them
+picks another provider/model. Switching the provider of a session resets its
+model/variant/sampling selection (those are provider-scoped); `/model default`
+restores the provider default. Every LLM call a session triggers - turns,
+sub-agents, compaction, memory extraction, plan seeding, indexing it asks for -
+uses that session's provider/model, resolved lazily at call time. The only
+process-default path left is genuinely session-less startup work (the
+deterministic maven dependency scan and the model completion prefetch before
+the first tab exists).
+
 A memory store is maintained automatically at both the global and per-project
 levels, letting yca remember recurring facts across sessions.
 

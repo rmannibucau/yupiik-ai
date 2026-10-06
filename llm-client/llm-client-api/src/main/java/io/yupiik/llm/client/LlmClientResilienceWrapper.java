@@ -26,9 +26,11 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -50,6 +52,9 @@ public final class LlmClientResilienceWrapper {
     /** Default wait when a concurrency-limit error carries no {@code retry-after} header. */
     static final long CONCURRENCY_LIMIT_DEFAULT_WAIT_MS = 10_000L;
 
+    /** Cadence (ms) at which the cancellation probe is polled during a scheduled retry wait. */
+    private static final long CANCEL_POLL_MS = 100L;
+
     private static final java.util.regex.Pattern CONCURRENCY_LIMIT_JSON =
             java.util.regex.Pattern.compile("\"limit\"\\s*:\\s*(\\d+)");
     private static final java.util.regex.Pattern CONCURRENCY_FAILED =
@@ -60,6 +65,12 @@ public final class LlmClientResilienceWrapper {
     private final LlmResilienceConfig config;
     private final Consumer<PauseEvent> pauseListener;
     /**
+     * Scheduler parking the retry waits and polling the cancellation probe; {@code null} falls
+     * back to the JDK delayed executor (no early cancellation of the wait itself). Never shut
+     * down by the wrapper.
+     */
+    private final ScheduledExecutorService scheduler;
+    /**
      * Concurrency gate. May be {@code null} while the configured cap is unlimited
      * (negative/zero): the first provider {@code concurrency_limit_exceeded} response
      * lazily creates it bounded by the announced limit so the adaptation still applies
@@ -68,7 +79,7 @@ public final class LlmClientResilienceWrapper {
     private volatile Semaphore semaphore;
 
     private final java.util.ArrayDeque<Long> requestTimes;
-    private final Object concurrencyLock = new Object();
+    private final ReentrantLock concurrencyLock;
     private int adaptedConcurrency = -1;
     private long adaptedUntilMs;
 
@@ -79,10 +90,28 @@ public final class LlmClientResilienceWrapper {
      * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
      */
     public LlmClientResilienceWrapper(final LlmResilienceConfig config, final Consumer<PauseEvent> pauseListener) {
+        this(config, pauseListener, null);
+    }
+
+    /**
+     * Creates the wrapper with an explicit pause listener and scheduler.
+     *
+     * @param config resilience knobs (defaults applied when {@code null}).
+     * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
+     * @param scheduler scheduler used to park retry waits and poll the cancellation probe; {@code null}
+     *     (the default) falls back to {@link CompletableFuture#delayedExecutor}. The scheduler is never
+     *     shut down by the wrapper: as the application-wide one, its owner owns its lifecycle.
+     */
+    public LlmClientResilienceWrapper(
+            final LlmResilienceConfig config,
+            final Consumer<PauseEvent> pauseListener,
+            final ScheduledExecutorService scheduler) {
         this.config = config == null ? LlmResilienceConfig.defaults() : config;
         this.pauseListener = pauseListener;
+        this.scheduler = scheduler;
         this.semaphore = this.config.maxConcurrent() > 0 ? new Semaphore(this.config.maxConcurrent()) : null;
         this.requestTimes = new java.util.ArrayDeque<>();
+        this.concurrencyLock = new ReentrantLock();
     }
 
     /**
@@ -324,10 +353,14 @@ public final class LlmClientResilienceWrapper {
                     lastError.getMessage() + " -> wait " + (wait.waitMs() / 1000) + "s (" + wait.reason() + ")",
                     wait.waitMs()));
         }
-        CompletableFuture.delayedExecutor(
-                        Math.max(1L, (long) (wait.waitMs() * config.waitScale())), TimeUnit.MILLISECONDS)
-                .execute(() -> retryStream(dialect, request, cancelled, attempt + 1, listener)
-                        .whenComplete((r, e) -> completeInto(result, r, e)));
+        cancellableWait(wait.waitMs(), cancelled).whenComplete((elapsed, waitError) -> {
+            if (waitError != null) {
+                completeInto(result, null, waitError);
+                return;
+            }
+            retryStream(dialect, request, cancelled, attempt + 1, listener)
+                    .whenComplete((r, e) -> completeInto(result, r, e));
+        });
         return result;
     }
 
@@ -368,19 +401,54 @@ public final class LlmClientResilienceWrapper {
         if (listener != null) {
             listener.accept(new PauseEvent(attempt, reason, wait.waitMs()));
         }
-        CompletableFuture.delayedExecutor(
-                        Math.max(1L, (long) (wait.waitMs() * config.waitScale())), TimeUnit.MILLISECONDS)
-                .execute(() -> {
-                    if (cancelled != null && cancelled.getAsBoolean()) {
-                        // do not restart a retry the user already cancelled: the delayed
-                        // executor is not interruptible, so the probe is checked here
-                        completeInto(result, null, new IOException("Cancelled"));
-                        return;
-                    }
-                    retry(dialect, request, cancelled, attempt + 1, listener)
-                            .whenComplete((r, e) -> completeInto(result, r, e));
-                });
+        cancellableWait(wait.waitMs(), cancelled).whenComplete((elapsed, waitError) -> {
+            if (waitError != null) {
+                completeInto(result, null, waitError);
+                return;
+            }
+            if (cancelled != null && cancelled.getAsBoolean()) {
+                // do not restart a retry the user already cancelled
+                completeInto(result, null, new IOException("Cancelled"));
+                return;
+            }
+            retry(dialect, request, cancelled, attempt + 1, listener)
+                    .whenComplete((r, e) -> completeInto(result, r, e));
+        });
         return result;
+    }
+
+    /**
+     * Parks one retry wait without ever blocking a caller thread: a stage completing (normally)
+     * once {@code waitMs} elapsed, or exceptionally with {@code IOException("Cancelled")} as soon
+     * as the cancellation probe flips. With an injected scheduler the wait is scheduled there and
+     * the probe polled on a short cadence from the same pool; without one the JDK delayed executor
+     * is used and the probe is only checked when the wait elapses (legacy behavior).
+     */
+    private CompletionStage<Boolean> cancellableWait(final long waitMs, final BooleanSupplier cancelled) {
+        final var waitMsScaled = Math.max(1L, (long) (waitMs * config.waitScale()));
+        final var done = new CompletableFuture<Boolean>();
+        if (scheduler == null) {
+            CompletableFuture.delayedExecutor(waitMsScaled, TimeUnit.MILLISECONDS)
+                    .execute(() -> done.complete(Boolean.TRUE));
+            return done;
+        }
+        final var fire = scheduler.schedule(() -> done.complete(Boolean.TRUE), waitMsScaled, TimeUnit.MILLISECONDS);
+        // the probe must end the wait early: poll it on a fixed short cadence, cancel the
+        // pending fire task when cancellation wins so no orphaned task stays scheduled
+        final var poll = scheduler.scheduleAtFixedRate(
+                () -> {
+                    if (cancelled != null && cancelled.getAsBoolean()) {
+                        done.completeExceptionally(new IOException("Cancelled"));
+                    }
+                },
+                0,
+                CANCEL_POLL_MS,
+                TimeUnit.MILLISECONDS);
+        done.whenComplete((value, error) -> {
+            poll.cancel(false);
+            fire.cancel(false);
+        });
+        return done;
     }
 
     /**
@@ -477,7 +545,9 @@ public final class LlmClientResilienceWrapper {
         if (limit == null || limit <= 0) {
             return;
         }
-        synchronized (concurrencyLock) {
+        final boolean alreadyAdapted;
+        concurrencyLock.lock();
+        try {
             // with an unlimited configured cap the gate is null: lazily create it bounded
             // by the provider-announced limit so the adaptation applies even then
             if (semaphore == null && config.maxConcurrent() <= 0) {
@@ -489,10 +559,18 @@ public final class LlmClientResilienceWrapper {
                     semaphore.tryAcquire();
                 }
             }
-            adaptedConcurrency = Math.max(1, limit);
-            adaptedUntilMs = System.currentTimeMillis() + config.concurrencyAdaptationMs();
+            // already adapted to this exact limit and the window has not relaxed yet:
+            // a repeated 429 while the cap is active is absorbed silently - only the
+            // initial adaptation (or a *changed* limit) is worth surfacing once.
+            alreadyAdapted = adaptedConcurrency == Math.max(1, limit) && System.currentTimeMillis() < adaptedUntilMs;
+            if (!alreadyAdapted) {
+                adaptedConcurrency = Math.max(1, limit);
+                adaptedUntilMs = System.currentTimeMillis() + config.concurrencyAdaptationMs();
+            }
+        } finally {
+            concurrencyLock.unlock();
         }
-        if (listener != null) {
+        if (!alreadyAdapted && listener != null) {
             listener.accept(new PauseEvent(
                     0, "concurrency limit " + limit + " detected for this provider, capping concurrent requests", 0));
         }
@@ -502,7 +580,8 @@ public final class LlmClientResilienceWrapper {
         if (semaphore == null || adaptedConcurrency <= 0) {
             return;
         }
-        synchronized (concurrencyLock) {
+        concurrencyLock.lock();
+        try {
             if (adaptedConcurrency <= 0 || System.currentTimeMillis() < adaptedUntilMs) {
                 return;
             }
@@ -517,6 +596,8 @@ public final class LlmClientResilienceWrapper {
             }
             adaptedConcurrency = -1;
             adaptedUntilMs = 0;
+        } finally {
+            concurrencyLock.unlock();
         }
     }
 
@@ -573,7 +654,6 @@ public final class LlmClientResilienceWrapper {
         }
     }
 
-    @SuppressWarnings("unused")
     private static void sleepInterruptibly(final long waitMs, final BooleanSupplier cancelled)
             throws InterruptedException {
         final var end = System.nanoTime() + waitMs * 1_000_000L;

@@ -61,6 +61,7 @@ import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
@@ -69,6 +70,7 @@ import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.BusyLabels;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -108,6 +110,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -205,7 +208,7 @@ public class TuiCommand implements Runnable {
     // single-entry render memo: when neither the transcript markdown nor the
     // mutable render inputs changed, the previous frame's chunks are reused
     // verbatim (only the spinner/animation parts are re-rendered each frame)
-    private final Object contentLock = new Object();
+    private final ReentrantLock contentLock = new ReentrantLock();
     private volatile ContentKey lastContentKey;
     private volatile ContentResult lastContent;
     // incremental live-thinking memo: the flushed part of the growing stream is
@@ -787,7 +790,7 @@ public class TuiCommand implements Runnable {
             });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted || renderStalled(state)) {
+                    if (state.interrupted) {
                         tui.runLater(() -> {
                             state.dirty = true;
                             state.approvals.removeIf(a -> a.latch() == latch);
@@ -819,7 +822,7 @@ public class TuiCommand implements Runnable {
             });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted || renderStalled(state)) {
+                    if (state.interrupted) {
                         tui.runLater(() -> {
                             state.dirty = true;
                             state.approvals.removeIf(a -> a.latch() == latch);
@@ -1146,6 +1149,11 @@ public class TuiCommand implements Runnable {
             state.pendingToolArgs
                     .computeIfAbsent(started.name(), n -> new java.util.ArrayDeque<>())
                     .addLast(started.args());
+            // reserve the ordinal this call will be stamped with so the running tool
+            // opens its overlay immediately; the ToolFinished event overwrites it
+            final var ordinal = started.ordinal() > 0 ? started.ordinal() : state.model.toolCallCount() + 1;
+            state.toolOutputs.record(
+                    ordinal, new ToolOutputStore.Entry(started.name(), started.args(), "", false, -1L));
         } else if (event instanceof AgentEvent.ToolFinished finished) {
             // the transcript just stamped this call with ordinal #toolCallCount: keep the
             // full uncapped output around so the Ctrl+O overlay can expand the truncated card
@@ -1814,7 +1822,7 @@ public class TuiCommand implements Runnable {
         }
         state.model.startUserTurn(text, pinToBottom);
         state.interrupted = false;
-        waiting(state, "thinking...", SpinnerStyle.CLOCK);
+        waiting(state, BusyLabels.thinking(0), SpinnerStyle.CLOCK);
         final var override = agentSessionService.agentOverride(text);
         final var agentName = override.agentName() != null ? override.agentName() : state.activeAgent;
         final var prompt = override.prompt();
@@ -1828,7 +1836,7 @@ public class TuiCommand implements Runnable {
     private void startResumeTurn(final UiState state) {
         notify(state, "resuming previous turn");
         state.interrupted = false;
-        waiting(state, "thinking...", SpinnerStyle.CLOCK);
+        waiting(state, BusyLabels.thinking(0), SpinnerStyle.CLOCK);
         startTurn(state, state.activeAgent, null);
     }
 
@@ -2014,7 +2022,9 @@ public class TuiCommand implements Runnable {
         // /provider switched the active provider: the completion cache is provider-scoped
         // (model ids differ per provider, e.g. glm-5.3 vs z-ai/glm-5.3), so the stale list
         // must be dropped and re-fetched for the new provider
-        final var providerId = chatClient == null ? "" : chatClient.providerId();
+        final var providerId = chatClient == null
+                ? ""
+                : chatClient.providerId(state.session == null ? null : state.session.chatSettings());
         if (!providerId.equals(lastCompletionProviderId)) {
             lastCompletionProviderId = providerId;
             completionCache.invalidateModels();
@@ -2352,7 +2362,14 @@ public class TuiCommand implements Runnable {
                         // runs; if the provider switches meanwhile (invalidateModels bumps the
                         // generation) the stale result must not overwrite the new provider's list
                         final var generation = completionCache.modelGeneration();
-                        final var ids = chatClient.models().ids();
+                        // the warm-up can run before the first tab exists (constructor-time refresh):
+                        // without a tab there is no per-session override to honor, so fall back to the
+                        // process default provider like a pre-session models() call
+                        final var activeState = active();
+                        final var activeSettings = activeState == null || activeState.session == null
+                                ? null
+                                : activeState.session.chatSettings();
+                        final var ids = chatClient.models(activeSettings).ids();
                         completionCache.updateModels(generation, ids == null ? List.of() : List.copyOf(ids));
                     } catch (final Exception e) {
                         LOG.log(Level.SEVERE, "model list refresh failed; keeping previous completion cache", e);
@@ -2396,13 +2413,17 @@ public class TuiCommand implements Runnable {
                 if (chatClient != null) {
                     final var variantGeneration = completionCache.modelGeneration();
                     final var variants = new LinkedHashMap<String, List<String>>();
+                    final var activeState = active();
+                    final var activeSettings = activeState == null || activeState.session == null
+                            ? null
+                            : activeState.session.chatSettings();
                     for (final var model : completionCache.models()) {
                         final var selected = new ArrayList<String>();
-                        if (chatClient.implicitVariant(model) != null) {
+                        if (chatClient.implicitVariant(activeSettings) != null) {
                             selected.add("default");
                         }
                         try {
-                            final var raw = chatClient.variants(model);
+                            final var raw = chatClient.variants(activeSettings, model);
                             if (raw != null) {
                                 for (final var v : raw) {
                                     selected.add(v.name());
@@ -2729,7 +2750,9 @@ public class TuiCommand implements Runnable {
     private void models(final TuiRunner runner, final UiState state) {
         executor.execute(() -> {
             try {
-                final var ids = chatClient.models().ids();
+                final var ids = chatClient
+                        .models(state.session == null ? null : state.session.chatSettings())
+                        .ids();
                 runLater(state, () -> openModelPicker(state, ids));
             } catch (final Exception e) {
                 runLater(state, () -> modelError(state, "models failed: " + e.getMessage(), e));
@@ -2750,10 +2773,12 @@ public class TuiCommand implements Runnable {
                     try {
                         // same reset semantics as AgentSessionService.setModel: a model
                         // change drops any stale variant/sampling override of the old model
-                        final var settings = state.session.chatSettings();
-                        settings.setModel(selected);
-                        settings.setVariant(null);
-                        settings.setSampling(null);
+                        final var updated = state.session
+                                .chatSettings()
+                                .withModel(selected)
+                                .withVariant(null)
+                                .withSampling(null);
+                        state.session.runtime().updateChatSettings(updated);
                         notify(state, "model: " + selected);
                         refreshCompletionCache();
                     } catch (final RuntimeException e) {
@@ -2930,7 +2955,7 @@ public class TuiCommand implements Runnable {
                             : "a context operation is already pending this turn");
             return;
         }
-        waiting(state, "compacting...", SpinnerStyle.BOUNCING_BALL);
+        waiting(state, BusyLabels.compacting(1, 1), SpinnerStyle.BOUNCING_BALL);
         executor.execute(() -> {
             try {
                 final var result = agentSessionService.compact(state.sessionId, state.runtime());
@@ -3112,9 +3137,9 @@ public class TuiCommand implements Runnable {
         return inner;
     }
 
-    private Style modelNameStyle(final String model) {
-        final var style =
-                modelStyleService.resolve(chatClient.currentProvider(), model, !"light".equalsIgnoreCase(theme));
+    private Style modelNameStyle(final ChatSettings settings, final String model) {
+        final var style = modelStyleService.resolve(
+                chatClient.currentProvider(settings), model, !"light".equalsIgnoreCase(theme));
         final var base = Style.EMPTY.fg(Color.hex(style.hex()));
         return style.bold() ? base.bold() : base;
     }
@@ -3223,9 +3248,15 @@ public class TuiCommand implements Runnable {
         text.add(Line.empty());
         final var model = chatClient.model(state.session.chatSettings());
         text.add(Line.from(
-                Span.styled("model ", label), Span.styled(ellipsize(model, width - 6), modelNameStyle(model))));
+                Span.styled("model ", label),
+                Span.styled(ellipsize(model, width - 6), modelNameStyle(state.session.chatSettings(), model))));
         text.add(Line.from(
-                Span.styled("provider ", label), Span.styled(ellipsize(chatClient.providerId(), width - 9), value)));
+                Span.styled("provider ", label),
+                Span.styled(
+                        ellipsize(
+                                chatClient.providerId(state.session == null ? null : state.session.chatSettings()),
+                                width - 9),
+                        value)));
         text.add(Line.from(
                 Span.styled("agent ", label),
                 Span.styled(ellipsize(state.activeAgent.isBlank() ? "-" : state.activeAgent, width - 7), value)));
@@ -3494,8 +3525,11 @@ public class TuiCommand implements Runnable {
                 state.collapsedTools.hashCode(),
                 System.identityHashCode(palette));
         final ContentResult cached;
-        synchronized (contentLock) {
+        contentLock.lock();
+        try {
             cached = lastContentKey != null && lastContentKey.equals(key) ? lastContent : null;
+        } finally {
+            contentLock.unlock();
         }
         if (cached != null) {
             out.addAll(cached.chunks());
@@ -3523,9 +3557,12 @@ public class TuiCommand implements Runnable {
         }
         final var result = new ContentResult(
                 List.copyOf(local), List.copyOf(localRows), List.copyOf(localToolTops), List.copyOf(localFooterLinks));
-        synchronized (contentLock) {
+        contentLock.lock();
+        try {
             lastContentKey = key;
             lastContent = result;
+        } finally {
+            contentLock.unlock();
         }
         out.addAll(result.chunks());
         rows.addAll(result.rows());
@@ -3756,7 +3793,7 @@ public class TuiCommand implements Runnable {
         final var line = Line.from(
                 thoughtBar(),
                 Span.styled(
-                        spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " thinking... (" + secs + " s)",
+                        spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " " + BusyLabels.thinking(secs),
                         thoughtBarStyle));
         addThoughtChunk(out, List.of(line), rows);
     }
@@ -4312,8 +4349,8 @@ public class TuiCommand implements Runnable {
                         ? state.model.runningTool()
                         : state.model.runningToolCommand();
                 final var line = Line.from(Span.styled(
-                        spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " calling "
-                                + ellipsize(name, 60),
+                        spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " "
+                                + BusyLabels.calling(ellipsize(name, 60)),
                         accent));
                 frame.renderWidget(
                         Paragraph.builder()
@@ -4329,11 +4366,12 @@ public class TuiCommand implements Runnable {
                     // is managed once per frame in render())
                     final var secs = Math.max(0, (clock.millis() - state.thinkingStartedAtMillis) / 1000);
                     line = Line.from(Span.styled(
-                            spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " thinking (" + secs + " s)",
+                            spinnerFrame(SpinnerStyle.SQUARE_CORNERS, state.spinnerTick) + " "
+                                    + BusyLabels.thinking(secs),
                             palette.blended(palette.info(), 0.35)));
                 } else {
                     line = Line.from(Span.styled(
-                            spinnerFrame(SpinnerStyle.DOTS, state.spinnerTick) + " agent is working...", muted));
+                            spinnerFrame(SpinnerStyle.DOTS, state.spinnerTick) + " " + BusyLabels.working(), muted));
                 }
                 frame.renderWidget(
                         Paragraph.builder()
@@ -4367,7 +4405,9 @@ public class TuiCommand implements Runnable {
         final var variantSuffix =
                 activeVariant == null || activeVariant.isBlank() ? " (default)" : " [" + activeVariant + "]";
         parts.add(Span.styled(modeWord() + " ", Style.EMPTY.fg(modeColor())));
-        parts.add(Span.styled(activeModel + variantSuffix + "  ", modelNameStyle(statusModel)));
+        parts.add(Span.styled(
+                activeModel + variantSuffix + "  ",
+                modelNameStyle(state.session == null ? null : state.session.chatSettings(), statusModel)));
         parts.add(Span.styled(state.activeAgent.isBlank() ? "" : "agent " + state.activeAgent + "  ", muted));
         // narrow terminals have no sidebar: keep the essential context numbers in the strip
         if (narrow) {
@@ -5005,6 +5045,15 @@ public class TuiCommand implements Runnable {
                 || key.isKey(KeyCode.ESCAPE)
                 || key.isCharIgnoreCase('q')
                 || (key.hasCtrl() && key.isCharIgnoreCase('o'))) {
+            final var entry = state.toolOverlay.entry();
+            final var cancel = key.isCancel() || key.isKey(KeyCode.ESCAPE);
+            // Esc while a tool is still running cancels that tool (the overlay closes and
+            // the running card shows the aborted result); the turn itself keeps running.
+            // Ctrl+O/q only ever close the modal.
+            if (cancel && entry.running() && state.session != null && state.session.runtime() != null) {
+                final var runtime = state.session.runtime();
+                runtime.loop().cancelTool(state.toolOverlay.ordinal());
+            }
             state.toolOverlay = null;
             return true;
         }
@@ -5069,17 +5118,17 @@ public class TuiCommand implements Runnable {
             final int width,
             final boolean isDiff) {
         if (output == null || output.isBlank()) {
-            return List.of();
+            return new ArrayList<>();
         }
         final var body = renderToolBody(name, command, output, width, isDiff);
         if (args == null || args.isBlank()) {
-            return body;
+            return new ArrayList<>(body);
         }
         // the Ctrl+O overlay enriches the historical rendering with a structured
         // preview of the meaningful arguments (file content / diff / patch)
         final var preview = toolArgsPreview.preview(name, args, width, palette);
         if (preview == null || preview.isEmpty()) {
-            return body;
+            return new ArrayList<>(body);
         }
         final var all = new ArrayList<Line>(preview.size() + body.size() + 1);
         all.addAll(preview);
@@ -5152,13 +5201,23 @@ public class TuiCommand implements Runnable {
         final var width = Math.min(Math.max(70, frame.width() * 4 / 5), frame.width());
         final var height = Math.min(Math.max(14, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.1);
-        final var title = " " + (entry.failed() ? glyphs.cross() + " " : "") + entry.name() + " - full output ";
-        final var inner = modal(frame, rect, title, Color.hex(entry.failed() ? palette.error() : palette.success()));
+        final var running = entry.running();
+        final var title = " " + (running ? glyphs.running() + " " : entry.failed() ? glyphs.cross() + " " : "")
+                + entry.name() + " - full output ";
+        final var inner = modal(
+                frame,
+                rect,
+                title,
+                Color.hex(running ? palette.textMuted() : entry.failed() ? palette.error() : palette.success()));
         if (inner == null) {
             return;
         }
-        final var body =
-                toolBodyLines(entry.name(), toolCommandOf(entry), entry.args(), entry.output(), inner.width(), false);
+        final var body = toolBodyLines(
+                entry.name(), toolCommandOf(entry), entry.args(), running ? "" : entry.output(), inner.width(), false);
+        if (running) {
+            // the running tool streams into the overlay: show a live "pending" marker
+            body.add(Line.from(Span.styled("pending… (executing)", Style.EMPTY.fg(Color.hex(palette.textMuted())))));
+        }
         final var splits = Layout.vertical()
                 .constraints(Constraint.fill(), Constraint.length(1))
                 .split(inner);

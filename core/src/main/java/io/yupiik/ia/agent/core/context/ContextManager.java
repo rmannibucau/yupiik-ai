@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.runtime.Cancellations;
 import java.util.List;
 
 /**
@@ -106,15 +108,34 @@ public class ContextManager {
             final String focus,
             final int keepLastOverride,
             final java.util.function.BooleanSupplier cancelled) {
-        return coordinator.compact(messages, force, focus, keepLastOverride, cancelled);
+        return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, ChatSettings.EMPTY);
+    }
+
+    /** {@link #compact(List, boolean, String, int, BooleanSupplier)} for the session's model selection. */
+    public CompactionResult compact(
+            final List<Message> messages,
+            final boolean force,
+            final String focus,
+            final int keepLastOverride,
+            final java.util.function.BooleanSupplier cancelled,
+            final ChatSettings settings) {
+        return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, settings);
     }
 
     public CompactionResult compactForOverflow(final List<Message> messages) {
-        return coordinator.compact(messages, true, null, 0);
+        return coordinator.compact(messages, true, null, 0, Cancellations.NEVER, ChatSettings.EMPTY);
     }
 
     public CompactionResult compactForOverflow(
             final List<Message> messages, final java.util.function.BooleanSupplier cancelled) {
-        return coordinator.compact(messages, true, null, 0, cancelled);
+        return coordinator.compact(messages, true, null, 0, cancelled, ChatSettings.EMPTY);
+    }
+
+    /** {@link #compactForOverflow(List, BooleanSupplier)} for the session's model selection. */
+    public CompactionResult compactForOverflow(
+            final List<Message> messages,
+            final java.util.function.BooleanSupplier cancelled,
+            final ChatSettings settings) {
+        return coordinator.compact(messages, true, null, 0, cancelled, settings);
     }
 }

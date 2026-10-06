@@ -242,6 +242,10 @@ public class SubagentRunner {
                 state.id(),
                 subagentName,
                 parentContext == null ? null : parentContext.feedback());
+        // the sub-agent inherits its parent tab's provider/model/variant/sampling selection so a
+        // child spawned from tab B runs on B's provider, not the process default
+        agentLoop.updateChatSettings(
+                agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings()));
 
         final var fullConversation = new StringBuilder();
         fullConversation

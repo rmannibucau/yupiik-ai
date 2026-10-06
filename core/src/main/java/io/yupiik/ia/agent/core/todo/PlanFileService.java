@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.todo;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.session.SessionStorageLayout;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -44,11 +45,18 @@ public class PlanFileService {
     /**
      * Default location for a session plan file under the given storage home.
      *
+     * <p>Generated session ids (the session folder layout) keep their plan in the
+     * session folder ({@code sessions/<id>/plan.md}); anything else keeps the
+     * legacy out-of-band location {@code plans/<title>-<id>.plan.md}.</p>
+     *
      * @param storageHome resolved storage root.
      * @param sessionId   the session id.
      * @param title       a human session title used to build a readable file name.
      */
     public Path defaultPath(final Path storageHome, final String title, final String sessionId) {
+        if (SessionStorageLayout.isGeneratedSessionId(sessionId)) {
+            return SessionStorageLayout.sessionDir(storageHome, sessionId).resolve("plan.md");
+        }
         final var base = storageHome.resolve("plans");
         final var name = sanitize(title == null || title.isBlank() ? "plan" : title) + "-" + sessionId + ".plan.md";
         return base.resolve(name);

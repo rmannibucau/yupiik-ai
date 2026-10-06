@@ -231,25 +231,55 @@ class AgentSessionServiceTest {
     void setModelStripsDollarPrefix() {
         final var client = chatClient();
         final var service = service(client);
-        final var settings = new ChatSettings();
+        final var settings = ChatSettings.EMPTY;
 
-        assertEquals("my-model", service.setModel("$my-model", settings));
-        assertEquals("my-model", settings.model());
+        final var updated = service.setModel("$my-model", settings);
+        assertEquals("my-model", updated.model());
+        assertNull(settings.model(), "pure: the passed value is unchanged");
+    }
+
+    @Test
+    void setProviderWritesOnlyTheSessionSettings() {
+        final var client = chatClient(); // no ProviderManager: calling chatClient.setProvider would fail
+        final var service = service(client);
+        final var settings = ChatSettings.EMPTY;
+
+        final var ollama = service.setProvider("ollama", settings);
+        assertEquals("ollama", ollama.providerId(), "the selection lands in the returned value");
+        assertNull(settings.providerId(), "pure: the passed value is unchanged");
+
+        // "default" / blank clear the override so the session falls back to the process default
+        assertNull(service.setProvider("default", settings).providerId());
+        assertEquals("openai", service.setProvider("openai", settings).providerId());
+        assertNull(service.setProvider("  ", settings).providerId());
+    }
+
+    @Test
+    void setProviderResetsTheProviderScopedModelSelection() {
+        final var service = service(chatClient());
+        final var settings = ChatSettings.EMPTY.withModel("qwen3-coder").withVariant("balanced");
+
+        final var updated = service.setProvider("ollama", settings);
+
+        assertEquals("ollama", updated.providerId());
+        assertNull(updated.model(), "model/variant/sampling are provider-scoped and must reset on switch");
+        assertNull(updated.variant());
+        assertEquals("qwen3-coder", settings.model(), "pure: the passed value is unchanged");
     }
 
     @Test
     void setModelClearsVariantAndSamplingOverrides() {
         final var service = service(chatClient());
-        final var settings = new ChatSettings();
-        settings.setVariant("fast");
-        settings.setSampling(
-                new ChatClient.SamplingOverride(Map.of(ChatClient.SamplingField.TEMPERATURE, Optional.of(0.2))));
+        final var settings = ChatSettings.EMPTY
+                .withVariant("fast")
+                .withSampling(new ChatClient.SamplingOverride(
+                        Map.of(ChatClient.SamplingField.TEMPERATURE, Optional.of(0.2))));
 
-        service.setModel("$gpt-5", settings);
+        final var updated = service.setModel("$gpt-5", settings);
 
-        assertEquals("gpt-5", settings.model());
-        assertNull(settings.variant(), "a model change must drop the variant of the previous model");
-        assertNull(settings.sampling(), "a model change must drop the sampling overrides of the previous model");
+        assertEquals("gpt-5", updated.model());
+        assertNull(updated.variant(), "a model change must drop the variant of the previous model");
+        assertNull(updated.sampling(), "a model change must drop the sampling overrides of the previous model");
     }
 
     @Test

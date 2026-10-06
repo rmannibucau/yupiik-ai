@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -248,15 +249,20 @@ public class CompactionCoordinator {
             final List<Message> messages, final boolean force, final String focus, final int keepLastOverride) {
         // no interrupt flag on this path (a synchronous /compact, a tool directive): the
         // cancellation probe is a real never-true supplier rather than null
-        return compact(messages, force, focus, keepLastOverride, Cancellations.NEVER);
+        return compact(messages, force, focus, keepLastOverride, Cancellations.NEVER, ChatSettings.EMPTY);
     }
 
+    /**
+     * @param settings the requesting session's selection (model/provider for the summarizer); null or
+     *                 empty means the process default provider and model resolve the compact model
+     */
     public CompactionResult compact(
             final List<Message> messages,
             final boolean force,
             final String focus,
             final int keepLastOverride,
-            final BooleanSupplier cancelled) {
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
         java.util.Objects.requireNonNull(cancelled, "cancelled");
         final var p = configuration.pruning();
         final var keepFloor =
@@ -279,7 +285,8 @@ public class CompactionCoordinator {
                 prior,
                 focus,
                 configuration.model().compact(),
-                cancelled);
+                cancelled,
+                settings);
         if (!outcome.summary().isBlank()) {
             List<Message> out = new ArrayList<>();
             if (system != null) {
@@ -550,9 +557,12 @@ public class CompactionCoordinator {
             final String priorSummary,
             final String focus,
             final String modelOverride,
-            final BooleanSupplier cancelled) {
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
         final var summary = new StringBuilder();
         warnOnceWhenNoCompactModel();
+        emit(new AgentEvent.Status(
+                "compacting (" + label + ", chunk 1/" + chunks.size() + ")...", sessionId, null, null));
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
                 return new Outcome("", label + " cancelled");
@@ -563,17 +573,23 @@ public class CompactionCoordinator {
             for (var attempt = 0; attempt < retries(); attempt++) {
                 final var model = resolveModel(modelOverride);
                 try {
-                    final var res = chatClient.chat(new ChatCompletionRequest(
-                            model,
-                            List.of(Message.system(systemPrompt), Message.user(prompt)),
-                            null,
-                            null,
-                            false,
-                            null,
-                            null,
-                            null,
-                            null,
-                            null));
+                    final var res = chatClient.chat(
+                            new ChatCompletionRequest(
+                                            model,
+                                            List.of(Message.system(systemPrompt), Message.user(prompt)),
+                                            null,
+                                            null,
+                                            false,
+                                            null,
+                                            null,
+                                            null,
+                                            null,
+                                            null)
+                                    .withSettings(settings),
+                            // surface provider throttles/backoffs during compaction too
+                            pause -> emit(new AgentEvent.Status(
+                                    "compacting " + label + ": " + pause.message(), sessionId, null, null)),
+                            cancelled);
                     if (usageTracker != null) {
                         usageTracker.recordAuxiliary(res.usage());
                     }
@@ -593,6 +609,11 @@ public class CompactionCoordinator {
                     if (cancelled.getAsBoolean()) {
                         return new Outcome("", label + " cancelled");
                     }
+                    emit(new AgentEvent.Status(
+                            "compacting " + label + ": retrying in ~" + (backoff(attempt) / 1000) + "s...",
+                            sessionId,
+                            null,
+                            null));
                     sleep(backoff(attempt));
                 }
             }
@@ -603,6 +624,13 @@ public class CompactionCoordinator {
                 return new Outcome("", error);
             }
             appendBounded(summary, part, MAX_ROLLING_SUMMARY_CHARS);
+            if (c + 1 < chunks.size()) {
+                emit(new AgentEvent.Status(
+                        "compacting (" + label + ", chunk " + (c + 2) + "/" + chunks.size() + ")...",
+                        sessionId,
+                        null,
+                        null));
+            }
         }
         return new Outcome(summary.toString(), "");
     }

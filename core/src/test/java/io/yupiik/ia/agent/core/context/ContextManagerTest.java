@@ -106,7 +106,10 @@ class ContextManagerTest {
         final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
         };
@@ -150,7 +153,10 @@ class ContextManagerTest {
         final var captured = new ArrayList<List<Message>>();
         final var chat = new ChatClient() {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant("digest: custom focus", null), Usage.EMPTY);
             }
@@ -196,7 +202,10 @@ class ContextManagerTest {
         final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
         };
@@ -249,7 +258,10 @@ class ContextManagerTest {
         final var captured = new ArrayList<ChatCompletionRequest>();
         final var chat = new ChatClient() {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 captured.add(request);
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -295,7 +307,10 @@ class ContextManagerTest {
         final var cfg = config(5, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
         final var chat = new ChatClient() {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), new Usage(11, 7, 18));
             }
         };
@@ -648,7 +663,10 @@ class ContextManagerTest {
     private static ChatClient chatReturning(final String digest) {
         return new ChatClient(null, null, null, Clock.systemUTC(), null) {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
         };
@@ -657,7 +675,10 @@ class ContextManagerTest {
     private static ChatClient chatRecording(final String digest, final List<List<Message>> captured) {
         return new ChatClient(null, null, null, Clock.systemUTC(), null) {
             @Override
-            public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled) {
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }

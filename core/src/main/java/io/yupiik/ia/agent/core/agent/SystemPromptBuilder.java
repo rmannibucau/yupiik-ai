@@ -18,6 +18,8 @@ package io.yupiik.ia.agent.core.agent;
 import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -49,6 +51,27 @@ public class SystemPromptBuilder {
     private final ProviderManager providerManager;
     private final TodoPromptResolver todoPromptResolver;
     private final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
+    /** The session's per-tab selection (provider/model); when set the prompt caps follow it. */
+    protected volatile ChatSettings settings;
+
+    /** Attach the owning session's model/provider selection so this builder resolves the right caps. */
+    public void attach(final ChatSettings sessionSettings) {
+        this.settings = sessionSettings;
+    }
+
+    /** The session's effective provider: explicit per-tab override, else the process default. */
+    private ProviderConfiguration provider(final ChatSettings sessionSettings) {
+        if (providerManager == null) {
+            return null;
+        }
+        if (sessionSettings != null && sessionSettings.providerId() != null) {
+            final var byId = providerManager.provider(sessionSettings.providerId());
+            if (byId != null) {
+                return byId;
+            }
+        }
+        return providerManager.current();
+    }
 
     public SystemPromptBuilder(
             final CodingAgentConfiguration configuration,
@@ -288,9 +311,14 @@ public class SystemPromptBuilder {
      * {@link #SYSTEM_PROMPT_CAP}, small ones shrink to leave the usable input budget room for the messages and tools).
      */
     private int resolvedSystemPromptCap() {
-        final var provider = providerManager == null ? null : providerManager.current();
-        final var resolved = providerManager == null ? null : providerManager.resolveDefault();
-        final var model = resolved == null ? null : resolved.model();
+        final var provider = providerManager == null ? null : provider(settings);
+        final var model = provider == null
+                ? null
+                : (settings != null
+                                && settings.model() != null
+                                && !settings.model().isBlank()
+                        ? settings.model()
+                        : provider.model());
         final var perModel =
                 provider == null || model == null ? 0 : providerManager.systemPromptMaxChars(provider, model);
         if (perModel > 0) {

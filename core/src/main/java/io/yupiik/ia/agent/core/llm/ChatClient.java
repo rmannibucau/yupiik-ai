@@ -52,6 +52,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -83,14 +84,30 @@ public class ChatClient implements AutoCloseable {
     private final ContextWindowCache contextWindowCache;
     private final ExtendedHttpClient httpClient;
     private final boolean ownsHttpClient;
+    /** Shared application scheduler parking the resilient retry waits; {@code null} falls back to the JDK delayed executor. */
+    private final ScheduledExecutorService scheduler;
+
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
     private final Set<String> budgetLogged = ConcurrentHashMap.newKeySet();
-    private final RoutingLlmClient routing;
-    private volatile ApiFlavor resolved = ApiFlavor.AUTO;
-    private volatile ModelsResponse cachedModels;
+    // per-provider caches: the flavor AUTO fallback, structured-output support and the model list are
+    // provider-scoped facts. With per-session providers (one per tab) a single process-wide slot would
+    // leak a tab A provider observation (AUTO fell back to completions, structured unsupported) to tab B
+    private final ConcurrentHashMap<String, ApiFlavor> resolvedFlavors = new ConcurrentHashMap<>();
+    private final Set<String> structuredOutputUnsupported = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<String, ModelsResponse> cachedModelsByProvider = new ConcurrentHashMap<>();
     private volatile ProviderConfiguration targetProvider;
-    private volatile boolean structuredOutputUnsupported = false;
+
+    public ChatClient(
+            final CodingAgentConfiguration configuration,
+            final JsonMapper mapper,
+            final ProviderManager providerManager,
+            final Clock clock,
+            final ExtendedHttpClient httpClient,
+            final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
+            final ScheduledExecutorService scheduler) {
+        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false, scheduler);
+    }
 
     public ChatClient(
             final CodingAgentConfiguration configuration,
@@ -99,7 +116,7 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer) {
-        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false);
+        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false, null);
     }
 
     /**
@@ -113,7 +130,15 @@ public class ChatClient implements AutoCloseable {
             final ProviderManager providerManager,
             final Clock clock,
             final ExtendedHttpClient httpClient) {
-        this(configuration, mapper, providerManager, clock, httpClient, new ToolCallArgumentsRepairer(mapper), false);
+        this(
+                configuration,
+                mapper,
+                providerManager,
+                clock,
+                httpClient,
+                new ToolCallArgumentsRepairer(mapper),
+                false,
+                null);
     }
 
     /**
@@ -133,7 +158,8 @@ public class ChatClient implements AutoCloseable {
                 clock,
                 defaultClient(configuration),
                 new ToolCallArgumentsRepairer(mapper),
-                true);
+                true,
+                null);
     }
 
     private ChatClient(
@@ -143,7 +169,8 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
-            final boolean ownsHttpClient) {
+            final boolean ownsHttpClient,
+            final ScheduledExecutorService scheduler) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
@@ -152,10 +179,10 @@ public class ChatClient implements AutoCloseable {
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
         this.httpClient = httpClient;
         this.ownsHttpClient = ownsHttpClient;
+        this.scheduler = scheduler;
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer; per-provider clients get their own resilience
         // wrapper so the concurrency budget is scoped to one provider base URL
-        this.routing = new RoutingLlmClient(request -> dialectClient(flavorForRouting(), target()));
     }
 
     private static ExtendedHttpClient defaultClient(final CodingAgentConfiguration configuration) {
@@ -183,7 +210,10 @@ public class ChatClient implements AutoCloseable {
                         configuration.llm().retryAfterMaxWaitMs(),
                         1.0d,
                         configuration.llm().concurrencyAdaptationMs()),
-                null);
+                null,
+                // the shared scheduler makes the retry waits cancellable (interrupt during a
+                // 429/retry-after backoff ends the wait early); null keeps the JDK fallback
+                scheduler);
     }
 
     protected ChatClient() {
@@ -195,7 +225,7 @@ public class ChatClient implements AutoCloseable {
         this.contextWindowCache = null;
         this.httpClient = null;
         this.ownsHttpClient = false;
-        this.routing = null;
+        this.scheduler = null;
     }
 
     /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
@@ -210,34 +240,48 @@ public class ChatClient implements AutoCloseable {
      * The flavor used to select a dialect: an explicitly resolved flavor wins, then the configured
      * provider flavor, then a flavor deduced from the base URL route; {@link ApiFlavor#AUTO} when it
      * cannot be pinned (in which case the responses route is probed first and falls back).
+     * The effective provider is the session's (per-tab) one when a settings override exists.
      */
     private ApiFlavor effectiveFlavor() {
-        if (resolved != ApiFlavor.AUTO) {
-            return resolved;
-        }
-        final var current = providerManager == null ? null : providerManager.current();
-        if (current == null) {
+        return effectiveFlavor(null);
+    }
+
+    private ApiFlavor effectiveFlavor(final ChatSettings settings) {
+        final var provider = provider(settings);
+        if (provider == null) {
             return ApiFlavor.AUTO;
         }
-        final var configured = current.api();
+        final var configured = provider.api();
         if (configured != null && configured != ApiFlavor.AUTO) {
             return configured;
         }
-        final var detected = ChatRoutes.detectFlavor(current.baseUrl());
+        final var detected = ChatRoutes.detectFlavor(provider.baseUrl());
         return detected == null ? ApiFlavor.AUTO : detected;
     }
 
     /** The concrete flavor handed to the router: AUTO resolves to probing the responses route first. */
     private ApiFlavor flavorForRouting() {
-        final var flavor = effectiveFlavor();
+        return flavorForRouting(null);
+    }
+
+    private ApiFlavor flavorForRouting(final ChatSettings settings) {
+        final var flavor = effectiveFlavor(settings);
         if (flavor != ApiFlavor.AUTO) {
             return flavor;
+        }
+        // a provider that already fell back once (AUTO probed /responses, got DialectNotSupported)
+        // is pinned to chat completions: re-probing each retry would loop on the same failure
+        final var provider = provider(settings);
+        if (provider != null) {
+            final var pinned = resolvedFlavors.get(providerIdOf(provider));
+            if (pinned != null && pinned != ApiFlavor.AUTO) {
+                return pinned;
+            }
         }
         // A bare base URL (no recognizable /responses, /chat/completions or /messages route) cannot be
         // pinned reliably; default to chat completions, the common OpenAI-compatible layout opencode
         // uses, so reasoning_content flows without requiring an explicit reasoning_effort.
-        final var current = providerManager == null ? null : providerManager.current();
-        if (current != null && ChatRoutes.detectFlavor(current.baseUrl()) == null) {
+        if (provider != null && ChatRoutes.detectFlavor(provider.baseUrl()) == null) {
             return ApiFlavor.COMPLETIONS;
         }
         return ApiFlavor.RESPONSES;
@@ -259,7 +303,7 @@ public class ChatClient implements AutoCloseable {
                     ? provider.maxConcurrent()
                     : configuration.llm().maxConcurrent();
             return new DialectLlmClient(
-                    dialect(flavor, spec), resiliences.computeIfAbsent(key, _n -> resilience(bounds)));
+                    dialect(flavor, spec), resiliences.computeIfAbsent(key, _ -> resilience(bounds)));
         });
     }
 
@@ -369,8 +413,8 @@ public class ChatClient implements AutoCloseable {
         if (override != null && !override.isBlank()) {
             return override;
         }
-        final var current = providerManager == null ? null : providerManager.current();
-        return current == null || current.model() == null ? "" : current.model();
+        final var provider = provider(settings);
+        return provider == null || provider.model() == null ? "" : provider.model();
     }
 
     /** The currently selected variant name, or null when none is forced (implicit family defaults apply). */
@@ -403,7 +447,7 @@ public class ChatClient implements AutoCloseable {
 
     /** Variants available for the session's current model. */
     public List<ModelVariantConfiguration> variants(final ChatSettings settings) {
-        final var provider = target();
+        final var provider = provider(settings);
         if (provider == null) {
             return List.of();
         }
@@ -414,20 +458,22 @@ public class ChatClient implements AutoCloseable {
         return effectiveVariants(provider, model);
     }
 
-    /**
-     * Variants available for a specific model name against the current provider, without changing the
+    /** Variants available for the specific model name against the session's provider, without changing the
      * active model. Used to resolve the variants of a model being typed or picked in {@code /model}
      * before it becomes the active one. Blank model falls back to the current model.
      */
     public List<ModelVariantConfiguration> variants(final String model) {
-        final var provider = target();
+        return variants((ChatSettings) null, model);
+    }
+
+    /** Variants for {@code model} against the session's provider ({@code settings}), blank model falls back to the current one. */
+    public List<ModelVariantConfiguration> variants(final ChatSettings settings, final String model) {
+        final var provider = provider(settings);
         if (provider == null) {
             return List.of();
         }
-        if (model == null || model.isBlank()) {
-            return variants();
-        }
-        return effectiveVariants(provider, model.trim());
+        final var effective = model == null || model.isBlank() ? model(settings) : model.trim();
+        return effectiveVariants(provider, effective);
     }
 
     /**
@@ -447,7 +493,7 @@ public class ChatClient implements AutoCloseable {
      * surfaces as null so callers know it would not be sent; a forced value surfaces as that value.
      */
     public ModelVariantConfiguration implicitVariant(final ChatSettings settings) {
-        final var provider = target();
+        final var provider = provider(settings);
         final var providerId = provider == null ? null : provider.id();
         var model = settings == null ? null : settings.model();
         if (model == null || model.isBlank()) {
@@ -486,7 +532,7 @@ public class ChatClient implements AutoCloseable {
      * in-memory sampling override is not applied here since the model is not yet the active one.
      */
     public ModelVariantConfiguration implicitVariant(final String model) {
-        final var provider = target();
+        final var provider = provider(null);
         final var providerId = provider == null ? null : provider.id();
         if (model == null || model.isBlank()) {
             return implicitVariant();
@@ -503,19 +549,46 @@ public class ChatClient implements AutoCloseable {
 
     public void setProvider(final String id) {
         providerManager.setProvider(id);
-        this.resolved = ApiFlavor.AUTO;
-        this.structuredOutputUnsupported = false;
+        final var providerId = providerManager.currentProviderId();
         this.targetProvider = null;
-        this.cachedModels = null;
         this.dialectClients.clear();
+        // the new provider never observed the response route or structured output yet
+        this.resolvedFlavors.remove(providerId);
+        this.structuredOutputUnsupported.remove(providerId);
+        this.cachedModelsByProvider.remove(providerId);
     }
 
     public String providerId() {
-        return providerManager.currentProviderId();
+        return providerId(null);
+    }
+
+    /** The effective provider id for a session: the per-tab override when set, else the process default. */
+    public String providerId(final ChatSettings settings) {
+        final var provider = provider(settings);
+        if (provider == null || provider.id() == null || provider.id().isBlank()) {
+            return providerManager == null ? "" : providerManager.currentProviderId();
+        }
+        return provider.id();
     }
 
     /** The currently active provider configuration (may be null when nothing is configured). */
     public ProviderConfiguration currentProvider() {
+        return provider(null);
+    }
+
+    public ProviderConfiguration currentProvider(final ChatSettings settings) {
+        return provider(settings);
+    }
+
+    /**
+     * The effective provider for a session: its explicit override when set, else the process-wide
+     * current provider. {@code settings} is the per-session {@link ChatSettings}, may be null.
+     */
+    public ProviderConfiguration provider(final ChatSettings settings) {
+        final var override = settings == null ? null : settings.providerId();
+        if (override != null && !override.isBlank()) {
+            return providerManager.provider(override);
+        }
         return providerManager == null ? null : providerManager.current();
     }
 
@@ -530,18 +603,22 @@ public class ChatClient implements AutoCloseable {
      * unknown. Used by callers that must stay under the model input budget (e.g. batch sizing).
      */
     public int contextWindow() {
-        final var provider = target();
+        return contextWindow(null);
+    }
+
+    /** The session's context window when the settings carry a provider override, else the process default's. */
+    public int contextWindow(final ChatSettings settings) {
+        final var provider = provider(settings);
         if (provider == null) {
             return 0;
         }
         if (provider.contextWindow() > 0) {
             return provider.contextWindow();
         }
+        final var id = providerIdOf(provider);
         return contextWindowCache == null
                 ? 0
-                : contextWindowCache
-                        .get(providerManager.currentProviderId(), model())
-                        .orElse(0);
+                : contextWindowCache.get(id, model(settings)).orElse(0);
     }
 
     /**
@@ -550,24 +627,26 @@ public class ChatClient implements AutoCloseable {
      * (per-model override, per-provider default, /v1/models-detected, then {@code 32000}).
      */
     public int outputTokens() {
-        final var provider = target();
+        return outputTokens(null);
+    }
+
+    /** The session's output budget when the settings carry a provider override, else the process default's. */
+    public int outputTokens(final ChatSettings settings) {
+        final var provider = provider(settings);
         if (provider == null) {
             return OutputBudgetResolver.DEFAULT_MAX_TOKEN;
         }
-        final var model = model();
+        final var model = model(settings);
+        final var id = providerIdOf(provider);
         final var detectedMax = contextWindowCache == null
                 ? null
-                : contextWindowCache
-                        .getMaxTokens(providerManager.currentProviderId(), model)
-                        .orElse(null);
+                : contextWindowCache.getMaxTokens(id, model).orElse(null);
         final Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         final var resolvedWindow = contextWindow != null
                 ? contextWindow
                 : (contextWindowCache == null
                         ? null
-                        : contextWindowCache
-                                .get(providerManager.currentProviderId(), model)
-                                .orElse(null));
+                        : contextWindowCache.get(id, model).orElse(null));
         return OutputBudgetResolver.resolve(
                 null,
                 providerManager.outputTokensOverride(provider, model),
@@ -576,20 +655,40 @@ public class ChatClient implements AutoCloseable {
                 resolvedWindow);
     }
 
-    /** The provider currently targeted by the in-flight request (the current provider unless a $provider ref routed it). */
-    private ProviderConfiguration target() {
-        final var t = targetProvider;
-        return t == null ? providerManager.current() : t;
+    /** The request's session selection, never null (defaults to {@link ChatSettings#EMPTY}). */
+    private static ChatSettings settings(final ChatCompletionRequest request) {
+        return request == null || request.settings() == null ? ChatSettings.EMPTY : request.settings();
     }
 
-    private String resolveModel(final ChatSettings settings) throws IOException {
-        final var override = settings == null ? null : settings.model();
-        final var ref = override != null && !override.isBlank()
-                ? override
-                : providerManager.current().model();
+    /** The provider currently targeted by the in-flight request: the session's effective provider
+     * (per-tab override, then process current) unless a {@code $provider} ref routed it. */
+    private ProviderConfiguration target(final ChatCompletionRequest request) {
+        final var t = targetProvider;
+        return t == null ? provider(settings(request)) : t;
+    }
+
+    /**
+     * Resolve the concrete model for a request: an explicit request model wins (plain name or
+     * {@code $provider/model}), then the request's session selection ({@link ChatSettings#model()}),
+     * then the effective provider's configured model. A {@code $provider/model} reference
+     * additionally routes the request to that provider.
+     */
+    private String resolveModel(final ChatCompletionRequest request) throws IOException {
+        final var settings = settings(request);
+        final var provider = provider(settings);
+        final var explicit = request.model();
+        final var override = settings.model();
+        final var ref = explicit != null && !explicit.isBlank()
+                ? explicit
+                : (override != null && !override.isBlank() ? override : (provider == null ? null : provider.model()));
         final var resolvedModel = providerManager.resolve(ref);
-        if (resolvedModel.provider() != null) {
+        if (ref != null && ref.startsWith("$")) {
+            // an explicit $provider/model reference routes this request to that provider; a plain
+            // reference must never capture the process provider into the shared routing slot (it would
+            // leak to every other tab running on its own provider)
             this.targetProvider = resolvedModel.provider();
+        } else {
+            this.targetProvider = null;
         }
         final var model = resolvedModel.model();
         if (model == null || model.isBlank()) {
@@ -599,9 +698,8 @@ public class ChatClient implements AutoCloseable {
         return model.trim();
     }
 
-    private ChatCompletionRequest useModel(final ChatCompletionRequest request, final ChatSettings settings)
-            throws IOException {
-        return withPromotedExtras(applyModelDefaults(request, settings));
+    private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
+        return withPromotedExtras(applyModelDefaults(request));
     }
 
     /**
@@ -611,10 +709,9 @@ public class ChatClient implements AutoCloseable {
      * value wins, then the selected variant, then the implicit family default; nothing is forced.
      * The provider routing is resolved here so the variant and defaults are those of the target model.
      */
-    private ChatCompletionRequest applyModelDefaults(final ChatCompletionRequest request, final ChatSettings settings)
-            throws IOException {
-        final var model = resolveModel(settings);
-        final var provider = target();
+    private ChatCompletionRequest applyModelDefaults(final ChatCompletionRequest request) throws IOException {
+        final var model = resolveModel(request);
+        final var provider = target(request);
         final var providerId = provider == null ? null : provider.id();
         final var others = new LinkedHashMap<String, Object>();
         if (request.others() != null) {
@@ -627,7 +724,7 @@ public class ChatClient implements AutoCloseable {
         final var tuning = providerManager.tuning(provider, model);
         final var tuningOptions = providerManager.tuningOptions(tuning);
         deepMergePutIfAbsent(others, tuningOptions);
-        final var variant = selectedVariant(provider, model, settings);
+        final var variant = selectedVariant(provider, model, request);
         if (variant != null && variant.extra() != null && variant.extra().startsWith("{")) {
             deepMergePutIfAbsent(others, parseRaw(variant.extra()));
         }
@@ -642,7 +739,7 @@ public class ChatClient implements AutoCloseable {
                 DefaultModelTuner::temperature,
                 model,
                 providerId,
-                settings);
+                request);
         final var topP = resolveSampling(
                 SamplingField.TOP_P,
                 request.topP(),
@@ -653,7 +750,7 @@ public class ChatClient implements AutoCloseable {
                 DefaultModelTuner::topP,
                 model,
                 providerId,
-                settings);
+                request);
         final var topK = resolveSampling(
                 SamplingField.TOP_K,
                 null,
@@ -664,7 +761,7 @@ public class ChatClient implements AutoCloseable {
                 DefaultModelTuner::topK,
                 model,
                 providerId,
-                settings);
+                request);
         if (topK != null) {
             others.put("top_k", topK);
         }
@@ -697,7 +794,8 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 maxTokens,
                 reasoningEffort,
-                others);
+                others,
+                request.settings());
     }
 
     /**
@@ -720,8 +818,8 @@ public class ChatClient implements AutoCloseable {
             final BiFunction<String, String, Double> tuner,
             final String model,
             final String providerId,
-            final ChatSettings settings) {
-        final var sampling = sampling(settings);
+            final ChatCompletionRequest request) {
+        final var sampling = sampling(request.settings());
         final var overridden = sampling == null ? null : sampling.get(field);
         if (overridden != null && overridden.isEmpty()) {
             // none: force-omit, so the server default applies; drop any request/raw value
@@ -864,8 +962,9 @@ public class ChatClient implements AutoCloseable {
 
     /** The named variant requested via {@code /model}, validated against the configured variants, else null. */
     private ModelVariantConfiguration selectedVariant(
-            final ProviderConfiguration provider, final String model, final ChatSettings settings) {
-        final var selected = settings == null ? null : settings.variant();
+            final ProviderConfiguration provider, final String model, final ChatCompletionRequest request) {
+        final var selected =
+                request.settings() == null ? null : request.settings().variant();
         if (selected == null || selected.isBlank()) {
             return null;
         }
@@ -1054,7 +1153,8 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 maxTokens,
                 request.reasoningEffort(),
-                stripped);
+                stripped,
+                request.settings());
     }
 
     private static Integer extrasNumber(final Map<String, Object> extras, final String... keys) {
@@ -1078,7 +1178,7 @@ public class ChatClient implements AutoCloseable {
         if (flavor == null || flavor == ApiFlavor.AUTO) {
             return request;
         }
-        final var provider = target();
+        final var provider = target(request);
         final var model = request.model();
         final var perModel = providerManager.outputTokensOverride(provider, model);
         final var perProvider = provider.outputTokens();
@@ -1086,20 +1186,17 @@ public class ChatClient implements AutoCloseable {
         if (flavor != ApiFlavor.ANTHROPIC && perModel <= 0 && perProvider <= 0 && !hasRequestBudget) {
             return request;
         }
+        final var providerId = providerIdOf(provider);
         Integer contextWindow = provider.contextWindow() > 0 ? provider.contextWindow() : null;
         if (contextWindow == null) {
-            contextWindow = contextWindowCache
-                    .get(providerManager.currentProviderId(), model)
-                    .orElse(null);
+            contextWindow = contextWindowCache.get(providerId, model).orElse(null);
         }
         final var detectedMaxTokens = flavor == ApiFlavor.ANTHROPIC
-                ? contextWindowCache
-                        .getMaxTokens(providerManager.currentProviderId(), model)
-                        .orElse(null)
+                ? contextWindowCache.getMaxTokens(providerId, model).orElse(null)
                 : null;
         final var decision = OutputBudgetResolver.resolveTracked(
                 request.maxTokens(), perModel, perProvider, detectedMaxTokens, contextWindow);
-        logBudgetOnce(flavor, model, decision);
+        logBudgetOnce(flavor, providerId, model, decision);
         final var maxTokens = request.maxTokens();
         if (maxTokens != null && decision.budget() == maxTokens) {
             return request;
@@ -1114,7 +1211,8 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 decision.budget(),
                 request.reasoningEffort(),
-                request.others());
+                request.others(),
+                request.settings());
     }
 
     /**
@@ -1122,8 +1220,10 @@ public class ChatClient implements AutoCloseable {
      * it comes from, so a misconfigured budget can be diagnosed without tracing requests.
      */
     private void logBudgetOnce(
-            final ApiFlavor flavor, final String model, final OutputBudgetResolver.Decision decision) {
-        final var providerId = providerManager.currentProviderId();
+            final ApiFlavor flavor,
+            final String providerId,
+            final String model,
+            final OutputBudgetResolver.Decision decision) {
         if (budgetLogged.add(flavor.name() + '|' + providerId + '|' + model)) {
             LOGGER.info(() -> "Output budget for " + providerId + '/' + model + " ["
                     + flavor.name().toLowerCase(java.util.Locale.ROOT) + "]: " + decision.budget()
@@ -1137,22 +1237,15 @@ public class ChatClient implements AutoCloseable {
 
     public ChatResult chat(final ChatCompletionRequest request, final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return chat(request, null, cancelled);
-    }
-
-    public ChatResult chat(
-            final ChatCompletionRequest request, final ChatSettings settings, final BooleanSupplier cancelled)
-            throws IOException, InterruptedException {
-        return chat(request, settings, null, cancelled);
+        return chat(request, (Consumer<PauseEvent>) null, cancelled);
     }
 
     public ChatResult chat(
             final ChatCompletionRequest request,
-            final ChatSettings settings,
             final Consumer<PauseEvent> pauseListener,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return doWithFallback(useModel(request, settings), pauseListener, cancelled, false, null);
+        return doWithFallback(useModel(request), pauseListener, cancelled, false, null);
     }
 
     /**
@@ -1173,17 +1266,8 @@ public class ChatClient implements AutoCloseable {
     public StructuredResult chatStructured(
             final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
             throws IOException, InterruptedException {
-        return chatStructured(request, null, schemaName, schema);
-    }
-
-    public StructuredResult chatStructured(
-            final ChatCompletionRequest request,
-            final ChatSettings settings,
-            final String schemaName,
-            final Map<String, Object> schema)
-            throws IOException, InterruptedException {
-        final var model = resolveModel(settings);
-        final var flavor = effectiveFlavor();
+        final var model = resolveModel(request);
+        final var flavor = effectiveFlavor(request.settings());
         final var base = new LinkedHashMap<String, Object>();
         if (request.others() != null) {
             base.putAll(request.others());
@@ -1198,7 +1282,8 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 request.maxTokens(),
                 request.reasoningEffort(),
-                base);
+                base,
+                request.settings());
         final var structuredReq = new ChatCompletionRequest(
                 model,
                 request.messages(),
@@ -1209,28 +1294,26 @@ public class ChatClient implements AutoCloseable {
                 request.toolChoice(),
                 request.maxTokens(),
                 request.reasoningEffort(),
-                withStructuredField(base, flavor, schemaName, schema));
-        if (structuredOutputUnsupported) {
-            return new StructuredResult(
-                    chatInternal(withPromotedExtras(applyModelDefaults(plainReq, settings))), false);
+                withStructuredField(base, flavor, schemaName, schema),
+                request.settings());
+        final var providerId = providerIdFor(request);
+        if (structuredOutputUnsupported.contains(providerId)) {
+            return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
         }
         try {
-            return new StructuredResult(
-                    chatInternal(withPromotedExtras(applyModelDefaults(structuredReq, settings))), true);
+            return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(structuredReq))), true);
         } catch (final IOException first) {
             if (!isStatus400(first)) {
                 throw first;
             }
             try {
-                return new StructuredResult(
-                        chatInternal(withPromotedExtras(applyModelDefaults(plainReq, settings))), false);
+                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
             } catch (final IOException second) {
                 if (!isStatus400(second)) {
                     throw second;
                 }
-                structuredOutputUnsupported = true;
-                return new StructuredResult(
-                        chatInternal(withPromotedExtras(applyModelDefaults(plainReq, settings))), false);
+                structuredOutputUnsupported.add(providerId);
+                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
             }
         }
     }
@@ -1278,7 +1361,8 @@ public class ChatClient implements AutoCloseable {
         return out;
     }
 
-    /** Route a request through the current flavor, reusing the shared dispatch logic. */
+    /** Route a request through the current flavor, reusing the shared dispatch logic (process default settings). */
+    /** Route a request through the session's flavor/provider (the request carries the selection). */
     private ChatResult chatInternal(final ChatCompletionRequest request) throws IOException, InterruptedException {
         return doWithFallback(request, null, () -> false, false, null);
     }
@@ -1287,12 +1371,12 @@ public class ChatClient implements AutoCloseable {
      * Applies the configured tool call arguments repair to an assistant message when the effective
      * provider/model enable it. Never changes the message when nothing was repaired.
      */
-    private Message repairToolCalls(final Message message, final ChatCompletionRequest effective) {
+    private Message repairToolCalls(
+            final Message message, final ChatCompletionRequest effective, final ProviderConfiguration provider) {
         final var toolCalls = message.toolCalls();
         if (toolCalls == null || toolCalls.isEmpty()) {
             return message;
         }
-        final var provider = target();
         final var model = effective.model();
         if (provider == null || providerManager == null || !providerManager.repairToolCallArguments(provider, model)) {
             return message;
@@ -1325,8 +1409,9 @@ public class ChatClient implements AutoCloseable {
                 : message;
     }
 
-    private ChatResult repairToolCalls(final ChatResult result, final ChatCompletionRequest effective) {
-        final var message = repairToolCalls(result.message(), effective);
+    private ChatResult repairToolCalls(
+            final ChatResult result, final ChatCompletionRequest effective, final ProviderConfiguration provider) {
+        final var message = repairToolCalls(result.message(), effective, provider);
         return message == result.message() ? result : new ChatResult(message, result.usage());
     }
 
@@ -1340,30 +1425,29 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        return stream(request, null, null, onDelta, cancelled);
+        return stream(request, (Consumer<PauseEvent>) null, onDelta, cancelled);
     }
 
+    /** Stream a completion for the request's selection ({@link ChatCompletionRequest#settings()}). */
     public Message stream(
             final ChatCompletionRequest request,
-            final ChatSettings settings,
             final Consumer<PauseEvent> pauseListener,
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        final var model = resolveModel(settings);
-        final var effective = applyModelDefaults(
-                new ChatCompletionRequest(
-                        model,
-                        request.messages(),
-                        request.temperature(),
-                        request.topP(),
-                        true,
-                        request.tools(),
-                        request.toolChoice(),
-                        request.maxTokens(),
-                        request.reasoningEffort(),
-                        request.others()),
-                settings);
+        final var model = resolveModel(request);
+        final var effective = applyModelDefaults(new ChatCompletionRequest(
+                model,
+                request.messages(),
+                request.temperature(),
+                request.topP(),
+                true,
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
+                request.others(),
+                request.settings()));
         return doWithFallback(withPromotedExtras(effective), pauseListener, cancelled, true, onDelta);
     }
 
@@ -1376,39 +1460,63 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
-        final var effective = applyOutputBudget(request, flavorForRouting());
+        final var settings = request.settings();
+        final var provider = provider(settings);
+        final var effective = applyOutputBudget(request, flavorForRouting(request.settings()));
         final Consumer<io.yupiik.llm.client.PauseEvent> libraryListener =
                 pauseListener == null ? null : event -> onLibraryPause(event, pauseListener);
+        final var dialect = dialectClient(flavorForRouting(settings), provider);
         try {
             if (stream) {
                 final var publisher =
-                        LlmWire.join(routing.stream(LlmWire.toLlmRequest(effective), cancelled, libraryListener));
-                return (A) repairToolCalls(LlmWire.pump(publisher, onDeltaSafe, cancelled), effective);
+                        LlmWire.join(dialect.stream(LlmWire.toLlmRequest(effective), cancelled, libraryListener));
+                return (A) repairToolCalls(LlmWire.pump(publisher, onDeltaSafe, cancelled), effective, provider);
             }
             return (A) repairToolCalls(
                     LlmWire.toChatResult(
-                            LlmWire.join(routing.chat(LlmWire.toLlmRequest(effective), cancelled, libraryListener))),
-                    effective);
+                            LlmWire.join(dialect.chat(LlmWire.toLlmRequest(effective), cancelled, libraryListener))),
+                    effective,
+                    provider);
         } catch (final DialectNotSupportedException e) {
-            if (resolved != ApiFlavor.AUTO) {
+            final var providerId = providerIdOf(provider);
+            if (resolvedFlavors.getOrDefault(providerId, ApiFlavor.AUTO) != ApiFlavor.AUTO) {
                 throw e; // explicitly configured flavor: surface the incompatibility
             }
-            resolved = ApiFlavor.COMPLETIONS; // AUTO probed the responses route first: fall back
+            // AUTO probed the responses route first: pin the fallback for this provider
+            resolvedFlavors.put(providerId, ApiFlavor.COMPLETIONS);
             return doWithFallback(request, pauseListener, cancelled, stream, onDelta);
         }
     }
 
+    /** The provider id used to key the per-provider caches; {@code "default"} when the provider is unresolved. */
+    private String providerIdOf(final ProviderConfiguration provider) {
+        final var id = provider == null || provider.id() == null ? "" : provider.id();
+        return id.isBlank() ? "default" : id;
+    }
+
+    /** The provider id for a request's effective provider, for the per-provider caches. */
+    private String providerIdFor(final ChatCompletionRequest request) {
+        return providerIdOf(provider(request.settings()));
+    }
+
     public ModelsResponse models() throws IOException, InterruptedException {
-        final var cached = cachedModels;
+        return models(null);
+    }
+
+    /** The provider's model list; the effective provider is the session's when a settings override exists. */
+    public ModelsResponse models(final ChatSettings settings) throws IOException, InterruptedException {
+        final var provider = provider(settings);
+        final var providerId = providerIdOf(provider);
+        final var cached = cachedModelsByProvider.get(providerId);
         if (cached != null) {
             return cached;
         }
-        final var flavor = effectiveFlavor();
+        final var flavor = flavorForRouting(settings);
         try {
             final var fetched = LlmWire.toModelsResponse(
-                    LlmWire.join(dialectClient(flavor == ApiFlavor.AUTO ? ApiFlavor.COMPLETIONS : flavor, target())
+                    LlmWire.join(dialectClient(flavor == ApiFlavor.AUTO ? ApiFlavor.COMPLETIONS : flavor, provider)
                             .models()));
-            cachedModels = fetched;
+            cachedModelsByProvider.put(providerId, fetched);
             return fetched;
         } catch (final DialectNotSupportedException e) {
             return new ModelsResponse(List.of());

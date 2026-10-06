@@ -132,7 +132,7 @@ public class BashTool implements EmbeddedTool {
         // re-checked until the command actually finishes.
         final var deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeout);
         while (true) {
-            if (context.isCancelled()) {
+            if (context.isCancelled() || context.isCallCancelled()) {
                 process.destroyForcibly();
                 return ToolResult.error("Interrupted");
             }

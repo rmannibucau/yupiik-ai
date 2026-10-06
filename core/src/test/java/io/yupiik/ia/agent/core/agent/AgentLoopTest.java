@@ -77,6 +77,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
@@ -227,6 +228,48 @@ class AgentLoopTest {
         assertTrue(
                 events.stream().noneMatch(AgentEvent.TurnDone.class::isInstance),
                 "a cancelled turn must not emit TurnDone");
+    }
+
+    @Test
+    void settingsChangeMidTurnAppliesToTheNextRequestOnly() {
+        final var requests = new ArrayList<List<Message>>();
+        final var capturedSettings = new ArrayList<ChatSettings>();
+        final var loopRef = new java.util.concurrent.atomic.AtomicReference<AgentLoop>();
+        final var replies = new ArrayDeque<>(
+                List.of(toolCallReply("t1", "noop"), new ScriptedReply("final answer", "stop", false)));
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                capturedSettings.add(request.settings());
+                // mid-turn: the /model or /provider command runs on another thread; the running
+                // request already carries the old selection, only the next one must pick it up
+                if (capturedSettings.size() == 1) {
+                    loopRef.get().updateChatSettings(ChatSettings.EMPTY.withModel("next-model"));
+                }
+                final var reply = replies.poll();
+                if (reply.finishReason() != null) {
+                    onDelta.accept(new End(reply.finishReason(), null));
+                }
+                return reply.toMessage();
+            }
+        };
+        final var loop = loop(client, null, configuration(true));
+        loopRef.set(loop);
+        final var result = loop.run("do it", null, "s1", null, () -> false);
+
+        assertEquals("final answer", result);
+        assertEquals(2, requests.size(), "a tool round trip must issue exactly two requests");
+        assertEquals(
+                ChatSettings.EMPTY, capturedSettings.get(0), "the in-flight request keeps the pre-change selection");
+        assertEquals(
+                ChatSettings.EMPTY.withModel("next-model"),
+                capturedSettings.get(1),
+                "the next request picks up the mid-turn selection change");
     }
 
     /**
@@ -482,7 +525,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled)
@@ -971,7 +1013,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled)
@@ -2003,7 +2044,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -2206,6 +2246,17 @@ class AgentLoopTest {
                     final String focus,
                     final int keepLastOverride,
                     final java.util.function.BooleanSupplier cancelled) {
+                return compact(messages, force, focus, keepLastOverride, cancelled, ChatSettings.EMPTY);
+            }
+
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLastOverride,
+                    final java.util.function.BooleanSupplier cancelled,
+                    final ChatSettings settings) {
                 return new CompactionResult(
                         List.of(
                                 messages.get(0),
@@ -2289,6 +2340,17 @@ class AgentLoopTest {
             @Override
             public CompactionResult compact(
                     final List<Message> messages, final boolean force, final String focus, final int keepLast) {
+                return compact(messages, force, focus, keepLast, () -> false, ChatSettings.EMPTY);
+            }
+
+            @Override
+            public CompactionResult compact(
+                    final List<Message> messages,
+                    final boolean force,
+                    final String focus,
+                    final int keepLast,
+                    final java.util.function.BooleanSupplier cancelled,
+                    final ChatSettings settings) {
                 compactRuns.incrementAndGet();
                 return new CompactionResult(
                         List.of(
@@ -2311,7 +2373,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -2781,7 +2842,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -2877,7 +2937,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -2945,7 +3004,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -3240,7 +3298,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -3335,6 +3392,146 @@ class AgentLoopTest {
     }
 
     /**
+     * A per-tool cancel (TUI Esc on the running-tool overlay) flips only that call's probe: the
+     * tool aborts, the result is fed back to the model as a failure and the turn keeps running
+     * (no whole-turn interruption).
+     */
+    @Test
+    void cancelToolAbortsOnlyTheRunningCallAndTheTurnContinues() throws Exception {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo"));
+        final var started = new CountDownLatch(1);
+        final var executions = new AtomicInteger();
+        final var seenCancelled = new AtomicBoolean();
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return List.of();
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                return new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "hanging";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "hangs until its per-call probe flips";
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of();
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.AGENT;
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        throw new UnsupportedOperationException();
+                    }
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+                        executions.incrementAndGet();
+                        started.countDown();
+                        while (!context.isCallCancelled() && !context.isCancelled()) {
+                            LockSupport.parkNanos(1_000_000);
+                        }
+                        seenCancelled.set(context.isCallCancelled());
+                        return ToolResult.error("cancelled by user");
+                    }
+                };
+            }
+        };
+        final var chatCalls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                chatCalls.incrementAndGet();
+                final var toolSeen = request.messages().stream()
+                        .anyMatch(m -> "tool".equals(m.role())
+                                && String.valueOf(m.content()).contains("cancelled by user"));
+                if (!toolSeen) {
+                    return new Message(
+                            "assistant",
+                            null,
+                            null,
+                            List.of(new ToolCall("1", "function", new ToolCall.FunctionCall("hanging", "{}"), 0)),
+                            null,
+                            null);
+                }
+                return new Message("assistant", "done after cancel", null, null, null, null);
+            }
+        };
+        final var loop = loop(
+                client,
+                new TodoStore() {},
+                config,
+                new ContextManager() {
+                    @Override
+                    public boolean pruneNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+
+                    @Override
+                    public boolean compactNeeded(final List<Message> messages, final int extraToolTokens) {
+                        return false;
+                    }
+                },
+                new SessionStore() {
+                    @Override
+                    public void append(final String id, final SessionEntry entry) {}
+                },
+                null,
+                registry,
+                new ToolExecutionService(
+                        config,
+                        new Emitter() {
+                            @Override
+                            public <T> void emit(final T event) {}
+                        },
+                        List.of()) {
+                    @Override
+                    public ToolResult execute(
+                            final EmbeddedTool tool, final Map<String, Object> args, final ToolContext context) {
+                        return tool.execute(args, context);
+                    }
+                },
+                new VirtualThreadExecutor(),
+                null);
+        final var future = Thread.ofVirtual().start(() -> {
+            try {
+                loop.run("run", null, "s1", null, () -> false);
+            } catch (final Throwable t) {
+                throw new RuntimeException(t);
+            }
+        });
+        assertTrue(started.await(5, TimeUnit.SECONDS), "the tool must start");
+        assertTrue(loop.isToolRunning(1), "the running tool must be registered under ordinal 1");
+        loop.cancelTool(1); // the TUI Esc path
+        future.join(10_000);
+        assertFalse(future.isAlive(), "the turn must complete after the per-tool cancel");
+        assertEquals(1, executions.get(), "the tool must run exactly once");
+        assertTrue(seenCancelled.get(), "the abort must come from the per-call probe, not the turn");
+        assertTrue(chatCalls.get() >= 2, "the turn must keep going (round 2 sees the cancelled result)");
+        assertFalse(loop.isToolRunning(1), "the finished call must be unregistered");
+    }
+
+    /**
      * A turn always carries a real cancellation probe: a caller with no interrupt flag passes
      * {@link io.yupiik.ia.agent.core.runtime.Cancellations#NEVER}, and a {@code null} is a caller
      * bug which must fail at the boundary - named, and not swallowed into the mid-turn
@@ -3399,7 +3596,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -3813,7 +4009,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -3926,7 +4121,6 @@ class AgentLoopTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled) {
@@ -4116,6 +4310,9 @@ class AgentLoopTest {
                 new MemoryExtractor() {
                     @Override
                     public void maybeExtract(final List<Message> messages) {}
+
+                    @Override
+                    public void maybeExtract(final List<Message> messages, final ChatSettings settings) {}
                 },
                 new StatusReporter(),
                 new Emitter() {
@@ -4170,11 +4367,17 @@ class AgentLoopTest {
      * listener once as the resilience layer would during a retry backoff.
      */
     private ChatClient chatClient(final Deque<ScriptedReply> replies, final List<List<Message>> requests) {
+        return chatClient(replies, requests, null);
+    }
+
+    private ChatClient chatClient(
+            final Deque<ScriptedReply> replies,
+            final List<List<Message>> requests,
+            final List<ChatSettings> settingsList) {
         return new ChatClient() {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled)
@@ -4185,6 +4388,9 @@ class AgentLoopTest {
                     throw new IllegalStateException("no scripted reply left");
                 }
                 requests.add(List.copyOf(request.messages()));
+                if (settingsList != null) {
+                    settingsList.add(request.settings());
+                }
                 if (pauseListener != null && reply.firePauses()) {
                     pauseListener.accept(PauseEvent.retry("LLM call failed, retrying in ~2s (attempt 2)", 2000));
                     pauseListener.accept(PauseEvent.throttle("Rate limit reached, waiting ~5s", 5000));

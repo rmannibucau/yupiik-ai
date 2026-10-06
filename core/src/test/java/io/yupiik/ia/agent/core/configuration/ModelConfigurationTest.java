@@ -25,18 +25,31 @@ class ModelConfigurationTest {
 
     @Test
     void resolvedPruneFallsBackToCompactWhenBlank() {
-        assertEquals("compact-model", new ModelConfiguration("compact-model", "").resolvedPrune());
-        assertEquals("compact-model", new ModelConfiguration("compact-model", null).resolvedPrune());
+        assertEquals("compact-model", new ModelConfiguration("compact-model", "", "").resolvedPrune());
+        assertEquals("compact-model", new ModelConfiguration("compact-model", null, null).resolvedPrune());
     }
 
     @Test
     void resolvedPruneKeepsItsOwnValue() {
-        assertEquals("prune-model", new ModelConfiguration("compact-model", "prune-model").resolvedPrune());
+        assertEquals("prune-model", new ModelConfiguration("compact-model", "prune-model", "").resolvedPrune());
     }
 
     @Test
     void resolvedPruneCanBeBlankWhenBothAreBlank() {
-        assertEquals("", new ModelConfiguration("", "").resolvedPrune());
+        assertEquals("", new ModelConfiguration("", "", "").resolvedPrune());
+    }
+
+    @Test
+    void resolvedMemoryFallsBackToTheCompactModelThenTheProviderDefault() {
+        // memory empty -> compact model
+        assertEquals("compact-model", new ModelConfiguration("compact-model", "", "").resolvedMemory());
+        assertEquals("compact-model", new ModelConfiguration("compact-model", "prune-model", "").resolvedMemory());
+        // memory set -> its own value
+        assertEquals(
+                "memory-model",
+                new ModelConfiguration("compact-model", "prune-model", "memory-model").resolvedMemory());
+        // both blank -> blank (the provider default model applies at resolve time)
+        assertEquals("", new ModelConfiguration("", "", "").resolvedMemory());
     }
 
     @Test

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.tools;
 
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
@@ -47,6 +48,10 @@ import java.util.function.BooleanSupplier;
  * @param cancelled      cancellation probe of the running turn; a tool may poll it and stop its
  *                       work early (killing a subprocess for example). Never {@code null}: a
  *                       context no turn owns passes {@link Cancellations#NEVER}.
+ * @param settings       the asking session's chat settings (provider/model selection); may be null
+ * @param callCancelled  per-call cancellation probe: distinct from {@code cancelled} (the turn probe)
+ *                       so a UI can cancel the running tool alone while the turn keeps going. Never
+ *                       {@code null}: standalone contexts report "not cancelled".
  */
 public record ToolContext(
         String sessionId,
@@ -58,21 +63,56 @@ public record ToolContext(
         StatusReporter statusReporter,
         UsageTracker usage,
         ContextView contextView,
-        BooleanSupplier cancelled) {
+        BooleanSupplier cancelled,
+        ChatSettings settings,
+        BooleanSupplier callCancelled) {
+
+    /** Backward-compatible convenience: builds a context without per-session provider/model settings. */
+    public ToolContext(
+            final String sessionId,
+            final String subagentId,
+            final String subagentName,
+            final PermissionService permissions,
+            final UserFeedbackService feedback,
+            final TodoStore todos,
+            final StatusReporter statusReporter,
+            final UsageTracker usage,
+            final ContextView contextView,
+            final BooleanSupplier cancelled) {
+        this(
+                sessionId,
+                subagentId,
+                subagentName,
+                permissions,
+                feedback,
+                todos,
+                statusReporter,
+                usage,
+                contextView,
+                cancelled,
+                null,
+                null);
+    }
 
     public ToolContext {
         // a probe is always a real supplier: polling a null one used to surface as an
         // "unexpected failure" NullPointerException in the middle of a turn
         cancelled = Objects.requireNonNull(cancelled, "cancelled");
+        callCancelled = callCancelled == null ? cancelled : callCancelled;
     }
 
     /** A context without any session-scoped service, for standalone tool invocation. */
     public static ToolContext empty() {
-        return new ToolContext(null, null, null, null, null, null, null, null, null, Cancellations.NEVER);
+        return new ToolContext(null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null);
     }
 
     /** Cancellation probe, never {@code null}: standalone contexts report "not cancelled". */
     public boolean isCancelled() {
         return cancelled.getAsBoolean();
+    }
+
+    /** Per-call cancellation probe: when it flips, only this tool call should abort. */
+    public boolean isCallCancelled() {
+        return callCancelled.getAsBoolean();
     }
 }

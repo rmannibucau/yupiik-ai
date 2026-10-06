@@ -871,10 +871,10 @@ class TuiCommandRenderTest {
         // pinned footer is busy showing the tool line
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry)));
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta("pondering while building", sid(shellRegistry)));
-        awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
+        awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
 
         clock.advance(5_000);
-        awaitTextWithin("thinking... (5 s)", TIMEOUT_MS);
+        awaitTextWithin("thinking... (5s)", TIMEOUT_MS);
 
         quit();
     }
@@ -897,21 +897,21 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta("first round", sid(shellRegistry)));
-        awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
+        awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
         clock.advance(30_000);
-        awaitTextWithin("thinking... (30 s)", TIMEOUT_MS);
+        awaitTextWithin("thinking... (30s)", TIMEOUT_MS);
 
         // the turn ends while no idle frame may ever catch the reset condition: the
         // next thinking round must restart from zero, not resume the stale timer
         shellRegistry.onEvent(new AgentEvent.TurnDone("answer", sid(shellRegistry)));
         awaitText("answer");
-        awaitTextGoneWithin("thinking... (30 s)", TIMEOUT_MS);
+        awaitTextGoneWithin("thinking... (30s)", TIMEOUT_MS);
 
         clock.advance(5_000);
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta("second round", sid(shellRegistry)));
-        awaitTextWithin("thinking... (0 s)", TIMEOUT_MS);
+        awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
         clock.advance(2_000);
-        awaitTextWithin("thinking... (2 s)", TIMEOUT_MS);
+        awaitTextWithin("thinking... (2s)", TIMEOUT_MS);
 
         quit();
     }
@@ -1508,7 +1508,10 @@ class TuiCommandRenderTest {
                 "cursor must sit past the start column after typing; start=" + promptStart + " cursor=" + atEnd[0]);
 
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.HOME));
-        final var atHome = awaitCursorAt(promptStart);
+        // settle on the exact home position: with the row also required to match, a transient
+        // mid-reflow frame (prompt re-wrapping a row while an async refresh delays the next
+        // render) cannot satisfy the wait at a stale row
+        final var atHome = awaitCursorAt(promptStart, atEnd[1]);
         org.junit.jupiter.api.Assertions.assertEquals(
                 promptStart, atHome[0], "HOME must move the cursor to the first character of the line");
         org.junit.jupiter.api.Assertions.assertEquals(atEnd[1], atHome[1], "HOME must not change the cursor row");
@@ -1863,7 +1866,7 @@ class TuiCommandRenderTest {
                 subagentRegistry.start(sessionId, "do the thing", "child").orElseThrow();
         shellRegistry.onEvent(new AgentEvent.ThinkingDelta("kid thinks", sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.TextDelta("kid answer", sessionId, sub.id(), "child"));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", sessionId, sub.id(), "child"));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("grep", "{\"q\":\"x\"}", -1L, sessionId, sub.id(), "child"));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("grep", "match line", true, sessionId, sub.id(), "child"));
 
         // the detail view renders the captured regions - never the raw yca markers
@@ -2270,26 +2273,52 @@ class TuiCommandRenderTest {
         }
     }
 
-    /** Polls until the bottommost reversed-video cell sits at {@code expectedColumn}. */
+    /** Polls until the bottommost reversed-video cell sits at {@code expectedColumn} (row-agnostic). */
     private int[] awaitCursorAt(final int expectedColumn) throws InterruptedException {
-        var cell = backend.lastReversed();
-        while (cell == null || cell[0] != expectedColumn) {
-            assertTrue(
-                    backend.awaitFrame(1_000),
-                    "no frame received while waiting for the cursor at column " + expectedColumn);
-            cell = backend.lastReversed();
-        }
-        return cell;
+        return settledCursor(c -> c.col() == expectedColumn, "cursor at column " + expectedColumn);
+    }
+
+    /** Polls until the bottommost reversed-video cell sits at {@code expectedColumn} on row {@code expectedRow}. */
+    private int[] awaitCursorAt(final int expectedColumn, final int expectedRow) throws InterruptedException {
+        return settledCursor(
+                c -> c.col() == expectedColumn && c.row() == expectedRow,
+                "cursor at column " + expectedColumn + ", row " + expectedRow);
     }
 
     /** Bottommost reversed-video cell, which is the prompt input cursor. */
     private int[] awaitCursorCell() throws InterruptedException {
-        var cell = backend.lastReversed();
-        while (cell == null) {
-            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for the reversed cursor cell");
-            cell = backend.lastReversed();
+        return settledCursor(c -> true, "the reversed cursor cell");
+    }
+
+    /**
+     * Polls the prompt cursor until a state satisfying {@code accept} has been stable across two
+     * consecutive frames, so a transient mid-reflow frame (the prompt re-wrapping by a row while an
+     * asynchronous refresh delays the next render) cannot satisfy the wait: the first matching frame
+     * only arms the wait, the frame after it confirms the layout settled. When the backend goes
+     * quiescent (no more frames), the last observed state is accepted as-is, mirroring the previous
+     * behavior where an already-correct-but-not-repainted state still passed.
+     */
+    private int[] settledCursor(final java.util.function.Predicate<HeadlessBackend.Cursor> accept, final String what)
+            throws InterruptedException {
+        var prev = HeadlessBackend.Cursor.NONE;
+        while (true) {
+            final var cur = backend.cursor();
+            if (cur.equals(prev) && accept.test(cur)) {
+                return new int[] {cur.col(), cur.row()};
+            }
+            if (accept.test(cur) && cur != HeadlessBackend.Cursor.NONE) {
+                prev = cur; // first sighting: require a second identical frame
+                if (!backend.awaitFrame(1_000)) {
+                    return new int[] {cur.col(), cur.row()}; // settled: no more frames coming
+                }
+                continue;
+            }
+            prev = HeadlessBackend.Cursor.NONE; // state moved: restart the two-frame criterion
+            if (!backend.awaitFrame(1_000)) {
+                assertTrue(accept.test(cur), "no frame received while waiting for " + what);
+                return new int[] {cur.col(), cur.row()};
+            }
         }
-        return cell;
     }
 
     /** Screen column where {@code token} first appears on the lowest row that contains it. */

@@ -28,8 +28,13 @@ import java.util.Map;
  * Pure and terminal-free so it is unit testable.
  */
 public final class ToolOutputStore {
-    /** Full, uncapped record of a finished tool call. */
-    public record Entry(String name, String args, String output, boolean failed, long elapsedMs) {}
+    /** Full, uncapped record of a finished tool call; {@code elapsedMs < 0} marks a still-running call. */
+    public record Entry(String name, String args, String output, boolean failed, long elapsedMs) {
+        /** Whether the call is still running (no final output/elapsed yet). */
+        public boolean running() {
+            return elapsedMs < 0;
+        }
+    }
 
     public static final int DEFAULT_MAX_ENTRIES = 128;
     public static final int DEFAULT_MAX_OUTPUT_CHARS = 256 * 1024;

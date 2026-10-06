@@ -186,7 +186,7 @@ public class ConfigCommands implements SlashCommandSet {
     private CompletionStage<ShellOutcome> modelWizard(final ShellEnv env) {
         final List<String> ids;
         try {
-            ids = chatClient.models().ids();
+            ids = chatClient.models(env.session().chatSettings()).ids();
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
             return CompletableFuture.completedStage(ShellOutcome.error("cannot list models: " + e.getMessage()));
@@ -213,24 +213,20 @@ public class ConfigCommands implements SlashCommandSet {
         final var settings = env.session().chatSettings();
         final var options = new ArrayList<String>();
         options.add("default");
-        chatClient.variants(model).forEach(v -> options.add(v.name()));
-        agentSessionService.setModel(model, settings);
+        chatClient.variants(settings, model).forEach(v -> options.add(v.name()));
+        var updated = agentSessionService.setModel(model, settings);
+        env.session().runtime().updateChatSettings(updated);
         if (options.size() <= 1) {
-            settings.setVariant(null);
-            settings.setSampling(null);
             return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(model, env)));
         }
         return env.io().pick("variant", options).thenApply(selected -> {
             if (selected.isEmpty()) {
                 return ShellOutcome.status("model wizard cancelled");
             }
-            if ("default".equals(selected.get())) {
-                settings.setVariant(null);
-                settings.setSampling(null);
-            } else {
-                settings.setVariant(selected.get());
-                settings.setSampling(null);
-            }
+            final var finalUpdated = "default".equals(selected.get())
+                    ? updated.withVariant(null).withSampling(null)
+                    : updated.withVariant(selected.get()).withSampling(null);
+            env.session().runtime().updateChatSettings(finalUpdated);
             return ShellOutcome.status(modelStatus(model, env));
         });
     }
@@ -274,9 +270,12 @@ public class ConfigCommands implements SlashCommandSet {
         if (positional.size() >= 5) {
             upserts.putIfAbsent("top_p", positional.get(4));
         }
-        agentSessionService.setModel(model, settings);
-        settings.setVariant(variant);
-        settings.setSampling(upserts.isEmpty() ? null : parseSampling(upserts));
+        env.session()
+                .runtime()
+                .updateChatSettings(agentSessionService
+                        .setModel(model, settings)
+                        .withVariant(variant)
+                        .withSampling(upserts.isEmpty() ? null : parseSampling(upserts)));
         return ShellOutcome.status(modelStatus(model, env));
     }
 
@@ -413,16 +412,23 @@ public class ConfigCommands implements SlashCommandSet {
     private CompletionStage<ShellOutcome> provider(final String arg, final ShellEnv env) {
         final var settings = env.session().chatSettings();
         if (!arg.isBlank()) {
-            return CompletableFuture.completedStage(
-                    ShellOutcome.status("provider: " + agentSessionService.setProvider(arg, settings)));
+            final var updated = agentSessionService.setProvider(arg, settings);
+            env.session().runtime().updateChatSettings(updated);
+            final var effective = updated.providerId() == null
+                    ? (agentSessionService.lastProviderId() == null ? arg : agentSessionService.lastProviderId())
+                    : updated.providerId();
+            return CompletableFuture.completedStage(ShellOutcome.status("provider: " + effective));
         }
         final var ids = providerManager.providers().stream().map(p -> p.id()).toList();
-        return env.io()
-                .pick("provider", ids)
-                .thenApply(selected -> selected.isEmpty()
-                        ? ShellOutcome.status("provider picker cancelled")
-                        : ShellOutcome.status(
-                                "provider: " + agentSessionService.setProvider(selected.get(), settings)));
+        return env.io().pick("provider", ids).thenApply(selected -> {
+            if (selected.isEmpty()) {
+                return ShellOutcome.status("provider picker cancelled");
+            }
+            final var updated = agentSessionService.setProvider(selected.get(), settings);
+            env.session().runtime().updateChatSettings(updated);
+            final var effective = updated.providerId() == null ? selected.get() : updated.providerId();
+            return ShellOutcome.status("provider: " + effective);
+        });
     }
 
     private CompletionStage<ShellOutcome> agent(final String arg, final ShellEnv env) {

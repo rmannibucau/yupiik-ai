@@ -29,7 +29,6 @@ import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
-import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
@@ -349,7 +348,6 @@ class SubagentIntegrationTest {
             @Override
             public Message stream(
                     final ChatCompletionRequest request,
-                    final ChatSettings settings,
                     final Consumer<PauseEvent> pauseListener,
                     final Consumer<LlmStreamEvent> onDelta,
                     final BooleanSupplier cancelled)

@@ -304,7 +304,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         if (resumeThinking) {
             resumeThinking = false;
             if (!showThinking && !turnEnded && turnActive) {
-                beginSpinner("thinking");
+                beginSpinner(BusyLabels.thinking(0));
             }
         }
     }
@@ -341,7 +341,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             spinnerLock.unlock();
         }
         if (!showThinking) {
-            beginSpinner("thinking");
+            beginSpinner(BusyLabels.thinking(0));
         }
     }
 
@@ -420,7 +420,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                 stderrNeedsNewline = !delta.endsWith("\n");
                 stderrLineOwner = subagentId;
             } else {
-                beginSpinner(prefix + "thinking");
+                beginSpinner(BusyLabels.thinking(0));
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();
@@ -508,7 +508,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         } else if (event instanceof AgentEvent.ThinkingDelta(var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ToolStarted(var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.ToolStream(var _, var _, var _, String id, String name)) {
@@ -583,7 +583,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             renderLock.unlock();
         }
         if (verbosity == CliVerbosity.COMPACT && !collapsed && t.name().equals("bash")) {
-            beginSpinner(prefix + "running " + presenter.summarize(t.name(), t.args()));
+            beginSpinner(prefix + BusyLabels.calling(presenter.summarize(t.name(), t.args())));
         }
     }
 

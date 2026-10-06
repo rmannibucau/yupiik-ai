@@ -124,10 +124,21 @@ public class BtwAnswerer {
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate) {
+        return ask(question, sessionId, usage, cancelled, sessionGate, null);
+    }
+
+    /** @param sessionSettings the requesting tab's selection; null means the process default provider/model */
+    public CompletionStage<String> ask(
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate,
+            final ChatSettings sessionSettings) {
         final var future = new CompletableFuture<String>();
         executor.execute(() -> {
             try {
-                future.complete(doAsk(question, sessionId, usage, cancelled, sessionGate));
+                future.complete(doAsk(question, sessionId, usage, cancelled, sessionGate, sessionSettings));
             } catch (final IOException e) {
                 future.completeExceptionally(e);
             } catch (final InterruptedException e) {
@@ -145,7 +156,8 @@ public class BtwAnswerer {
             final String sessionId,
             final UsageTracker usage,
             final BooleanSupplier cancelled,
-            final ApprovalGate sessionGate)
+            final ApprovalGate sessionGate,
+            final ChatSettings sessionSettings)
             throws IOException, InterruptedException {
         final var conf = configuration();
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
@@ -170,20 +182,25 @@ public class BtwAnswerer {
             if (cancelled.getAsBoolean()) {
                 throw new InterruptedException("cancelled");
             }
+            var requestSettings = target.settings();
+            if (sessionSettings != null) {
+                requestSettings =
+                        requestSettings == null ? sessionSettings : requestSettings.inheritFrom(sessionSettings);
+            }
             final var res = target.client()
                     .chat(
                             new ChatCompletionRequest(
-                                    model,
-                                    messages,
-                                    null,
-                                    null,
-                                    false,
-                                    tools,
-                                    "auto",
-                                    conf.maxTokens() > 0 ? conf.maxTokens() : null,
-                                    null,
-                                    null),
-                            target.settings(),
+                                            model,
+                                            messages,
+                                            null,
+                                            null,
+                                            false,
+                                            tools,
+                                            "auto",
+                                            conf.maxTokens() > 0 ? conf.maxTokens() : null,
+                                            null,
+                                            null)
+                                    .withSettings(requestSettings),
                             cancelled);
             if (usage != null) {
                 usage.recordAuxiliary(res.usage());
@@ -210,7 +227,7 @@ public class BtwAnswerer {
             final var prose = toolCallMarkup.strip(raw);
             messages.add(Message.assistant(prose.isBlank() ? null : prose, calls));
             for (final var call : calls) {
-                final var outcome = runTool(call, sessionId, usage, cancelled, permissions);
+                final var outcome = runTool(target, call, sessionId, usage, cancelled, permissions);
                 messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
             }
         }
@@ -220,6 +237,7 @@ public class BtwAnswerer {
 
     /** Executes a single /btw tool call, mirroring the main loop's authorisation and bounding. */
     private ToolOutcome runTool(
+            final Target target,
             final ToolCall call,
             final String sessionId,
             final UsageTracker usage,
@@ -247,8 +265,8 @@ public class BtwAnswerer {
                     "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason()),
                     false);
         }
-        final var context =
-                new ToolContext(sessionId, null, null, permissions, null, null, null, usage, null, cancelled);
+        final var context = new ToolContext(
+                sessionId, null, null, permissions, null, null, null, usage, null, cancelled, target.settings(), null);
         final var result = toolExecutionService.execute(tool, args, context);
         final var output = result.output() == null || result.output().isBlank() ? "(no output)" : result.output();
         return new ToolOutcome(call.id(), capIngestionOutput(output), result.success());
@@ -294,8 +312,7 @@ public class BtwAnswerer {
         synchronized (this) {
             if (dedicatedClient == null) {
                 final var created = new ChatClient(configuration, mapper, providerManager, clock);
-                final var settings = new ChatSettings();
-                settings.setModel(model);
+                final var settings = ChatSettings.EMPTY.withModel(model);
                 dedicatedClient = created;
                 dedicatedSettings = settings;
             }

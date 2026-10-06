@@ -118,7 +118,7 @@ public class WebFetchTool implements EmbeddedTool {
             final var future = client.sendAsync(request, HttpResponse.BodyHandlers.ofByteArray());
             final var deadline = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
             while (true) {
-                if (context.isCancelled()) {
+                if (context.isCancelled() || context.isCallCancelled()) {
                     future.cancel(true);
                     return ToolResult.error("Interrupted while fetching " + url);
                 }

@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.tui;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -81,5 +83,35 @@ class ToolOutputStoreTest {
         store.record(1, new ToolOutputStore.Entry("a", "", "second", false, 0));
         assertEquals("second", store.get(1).output());
         assertEquals(1, store.size());
+    }
+
+    @Test
+    void runningEntryFlaggedAndReplacedOnFinish() {
+        final var store = new ToolOutputStore();
+        // the TUI records a placeholder at start (elapsedMs < 0 => running)
+        store.record(1, new ToolOutputStore.Entry("bash", "{\"command\":\"mvn test\"}", "", false, -1L));
+        final var running = store.get(1);
+        assertTrue(running.running(), "elapsedMs < 0 must mark a still-running call");
+        assertEquals("bash", running.name());
+        assertFalse(running.failed());
+
+        // the ToolFinished event overwrites the same ordinal with the real output
+        store.record(
+                1, new ToolOutputStore.Entry("bash", "{\"command\":\"mvn test\"}", "BUILD SUCCESS", false, 1_234L));
+        final var done = store.get(1);
+        assertFalse(done.running(), "the finished record must not be running");
+        assertEquals("BUILD SUCCESS", done.output());
+        assertEquals(1_234L, done.elapsedMs());
+        assertEquals(1, store.size(), "the placeholder must be replaced, not stacked");
+        assertEquals(1, store.latestOrdinal());
+    }
+
+    @Test
+    void pendingOutputRendersWithoutCrashing() {
+        // the overlay builds a body from the running entry's empty output
+        final var store = new ToolOutputStore();
+        store.record(2, new ToolOutputStore.Entry("bash", "{}", "", false, -1L));
+        assertNotNull(store.get(2));
+        assertTrue(store.get(2).output().isEmpty());
     }
 }

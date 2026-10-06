@@ -264,4 +264,43 @@ class AnthropicMessagesClientTest {
         assertEquals("read", call.function().name());
         assertEquals("{\"path\":\"/a\"}", call.function().arguments());
     }
+
+    /**
+     * The structured-output field is composed for the provider flavor carried by the request's
+     * settings (Anthropic {@code output_config}), not the process-default one ({@code response_format}):
+     * the session selection must drive the structured wire format, exactly like the plain chat path.
+     */
+    @Test
+    void chatStructuredHonorsTheSettingsCarrierFlavor() throws Exception {
+        final var reqBody = new AtomicReference<String>();
+        server.createContext("/anthropic/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            final var body =
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"deepseek-v4-flash\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"{\\\"credentials\\\":[{\\\"id\\\":1}]}\"}],"
+                            + "\"stop_reason\":\"end_turn\",\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":2}}";
+            final var bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        client = client();
+        final var schema = Map.of(
+                "type",
+                "object",
+                "properties",
+                Map.of("credentials", Map.of("type", "array", "items", Map.of("type", "string"))),
+                "required",
+                List.of("credentials"));
+        final var result = client.chatStructured(
+                request().withSettings(ChatSettings.EMPTY.withProviderId("default")), "credentials", schema);
+
+        assertTrue(result.structured(), "the anthropic provider must honour the JSON Schema request");
+        assertEquals("{\"credentials\":[{\"id\":1}]}", result.result().message().content());
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"output_config\""), "anthropic structured field expected:\n" + body);
+        assertTrue(body.contains("\"json_schema\""), body);
+        assertTrue(!body.contains("\"response_format\""), "the openai field must not leak into anthropic:\n" + body);
+    }
 }

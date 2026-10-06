@@ -256,28 +256,44 @@ public class AgentSessionService {
      * A model change drops any previous variant/sampling override: they belong to
      * the previous model and would otherwise leak into the new one.
      */
-    public String setModel(final String arg, final ChatSettings settings) {
+    public ChatSettings setModel(final String arg, final ChatSettings settings) {
         final var model = arg.strip();
         final var effective = model.startsWith("$") ? model.substring(1) : model;
-        settings.setModel(effective);
-        settings.setVariant(null);
-        settings.setSampling(null);
-        return effective;
+        return settings.withModel(effective).withVariant(null).withSampling(null);
     }
 
     /**
-     * Sets the active provider; returns the provider id. The session override
-     * (model/variant/sampling) is provider-scoped, so switching provider resets
-     * the per-session selection and lets the new provider's configured model
-     * apply again.
+     * Sets the provider of one session, returning the provider id. The selection lands in the passed
+     * {@link ChatSettings} (owned by the shell/tab), never in the shared client: each tab can run on
+     * its own provider. The process-wide default ({@code yca.provider.defaultProvider} or the first
+     * provider) applies to sessions without an override; a blank or {@code "default"} arg clears the
+     * override so the session falls back to it. The session override (model/variant/sampling) is
+     * provider-scoped, so switching provider resets the per-session model selection and lets the new
+     * provider's configured model apply again. {@code chatClient.setProvider} is not called: it would
+     * mutate the process-wide provider for every tab.
      */
-    public String setProvider(final String arg, final ChatSettings settings) {
-        final var id = arg.strip();
-        chatClient.setProvider(id);
-        if (settings != null) {
-            settings.reset();
+    private volatile String lastProviderId;
+
+    /**
+     * Sets the provider of one session, returning the new selection value (pure; the caller applies
+     * it to the session loop). A blank or {@code "default"} arg clears the override so the session
+     * falls back to the process default provider. Provider switch resets the per-session model
+     * selection (model/variant/sampling are provider-scoped).
+     */
+    public ChatSettings setProvider(final String arg, final ChatSettings settings) {
+        final var id = arg == null ? "" : arg.strip();
+        final var next = settings == null
+                ? ChatSettings.EMPTY
+                : settings.withProviderId(id).withoutModelOverrides();
+        if (next.providerId() != null) {
+            lastProviderId = next.providerId();
         }
-        return id;
+        return next;
+    }
+
+    /** The last provider id this session ran on (the effective provider for display), or null. */
+    public String lastProviderId() {
+        return lastProviderId;
     }
 
     /**
@@ -333,7 +349,8 @@ public class AgentSessionService {
         if (history.isEmpty()) {
             return new CompactionApplied(false, "nothing to compact", null);
         }
-        final var result = runtime.contextManager().compact(history, force);
+        final var result =
+                runtime.contextManager().compact(history, force, null, 0, () -> false, runtime.chatSettings());
         if (!result.changed()) {
             return new CompactionApplied(false, "context already within budget", null);
         }

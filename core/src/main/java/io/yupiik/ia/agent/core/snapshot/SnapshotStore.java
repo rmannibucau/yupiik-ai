@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.snapshot;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.session.SessionStorageLayout;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
@@ -98,9 +99,9 @@ public class SnapshotStore {
 
     public void drop(final String sessionId) {
         sessions.remove(sessionId);
-        final var file = file(sessionId);
         try {
-            Files.deleteIfExists(file);
+            Files.deleteIfExists(file(sessionId));
+            Files.deleteIfExists(legacyFile(sessionId));
         } catch (final IOException e) {
             throw new UncheckedIOException("Cannot delete snapshot state for " + sessionId, e);
         }
@@ -111,7 +112,15 @@ public class SnapshotStore {
     }
 
     private SessionState load(final String id) {
-        final var file = file(id);
+        // backward compatibility: read the legacy snapshots/<id>.snap when the session
+        // folder snapshot does not exist yet
+        var file = file(id);
+        if (!Files.isRegularFile(file)) {
+            final var legacy = legacyFile(id);
+            if (Files.isRegularFile(legacy)) {
+                file = legacy;
+            }
+        }
         if (!Files.isRegularFile(file)) {
             return new SessionState(null, List.of());
         }
@@ -158,7 +167,16 @@ public class SnapshotStore {
     }
 
     private Path file(final String sessionId) {
-        return Path.of(configuration.resolveStorageHome(), "snapshots", sessionId + ".snap");
+        final var home = Path.of(configuration.resolveStorageHome());
+        if (SessionStorageLayout.isGeneratedSessionId(sessionId)) {
+            return SessionStorageLayout.sessionDir(home, sessionId).resolve("snapshot.snap");
+        }
+        return home.resolve("snapshots").resolve(sessionId + ".snap");
+    }
+
+    /** The legacy out-of-band snapshot file ({@code snapshots/<id>.snap}). */
+    private Path legacyFile(final String sessionId) {
+        return Path.of(configuration.resolveStorageHome()).resolve("snapshots").resolve(sessionId + ".snap");
     }
 
     public record Checkpoint(String label, long createdAt) {}

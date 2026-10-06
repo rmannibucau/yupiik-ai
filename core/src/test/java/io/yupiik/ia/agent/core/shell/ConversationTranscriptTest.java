@@ -551,7 +551,7 @@ class ConversationTranscriptTest {
         // subagent-tagged events are dropped from a parent transcript...
         t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child"));
         t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", -1, "s1", "sub-1", "child"));
         t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child"));
         assertEquals("", t.transcript().toString());
         assertEquals("", t.pending().toString());
@@ -586,7 +586,7 @@ class ConversationTranscriptTest {
         t.startUserTurn("go");
         t.onEvent(new AgentEvent.ThinkingDelta("child reasoning", "s1", "sub-1", "child"));
         t.onEvent(new AgentEvent.TextDelta("child answer", "s1", "sub-1", "child"));
-        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", "s1", "sub-1", "child"));
+        t.onEvent(new AgentEvent.ToolStarted("bash", "{}", -1, "s1", "sub-1", "child"));
         t.onEvent(new AgentEvent.ToolFinished("bash", "out", true, "s1", "sub-1", "child"));
         final var md = t.markdown("|", "");
         assertTrue(md.contains("child reasoning"), md);
@@ -601,6 +601,22 @@ class ConversationTranscriptTest {
         assertTrue(t.status().startsWith("error:"), t.status());
         t.onEvent(new AgentEvent.TextDelta("recovered", "s1"));
         assertFalse(t.status().startsWith("error:"), "a successful retry must clear the stale error: " + t.status());
+    }
+
+    @Test
+    void retryWaitNoticeIsRenderedAsInfoNotError() {
+        // the resilience layer surfaces a retry wait through the pause listener; it must reach the
+        // transcript as an informational notice (the user sees feedback during the backoff) without
+        // tripping the error/status path reserved for real failures
+        final var t = new ConversationTranscript();
+        t.onEvent(new AgentEvent.Notice(
+                AgentEvent.Notice.Level.INFO,
+                "LLM call failed (429: {\"error\":{\"message\":\"rate limited\"}}), retrying in ~30s (attempt 1/3)",
+                "s1"));
+        assertFalse(t.status().startsWith("error:"), t.status());
+        final var md = t.transcript().toString();
+        assertTrue(md.contains("LLM call failed (429"), md);
+        assertTrue(md.contains("retrying in ~30s (attempt 1/3)"), md);
     }
 
     @Test

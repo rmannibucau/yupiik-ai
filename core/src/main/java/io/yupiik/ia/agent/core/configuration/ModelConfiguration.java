@@ -29,10 +29,21 @@ public record ModelConfiguration(
                 defaultValue = "\"\"",
                 documentation =
                         "Model used to prune the context. When empty the compact model is used, then the provider model when both are empty.")
-        String prune) {
+        String prune,
+
+        @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Model used for the memory write path (extraction and rewrite). When empty the compact model is used, then the provider model.")
+        String memory) {
 
     /** Falls back to the compact model when prune is empty. */
     public String resolvedPrune() {
         return prune == null || prune.isBlank() ? compact : prune;
+    }
+
+    /** Falls back to the compact model when memory is empty, then to the provider model (blank = provider default). */
+    public String resolvedMemory() {
+        return memory == null || memory.isBlank() ? compact : memory;
     }
 }

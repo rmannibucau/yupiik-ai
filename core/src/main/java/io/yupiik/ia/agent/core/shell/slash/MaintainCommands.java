@@ -216,7 +216,8 @@ public class MaintainCommands implements SlashCommandSet {
             final var ack = mavenKnowledgeService.refresh(
                     gav,
                     progress -> env.frontend().status(progress),
-                    summary -> env.frontend().transcript("\n\n> maven-repository-knowledge:\n" + summary));
+                    summary -> env.frontend().transcript("\n\n> maven-repository-knowledge:\n" + summary),
+                    env.session().chatSettings());
             return ShellOutcome.transcript("> maven-repository-knowledge:\n" + String.join("\n", ack));
         } catch (final RuntimeException e) {
             return ShellOutcome.error("maven-repository-knowledge failed: " + e.getMessage());

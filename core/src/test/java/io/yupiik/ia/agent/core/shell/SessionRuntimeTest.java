@@ -116,13 +116,27 @@ class SessionRuntimeTest {
     }
 
     @Test
+    void sessionShapedKeysPersistTodosInTheSessionFolder() throws Exception {
+        final var factory = factory();
+        final var key = "s1a0e47e830a";
+        factory.create(key, "s1").todos().replace(List.of(new TodoItem("step", "pending")));
+
+        final var file = storageHome.resolve("sessions").resolve(key).resolve("todos.json");
+        assertTrue(Files.isRegularFile(file), "a session-shaped key stores todos in the session folder");
+        assertFalse(Files.exists(storageHome.resolve("todos-" + key + ".json")), "no legacy root file anymore");
+
+        // a later runtime for the same key reloads its own list
+        assertEquals(1, factory.create(key, "s1-again").todos().all().size());
+    }
+
+    @Test
     void chatSettingsArePerSessionAndSharedWithTheLoop() {
         final var factory = factory();
         final var first = factory.create("k1", "s1");
         final var second = factory.create("k2", "s2");
 
         assertSame(first.loop().chatSettings(), first.chatSettings(), "the runtime exposes the loop's settings");
-        first.chatSettings().setModel("model-a");
+        first.updateChatSettings(first.chatSettings().withModel("model-a"));
         assertEquals("model-a", first.chatSettings().model());
         assertNull(second.chatSettings().model(), "model selection of one tab must not leak to the other");
     }

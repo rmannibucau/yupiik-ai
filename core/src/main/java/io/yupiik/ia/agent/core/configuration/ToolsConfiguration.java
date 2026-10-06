@@ -36,4 +36,14 @@ public record ToolsConfiguration(
                                 + " (eg. parallel read_file/grep batches). State-changing tools stay sequential and the"
                                 + " message order always follows the model's call order. Set to false for fully"
                                 + " sequential tool execution.")
-        boolean parallelReadonly) {}
+        boolean parallelReadonly,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "When enabled, the code_resolve tool also appends its short Maven artifact-knowledge note"
+                                + " (which dependency provides the symbol, read with maven_knowledge_content) when the"
+                                + " symbol was found in the local code graph. Disabled by default: with graph hits the"
+                                + " note is skipped to keep resolve output lean. Requires the Maven repository knowledge"
+                                + " feature to be enabled.")
+        boolean alwaysSuggestMavenKnowledge) {}

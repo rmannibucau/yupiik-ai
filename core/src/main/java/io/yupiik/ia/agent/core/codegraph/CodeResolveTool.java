@@ -85,6 +85,13 @@ public class CodeResolveTool implements EmbeddedTool {
         return codeGraph != null && codeGraph.enabled();
     }
 
+    /** Whether code_resolve should also suggest the artifact knowledge when the local graph matched. */
+    private boolean alwaysSuggestKnowledge() {
+        return configuration != null
+                && configuration.tools() != null
+                && configuration.tools().alwaysSuggestMavenKnowledge();
+    }
+
     /** Whether the knowledge source is live. */
     private boolean knowledgeLive() {
         return knowledge != null && knowledge.knowledgeEnabled();
@@ -189,7 +196,8 @@ public class CodeResolveTool implements EmbeddedTool {
         if (graphLive()) {
             graphHits = appendGraph(sb, symbol, relation, edgeTypes, depth, max);
         }
-        if (knowledgeLive() && (graphHits == 0 || (artifact != null && !artifact.isBlank()))) {
+        if (knowledgeLive()
+                && (alwaysSuggestKnowledge() || graphHits == 0 || (artifact != null && !artifact.isBlank()))) {
             appendKnowledge(sb, symbol, artifact, graphHits);
         }
         if (graphHits == 0 && knowledgeLive() && (artifact == null || artifact.isBlank())) {
