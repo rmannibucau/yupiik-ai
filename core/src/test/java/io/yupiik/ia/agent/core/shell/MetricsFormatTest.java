@@ -62,8 +62,8 @@ class MetricsFormatTest {
         assertEquals(2, lines.length, "the report contract stays exactly two lines: " + report);
         assertEquals("metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT", lines[0]);
         assertFalse(lines[1].contains("reasoning"), "compact must not surface the reasoning drill-down: " + lines[1]);
-        assertTrue(lines[1].contains("2 LLM (1234ms think)"), lines[1]);
-        assertTrue(lines[1].contains("3 tools (600/700ms)"), lines[1]);
+        assertTrue(lines[1].contains("2 LLM (1.2s think)"), lines[1]);
+        assertTrue(lines[1].contains("3 tools (600ms/700ms)"), lines[1]);
         assertTrue(lines[1].contains("session: 1 LLM calls"), lines[1]);
     }
 
@@ -76,7 +76,7 @@ class MetricsFormatTest {
         final var lines = report.split("\n");
         assertEquals(2, lines.length, "the report contract stays exactly two lines: " + report);
         assertEquals(
-                "2 LLM (1234ms think) · out 953 tok · reasoning 251 tok · 3 tools (600/700ms)"
+                "2 LLM (1.2s think) · out 953 tok · reasoning 251 tok · 3 tools (600ms/700ms)"
                         + " · 602.0 tok/s (real 566.6 tok/s) · reasoning 125.5 tok/s · 12.3s"
                         + " · session: 1 LLM calls · reasoning 500 tok",
                 lines[1]);
@@ -91,7 +91,7 @@ class MetricsFormatTest {
                 MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
         assertEquals(
                 "metrics: showPerTurn=true showSessionTotals=true displayMode=FULL\n"
-                        + "1 LLM · 2 tools (300/400ms) · 120.0 tok/s · 5.0s",
+                        + "1 LLM · 2 tools (300ms/400ms) · 120.0 tok/s · 5s",
                 report);
     }
 

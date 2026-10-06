@@ -25,13 +25,14 @@ import io.yupiik.ia.agent.core.configuration.LabelsConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
 /**
  * Renders the speaker labels used in terminal transcript headers (CLI, TUI, run).
  *
- * <p>Both templates from {@code yca.labels} are compiled <em>once</em> at bean
+ * <p>All templates from {@code yca.labels} are compiled <em>once</em> at bean
  * construction - exactly once per application lifecycle, like
  * {@link io.yupiik.ia.agent.core.cli.CliPromptTemplate} - and rendered at each
  * turn boundary with a fresh context map. Null/blank context values are skipped
@@ -47,6 +48,7 @@ import java.util.function.Function;
 public class SpeakerLabels {
     private final Template userTemplate;
     private final Template assistantTemplate;
+    private final Template logsTemplate;
     private final ChatClient chatClient;
     private final ProviderManager providerManager;
 
@@ -54,6 +56,7 @@ public class SpeakerLabels {
     protected SpeakerLabels() {
         this.userTemplate = null;
         this.assistantTemplate = null;
+        this.logsTemplate = null;
         this.chatClient = null;
         this.providerManager = null;
     }
@@ -62,18 +65,32 @@ public class SpeakerLabels {
             final CodingAgentConfiguration configuration,
             final ChatClient chatClient,
             final ProviderManager providerManager) {
+        this(List.of(), configuration, chatClient, providerManager);
+    }
+
+    public SpeakerLabels(
+            final List<PromptHandlebarsHelper> helpers,
+            final CodingAgentConfiguration configuration,
+            final ChatClient chatClient,
+            final ProviderManager providerManager) {
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         final var labels = configuration == null ? null : configuration.labels();
         final var user = labels == null ? null : labels.userTemplate();
         final var assistant = labels == null ? null : labels.assistantTemplate();
-        this.userTemplate = compile(user == null || user.isBlank() ? null : user);
-        this.assistantTemplate = compile(assistant == null || assistant.isBlank() ? null : assistant);
+        final var logs = labels == null ? null : labels.logsTemplate();
+        final var functions = new LinkedHashMap<String, Function<HelperContext, Object>>();
+        functions.put("systemProperty", PromptHandlebarsHelper.systemProperty());
+        for (final var helper : helpers) {
+            functions.put(helper.name(), helper::apply);
+        }
+        this.userTemplate = compile(functions, user == null || user.isBlank() ? null : user);
+        this.assistantTemplate = compile(functions, assistant == null || assistant.isBlank() ? null : assistant);
+        this.logsTemplate = compile(functions, logs == null || logs.isBlank() ? null : logs);
     }
 
-    private static Template compile(final String template) {
-        final var functions = new java.util.LinkedHashMap<String, Function<HelperContext, Object>>();
-        functions.put("systemProperty", PromptHandlebarsHelper.systemProperty());
+    private static Template compile(
+            final Map<String, Function<HelperContext, Object>> functions, final String template) {
         return new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(
                         new HandlebarsCompiler.Settings().helpers(functions), template == null ? "\u0000" : template));
@@ -100,6 +117,11 @@ public class SpeakerLabels {
     /** The rendered assistant label; blank renders fall back to {@link LabelsConfiguration#defaultAssistantLabel()}. */
     public String assistantLabel(final Ctx ctx) {
         return render(assistantTemplate, ctx, LabelsConfiguration.defaultAssistantLabel());
+    }
+
+    /** The rendered log block label; blank renders fall back to {@link LabelsConfiguration#defaultLogsLabel()}. */
+    public String logsLabel(final Ctx ctx) {
+        return render(logsTemplate, ctx, LabelsConfiguration.defaultLogsLabel());
     }
 
     private String render(final Template template, final Ctx ctx, final String fallback) {

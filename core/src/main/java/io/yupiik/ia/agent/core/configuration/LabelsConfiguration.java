@@ -30,18 +30,22 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 @JsonModel
 public record LabelsConfiguration(
         @Property(
-                defaultValue = "\"{{systemProperty \\\"user.name\\\" \\\"You\\\"}}\"",
+                defaultValue = "\"[{{formatDate \\\"HH:mm:ss\\\"}}] {{systemProperty \\\"user.name\\\" \\\"You\\\"}}\"",
                 documentation =
                         "Handlebars template rendering the user speaker label shown in transcript headers (CLI, TUI, run). "
                                 + "UI only: the LLM conversation keeps its hardcoded user/assistant roles and is never affected. "
                                 + "Context keys: userName (System.getProperty(\"user.name\"), missing values are skipped), modelName, "
                                 + "model (name, provider), provider, agent, mode (plan/build), sessionId and configuration (the whole "
                                 + "yca configuration as a map). The systemProperty helper reads a system property with an optional "
-                                + "default: {{systemProperty \"user.name\" \"You\"}}.")
+                                + "default: {{systemProperty \"user.name\" \"You\"}}. The formatDate helper renders the current "
+                                + "date/time from the injected Clock: {{formatDate}} uses HH:mm:ss and "
+                                + "{{formatDate \"yyyy-MM-dd HH:mm:ss\"}} accepts any java.time pattern. Remove the formatDate "
+                                + "segment to disable the timestamp.")
         String userTemplate,
 
         @Property(
-                defaultValue = "\"{{#if model.name}}{{model.provider}}::{{model.name}}{{else}}Assistant{{/if}}\"",
+                defaultValue =
+                        "\"[{{formatDate \\\"HH:mm:ss\\\"}}] {{#if model.name}}{{model.provider}}::{{model.name}}{{else}}Assistant{{/if}}\"",
                 documentation =
                         "Handlebars template rendering the assistant speaker label shown in transcript headers (CLI, TUI, run). "
                                 + "UI only: the LLM conversation keeps its hardcoded user/assistant roles and is never affected, "
@@ -49,8 +53,22 @@ public record LabelsConfiguration(
                                 + "Context keys: userName, modelName, model (name, provider), provider, agent, mode (plan/build), "
                                 + "sessionId and configuration (the whole yca configuration as a map). "
                                 + "The default renders the active provider and model, e.g. openai::gpt-5-mini; when no model is "
-                                + "resolved (no provider configured yet) it falls back to: Assistant.")
-        String assistantTemplate) {
+                                + "resolved (no provider configured yet) it falls back to: Assistant. The formatDate helper is "
+                                + "available exactly like in the user label: {{formatDate}} (HH:mm:ss) or "
+                                + "{{formatDate \"pattern\"}} with any java.time pattern; remove it to disable the timestamp.")
+        String assistantTemplate,
+
+        @Property(
+                defaultValue = "\"[{{formatDate \\\"HH:mm:ss\\\"}}]\"",
+                documentation =
+                        "Handlebars template rendering the label of the captured log blocks shown in the TUI transcript "
+                                + "content view. UI only: the LLM conversation is never affected. "
+                                + "Context keys: userName, modelName, model (name, provider), provider, agent, mode (plan/build), "
+                                + "sessionId and configuration (the whole yca configuration as a map). "
+                                + "The formatDate helper is available exactly like in the user/assistant labels: "
+                                + "{{formatDate}} (HH:mm:ss) or {{formatDate \"pattern\"}} with any java.time pattern; "
+                                + "remove it to disable the timestamp.")
+        String logsTemplate) {
 
     /** The rendered user label when a template renders blank: the OS user name, else "You". */
     public static String defaultUserLabel() {
@@ -61,5 +79,10 @@ public record LabelsConfiguration(
     /** The rendered assistant label when a template renders blank. */
     public static String defaultAssistantLabel() {
         return "Assistant";
+    }
+
+    /** The rendered log block label when a template renders blank. */
+    public static String defaultLogsLabel() {
+        return "Logs";
     }
 }

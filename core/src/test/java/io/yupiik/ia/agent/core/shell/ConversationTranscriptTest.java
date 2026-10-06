@@ -467,10 +467,64 @@ class ConversationTranscriptTest {
 
         final var regions = ConversationTranscript.regions(md);
         assertEquals(5, regions.size());
-        assertEquals(new ConversationTranscript.Region("before", false, false), regions.get(0));
+        assertEquals(new ConversationTranscript.Region("before", false, false, false), regions.get(0));
         assertTrue(regions.get(1).thought());
         assertTrue(regions.get(3).tool());
         assertEquals("after", regions.get(4).text());
+    }
+
+    @Test
+    void regionsSplitLogBlocks() {
+        final var md =
+                "before" + ConversationTranscript.LOG_BEGIN + "captured" + ConversationTranscript.LOG_END + "after";
+
+        final var regions = ConversationTranscript.regions(md);
+        assertEquals(3, regions.size());
+        assertEquals("before", regions.get(0).text());
+        assertFalse(regions.get(0).thought());
+        assertFalse(regions.get(0).tool());
+        assertFalse(regions.get(0).log());
+        assertEquals("captured", regions.get(1).text());
+        assertTrue(regions.get(1).log());
+        assertFalse(regions.get(1).thought());
+        assertFalse(regions.get(1).tool());
+        assertEquals("after", regions.get(2).text());
+    }
+
+    @Test
+    void logRegionInterleavedWithThoughtAndToolIsTyped() {
+        final var md = ConversationTranscript.THOUGHT_BEGIN
+                + "thinking"
+                + ConversationTranscript.THOUGHT_END
+                + ConversationTranscript.LOG_BEGIN
+                + "logged"
+                + ConversationTranscript.LOG_END
+                + ConversationTranscript.TOOL_BEGIN
+                + "tooled"
+                + ConversationTranscript.TOOL_END;
+
+        final var regions = ConversationTranscript.regions(md);
+        assertEquals(7, regions.size(), "open and tail plain regions surround each marker block");
+        assertTrue(regions.get(1).thought());
+        assertTrue(regions.get(3).log());
+        assertTrue(regions.get(5).tool());
+    }
+
+    @Test
+    void appendTranscriptLogRegionIsRoundTripped() {
+        final var t = new ConversationTranscript();
+        t.appendTranscript(ConversationTranscript.LOG_BEGIN + "\n[10:00:00]\nINFO StructuralCodeGraph\nindexed\n"
+                + ConversationTranscript.LOG_END);
+
+        final var regions = ConversationTranscript.regions(t.transcript().toString());
+        final var region = regions.stream()
+                .filter(ConversationTranscript.Region::log)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no log region in: " + t.transcript()));
+        assertFalse(region.thought());
+        assertFalse(region.tool());
+        assertTrue(region.text().contains("[10:00:00]"));
+        assertTrue(region.text().contains("indexed"));
     }
 
     @Test

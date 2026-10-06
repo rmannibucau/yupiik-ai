@@ -68,7 +68,7 @@ class ConfigCommandsTest {
         final var outcome = run("", session(), transcript);
         assertEquals(
                 "metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT\n"
-                        + "3 LLM (120ms think) · 5 tools (300/500ms) · 1.5s",
+                        + "3 LLM (120ms think) · 5 tools (300ms/500ms) · 1.5s",
                 ((ShellOutcome.Status) outcome).message());
     }
 

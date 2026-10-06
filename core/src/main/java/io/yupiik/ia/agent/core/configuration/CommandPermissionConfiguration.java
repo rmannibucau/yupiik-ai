@@ -189,6 +189,7 @@ public record CommandPermissionConfiguration(
                 command("locate"),
                 command("test"),
                 command("["),
+                command("[["),
 
                 // -----------------------------------------------------------------
                 // Shell-safe output / argument utilities

@@ -153,6 +153,11 @@ public record TuiConfiguration(
         TuiTranscriptConfiguration transcript,
 
         @Property(
+                documentation =
+                        "Per-level colors of the captured log regions (`yca.tui.log.<level>.color`, see TuiLogLevelConfiguration).")
+        TuiLogConfiguration log,
+
+        @Property(
                 defaultValue = "true",
                 documentation =
                         "Hide the terminal hardware cursor while the TUI runs: only the in-app drawn caret is shown "

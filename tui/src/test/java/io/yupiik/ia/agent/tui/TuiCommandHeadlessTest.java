@@ -41,9 +41,11 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
+import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
@@ -51,6 +53,7 @@ import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.lang.reflect.Type;
@@ -61,9 +64,12 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -248,35 +254,30 @@ class TuiCommandHeadlessTest {
 
     @Test
     void errorBannerUsesErrorColoredBorder() throws Exception {
-        // the shared container's executor is shut down when a TUI quits, so this
-        // second boot needs its own container to avoid poisoning the other tests
-        try (final var isolated = bootContainer()) {
-            final var isolatedDeps = lookupDeps(isolated);
-            final var command = newUiCommand(isolated, isolatedDeps);
+        final var command = newUiCommand(container, deps);
 
-            uiThread = new Thread(command::run, "tui-headless-error");
-            uiThread.setDaemon(true);
-            uiThread.start();
-            awaitTui();
+        uiThread = new Thread(command::run, "tui-headless-error");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
 
-            tuiRef.get().dispatch(new PasteEvent("/agent definitely-not-an-agent"));
-            awaitText("/agent definitely-not-an-agent");
-            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-            awaitText("unknown agent: definitely-not-an-agent");
-            awaitText("Alt+E for details");
+        tuiRef.get().dispatch(new PasteEvent("/agent definitely-not-an-agent"));
+        awaitText("/agent definitely-not-an-agent");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("unknown agent: definitely-not-an-agent");
+        awaitText("Alt+E for details");
 
-            final var lines = backend.text().split("\n", -1);
-            final var errorRow = IntStream.range(0, lines.length)
-                    .filter(i -> lines[i].contains("Alt+E for details"))
-                    .findFirst()
-                    .orElseThrow();
-            // the error banner is a full-width rounded box: border rows on either side of the text
-            assertEquals("╭", backend.symbol(0, errorRow - 1));
-            assertEquals("╰", backend.symbol(0, errorRow + 1));
-            final var expected = Color.hex("#e06c75");
-            assertEquals(expected, backend.fg(0, errorRow - 1).orElseThrow());
-            assertEquals(expected, backend.fg(0, errorRow + 1).orElseThrow());
-        }
+        final var lines = backend.text().split("\n", -1);
+        final var errorRow = IntStream.range(0, lines.length)
+                .filter(i -> lines[i].contains("Alt+E for details"))
+                .findFirst()
+                .orElseThrow();
+        // the error banner is a full-width rounded box: border rows on either side of the text
+        assertEquals("╭", backend.symbol(0, errorRow - 1));
+        assertEquals("╰", backend.symbol(0, errorRow + 1));
+        final var expected = Color.hex("#e06c75");
+        assertEquals(expected, backend.fg(0, errorRow - 1).orElseThrow());
+        assertEquals(expected, backend.fg(0, errorRow + 1).orElseThrow());
     }
 
     @Test
@@ -355,9 +356,15 @@ class TuiCommandHeadlessTest {
                 final var slashRegistry = container.lookup(SlashRegistry.class);
                 final var turnRunner = container.lookup(TurnRunner.class);
                 final var runtimeFactory = container.lookup(SessionRuntimeFactory.class);
-                final var scheduler = container.lookup(ScheduledExecutorService.class)) {
+                final var scheduler = container.lookup(ScheduledExecutorService.class);
+                final var autoLogConfigurer = container.lookup(AutoLogConfigurer.class)) {
             final var tabManager = tabManagerInstance.instance();
             final var tuiSlashCommands = slashCommandsInstance.instance();
+            // a fresh executor per run: TuiCommand.run() shuts the executor down when the TUI
+            // quits, and the container-managed VirtualThreadExecutor bean is also used by the
+            // agent beans (TurnRunner, ChatClient...). Passing a dedicated one lets every test
+            // reuse the shared @BeforeAll container without poisoning the other tests.
+            final var runExecutor = new VirtualThreadExecutor();
             return new TuiCommand(
                     conf,
                     d.tuiConfiguration(),
@@ -368,9 +375,14 @@ class TuiCommandHeadlessTest {
                     d.sessionLifecycle(),
                     d.chatClient(),
                     d.modelStyleService(),
-                    new SpeakerLabels(d.configuration(), d.chatClient(), d.providerManager()),
+                    new SpeakerLabels(
+                            List.of(new FormatDatePromptHelper(Clock.systemUTC())),
+                            d.configuration(),
+                            d.chatClient(),
+                            d.providerManager()),
+                    autoLogConfigurer.instance(),
                     d.mcpManager(),
-                    d.executor(),
+                    runExecutor,
                     d.providerManager(),
                     d.agentProvider(),
                     d.agentSessionService(),
@@ -460,185 +472,258 @@ class TuiCommandHeadlessTest {
 
     @Test
     void sessionOptionReplaysPersistedSession() throws Exception {
-        try (final var isolated = bootContainer()) {
-            final var isolatedDeps = lookupDeps(isolated);
-            final var sessionId = "sresume";
-            isolatedDeps.sessionStore().append(sessionId, SessionEntry.of(1, "user", "resumed question", null, null));
-            isolatedDeps
-                    .sessionStore()
-                    .append(sessionId, SessionEntry.of(2, "assistant", "resumed assistant reply", null, null));
-            final var command = newUiCommand(
-                    isolated,
-                    isolatedDeps,
-                    new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark"));
+        final var sessionId = "sresume";
+        deps.sessionStore().append(sessionId, SessionEntry.of(1, "user", "resumed question", null, null));
+        deps.sessionStore().append(sessionId, SessionEntry.of(2, "assistant", "resumed assistant reply", null, null));
+        final var command = newUiCommand(
+                container, deps, new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark"));
 
-            uiThread = new Thread(command::run, "tui-headless-session");
-            uiThread.setDaemon(true);
-            uiThread.start();
-            awaitTui();
-            // the persisted history is replayed into the initial tab, not fetched from the model
-            awaitText("resumed assistant reply");
-            awaitText("ready");
-            final var requestsBefore = llm.requests().size();
-            assertEquals(requestsBefore, llm.requests().size(), "resuming a session at launch must not call the model");
+        uiThread = new Thread(command::run, "tui-headless-session");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        // the persisted history is replayed into the initial tab, not fetched from the model
+        awaitText("resumed assistant reply");
+        awaitText("ready");
+        final var requestsBefore = llm.requests().size();
+        assertEquals(requestsBefore, llm.requests().size(), "resuming a session at launch must not call the model");
 
-            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-            uiThread.join(TIMEOUT_MS);
-        }
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
     }
 
     @Test
     void initialPromptResumeAliasRestartsTheLoopOnThePersistedHistory() throws Exception {
-        try (final var isolated = bootContainer()) {
-            final var isolatedDeps = lookupDeps(isolated);
-            final var sessionId = "sinitialresume";
-            isolatedDeps.sessionStore().append(sessionId, SessionEntry.of(1, "user", "already asked", null, null));
-            isolatedDeps
-                    .sessionStore()
-                    .append(sessionId, SessionEntry.of(2, "assistant", "already answered", null, null));
-            final var requestsBefore = llm.requests().size();
-            // `continue` is a resume alias by default (yca.resumeAliases): the turn restarts the
-            // loop on the persisted history, so it reaches the model without any new user message
-            final var command = newUiCommand(
-                    isolated,
-                    isolatedDeps,
-                    new TuiCommand.TuiConf(
-                            sessionId, "", KeyBindingPreset.STANDARD, true, "dark", List.of("continue")));
+        final var sessionId = "sinitialresume";
+        deps.sessionStore().append(sessionId, SessionEntry.of(1, "user", "already asked", null, null));
+        deps.sessionStore().append(sessionId, SessionEntry.of(2, "assistant", "already answered", null, null));
+        final var requestsBefore = llm.requests().size();
+        // `continue` is a resume alias by default (yca.resumeAliases): the turn restarts the
+        // loop on the persisted history, so it reaches the model without any new user message
+        final var command = newUiCommand(
+                container,
+                deps,
+                new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark", List.of("continue")));
 
-            uiThread = new Thread(command::run, "tui-headless-initial-resume");
-            uiThread.setDaemon(true);
-            uiThread.start();
-            awaitTui();
-            awaitText("already answered");
-            // the loop ran again on its own: the mock is called and its answer joins the transcript
-            awaitText("hello from mock");
+        uiThread = new Thread(command::run, "tui-headless-initial-resume");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("already answered");
+        // the loop ran again on its own: the mock is called and its answer joins the transcript
+        awaitText("hello from mock");
 
-            final var sent =
-                    llm.requests().subList(requestsBefore, llm.requests().size());
-            assertFalse(sent.isEmpty(), "the injected resume turn must call the model");
-            assertTrue(
-                    sent.stream().anyMatch(it -> it.contains("already asked")),
-                    "the resumed turn must replay the persisted history");
-            assertTrue(
-                    isolatedDeps.sessionStore().load(sessionId).stream()
-                            .noneMatch(e ->
-                                    "user".equals(e.role()) && "continue".contentEquals(String.valueOf(e.content()))),
-                    "a resume turn must not persist the alias as a user message");
+        final var sent = llm.requests().subList(requestsBefore, llm.requests().size());
+        assertFalse(sent.isEmpty(), "the injected resume turn must call the model");
+        assertTrue(
+                sent.stream().anyMatch(it -> it.contains("already asked")),
+                "the resumed turn must replay the persisted history");
+        assertTrue(
+                deps.sessionStore().load(sessionId).stream()
+                        .noneMatch(
+                                e -> "user".equals(e.role()) && "continue".contentEquals(String.valueOf(e.content()))),
+                "a resume turn must not persist the alias as a user message");
 
-            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-            uiThread.join(TIMEOUT_MS);
-        }
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
     }
 
     @Test
     void initialPromptListIsSubmittedInOrder() throws Exception {
-        try (final var isolated = bootContainer()) {
-            final var isolatedDeps = lookupDeps(isolated);
-            final var requestsBefore = llm.requests().size();
-            // two prompts: the first one starts a turn and the second one waits for that turn
-            // to end, so they are two turns and not one merged type-ahead turn
-            final var command = newUiCommand(
-                    isolated,
-                    isolatedDeps,
-                    new TuiCommand.TuiConf(
-                            "",
-                            "",
-                            KeyBindingPreset.STANDARD,
-                            true,
-                            "dark",
-                            List.of("injected first", "injected second")));
+        final var requestsBefore = llm.requests().size();
+        // two prompts: the first one starts a turn and the second one waits for that turn
+        // to end, so they are two turns and not one merged type-ahead turn
+        final var command = newUiCommand(
+                container,
+                deps,
+                new TuiCommand.TuiConf(
+                        "", "", KeyBindingPreset.STANDARD, true, "dark", List.of("injected first", "injected second")));
 
-            uiThread = new Thread(command::run, "tui-headless-initial-list");
-            uiThread.setDaemon(true);
-            uiThread.start();
-            awaitTui();
-            awaitText("injected second");
-            awaitText("ready");
+        uiThread = new Thread(command::run, "tui-headless-initial-list");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("injected second");
+        awaitText("ready");
 
-            final var sent = List.copyOf(
-                    llm.requests().subList(requestsBefore, llm.requests().size()));
-            final var firstTurn = sent.stream()
-                    .filter(it -> it.contains("injected first"))
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("the first injected prompt never reached the model"));
-            final var secondTurn = sent.stream()
-                    .filter(it -> it.contains("injected second"))
-                    .findFirst()
-                    .orElseThrow(() -> new AssertionError("the queued prompt was never submitted: " + sent));
-            assertTrue(
-                    sent.indexOf(firstTurn) < sent.indexOf(secondTurn), "injected prompts must run in the given order");
-            assertFalse(
-                    firstTurn.contains("injected second"),
-                    "the second prompt must run as its own turn, not merged into the first one");
+        final var sent = List.copyOf(
+                llm.requests().subList(requestsBefore, llm.requests().size()));
+        final var firstTurn = sent.stream()
+                .filter(it -> it.contains("injected first"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the first injected prompt never reached the model"));
+        final var secondTurn = sent.stream()
+                .filter(it -> it.contains("injected second"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the queued prompt was never submitted: " + sent));
+        assertTrue(sent.indexOf(firstTurn) < sent.indexOf(secondTurn), "injected prompts must run in the given order");
+        assertFalse(
+                firstTurn.contains("injected second"),
+                "the second prompt must run as its own turn, not merged into the first one");
 
-            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-            uiThread.join(TIMEOUT_MS);
-        }
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
     }
 
     @Test
     void initialPromptSlashEntryDoesNotStallTheQueue() throws Exception {
         // {@code /mode build} is a slash command: it starts no turn (no TurnDone event), so the
         // following entry must be released when the command outcome is applied, not when a turn ends
-        try (final var isolated = bootContainer()) {
-            final var isolatedDeps = lookupDeps(isolated);
-            final var requestsBefore = llm.requests().size();
-            final var command = newUiCommand(
-                    isolated,
-                    isolatedDeps,
-                    new TuiCommand.TuiConf(
-                            "",
-                            "",
-                            KeyBindingPreset.STANDARD,
-                            true,
-                            "dark",
-                            List.of("/mode build", "hello from the script")));
+        final var requestsBefore = llm.requests().size();
+        final var command = newUiCommand(
+                container,
+                deps,
+                new TuiCommand.TuiConf(
+                        "",
+                        "",
+                        KeyBindingPreset.STANDARD,
+                        true,
+                        "dark",
+                        List.of("/mode build", "hello from the script")));
 
-            uiThread = new Thread(command::run, "tui-headless-initial-slash");
-            uiThread.setDaemon(true);
-            uiThread.start();
-            awaitTui();
-            awaitText("mode: build");
-            awaitText("hello from the script");
-            awaitText("ready");
+        uiThread = new Thread(command::run, "tui-headless-initial-slash");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("mode: build");
+        awaitText("hello from the script");
+        awaitText("ready");
 
-            final var sent = List.copyOf(
-                    llm.requests().subList(requestsBefore, llm.requests().size()));
-            assertFalse(sent.isEmpty(), "the prompt following the slash command never reached the model: " + sent);
-            assertTrue(
-                    sent.stream().anyMatch(it -> it.contains("hello from the script")),
-                    "the queue must advance past a slash command - got: " + sent);
+        final var sent = List.copyOf(
+                llm.requests().subList(requestsBefore, llm.requests().size()));
+        assertFalse(sent.isEmpty(), "the prompt following the slash command never reached the model: " + sent);
+        assertTrue(
+                sent.stream().anyMatch(it -> it.contains("hello from the script")),
+                "the queue must advance past a slash command - got: " + sent);
 
-            tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
-            uiThread.join(TIMEOUT_MS);
-        }
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
     }
 
     @Test
     void tabsSlashOpensOverlayThroughRealRegistry() throws Exception {
-        // the shared container's executor is shut down when a TUI run quits, so this
-        // test boots its own container like errorBannerUsesErrorColoredBorder
-        try (final var isolated = bootContainer()) {
-            final var isolatedDeps = lookupDeps(isolated);
-            final var command = newUiCommand(isolated, isolatedDeps);
+        final var command = newUiCommand(container, deps);
 
-            uiThread = new Thread(command::run, "tui-tabs-list");
+        uiThread = new Thread(command::run, "tui-tabs-list");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+
+        // dispatch through the real SlashRegistry: "/tabs" (no arg) opens the modal
+        tuiRef.get().dispatch(new PasteEvent("/tabs"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("1-9 switch");
+
+        // Esc closes the overlay again
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("1-9 switch");
+
+        // quit the TUI so run() unwinds before the container closes
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
+    }
+
+    @Test
+    void exitingLogsEveryOpenedSessionWithItsTabTitle() throws Exception {
+        // remembering the session(s) of a run matters most for multi-tab TUI sessions: the exit
+        // must name each persisted session with the tab title so it can be resumed afterwards
+        final var command = newUiCommand(
+                container, deps, new TuiCommand.TuiConf("exit-session-a", "", KeyBindingPreset.STANDARD, true, "dark"));
+
+        final var events = new CopyOnWriteArrayList<String>();
+        final var logger = java.util.logging.Logger.getLogger(TuiCommand.class.getName());
+        final var handler = new Handler() {
+            {
+                setLevel(java.util.logging.Level.ALL);
+            }
+
+            @Override
+            public void publish(final LogRecord record) {
+                events.add(record.getMessage());
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        // marks when the TUI released the terminal: the session lines must only be emitted after
+        // that point (on the restored screen), or the alternate-screen buffer would swallow them
+        backend.onClose(() -> events.add("terminal released"));
+        logger.addHandler(handler);
+        try {
+            uiThread = new Thread(command::run, "tui-headless-exit-log");
             uiThread.setDaemon(true);
             uiThread.start();
             awaitTui();
+            awaitText("yca coding agent");
 
-            // dispatch through the real SlashRegistry: "/tabs" (no arg) opens the modal
-            tuiRef.get().dispatch(new PasteEvent("/tabs"));
+            // first tab reuses the deterministic session id and titles itself from the prompt
+            tuiRef.get().dispatch(new PasteEvent("first tab prompt"));
+            awaitText("first tab prompt");
             tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
-            awaitText("1-9 switch");
+            awaitText("hello from mock");
+            awaitText("ready");
 
-            // Esc closes the overlay again
-            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
-            awaitTextGone("1-9 switch");
+            // second tab: fresh session, its own title
+            tuiRef.get().dispatch(KeyEvent.ofChar('n', KeyModifiers.CTRL));
+            tuiRef.get().dispatch(new PasteEvent("second tab topic"));
+            awaitText("second tab topic");
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+            awaitText("hello from mock");
+            awaitText("ready");
 
-            // quit the TUI so run() unwinds before the container closes
             tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
             uiThread.join(TIMEOUT_MS);
+            assertFalse(uiThread.isAlive(), "the TUI thread should have exited");
+
+            assertTrue(
+                    events.contains("session exit-session-a (first tab prompt)"),
+                    "expected an exit log naming the first session with its tab title, got: " + events);
+            assertTrue(
+                    events.stream().anyMatch(it -> it.startsWith("session ") && it.endsWith("(second tab topic)")),
+                    "expected an exit log naming the second session with its tab title, got: " + events);
+            final var sessionLines =
+                    events.stream().filter(it -> it.startsWith("session ")).toList();
+            final var released = events.lastIndexOf("terminal released");
+            assertTrue(released >= 0, "expected the terminal released marker, got: " + events);
+            for (final var sessionLine : sessionLines) {
+                assertTrue(
+                        events.indexOf(sessionLine) > released,
+                        "the session logs must be emitted only after the terminal is released, got: " + events);
+            }
+        } finally {
+            logger.removeHandler(handler);
         }
+    }
+
+    @Test
+    void capturedLogsLandInTheContentViewAndNotify() throws Exception {
+        final var command = newUiCommand(container, deps);
+
+        uiThread = new Thread(command::run, "tui-headless-logs");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // emitted after the TUI ran: run() already detached the inline root handler
+        // (AutoLogConfigurer) and attached the content-view capture handlers
+        final var logger = java.util.logging.Logger.getLogger("io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph");
+        logger.info("captured info log");
+        awaitText("captured info log");
+        // inline log shape: [label][LEVEL][short logger] message on the same row
+        awaitText("[INFO][core.codegraph.StructuralCodeGraph]");
+
+        logger.warning("captured warning log");
+        awaitText("captured warning log");
+
+        logger.severe("captured severe log");
+        awaitText("captured severe log");
+        awaitText("Alt+E for details");
+
+        tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
+        uiThread.join(TIMEOUT_MS);
     }
 }

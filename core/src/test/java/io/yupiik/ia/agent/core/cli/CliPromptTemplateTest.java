@@ -75,7 +75,7 @@ class CliPromptTemplateTest {
     }
 
     private static List<PromptHandlebarsHelper> helpers() {
-        return List.of(new TimePromptHelper(CLOCK));
+        return List.of(new TimePromptHelper(CLOCK), new FormatDatePromptHelper(CLOCK));
     }
 
     private static CodingAgentConfiguration config(final String template) {
@@ -169,6 +169,14 @@ class CliPromptTemplateTest {
         assertEquals(
                 "2026-09-24 10:11:12.345",
                 template("{{time pattern=\"yyyy-MM-dd HH:mm:ss.SSS\"}}").render(data("plan", null, "")));
+    }
+
+    @Test
+    void formatDateHelperUsesFixedClock() {
+        assertEquals("10:11:12", template("{{formatDate}}").render(data("plan", null, "")));
+        assertEquals(
+                "2026-09-24 10:11:12.345",
+                template("{{formatDate \"yyyy-MM-dd HH:mm:ss.SSS\"}}").render(data("plan", null, "")));
     }
 
     @Test

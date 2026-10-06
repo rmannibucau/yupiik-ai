@@ -24,8 +24,8 @@ configurable through `yca.labels`:
 [source,json]
 ----
 "labels": {
-  "userTemplate": "{{systemProperty \"user.name\" \"You\"}}",
-  "assistantTemplate": "{{model.provider}}::{{model.name}}"
+  "userTemplate": "[{{formatDate \"HH:mm:ss\"}}] {{systemProperty \"user.name\" \"You\"}}",
+  "assistantTemplate": "[{{formatDate \"HH:mm:ss\"}}] {{model.provider}}::{{model.name}}"
 }
 ----
 
@@ -38,6 +38,10 @@ optional default: 1 argument ({`{{systemProperty "user.name"}}`}) renders the
 value or nothing when the key is absent, 2 arguments
 (`{{systemProperty "user.name" "You"}}`) add the fallback. A template rendering
 blank falls back to `You`/`Assistant`.
+
+The `formatDate` helper renders the current time from the injected clock:
+`{{formatDate}}` uses `HH:mm:ss`, `{{formatDate "yyyy-MM-dd HH:mm:ss"}}` accepts
+any `java.time` pattern; remove it from the template to disable the timestamp.
 
 [IMPORTANT]
 ====
@@ -55,6 +59,39 @@ entry. A `/resume` or a template change re-renders each block from its own
 identity, so a block written under `M1` is never relabeled `M2` when the model
 is switched later.
 ====
+
+== Transcript colors
+
+The transcript keeps one color per speaker: user turns are painted with the
+`yca.tui.primary` accent and assistant turns with `yca.tui.accent`, from the
+turn header and left bar down to the bold prose (unless `yca.tui.strongColor`
+pins an explicit bold color). Both are `yca.tui.*` settings documented in the
+xref:../configuration.adoc[configuration] reference.
+
+Captured log regions (the inline log panels) never reuse a role color: each JUL
+level keeps its own hue, configurable per level:
+
+[source,json]
+----
+{
+  "tui": {
+    "log": {
+      "severe": { "color": "#ff0000" },
+      "warning": { "color": "#ffd700" },
+      "info": { "color": "#00ffff" },
+      "config": { "color": "auto" },
+      "fine": { "color": "auto" },
+      "finer": { "color": "auto" },
+      "finest": { "color": "auto" }
+    }
+  }
+}
+----
+
+`auto` (the default) follows the closest palette accent: `severe` uses the
+error hue, `warning` the warning hue and the remaining levels the info hue
+(dimmed for the debug levels), so the light-theme remap keeps log regions
+readable. Replace it with a hex color to pin a level tone.
 
 == Side questions (/btw)
 
@@ -98,3 +135,12 @@ block once ready.
 |5
 |Previous side questions replayed for follow-ups, 0 disables the replay.
 |===
+
+== Sessions on exit
+
+When a session is left (`/exit`, `/quit`, `Ctrl+C` or a terminal close), its id
+is logged so the user can find it again with `/resume <id>`.
+In the `tui`, where several tabs can be open, each persisted session logs its
+own line: `session <id> (<tab title>)`.
+Sessions with a single prompt and no reply are discarded, so only sessions worth
+resuming are reported.

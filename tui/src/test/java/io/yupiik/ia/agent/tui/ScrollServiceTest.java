@@ -115,6 +115,7 @@ class ScrollServiceTest {
                 "auto",
                 java.util.List.of(),
                 null,
+                null,
                 true,
                 scrollLines,
                 scrollPageLines,

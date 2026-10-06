@@ -327,3 +327,71 @@ Guardrails: a request is refused below 30% usage, and at most one
 model-initiated operation runs per turn.
 See xref:../configuration.adoc[Configuration] for the `yca.pruning.*` and
 `yca.compaction.*` options.
+
+== Context-management philosophy: deterministic, not model-driven
+
+Some coding agents (opencode-style) teach the model to call a `compress` tool
+at semantic phase boundaries: "data collected", "implementation validated",
+"before writing the final report".
+The model decides *when* and *what* to summarize, and the intervention is
+visible in the transcript as meta-narration.
+
+yca made the opposite bet: the *decision* to prune or compact is
+deterministic.
+It fires on measured usage against thresholds (65% / 80% of the usable window
+by default), anchored on the last real provider `prompt_tokens` when
+available.
+The model never decides *when*; it only influences *what* to preserve, through
+the `manage_context` tool (`focus` and `keep_last`) and the soft nudge that
+invites it to wrap up early.
+
+This trade-off favors predictability over adaptability:
+
+* each model-initiated compaction is an extra LLM call, so an aggressive
+  phase-compressing model pays tokens for summaries the window does not need;
+* the deterministic pipes always run on the same thresholds, so behavior does
+  not depend on the model's mood or its sampling luck on a given turn;
+* the transcript stays clean: no "let me compress this phase" interjections,
+  compaction appears as a silent event;
+* fidelity is protected mechanically, not by a summary written at a lucky
+  moment: the verbatim tail, the `keepRecent` floor and the guaranteed
+  survival of the last user message all survive compaction regardless of the
+  model.
+
+NOTE: the two approaches are not mutually exclusive.
+yca still lets the model drive the *content* of a compaction, it just never
+lets the model drive its *timing*.
+
+== Opting into model-driven compression
+
+You can get opencode-style phase compression without changing the engine, by
+teaching the model to compact at natural phase boundaries through
+configuration only.
+The deterministic pipes stay as a safety net underneath.
+
+Three configuration levers combine to enable it:
+
+. Expose the self-service path: `yca.tools.manageContext.enabled=true` (the
+  default) gives the model the `manage_context` tool.
+. Keep the durable guidance: `yca.pruning.nudgeThresholdPercent > 0` (the
+  default `55`) is what injects the system-prompt rule telling the model to
+  proactively call `manage_context` instead of waiting for the hard limit.
+. Teach phase boundaries: add a custom agent
+  (xref:features/agents.adoc[Custom agents]) or a project/global `AGENTS.md`
+  rule whose prompt instructs the model to compact when a phase completes.
+
+.Example agent prompt enabling phase-boundary compaction
+[source,text]
+----
+Compress phase boundaries: when a task phase completes (data collected,
+implementation validated) call manage_context with action=compact and a focus
+that summarizes the phase (decisions, results, next steps) before starting the
+next phase or writing the final answer.
+----
+
+You can also tune the nudge wording with
+`yca.pruning.nudgeTemplate` and `yca.pruning.nudgeUrgentTemplate`
+(see <<soft-context-usage-nudge>>) to invite a compact at wrap-up instead of
+merely wrapping up.
+The `%ACTIONS%` placeholder already renders a `manage_context` suggestion when
+the tool is exposed (see <<soft-context-usage-nudge>>).

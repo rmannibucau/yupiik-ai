@@ -102,8 +102,13 @@ public class TuiTranscriptModel extends ConversationTranscript {
      *        {@code **You**}/{@code **Assistant**} marker. Leading content with no
      *        marker (the welcome block) is a plain assistant segment and must not
      *        draw a speaker header.
+     * @param label the speaker label as written in the opening marker (fences
+     *        stripped, any {@code [HH:mm:ss]} timestamp kept), {@code null} for
+     *        unlabelled content - the marker is rendered once when the turn starts,
+     *        so this label carries the turn's real time even after the current
+     *        speaker labels moved on.
      */
-    public record TurnSegment(String text, boolean user, boolean labelled) {}
+    public record TurnSegment(String text, boolean user, boolean labelled, String label) {}
 
     /**
      * Splits plain transcript markdown into speaker turns. A line holding nothing but a
@@ -117,6 +122,12 @@ public class TuiTranscriptModel extends ConversationTranscript {
      * segment. Content before the first heading is assistant and is <em>not</em> labelled.
      * Code fences never reach this method (extracted before rendering).
      *
+     * <p>Speaker labels may embed a {@code {{formatDate}}} timestamp, so a marker written
+     * when the turn started (e.g. {@code **[10:11:26] You**}) and the same label rendered
+     * again later can differ by their leading {@code [time]} token; matching strips that
+     * token so a marker still opens its turn. Labels without a timestamp keep strict
+     * equality.</p>
+     *
      * @param userMarker       the user marker line ({@code **label**}), default {@code **You**}
      * @param assistantMarker  the assistant marker line ({@code **label**}), default {@code **Assistant**}
      */
@@ -126,13 +137,14 @@ public class TuiTranscriptModel extends ConversationTranscript {
         final var out = new java.util.ArrayList<TurnSegment>();
         var start = 0;
         var user = false;
+        String label = null;
         // only a segment opened by a real marker gets a speaker header: the leading
         // welcome block has none and must not be labelled
         var labelled = false;
         for (var i = 0; i < lines.length; i++) {
             final var speaker = lines[i].strip();
-            final var isUser = userMarker != null && userMarker.equals(speaker);
-            final var isAssistant = assistantMarker != null && assistantMarker.equals(speaker);
+            final var isUser = markerMatches(speaker, userMarker);
+            final var isAssistant = markerMatches(speaker, assistantMarker);
             if (!isUser && !isAssistant) {
                 continue;
             }
@@ -149,15 +161,19 @@ public class TuiTranscriptModel extends ConversationTranscript {
             }
             if (from > start) {
                 out.add(new TurnSegment(
-                        String.join("\n", java.util.Arrays.asList(lines).subList(start, from)), user, labelled));
+                        String.join("\n", java.util.Arrays.asList(lines).subList(start, from)), user, labelled, label));
             }
             user = isUser;
+            label = markerLabel(speaker);
             start = i;
             labelled = true;
         }
         if (start < lines.length) {
             out.add(new TurnSegment(
-                    String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)), user, labelled));
+                    String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)),
+                    user,
+                    labelled,
+                    label));
         }
         return out;
     }
@@ -165,6 +181,48 @@ public class TuiTranscriptModel extends ConversationTranscript {
     /** {@link #splitTurns(String, String, String)} with the historic default markers. */
     public static java.util.List<TurnSegment> splitTurns(final String text) {
         return splitTurns(text, "**You**", "**Assistant**");
+    }
+
+    /**
+     * Marker comparison: exact equality is the fast path used by labels without a timestamp;
+     * when that fails, both sides are compared after stripping the {@code **} fences and any
+     * leading {@code [time]} token, so a marker written as {@code **[10:11:26] You**} still
+     * opens a turn looked up as {@code **[10:11:38] You**}.
+     */
+    private static boolean markerMatches(final String line, final String marker) {
+        if (line == null || marker == null) {
+            return false;
+        }
+        return line.equals(marker) || normalizedMarker(line).equals(normalizedMarker(marker));
+    }
+
+    /** Strips the {@code **} fences and any leading {@code [time]} token of a marker. */
+    private static String normalizedMarker(final String marker) {
+        final var inner = unwrap(marker);
+        final var timeEnd = timePrefixEnd(inner);
+        return timeEnd < 0 ? inner : inner.substring(timeEnd).stripLeading();
+    }
+
+    /** The speaker label as written in the marker line (fences stripped, timestamp kept). */
+    private static String markerLabel(final String line) {
+        return unwrap(line == null ? "" : line.strip());
+    }
+
+    /** Strips the {@code **} fences of a marker line; returns the raw line when not fenced. */
+    private static String unwrap(final String marker) {
+        if (marker == null || marker.length() < 4 || !marker.startsWith("**") || !marker.endsWith("**")) {
+            return marker;
+        }
+        return marker.substring(2, marker.length() - 2);
+    }
+
+    /** Index just past a leading {@code [..]} bracket token, or {@code -1} when none leads the label. */
+    private static int timePrefixEnd(final String label) {
+        if (label == null || !label.startsWith("[")) {
+            return -1;
+        }
+        final var end = label.indexOf(']');
+        return end < 0 ? -1 : end + 1;
     }
 
     public int anchorRow() {

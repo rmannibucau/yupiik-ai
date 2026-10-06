@@ -40,7 +40,8 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
-import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -53,25 +54,29 @@ class WebSearchManagerTest {
     Path tempDir;
 
     private JsonMapper mapper;
-    private HttpClient delegate;
-    private ExtendedHttpClient client;
+    // shared per test class: each per-test client spawned/stopped a selector thread, and the
+    // server is recreated per test anyway (ms-scale), so only the client is worth sharing
+    private static HttpClient delegate;
+    private static ExtendedHttpClient client;
 
-    @BeforeEach
-    void boot(final JsonMapper mapper) {
-        this.mapper = mapper;
-        this.delegate = HttpClient.newBuilder().build();
-        this.client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+    @BeforeAll
+    static void bootClient() {
+        delegate = HttpClient.newBuilder().build();
+        client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
     }
 
-    @AfterEach
-    void stop() {
+    @AfterAll
+    static void stopClient() {
         client.close();
         // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
         // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
         delegate.shutdownNow();
         delegate.close();
-        client = null;
-        delegate = null;
+    }
+
+    @BeforeEach
+    void boot(final JsonMapper mapper) {
+        this.mapper = mapper;
     }
 
     @Test

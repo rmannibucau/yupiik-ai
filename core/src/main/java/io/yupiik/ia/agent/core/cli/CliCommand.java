@@ -35,6 +35,7 @@ import io.yupiik.ia.agent.core.session.FileSessionStore;
 import io.yupiik.ia.agent.core.shell.AnsiShellFrontend;
 import io.yupiik.ia.agent.core.shell.AnsiShellIO;
 import io.yupiik.ia.agent.core.shell.ConversationCoordinator;
+import io.yupiik.ia.agent.core.shell.DurationFormat;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -834,7 +835,9 @@ public class CliCommand implements Runnable {
             }
             sb.append(lastTurnMetrics.llmCalls()).append(" LLM");
             if (lastTurnMetrics.thinkingDurationMs() > 0) {
-                sb.append(" (").append(lastTurnMetrics.thinkingDurationMs()).append("ms think)");
+                sb.append(" (")
+                        .append(DurationFormat.humanize(lastTurnMetrics.thinkingDurationMs()))
+                        .append(" think)");
             }
             final var tokPerSec = MetricsFormat.tokPerSec(lastTurnMetrics.throughput());
             if (!tokPerSec.isEmpty()) {
@@ -845,19 +848,19 @@ public class CliCommand implements Runnable {
                         .append(lastTurnMetrics.toolsRun())
                         .append(" tools ")
                         .append("(")
-                        .append(lastTurnMetrics.toolDurationSumMs())
-                        .append("ms sum")
+                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationSumMs()))
+                        .append(" sum")
                         .append("/")
-                        .append(lastTurnMetrics.toolDurationWallMs())
-                        .append("ms wall)");
+                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationWallMs()))
+                        .append(" wall)");
             } else {
                 sb.append(" · ")
                         .append(lastTurnMetrics.toolsRun())
                         .append(" tools (")
-                        .append(lastTurnMetrics.toolDurationSumMs())
-                        .append("ms/")
-                        .append(lastTurnMetrics.toolDurationWallMs())
-                        .append("ms)");
+                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationSumMs()))
+                        .append("/")
+                        .append(DurationFormat.humanize(lastTurnMetrics.toolDurationWallMs()))
+                        .append(")");
             }
         } else if (toolsRun > 0) {
             if (conf.showUsage()) {
@@ -879,7 +882,7 @@ public class CliCommand implements Runnable {
                         && session.runtime().usage().requests() > 0)) {
             sb.append(" · ");
         }
-        sb.append(String.format(Locale.ROOT, "%.1fs", elapsedMillis / 1000.0));
+        sb.append(DurationFormat.humanize(elapsedMillis));
         writeLineErr(MarkdownColorizer.status(sb.toString()));
     }
 

@@ -158,7 +158,19 @@ final class HeadlessBackend implements Backend {
     }
 
     @Override
-    public void close() {}
+    public void close() {
+        final var notify = onClose;
+        if (notify != null) {
+            notify.run();
+        }
+    }
+
+    private Runnable onClose;
+
+    /** Registers a callback invoked once the TUI released the terminal (runner closed). */
+    void onClose(final Runnable callback) {
+        this.onClose = callback;
+    }
 
     String text() {
         lock.lock();

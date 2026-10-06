@@ -88,7 +88,9 @@ public final class MetricsFormat {
             final var reasoning = throughput == null ? 0 : throughput.reasoningTokens();
             sb.append(transcript.turnLlmCalls()).append(" LLM");
             if (transcript.turnThinkingMs() > 0) {
-                sb.append(" (").append(transcript.turnThinkingMs()).append("ms think)");
+                sb.append(" (")
+                        .append(DurationFormat.humanize(transcript.turnThinkingMs()))
+                        .append(" think)");
             }
             if (full && reasoning > 0) {
                 sb.append(" · out ")
@@ -100,10 +102,10 @@ public final class MetricsFormat {
             sb.append(" · ")
                     .append(transcript.turnToolsRun())
                     .append(" tools (")
-                    .append(transcript.turnToolSumMs())
+                    .append(DurationFormat.humanize(transcript.turnToolSumMs()))
                     .append('/')
-                    .append(transcript.turnToolWallMs())
-                    .append("ms)");
+                    .append(DurationFormat.humanize(transcript.turnToolWallMs()))
+                    .append(")");
             final var throughputSegment = tokPerSec(throughput);
             if (!throughputSegment.isEmpty()) {
                 sb.append(" · ").append(throughputSegment);
@@ -112,7 +114,7 @@ public final class MetricsFormat {
                 sb.append(" · reasoning ")
                         .append(String.format(Locale.ROOT, "%.1f tok/s", throughput.reasoningTokensPerSecond()));
             }
-            sb.append(" · ").append(String.format(Locale.ROOT, "%.1fs", transcript.turnDurationMs() / 1000.0));
+            sb.append(" · ").append(DurationFormat.humanize(transcript.turnDurationMs()));
         } else {
             sb.append("(no turn yet)");
         }

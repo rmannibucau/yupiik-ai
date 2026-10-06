@@ -32,8 +32,15 @@ import java.util.Set;
  * <p>The command is split into segments on {@code &&}, {@code ||}, {@code ;}, {@code |}, single {@code &}
  * and newlines with a quote aware tokenizer (line continuations and pipelines spanning several lines are
  * supported). Every segment must match a rule resolving to {@code all}/{@code yolo} for the active agent
- * mode for the whole command to be auto-allowed; redirections, command substitutions and excluded options
+ * mode for the whole command to be auto-allowed; redirections, backticks and excluded options
  * (eg. {@code sed -i}) make the segment fall back to the normal ask/gate flow.</p>
+ *
+ * <p>Command substitutions {@code $( ... )} are verified recursively instead of being blanket-denied:
+ * the substituted command is evaluated with the same engine, so read-only substitutions
+ * (eg. {@code $(find . -name '*.java')}) are auto-allowed while any side effect gates the whole command.
+ * Shell control keywords ({@code for}, {@code if}, {@code while}, {@code do}, {@code done}...) are syntax,
+ * not commands: they are skipped so {@code for f in $(find .); do echo $f; done} works, but every real
+ * command in a loop body, condition or branch is still evaluated segment by segment.</p>
  */
 public final class BashRules {
 
@@ -49,7 +56,7 @@ public final class BashRules {
         NO_MATCH,
         /** A rule matched but resolves to interactive approval (ask/auto_edit) in the active mode. */
         NOT_YOLO,
-        /** The segment carries a redirection or a command substitution; never auto-allowed. */
+        /** The segment carries a redirection, a backtick, or a $() group that could not be verified read-only. */
         REDIRECT_OR_SUBSTITUTION
     }
 
@@ -108,6 +115,13 @@ public final class BashRules {
 
     public static final class Compiled {
         private static final Set<String> TOLERATED_REDIRECTS = Set.of("2>/dev/null", ">/dev/null", "2>&1");
+        // shell control keywords are syntax markers, not commands: they never execute anything by themselves
+        private static final Set<String> STRUCTURAL_HEAD =
+                Set.of("for", "while", "until", "if", "then", "else", "elif", "do", "done", "fi");
+        // command substitution placeholders introduced by mask(command)
+        private static final String SUBSTITUTION_PREFIX = "YCA_SUB_";
+        // guard against pathological nested $($($(...))) commands
+        private static final int MAX_SUBSTITUTION_DEPTH = 32;
 
         private final List<CompiledRule> rules;
 
@@ -122,21 +136,29 @@ public final class BashRules {
          * plus the arity-style command prefix (matched rule {@code commandStart}) used to key session grants.
          */
         public Evaluation evaluate(final AgentMode agentMode, final String command) {
+            return evaluateDeep(agentMode, command, 0);
+        }
+
+        private Evaluation evaluateDeep(final AgentMode agentMode, final String command, final int depth) {
             if (command == null || command.isBlank()) {
                 return new Evaluation(true, null, null, null);
             }
-            final var segments = tokenize(command);
+            if (depth >= MAX_SUBSTITUTION_DEPTH) {
+                return new Evaluation(false, null, command, Cause.REDIRECT_OR_SUBSTITUTION);
+            }
+            final var masked = mask(command);
+            final var segments = tokenize(masked.text());
             var allowed = true;
             var matchedSegments = 0;
             var matchedStart = (String) null;
             String deniedSegment = null;
             Cause deniedCause = null;
             for (final var segment : segments) {
-                final var decision = evaluateSegment(segment, agentMode);
+                final var decision = evaluateSegment(segment, agentMode, masked, depth);
                 if (!decision.allowed()) {
                     allowed = false;
                     if (deniedSegment == null) {
-                        deniedSegment = join(segment);
+                        deniedSegment = join(segment, masked);
                         deniedCause = decision.cause();
                     }
                 }
@@ -156,13 +178,13 @@ public final class BashRules {
                     deniedCause);
         }
 
-        private static String join(final Segment segment) {
+        private static String join(final Segment segment, final MaskedCommand masked) {
             final var sb = new StringBuilder();
             for (final var token : segment.tokens()) {
                 if (sb.length() > 0) {
                     sb.append(' ');
                 }
-                sb.append(token.text());
+                sb.append(expand(token.text(), masked));
             }
             return sb.toString();
         }
@@ -172,17 +194,12 @@ public final class BashRules {
             if (command == null || command.isBlank()) {
                 return List.of();
             }
+            final var masked = mask(command);
             final var segments = new ArrayList<String>();
-            for (final var segment : tokenize(command)) {
-                final var sb = new StringBuilder();
-                for (final var token : segment.tokens()) {
-                    if (sb.length() > 0) {
-                        sb.append(' ');
-                    }
-                    sb.append(token.text());
-                }
-                if (sb.length() > 0) {
-                    segments.add(sb.toString());
+            for (final var segment : tokenize(masked.text())) {
+                final var text = join(segment, masked);
+                if (!text.isEmpty()) {
+                    segments.add(text);
                 }
             }
             return segments;
@@ -277,40 +294,120 @@ public final class BashRules {
 
         private record SegmentDecision(boolean allowed, String matchedStart, Cause cause) {}
 
-        private SegmentDecision evaluateSegment(final Segment segment, final AgentMode agentMode) {
-            final var effective = new ArrayList<Token>(segment.tokens().size());
+        private SegmentDecision evaluateSegment(
+                final Segment segment, final AgentMode agentMode, final MaskedCommand masked, final int depth) {
+            var effective = new ArrayList<Token>(segment.tokens().size());
             for (final var token : segment.tokens()) {
                 if (!TOLERATED_REDIRECTS.contains(token.text())) {
                     effective.add(token);
                 }
             }
-            // remaining redirections (>, <) and command substitutions ($(), backticks) are never auto-allowed
+            // remaining redirections (>, <) and backticks are never auto-allowed; $() is masked to placeholders
             for (final var token : effective) {
                 if (token.redirect() || token.substitution()) {
                     return new SegmentDecision(false, null, Cause.REDIRECT_OR_SUBSTITUTION);
                 }
             }
+            // control keywords are syntax, not commands: `for ... done` and `if ... fi` never execute the
+            // keywords themselves, and the real commands of their bodies/conditions/branches are still
+            // evaluated below segment by segment, so `for f in $(rm -rf /); do ...` stays gated
+            final var structural = structuralPrefixLength(effective);
+            if (structural > 0) {
+                if (structural >= effective.size()) {
+                    return new SegmentDecision(true, null, null); // keyword-only segment (done, fi, ...)
+                }
+                if ("for".equals(effective.get(0).text())) {
+                    return evaluateForSegment(effective, structural, agentMode, masked, depth);
+                }
+                effective = new ArrayList<>(effective.subList(structural, effective.size()));
+            }
+
             var i = 0;
             while (i < effective.size() && isEnvAssignment(effective.get(i).text())) {
                 i++;
             }
             if (i >= effective.size()) {
-                return new SegmentDecision(true, null, null); // pure env assignments
+                // pure env assignments: their value may embed a $() that must be verified too
+                return verifyPlaceholders(effective, agentMode, masked, depth);
             }
 
             final var text = effective.get(i).text();
-            if ("cd".equals(text)) {
-                return new SegmentDecision(true, null, null); // directory change has no repository side effect
+            final var decision = "cd".equals(text)
+                    ? new SegmentDecision(true, null, null) // directory change has no repository side effect
+                    : "xargs".equals(text)
+                            ? evaluateXargs(effective, i, agentMode)
+                            : evaluateCommandTokens(toTexts(effective, i), agentMode);
+            if (!decision.allowed()) {
+                return decision;
             }
-            if ("xargs".equals(text)) {
-                return evaluateXargs(effective, i, agentMode);
-            }
+            // a family match (or cd/xargs/env tolerance) is not enough on its own: every $() argument
+            // must itself evaluate to a read-only command
+            return verifyPlaceholders(effective, agentMode, masked, depth);
+        }
 
-            final var tokens = new ArrayList<String>(effective.size() - i);
-            for (var j = i; j < effective.size(); j++) {
-                tokens.add(effective.get(j).text());
+        /**
+         * {@code for NAME [in] LIST} body opener: NAME is a plain loop variable and {@code in} is syntax,
+         * only the iteration LIST is command-line material - literal words, globs and verified $().
+         */
+        private SegmentDecision evaluateForSegment(
+                final List<Token> tokens,
+                final int start,
+                final AgentMode agentMode,
+                final MaskedCommand masked,
+                final int depth) {
+            var idx = start;
+            if (idx < tokens.size()) {
+                idx++; // loop variable name
             }
-            return evaluateCommandTokens(tokens, agentMode);
+            if (idx < tokens.size() && "in".equals(tokens.get(idx).text())) {
+                idx++;
+            }
+            return verifyPlaceholders(new ArrayList<>(tokens.subList(idx, tokens.size())), agentMode, masked, depth);
+        }
+
+        /**
+         * Fails the segment unless every $() placeholder in the tokens evaluates to a read-only command.
+         * Glued placeholders (eg. {@code echo "a $(ls) b"}) cannot be proven harmless and fall back to
+         * the gate, as do unbalanced or out-of-range placeholders.
+         */
+        private SegmentDecision verifyPlaceholders(
+                final List<Token> tokens, final AgentMode agentMode, final MaskedCommand masked, final int depth) {
+            for (final var token : tokens) {
+                final var ref = placeholderRef(token.text());
+                if (ref.kind() == PlaceholderKind.NONE) {
+                    continue;
+                }
+                if (ref.kind() == PlaceholderKind.GLUED
+                        || ref.index() < 0
+                        || ref.index() >= masked.substitutions().size()) {
+                    return new SegmentDecision(false, null, Cause.REDIRECT_OR_SUBSTITUTION);
+                }
+                final var inner = evaluateDeep(agentMode, masked.substitutions().get(ref.index()), depth + 1);
+                if (!inner.allowed()) {
+                    return new SegmentDecision(
+                            false,
+                            null,
+                            inner.deniedCause() != null ? inner.deniedCause() : Cause.REDIRECT_OR_SUBSTITUTION);
+                }
+            }
+            return new SegmentDecision(true, null, null);
+        }
+
+        private static int structuralPrefixLength(final List<Token> tokens) {
+            var count = 0;
+            while (count < tokens.size()
+                    && STRUCTURAL_HEAD.contains(tokens.get(count).text())) {
+                count++;
+            }
+            return count;
+        }
+
+        private static List<String> toTexts(final List<Token> tokens, final int from) {
+            final var texts = new ArrayList<String>(tokens.size() - from);
+            for (var i = from; i < tokens.size(); i++) {
+                texts.add(tokens.get(i).text());
+            }
+            return texts;
         }
 
         private SegmentDecision evaluateCommandTokens(final List<String> tokens, final AgentMode agentMode) {
@@ -648,6 +745,248 @@ public final class BashRules {
                 }
             }
             return false;
+        }
+
+        // ------------------------------------------------------------------
+        // command substitution masking ($( ... ) and $(( ... )))
+        // ------------------------------------------------------------------
+
+        private record MaskedCommand(String text, List<String> substitutions) {}
+
+        private enum PlaceholderKind {
+            NONE,
+            PURE,
+            GLUED
+        }
+
+        private record PlaceholderRef(PlaceholderKind kind, int index) {}
+
+        /**
+         * Replaces every balanced command substitution {@code $( ... )} with a {@code YCA_SUB_<n>} placeholder
+         * (the captured command is stored for recursive verification) and every arithmetic expansion
+         * {@code $(( ... ))} with a harmless literal: arithmetic has no side effect. Single quoted content is
+         * left untouched (no substitution happens there) while double quoted content is masked the same way
+         * (substitutions are live inside). Unbalanced {@code $(} is left raw and fails closed in the tokenizer.
+         */
+        private static MaskedCommand mask(final String raw) {
+            final var sb = new StringBuilder(raw.length());
+            final var substitutions = new ArrayList<String>();
+            maskInto(raw, 0, raw.length(), sb, substitutions);
+            return new MaskedCommand(sb.toString(), substitutions);
+        }
+
+        private static void maskInto(
+                final String raw,
+                final int from,
+                final int to,
+                final StringBuilder out,
+                final List<String> substitutions) {
+            var i = from;
+            while (i < to) {
+                final var c = raw.charAt(i);
+                if (c == '\'') { // single quotes: everything inside is literal, $() included
+                    var end = i + 1;
+                    while (end < to && raw.charAt(end) != '\'') {
+                        end++;
+                    }
+                    out.append(raw, i, Math.min(end + 1, to));
+                    i = end + 1;
+                    continue;
+                }
+                if (c == '"') { // double quotes: $() and $(( )) are live, backslash escapes
+                    out.append(c);
+                    i++;
+                    while (i < to) {
+                        final var d = raw.charAt(i);
+                        if (d == '\\' && i + 1 < to) {
+                            out.append(d).append(raw.charAt(i + 1));
+                            i += 2;
+                            continue;
+                        }
+                        if (d == '"') {
+                            out.append(d);
+                            i++;
+                            break;
+                        }
+                        if (d == '$' && i + 1 < to && raw.charAt(i + 1) == '(') {
+                            i = captureGroup(raw, i + 1, to, out, substitutions);
+                            continue;
+                        }
+                        out.append(d);
+                        i++;
+                    }
+                    continue;
+                }
+                if (c == '\\') {
+                    out.append(c);
+                    if (i + 1 < to) {
+                        out.append(raw.charAt(i + 1));
+                        i++;
+                    }
+                    i++;
+                    continue;
+                }
+                if (c == '$' && i + 1 < to && raw.charAt(i + 1) == '(') {
+                    i = captureGroup(raw, i + 1, to, out, substitutions);
+                    continue;
+                }
+                out.append(c);
+                i++;
+            }
+        }
+
+        /**
+         * Captures the group opened by {@code $(} at {@code openParen}: command substitutions become
+         * {@code YCA_SUB_<n>} placeholders, arithmetic {@code $(( ... ))} becomes a harmless literal.
+         * Returns the index just past the group, or {@code openParen + 1} when unbalanced so the raw
+         * {@code $(} stays in place and is rejected by the tokenizer (fail closed).
+         */
+        private static int captureGroup(
+                final String raw,
+                final int openParen,
+                final int to,
+                final StringBuilder out,
+                final List<String> substitutions) {
+            final var arithmetic = openParen + 1 < to && raw.charAt(openParen + 1) == '(';
+            final var end = findGroupEnd(raw, openParen, to);
+            if (end < 0) {
+                out.append('$').append('(');
+                return openParen + 1;
+            }
+            if (arithmetic) {
+                out.append('0');
+            } else {
+                substitutions.add(raw.substring(openParen + 1, end));
+                out.append(SUBSTITUTION_PREFIX).append(substitutions.size() - 1);
+            }
+            return end + 1;
+        }
+
+        /**
+         * Finds the {@code )} balancing the paren at {@code openParen}, ignoring quoted and escaped parens
+         * while still counting the parens of nested substitutions. Returns -1 when the group is unbalanced.
+         */
+        private static int findGroupEnd(final String raw, final int openParen, final int to) {
+            var depth = 1;
+            var i = openParen + 1;
+            while (i < to) {
+                final var c = raw.charAt(i);
+                if (c == '\\') {
+                    i += 2;
+                    continue;
+                }
+                if (c == '\'') {
+                    i = skipSingleQuoted(raw, i, to);
+                    continue;
+                }
+                if (c == '"') {
+                    i = skipDoubleQuoted(raw, i, to);
+                    continue;
+                }
+                if (c == '(') {
+                    depth++;
+                } else if (c == ')') {
+                    depth--;
+                    if (depth == 0) {
+                        return i;
+                    }
+                }
+                i++;
+            }
+            return -1;
+        }
+
+        private static int skipSingleQuoted(final String raw, final int open, final int to) {
+            var i = open + 1;
+            while (i < to && raw.charAt(i) != '\'') {
+                i++;
+            }
+            return i < to ? i + 1 : to;
+        }
+
+        /** Skips a double quoted section while still counting the parens of nested live $() groups. */
+        private static int skipDoubleQuoted(final String raw, final int open, final int to) {
+            var i = open + 1;
+            while (i < to) {
+                final var c = raw.charAt(i);
+                if (c == '\\') {
+                    i += 2;
+                    continue;
+                }
+                if (c == '"') {
+                    return i + 1;
+                }
+                if (c == '$' && i + 1 < to && raw.charAt(i + 1) == '(') {
+                    final var end = findGroupEnd(raw, i + 1, to);
+                    if (end < 0) {
+                        return to; // unbalanced: nothing sensible to do, bail out
+                    }
+                    i = end + 1;
+                    continue;
+                }
+                i++;
+            }
+            return to;
+        }
+
+        /** Parses the numeric index of a pure {@code YCA_SUB_<n>} placeholder, or -1 when not one. */
+        private static int substitutionIndex(final String token) {
+            if (!token.startsWith(SUBSTITUTION_PREFIX)) {
+                return -1;
+            }
+            final var number = token.substring(SUBSTITUTION_PREFIX.length());
+            if (number.isEmpty()) {
+                return -1;
+            }
+            for (var i = 0; i < number.length(); i++) {
+                if (number.charAt(i) < '0' || number.charAt(i) > '9') {
+                    return -1;
+                }
+            }
+            return Integer.parseInt(number);
+        }
+
+        /**
+         * Classifies a token relative to the substitution placeholders: {@code PURE} when the whole token
+         * (the value part for env assignments) is a placeholder, {@code GLUED} when a placeholder is mixed
+         * with other literal text (fail closed), {@code NONE} otherwise.
+         */
+        private static PlaceholderRef placeholderRef(final String token) {
+            var candidate = token;
+            if (isEnvAssignment(token)) {
+                candidate = token.substring(token.indexOf('=') + 1);
+            }
+            final var index = substitutionIndex(candidate);
+            if (index >= 0) {
+                return new PlaceholderRef(PlaceholderKind.PURE, index);
+            }
+            if (token.contains(SUBSTITUTION_PREFIX) || candidate.contains(SUBSTITUTION_PREFIX)) {
+                return new PlaceholderRef(PlaceholderKind.GLUED, -1);
+            }
+            return new PlaceholderRef(PlaceholderKind.NONE, -1);
+        }
+
+        /** Replaces placeholders in a token by their original {@code $( ... )} text (denials and deny matching). */
+        private static String expand(final String token, final MaskedCommand masked) {
+            final var ref = placeholderRef(token);
+            if (ref.kind() == PlaceholderKind.GLUED) {
+                var expanded = token;
+                for (var i = 0; i < masked.substitutions().size(); i++) {
+                    expanded = expanded.replace(
+                            SUBSTITUTION_PREFIX + i,
+                            "$(" + masked.substitutions().get(i) + ")");
+                }
+                return expanded;
+            }
+            if (ref.kind() != PlaceholderKind.PURE
+                    || ref.index() >= masked.substitutions().size()) {
+                return token;
+            }
+            final var replacement = "$(" + masked.substitutions().get(ref.index()) + ")";
+            if (isEnvAssignment(token)) {
+                return token.substring(0, token.indexOf('=') + 1) + replacement;
+            }
+            return replacement;
         }
     }
 

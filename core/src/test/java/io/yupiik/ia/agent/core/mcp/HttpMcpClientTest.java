@@ -30,7 +30,9 @@ import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -45,14 +47,6 @@ class HttpMcpClientTest {
             server.stop(0);
             server = null;
         }
-        client = null;
-        httpClient.close();
-        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
-        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
-        delegate.shutdownNow();
-        delegate.close();
-        httpClient = null;
-        delegate = null;
     }
 
     private com.sun.net.httpserver.HttpServer server;
@@ -60,14 +54,28 @@ class HttpMcpClientTest {
     private Object serverState;
 
     private JsonMapper mapper;
-    private HttpClient delegate;
-    private ExtendedHttpClient httpClient;
+    // shared per test class: each per-test client spawned/stopped a selector thread
+    private static HttpClient delegate;
+    private static ExtendedHttpClient httpClient;
+
+    @BeforeAll
+    static void bootClient() {
+        delegate = HttpClient.newBuilder().build();
+        httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
+    }
+
+    @AfterAll
+    static void stopClient() {
+        httpClient.close();
+        // HttpResponse/completion is done at that point: the graceful shutdown can wait forever on a
+        // lingering (SSE/keep-alive) connection of the test server, so abort the selector first.
+        delegate.shutdownNow();
+        delegate.close();
+    }
 
     @BeforeEach
     void boot(final JsonMapper mapper) {
         this.mapper = mapper;
-        this.delegate = HttpClient.newBuilder().build();
-        this.httpClient = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
     }
 
     private void start(final boolean sse) throws IOException, InterruptedException {

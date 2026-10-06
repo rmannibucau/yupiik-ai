@@ -24,6 +24,7 @@ import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.cli.CliPromptTemplate;
+import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.cli.PromptHandlebarsHelper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
@@ -34,6 +35,8 @@ import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,6 +51,14 @@ class SpeakerLabelsTest {
     void bindMapper(final JsonMapper mapper) {
         this.mapper = mapper;
     }
+
+    /**
+     * Fixed clock so the default templates' {@code {{formatDate "HH:mm:ss"}}} renders a deterministic stamp.
+     * {@code 2026-09-24T10:11:12Z} in UTC -> {@code [10:11:12] }.
+     */
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
+
+    private static final String STAMP = "[10:11:12] ";
 
     private static final String USER = System.getProperty("user.name");
     private static final String USER_FALLBACK = USER == null || USER.isBlank() ? "You" : USER;
@@ -72,14 +83,18 @@ class SpeakerLabelsTest {
     }
 
     private SpeakerLabels labels(final CodingAgentConfiguration configuration) {
-        return new SpeakerLabels(configuration, chatClient(configuration), providerManager(configuration));
+        return new SpeakerLabels(
+                List.of(new FormatDatePromptHelper(CLOCK)),
+                configuration,
+                chatClient(configuration),
+                providerManager(configuration));
     }
 
     @Test
     void defaultUserLabelIsTheOsUser() {
         final var configuration = configuration(Map.of());
         assertEquals(
-                USER_FALLBACK,
+                STAMP + USER_FALLBACK,
                 labels(configuration)
                         .userLabel(new SpeakerLabels.Ctx("llm-test", "default", null, "plan", "s1", null)));
     }
@@ -88,12 +103,12 @@ class SpeakerLabelsTest {
     void defaultAssistantLabelIsProviderColonColonModel() {
         final var configuration = configuration(Map.of());
         assertEquals(
-                "default::llm-test",
+                STAMP + "default::llm-test",
                 labels(configuration)
                         .assistantLabel(new SpeakerLabels.Ctx("llm-test", "default", null, "plan", "s1", null)));
         // no model resolved -> falls back to "Assistant"
         assertEquals(
-                "Assistant",
+                STAMP + "Assistant",
                 labels(configuration).assistantLabel(new SpeakerLabels.Ctx(null, null, null, "plan", "s1", null)));
     }
 
@@ -191,7 +206,9 @@ class SpeakerLabelsTest {
     @Test
     void replayRendersStoredIdentityWhenCurrentLabelsDiffer() {
         // history recorded under provider M1 then M2; the current transcript labels are M2
-        final var configuration = configuration(Map.of());
+        final var configuration = configuration(Map.of(
+                "yca.labels.userTemplate", "{{model.provider}}::{{model.name}}",
+                "yca.labels.assistantTemplate", "{{model.provider}}::{{model.name}}"));
         final var labels = labels(configuration);
         final var t = new ConversationTranscript();
         t.setLabelResolver((identity, user) -> {

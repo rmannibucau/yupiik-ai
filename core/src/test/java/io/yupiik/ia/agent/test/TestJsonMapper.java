@@ -28,6 +28,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.json.serialization.JsonCodec;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiPredicate;
 import org.junit.jupiter.api.extension.ExtensionContext;
 import org.junit.jupiter.api.extension.ParameterContext;
@@ -35,14 +36,11 @@ import org.junit.jupiter.api.extension.ParameterResolver;
 
 /**
  * JUnit extension providing a {@link JsonMapper} covering all the {@code $FusionJsonCodec}s of the classpath.
- * Boots once per test class a lightweight container keeping only the JSON beans ({@link JsonCodec}s and the
+ * Boots once per JVM a lightweight container keeping only the JSON beans ({@link JsonCodec}s and the
  * {@link JsonMapper} itself) and filtering all listeners out (no Start/Stop, no configuration wiring: nothing
- * initializes) and lets JUnit auto-close the container and the mapper instance when the test class context
- * is closed.
+ * initializes). The mapper and its container live for the whole JVM and are closed by a shutdown hook.
  */
 public class TestJsonMapper implements ParameterResolver {
-    private static final ExtensionContext.Namespace NAMESPACE = ExtensionContext.Namespace.create(TestJsonMapper.class);
-
     @Override
     public boolean supportsParameter(final ParameterContext parameterContext, final ExtensionContext extensionContext) {
         return JsonMapper.class == parameterContext.getParameter().getType();
@@ -50,59 +48,76 @@ public class TestJsonMapper implements ParameterResolver {
 
     @Override
     public Object resolveParameter(final ParameterContext parameterContext, final ExtensionContext extensionContext) {
-        // the mapper and its container must live for the whole test class, not per test method:
-        // store them in the class-level context so JUnit closes them once all the tests are done.
-        var context = extensionContext;
-        while (context.getTestMethod().isPresent()) {
-            context = context.getParent().orElseThrow(() -> new IllegalStateException("No parent extension context"));
+        return Holder.MAPPER.mapper();
+    }
+
+    /**
+     * JVM-wide singleton: booting a container per test class was the dominant cost of the slowest
+     * tests (each boot does a full classpath scan + CDI bootstrap of the JSON beans, ~0.5-1.5s),
+     * so it is now booted once, lazily on first use; the static initializer is thread-safe and the
+     * shutdown hook closes the mapper and the container exactly once on JVM exit.
+     */
+    private static final class Holder {
+        private static final Holder MAPPER = boot();
+
+        private static final AtomicBoolean CLOSED = new AtomicBoolean();
+
+        static {
+            Runtime.getRuntime().addShutdownHook(new Thread(Holder::closeOnce, "yca-test-json-mapper-close"));
         }
-        final var holder = context.getStore(NAMESPACE).computeIfAbsent(JsonMapper.class, key -> boot(), Holder.class);
-        return holder.mapper();
-    }
 
-    private static Holder boot() {
-        final var container = of().register(new FusionModule() {
-                    @Override
-                    public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
-                        // json only: the mapper, the codecs and the default beans it relies on
-                        // (Configuration, Emitter, RuntimeContainer), the CLI/wiring/tui beans are not needed
-                        return (runtimeContainer, bean) -> isA(bean.type(), JsonCodec.class)
-                                || isA(bean.type(), JsonMapper.class)
-                                || isA(bean.type(), Configuration.class)
-                                || isA(bean.type(), Emitter.class)
-                                || isA(bean.type(), RuntimeContainer.class);
-                    }
+        private final Instance<JsonMapper> mapperInstance;
+        private final RuntimeContainer container;
 
-                    @Override
-                    public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
-                        return (runtimeContainer, listener) -> false; // no listener -> nothing initializes
-                    }
-                })
-                .start();
-        try {
-            return new Holder(container.lookup(JsonMapper.class), container);
-        } catch (final RuntimeException e) {
-            container.close();
-            throw e;
+        private Holder(final Instance<JsonMapper> mapperInstance, final RuntimeContainer container) {
+            this.mapperInstance = mapperInstance;
+            this.container = container;
         }
-    }
 
-    private static boolean isA(final Type type, final Class<?> expected) {
-        final var clazz = type instanceof ParameterizedType parameterized
-                ? (Class<?>) parameterized.getRawType()
-                : (Class<?>) type;
-        return expected.isAssignableFrom(clazz);
-    }
-
-    private record Holder(Instance<JsonMapper> mapperInstance, RuntimeContainer container) implements AutoCloseable {
         private JsonMapper mapper() {
             return mapperInstance.instance();
         }
 
-        @Override
-        public void close() {
-            mapperInstance.close(); // the container does not track instances: closing the lookup runs the bean destroy
-            container.close();
+        private static Holder boot() {
+            final var container = of().register(new FusionModule() {
+                        @Override
+                        public BiPredicate<RuntimeContainer, FusionBean<?>> beanFilter() {
+                            // json only: the mapper, the codecs and the default beans it relies on
+                            // (Configuration, Emitter, RuntimeContainer), the CLI/wiring/tui beans are not needed
+                            return (runtimeContainer, bean) -> isA(bean.type(), JsonCodec.class)
+                                    || isA(bean.type(), JsonMapper.class)
+                                    || isA(bean.type(), Configuration.class)
+                                    || isA(bean.type(), Emitter.class)
+                                    || isA(bean.type(), RuntimeContainer.class);
+                        }
+
+                        @Override
+                        public BiPredicate<RuntimeContainer, FusionListener<?>> listenerFilter() {
+                            return (runtimeContainer, listener) -> false; // no listener -> nothing initializes
+                        }
+                    })
+                    .start();
+            try {
+                return new Holder(container.lookup(JsonMapper.class), container);
+            } catch (final RuntimeException e) {
+                container.close();
+                throw e;
+            }
+        }
+
+        private static boolean isA(final Type type, final Class<?> expected) {
+            final var clazz = type instanceof ParameterizedType parameterized
+                    ? (Class<?>) parameterized.getRawType()
+                    : (Class<?>) type;
+            return expected.isAssignableFrom(clazz);
+        }
+
+        private static void closeOnce() {
+            if (CLOSED.compareAndSet(false, true)) {
+                MAPPER.mapperInstance
+                        .close(); // the container does not track instances: closing the lookup runs the bean destroy
+                MAPPER.container.close();
+            }
         }
     }
 }

@@ -331,4 +331,130 @@ class BashRulesTest {
         final var compiled = compile(List.of(rule(PermissionMode.YOLO, null, "jq")));
         assertEquals(List.of("jq:pom.json"), compiled.coverageKeys("jq '.version' pom.json"));
     }
+
+    @Test
+    void readOnlyCommandSubstitutionsAreRecursivelyVerified() {
+        // $( ... ) used to be blanket-denied; a substitution is now verified with the same engine
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
+            assertTrue(
+                    compiled.evaluate(agentMode, "echo $(find . -name '*.java')")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "echo \"$(find . -name '*.java')\"")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "path=$(find . -name '*.java' 2>/dev/null)")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "grep -l foo $(find src -name '*.java' | head -3)")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "LC_ALL=C grep foo $(find .)").allowed(), agentMode.name());
+            // nested substitutions are verified recursively
+            assertTrue(
+                    compiled.evaluate(agentMode, "echo $(head -1 $(find . -name '*.txt'))")
+                            .allowed(),
+                    agentMode.name());
+        }
+    }
+
+    @Test
+    void mutatingSubstitutionsStayGated() {
+        // the whole point of the recursive verification: side effects inside $( ... ) keep gating
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        final var denied = List.of(
+                "echo $(rm -rf /)",
+                "path=$(rm -rf /)",
+                "echo \"$(rm -rf /)\"",
+                "echo `rm -rf /`",
+                "echo <(rm -rf /)",
+                "echo \"a $(ls) b\"",
+                "for f in $(rm -rf /); do echo $f; done",
+                "echo $(git push)",
+                "echo $(find . -delete)",
+                "echo $(find .");
+        for (final var command : denied) {
+            assertFalse(compiled.evaluate(AgentMode.PLAN, command).allowed(), command);
+            assertFalse(compiled.evaluate(AgentMode.BUILD, command).allowed(), command);
+        }
+    }
+
+    @Test
+    void shellControlKeywordsAreSyntacticNotCommandFamilies() {
+        // `for ... done`, `if ... fi`, `while ... done` never execute the keywords themselves; the
+        // real commands of the bodies, conditions and branches are still evaluated segment by segment
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
+            assertTrue(
+                    compiled.evaluate(agentMode, "for f in $(find . -name '*.java'); do echo $f; done")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "for f in src/main pom.xml; do cat $f; done")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "if git diff --exit-code; then echo ok; else echo ko; fi")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "if [ -f pom.xml ]; then echo yes; fi")
+                            .allowed(),
+                    agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "while git status; do echo ready; done")
+                            .allowed(),
+                    agentMode.name());
+            // bodies are not skipped: a mutating command inside a loop gates the whole compound
+            assertFalse(
+                    compiled.evaluate(agentMode, "for f in a b; do git push; done")
+                            .allowed(),
+                    agentMode.name());
+            assertFalse(
+                    compiled.evaluate(agentMode, "while read -r line; do echo $line; done")
+                            .allowed(),
+                    agentMode.name());
+            assertFalse(
+                    compiled.evaluate(agentMode, "if git push; then echo no; fi")
+                            .allowed(),
+                    agentMode.name());
+        }
+    }
+
+    @Test
+    void theReportedExplorationCommandsAreAutoAllowed() {
+        // the exact two commands that motivated the change: read-only find + grep/wc/head pipelines
+        // and a for loop titled from a verified find|xargs|grep|head substitution
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
+            final var command1 = "grep -l '\\.hpl' $(find src/main/repositories -name '*.hwf') | wc -l"
+                    + "; echo '---'"
+                    + "; grep -h '\\.hpl' $(find src/main/repositories -name '*.hwf') | head -20";
+            assertTrue(compiled.evaluate(agentMode, command1).allowed(), agentMode.name());
+
+            final var command2 = "cd src/main/repositories && for f in $(find . -name '*.hpl' -print0"
+                    + " | xargs -0 grep -l '\\.hpl' 2>/dev/null | head -8); do echo \"== $f\""
+                    + "; grep -o 'filename>[^<]*\\.hpl' \"$f\" | head -3; done";
+            assertTrue(compiled.evaluate(agentMode, command2).allowed(), agentMode.name());
+        }
+    }
+
+    @Test
+    void segmentsExpandSubstitutionsBackForPatternMatching() {
+        final var compiled = compile(List.of(rule(PermissionMode.YOLO, null, "echo")));
+        assertEquals(List.of("echo $(ls -la)", "grep foo bar"), compiled.segments("echo $(ls -la) | grep foo bar"));
+    }
+
+    @Test
+    void doubleBracketTestsAndNestedSubstitutions() {
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        assertTrue(compiled.evaluate(AgentMode.PLAN, "if [[ -n \"$(find . -name '*.java')\" ]]; then echo x; fi")
+                .allowed());
+        assertFalse(compiled.evaluate(AgentMode.PLAN, "[[ $(rm -rf /) ]]").allowed());
+    }
 }

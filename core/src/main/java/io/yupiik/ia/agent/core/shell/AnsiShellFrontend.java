@@ -234,6 +234,10 @@ public class AnsiShellFrontend implements ShellFrontend {
                 sb.append(MarkdownColorizer.thinkChunk(rendered));
             } else if (region.tool()) {
                 sb.append(MarkdownColorizer.dimChunk(rendered));
+            } else if (region.log()) {
+                // log regions are TUI-only (captured while the TUI runs);
+                // render them plain if a headless frontend ever sees one
+                sb.append(rendered);
             } else {
                 sb.append(rendered);
             }

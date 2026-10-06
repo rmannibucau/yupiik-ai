@@ -71,6 +71,8 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.BusyLabels;
+import io.yupiik.ia.agent.core.shell.ConversationTranscript;
+import io.yupiik.ia.agent.core.shell.DurationFormat;
 import io.yupiik.ia.agent.core.shell.InterruptCoordinator;
 import io.yupiik.ia.agent.core.shell.MetricsFormat;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -90,12 +92,14 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -115,6 +119,7 @@ import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.logging.SimpleFormatter;
 import java.util.regex.Pattern;
 
 @DefaultScoped
@@ -151,6 +156,7 @@ public class TuiCommand implements Runnable {
     private final ChatClient chatClient;
     private final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService;
     private final SpeakerLabels speakerLabels;
+    private final AutoLogConfigurer autoLogConfigurer;
     private final McpManager mcpManager;
     private final VirtualThreadExecutor executor;
     private final ProviderManager providerManager;
@@ -183,12 +189,17 @@ public class TuiCommand implements Runnable {
     private volatile Color thoughtBg;
     private volatile Color toolBg;
     private volatile Style toolStyle;
+    private volatile Style logStyle;
     /** Optional full-viewport background fill (blank config keeps the terminal background). */
     private volatile Color screenBackground;
 
     private final TranscriptRenderer transcriptRenderer = new TranscriptRenderer();
     private volatile Palette palette;
     private volatile MarkdownStyles markdownStyles;
+    /** Role-aware markdown for turn bodies so each speaker's bold prose keeps its own color. */
+    private volatile MarkdownStyles userMarkdownStyles;
+
+    private volatile MarkdownStyles assistantMarkdownStyles;
     private volatile String theme = "dark";
     private final CompletionEngine completionEngine;
     private final PromptHistory promptHistory;
@@ -255,6 +266,7 @@ public class TuiCommand implements Runnable {
             final ChatClient chatClient,
             final io.yupiik.ia.agent.core.style.ModelStyleService modelStyleService,
             final SpeakerLabels speakerLabels,
+            final AutoLogConfigurer autoLogConfigurer,
             final McpManager mcpManager,
             final VirtualThreadExecutor executor,
             final ProviderManager providerManager,
@@ -284,6 +296,7 @@ public class TuiCommand implements Runnable {
         this.chatClient = chatClient;
         this.modelStyleService = modelStyleService;
         this.speakerLabels = speakerLabels;
+        this.autoLogConfigurer = autoLogConfigurer;
         this.mcpManager = mcpManager;
         this.executor = executor;
         this.providerManager = providerManager;
@@ -500,10 +513,27 @@ public class TuiCommand implements Runnable {
         this.toolBg = palette.mono() ? null : TuiColors.blend(palette.text(), palette.backgroundPanel(), 0.95);
         final var toolOpacity = Math.clamp(tuiConfiguration.toolOutputOpacity(), 0.05, 0.95);
         this.toolStyle = palette.blended(palette.text(), toolOpacity);
+        // captured log body text keeps the readable text tone; the per-level color lives on
+        // the bar and background so severities stay distinguishable (see logStyles(Level))
+        this.logStyle = palette.blended(palette.text(), opacity);
         // the markdown theme follows the same palette/code-theme switch so /theme (and
         // NO_COLOR) restyles bold and inline code too
         this.markdownStyles = MarkdownTheme.of(
                 this.palette, this.codeTheme, tuiConfiguration.strongColor(), tuiConfiguration.inlineCodeColor());
+        // each speaker keeps its own color end to end: bold prose follows the role color
+        // unless the user pinned an explicit strong color (then both roles share it)
+        final var strongColor = tuiConfiguration.strongColor();
+        final var roleStrong = strongColor == null || strongColor.isBlank() || "auto".equals(strongColor);
+        this.userMarkdownStyles = MarkdownTheme.of(
+                this.palette,
+                this.codeTheme,
+                roleStrong ? palette.primary() : strongColor,
+                tuiConfiguration.inlineCodeColor());
+        this.assistantMarkdownStyles = MarkdownTheme.of(
+                this.palette,
+                this.codeTheme,
+                roleStrong ? palette.accent() : strongColor,
+                tuiConfiguration.inlineCodeColor());
         // screen background: blank keeps the terminal background (default), a configured hex
         // paints the whole viewport first so empty areas match the palette instead of the
         // terminal scheme (mono and NO_COLOR keep the terminal background)
@@ -524,6 +554,9 @@ public class TuiCommand implements Runnable {
         if (persistHistory) {
             this.promptHistory.replaceWith(PromptHistory.load(historyStoragePath(), promptHistory.capacity()));
         }
+        // the sessions touched by this run are named once the terminal is released (see the
+        // logOpenedSessions call after the try-with-resources below)
+        List<UiState> openStates = List.of();
         try (final var tui = tuiRunnerFactory.create(conf, tuiConfiguration.hideCursor())) {
             // the manager is application-scoped: clear any state left by a previous run
             tabManager.reset();
@@ -542,7 +575,16 @@ public class TuiCommand implements Runnable {
                 gitBranchPoller.start();
             }
             // while the TUI owns the terminal, stderr logging would corrupt the screen:
-            // route app and JLine WARNING+ records into the UI instead
+            // route app and JLine INFO+ records into the content view (WARNING+ also into
+            // the status strip, SEVERE into the Alt+E error modal). The inline root handler
+            // installed by AutoLogConfigurer is detached first so nothing prints to the raw
+            // terminal, and re-attached on exit so headless/CLI runs keep their inline logs.
+            final var rootLogger = Logger.getLogger("");
+            final var inlineRootHandler = autoLogConfigurer.installedInlineHandler();
+            if (inlineRootHandler != null) {
+                rootLogger.removeHandler(inlineRootHandler);
+            }
+            final var rootFeedback = redirectLoggerToUi("", tui);
             final var julFeedback = redirectLoggerToUi("io.yupiik", tui);
             final var jlineFeedback = redirectLoggerToUi("org.jline", tui);
             try {
@@ -550,7 +592,8 @@ public class TuiCommand implements Runnable {
             } finally {
                 // quitting the app tears every tab down: interrupt each running turn, wait
                 // for the in-flight futures and release the per-session resources
-                for (final var state : tabManager.list()) {
+                openStates = List.copyOf(tabManager.list());
+                for (final var state : openStates) {
                     state.interrupted = true;
                     awaitInFlight(state);
                     disposeTab(state);
@@ -560,6 +603,12 @@ public class TuiCommand implements Runnable {
                 }
                 if (julFeedback != null) {
                     julFeedback.run();
+                }
+                if (rootFeedback != null) {
+                    rootFeedback.run();
+                }
+                if (inlineRootHandler != null) {
+                    rootLogger.addHandler(inlineRootHandler);
                 }
                 if (persistHistory) {
                     promptHistory.save(historyStoragePath());
@@ -574,11 +623,32 @@ public class TuiCommand implements Runnable {
         } catch (final Exception e) {
             throw new IllegalStateException(e.getMessage(), e);
         }
+        // the terminal is released here: tui.close() restored the main screen, so the lines
+        // below reach the real terminal instead of the alternate-screen buffer the TUI left
+        logOpenedSessions(openStates);
     }
 
     /** The tab currently rendered and receiving the keyboard. */
     private UiState active() {
         return tabManager.active();
+    }
+
+    /**
+     * Names the sessions this run touched so the user can resume the right one afterwards. Called
+     * only once the terminal is released (the TUI close has restored the main screen): each
+     * persisted session is logged with its tab title, single-session runs included. Empty sessions
+     * (nothing beyond an initial prompt) were deleted by {@link #disposeTab(UiState)} and skipped.
+     */
+    private void logOpenedSessions(final List<UiState> openStates) {
+        final var kept = new ArrayList<UiState>();
+        for (final var state : openStates) {
+            if (state.sessionId != null && !sessionStore.isEmpty(state.sessionId)) {
+                kept.add(state);
+            }
+        }
+        for (final var state : kept) {
+            LOG.info(() -> "session " + state.sessionId + " (" + tabTitle(state) + ")");
+        }
     }
 
     /**
@@ -730,9 +800,14 @@ public class TuiCommand implements Runnable {
 
     /**
      * While the TUI owns the terminal, stderr logging would corrupt the screen:
-     * detach the parent handlers of the given logger and route WARNING+ records
-     * into the active tab (status bar, SEVERE as an error) instead. Returns a restore
-     * callback, or null when the logger already carries custom handlers.
+     * detach the parent handlers of the given logger and route INFO+ records into
+     * the active tab content view as log regions (see
+     * {@link ConversationTranscript#LOG_BEGIN}); WARNING+ records also reach the
+     * status-strip notification and SEVERE the Alt+E error modal. The emitting
+     * logger's effective level is respected like a logging framework would
+     * ({@code isLoggable}), so a logger level raise downgrades to drop records
+     * below it. Returns a restore callback, or null when the logger already
+     * carries custom handlers.
      */
     private Runnable redirectLoggerToUi(final String name, final TuiRunner tui) {
         final var logger = Logger.getLogger(name);
@@ -743,26 +818,31 @@ public class TuiCommand implements Runnable {
         logger.setUseParentHandlers(false);
         final Handler handler = new Handler() {
             {
-                setLevel(Level.WARNING);
+                setLevel(Level.INFO);
             }
 
             @Override
             public void publish(final LogRecord record) {
-                if (record.getLevel().intValue() < Level.WARNING.intValue()) {
+                final var level = record.getLevel();
+                if (level.intValue() < Level.INFO.intValue()) {
                     return;
                 }
-                final var level = record.getLevel();
-                final var message = record.getMessage();
+                if (!Logger.getLogger(record.getLoggerName()).isLoggable(level)) {
+                    return;
+                }
+                final var message = MESSAGE_FORMATTER.formatMessage(record);
                 tui.runLater(() -> {
                     final var target = active();
                     if (target == null) {
                         return;
                     }
                     target.dirty = true;
-                    if (level == Level.SEVERE) {
-                        modelError(target, message);
-                    } else {
+                    appendLogRegion(target, level, record.getLoggerName(), message);
+                    if (level.intValue() >= Level.WARNING.intValue()) {
                         TuiCommand.notify(target, message);
+                        if (level.intValue() >= Level.SEVERE.intValue()) {
+                            modelError(target, message);
+                        }
                     }
                 });
             }
@@ -778,6 +858,43 @@ public class TuiCommand implements Runnable {
             logger.removeHandler(handler);
             logger.setUseParentHandlers(previousUseParentHandlers);
         };
+    }
+
+    /** Formats records captured by {@link #redirectLoggerToUi} (JUL placeholder substitution). */
+    private static final SimpleFormatter MESSAGE_FORMATTER = new SimpleFormatter();
+
+    private static final String AGENT_LOGGER_PREFIX = "io.yupiik.ia.agent.";
+
+    private static String shortLoggerName(final String loggerName) {
+        return loggerName != null
+                        && loggerName.startsWith(AGENT_LOGGER_PREFIX)
+                        && loggerName.length() > AGENT_LOGGER_PREFIX.length()
+                ? loggerName.substring(AGENT_LOGGER_PREFIX.length())
+                : loggerName;
+    }
+
+    /**
+     * Wraps one captured record between the {@code LOG_BEGIN}/{@code LOG_END}
+     * markers so the renderer styles it as its own region: the first line holds
+     * the rendered log block label (handlebars, {@code yca.labels.logsTemplate}),
+     * then the level and shortened logger name, then the formatted message. Live
+     * only: the block is not persisted into the {@link io.yupiik.ia.agent.core.llm.Message}
+     * history and is dropped by a {@code /resume} replay, like any ephemeral
+     * transcript content.
+     */
+    private void appendLogRegion(
+            final UiState target, final Level level, final String loggerName, final String message) {
+        final var settings = target.session.chatSettings();
+        final var mode = target.session.runtime() == null
+                ? null
+                : String.valueOf(target.session.runtime().permissions().mode());
+        final var ctx = speakerLabels.minimalistCtx(
+                chatClient == null ? null : chatClient.model(settings), target.activeAgent, mode, target.sessionId);
+        target.model.appendTranscript(ConversationTranscript.LOG_BEGIN + "\n"
+                + speakerLabels.logsLabel(ctx) + "\n"
+                + level.getName() + " " + shortLoggerName(loggerName) + "\n"
+                + message + "\n"
+                + ConversationTranscript.LOG_END);
     }
 
     private ApprovalGate gate(final TuiRunner tui, final UiState state) {
@@ -3060,7 +3177,8 @@ public class TuiCommand implements Runnable {
         // gated by showThinking, so no dedicated stacked panel is needed anymore
         renderTranscript(chat, frame, state);
         // the copy-safe zone is the chat body: chat already excludes the accent gutter
-        // (column 0) and the sidebar/todos; +2 skips the per-region left bar ("│ "/"┃ ")
+        // (column 0) and the sidebar/todos; +2 skips the per-region role bar (every line
+        // starts with the 2-cell "│ "/"┃ " bar, the pane wall is gone)
         state.copyZone = new Rect(chat.x() + 2, chat.y(), Math.max(1, chat.width() - 2), Math.max(1, chat.height()));
         var bottomIndex = 2;
         if (queueRows > 0) {
@@ -3355,17 +3473,25 @@ public class TuiCommand implements Runnable {
     }
 
     private void renderTranscript(final Rect rect, final dev.tamboui.terminal.Frame frame, final UiState state) {
-        final var block = block(" conversation ");
+        final var block = conversationBlock();
         frame.renderWidget(block, rect);
         final var inner = block.inner(rect);
         if (inner.isEmpty()) {
             return;
         }
+        // the conversation pane is open on the left: the pane wall is replaced by the
+        // per-region role bar, so the content starts one column earlier than block.inner()
+        final var content = new Rect(inner.x() - 1, inner.y(), inner.width() + 1, inner.height());
         final var rows = new ArrayList<String>();
         final var toolTops = new ArrayList<UiState.ToolTop>();
         final var footerLinks = new ArrayList<UiState.FooterLink>();
         final var chunks = chunks(
-                state.model.markdown(RUNNING_TOOL_MARKER, WELCOME), inner.width(), state, toolTops, footerLinks, rows);
+                state.model.markdown(RUNNING_TOOL_MARKER, WELCOME),
+                content.width(),
+                state,
+                toolTops,
+                footerLinks,
+                rows);
         state.flatRows = rows;
         final var total = chunks.stream().mapToInt(RenderedChunk::height).sum();
         final var maxViewOffset = Math.max(0, total - Math.max(1, inner.height()));
@@ -3398,7 +3524,7 @@ public class TuiCommand implements Runnable {
         for (final var top : toolTops) {
             anchors.add(new UiState.ToolAnchor(
                     top.ordinal(),
-                    new Rect(inner.x(), inner.y() + top.row() - viewOffset, inner.width(), 1),
+                    new Rect(content.x(), inner.y() + top.row() - viewOffset, content.width(), 1),
                     top.row()));
         }
         state.toolAnchors = anchors;
@@ -3408,7 +3534,8 @@ public class TuiCommand implements Runnable {
         for (final var link : footerLinks) {
             final var y = inner.y() + link.row() - viewOffset;
             if (y >= inner.y() && y < inner.y() + inner.height()) {
-                links.add(new UiState.ToolAnchor(link.ordinal(), new Rect(inner.x(), y, inner.width(), 1), link.row()));
+                links.add(new UiState.ToolAnchor(
+                        link.ordinal(), new Rect(content.x(), y, content.width(), 1), link.row()));
             }
         }
         state.toolFooterLinks = links;
@@ -3422,7 +3549,7 @@ public class TuiCommand implements Runnable {
             if (visibleH <= 0) {
                 continue;
             }
-            final var sub = new Rect(inner.x(), inner.y() + visibleTop, inner.width(), visibleH);
+            final var sub = new Rect(content.x(), inner.y() + visibleTop, content.width(), visibleH);
             frame.renderWidget(chunk.widget(skip), sub);
         }
         // search match highlighting: reversed strips over matched rows, same buffer
@@ -3437,7 +3564,7 @@ public class TuiCommand implements Runnable {
                     }
                     final var y = inner.y() + top + r - viewOffset;
                     if (y >= inner.y() && y < inner.y() + inner.height()) {
-                        frame.buffer().setStyle(new Rect(inner.x(), y, inner.width(), 1), Style.EMPTY.reversed());
+                        frame.buffer().setStyle(new Rect(content.x(), y, content.width(), 1), Style.EMPTY.reversed());
                     }
                 }
                 top += chunk.height();
@@ -3559,6 +3686,8 @@ public class TuiCommand implements Runnable {
                 addThoughtChunk(local, thoughtLines(region.text(), contentWidth), localRows);
             } else if (region.tool()) {
                 addToolCardChunk(local, region.text(), width, state, localToolTops, localFooterLinks, localRows);
+            } else if (region.log()) {
+                addLogChunk(local, logLines(region.text(), contentWidth), localRows);
             } else if (!region.text().isBlank()) {
                 appendChunks(local, region.text(), contentWidth, state, localRows);
             }
@@ -3595,6 +3724,196 @@ public class TuiCommand implements Runnable {
         lines.add(Line.from(thoughtBar(), Span.styled("thinking", thoughtStyle)));
         appendThoughtBody(lines, source, width);
         return lines;
+    }
+
+    /**
+     * Renders a captured log region inline: the first row carries the rendered block label
+     * (see {@link #appendLogRegion}) then the level and shortened logger name as bracket
+     * groups, and the message on the same row - so a log reads as one compact timeline
+     * entry instead of a header plus body. The label and logger groups are muted, the level
+     * group is bold in its level color, and the message keeps the shared {@link #logStyle}.
+     * A blank label (timestamp disabled) omits its group. The message remainder (wrapped
+     * continuation or fenced blocks) is rendered on following rows by
+     * {@link #appendLogBody}; the region keeps its level tint ({@link #logStyles}).
+     */
+    private RenderedLog logLines(final String text, final int width) {
+        var source = text.stripLeading();
+        final var nl = source.indexOf('\n');
+        final var label = nl < 0 ? source : source.substring(0, nl).strip();
+        source = nl < 0 ? "" : source.substring(nl + 1).stripLeading();
+        final var level = logLevel(source);
+        final var styles = logStyles(level);
+        final var lines = new ArrayList<Line>();
+        // the body head is "<LEVEL> <shortLogger>", the message starts on the next line
+        final var headEnd = source.indexOf('\n');
+        final var head = (headEnd < 0 ? source : source.substring(0, headEnd)).strip();
+        var message = headEnd < 0 ? "" : source.substring(headEnd + 1).stripLeading();
+        final var space = head.indexOf(' ');
+        final var levelToken = space < 0 ? "INFO" : head.substring(0, space).strip();
+        final var logger = space < 0 ? "" : head.substring(space + 1).strip();
+        if (space < 0 && !head.isBlank()) {
+            // no "<LEVEL> <shortLogger>" head: the whole body is the message
+            message = message.isBlank() ? head : head + "\n" + message;
+        }
+        final var meta = new ArrayList<Span>();
+        if (!label.isBlank()) {
+            meta.add(Span.styled("[" + label + "]", palette.muted()));
+        }
+        if (!levelToken.isBlank()) {
+            meta.add(Span.styled(
+                    "[" + levelToken + "]", palette.bold(logLevelColor(palette, tuiConfiguration.log(), level))));
+        }
+        if (!logger.isBlank()) {
+            meta.add(Span.styled("[" + logger + "]", palette.muted()));
+        }
+        final var messageEnd = message.indexOf('\n');
+        final var firstMessage = messageEnd < 0 ? message : message.substring(0, messageEnd);
+        final var messageTail =
+                messageEnd < 0 ? "" : message.substring(messageEnd + 1).stripLeading();
+        final var row = new ArrayList<Span>();
+        row.add(styles.bar());
+        row.addAll(meta);
+        if (!firstMessage.isBlank()) {
+            final var metaWidth =
+                    meta.stream().mapToInt(s -> s.content().length()).sum();
+            final var barWidth = styles.bar().content().length();
+            final var wrapped = MarkdownLines.wrapCode(
+                    List.of(Line.from(Span.styled(firstMessage, logStyle))), Math.max(1, width - barWidth - metaWidth));
+            row.addAll(wrapped.get(0).spans());
+            for (var i = 1; i < wrapped.size(); i++) {
+                lines.add(Line.from(styles.bar()).append(wrapped.get(i)));
+            }
+        }
+        lines.add(0, Line.from(row));
+        appendLogBody(lines, messageTail, width, styles.bar());
+        return new RenderedLog(lines, styles.bg());
+    }
+
+    /**
+     * Extracts the {@link Level} name from the body's first line (the
+     * {@link #appendLogRegion} format is {@code <LEVEL> <shortLogger>}): styling
+     * falls back to INFO when the level is missing or not parseable.
+     */
+    private static Level logLevel(final String body) {
+        final var first = body.indexOf('\n');
+        final var head = (first < 0 ? body : body.substring(0, first)).stripLeading();
+        final var space = head.indexOf(' ');
+        final var token = space < 0 ? head : head.substring(0, space);
+        if (token == null || token.isBlank()) {
+            return Level.INFO;
+        }
+        try {
+            return Level.parse(token);
+        } catch (final IllegalArgumentException parseError) {
+            return Level.INFO;
+        }
+    }
+
+    /**
+     * One log region resolved from its level: the thin bar span and the background
+     * tint (null in mono terminals). The body text keeps the shared
+     * {@link #logStyle} so the message stays readable against any tint.
+     */
+    private record RenderedLog(List<Line> lines, Color bg) {}
+
+    /**
+     * Per-level log styles resolved from {@code yca.tui.log.<level>.color}: a hex
+     * value wins, blank/auto follows the closest palette accent (error for SEVERE,
+     * warning for WARNING, info otherwise, dimmed for the debug levels) so the log
+     * regions never borrow the user (primary) or assistant (accent) role colors.
+     */
+    private LogStyles logStyles(final Level level) {
+        final var color = logLevelColor(palette, tuiConfiguration.log(), level);
+        return new LogStyles(
+                Span.styled("│ ", palette.blended(color, 0.25)),
+                palette.mono() ? null : TuiColors.blend(color, palette.backgroundPanel(), 0.94));
+    }
+
+    private record LogStyles(Span bar, Color bg) {}
+
+    /**
+     * Resolves the log color for a level: the configured {@code color} hex wins,
+     * blank/auto falls back to the closest semantic palette accent. Kept
+     * package-private so the per-level mapping is unit-testable without a TUI.
+     *
+     * @return a hex string ready for the palette blending helpers
+     */
+    static String logLevelColor(final Palette palette, final TuiLogConfiguration log, final Level level) {
+        final var cfg = levelConfig(log, level);
+        final var configured =
+                cfg == null || cfg.color() == null ? null : cfg.color().strip();
+        if (configured != null && !configured.isBlank() && !"auto".equals(configured)) {
+            return configured;
+        }
+        final var raw = level.intValue();
+        if (raw >= Level.SEVERE.intValue()) {
+            return palette.error();
+        }
+        if (raw >= Level.WARNING.intValue()) {
+            return palette.warning();
+        }
+        if (raw >= Level.CONFIG.intValue()) {
+            return palette.info();
+        }
+        final var dim = raw >= Level.FINE.intValue() ? 0.25 : raw >= Level.FINER.intValue() ? 0.40 : 0.55;
+        return hexOf(TuiColors.blend(palette.info(), palette.backgroundPanel(), dim));
+    }
+
+    /** Level-tone config entry for a level, or null when the config (or the level) is absent. */
+    private static TuiLogLevelConfiguration levelConfig(final TuiLogConfiguration log, final Level level) {
+        if (log == null) {
+            return null;
+        }
+        final var raw = level.intValue();
+        if (raw >= Level.SEVERE.intValue()) {
+            return log.severe();
+        }
+        if (raw >= Level.WARNING.intValue()) {
+            return log.warning();
+        }
+        if (raw >= Level.INFO.intValue()) {
+            return log.info();
+        }
+        if (raw >= Level.CONFIG.intValue()) {
+            return log.config();
+        }
+        if (raw >= Level.FINE.intValue()) {
+            return log.fine();
+        }
+        if (raw >= Level.FINER.intValue()) {
+            return log.finer();
+        }
+        return log.finest();
+    }
+
+    /** Renders a color back to {@code #rrggbb} for the palette blending helpers. */
+    static String hexOf(final Color color) {
+        final var rgb = color.toRgb();
+        return "#%02x%02x%02x".formatted(rgb.r(), rgb.g(), rgb.b());
+    }
+
+    /**
+     * Renders one log body into existing output lines, mirroring
+     * {@link #appendThoughtBody} so fenced blocks in a log message keep their
+     * code layout but on the level-tinted log bar and plain (non-italic) style.
+     */
+    private void appendLogBody(final List<Line> lines, final String source, final int width, final Span bar) {
+        final var body = new ArrayList<Line>();
+        for (final var seg : syntaxHighlighter.split(source)) {
+            final List<Line> rendered;
+            if (seg.type() == SyntaxHighlighter.Segment.Type.CODE) {
+                rendered = withBar(
+                        MarkdownLines.wrapCode(
+                                boldedCode(syntaxHighlighter.highlightLines(seg.language(), seg.text())), width),
+                        bar);
+            } else if (!seg.text().isBlank()) {
+                rendered = withBar(transcriptRenderer.renderRegion(seg.text(), width, logStyle, markdownStyles), bar);
+            } else {
+                continue;
+            }
+            TranscriptRenderer.appendBlocks(body, rendered, true);
+        }
+        lines.addAll(body);
     }
 
     /**
@@ -3713,10 +4032,20 @@ public class TuiCommand implements Runnable {
                             ? turn.text()
                             : turn.text().substring(markerEnd + 1).stripLeading();
                     final var bar = turn.user() ? userBar() : outputBar();
+                    final var roleMarkdown = turn.user() ? userMarkdownStyles : assistantMarkdownStyles;
                     final var lines = new ArrayList<>(
-                            withBar(transcriptRenderer.renderRegion(body, width, Style.EMPTY, markdownStyles), bar));
+                            withBar(transcriptRenderer.renderRegion(body, width, Style.EMPTY, roleMarkdown), bar));
                     if (turn.labelled()) {
-                        lines.add(0, turnHeader(turn.user(), width, state.model));
+                        // the header keeps the same bar so the left border stays continuous and
+                        // the rule reads flush with the panel edge like every content line. The
+                        // label comes from the marker as written at turn start (real timestamp);
+                        // a fresh render is only a fallback for hand-edited transcripts without
+                        // one. Colors stay role-driven: primary (user) vs accent (assistant).
+                        final var headerLabel =
+                                turn.label() == null || turn.label().isBlank()
+                                        ? (turn.user() ? state.model.userLabel() : state.model.assistantLabel())
+                                        : turn.label();
+                        lines.add(0, Line.from(bar).append(turnHeader(turn.user(), width, headerLabel)));
                         // spacer row above the header: two turns must never read as one
                         lines.add(0, Line.from(bar));
                     }
@@ -3788,6 +4117,27 @@ public class TuiCommand implements Runnable {
             final var paragraph = Paragraph.builder().text(text).overflow(Overflow.CLIP);
             if (thoughtBg != null) {
                 paragraph.background(thoughtBg);
+            }
+            return paragraph.scroll(Math.clamp(innerH - 1, 0, skip)).build();
+        }));
+    }
+
+    /**
+     * Like {@link #addThoughtChunk} but paints the log panel: a subtle full-width
+     * level-colored background tint (pre-blended solid color - terminals have no
+     * alpha) so captured logs read as their own category, colored by severity.
+     */
+    private void addLogChunk(final List<RenderedChunk> out, final RenderedLog log, final List<String> rows) {
+        final var lines = log.lines();
+        final var innerH = Math.max(lines.size(), 1);
+        final var text = Text.from(lines);
+        for (final var line : lines) {
+            rows.add(plainText(line));
+        }
+        out.add(new RenderedChunk(innerH, skip -> {
+            final var paragraph = Paragraph.builder().text(text).overflow(Overflow.CLIP);
+            if (log.bg() != null) {
+                paragraph.background(log.bg());
             }
             return paragraph.scroll(Math.clamp(innerH - 1, 0, skip)).build();
         }));
@@ -3913,7 +4263,7 @@ public class TuiCommand implements Runnable {
         if (card.running()) {
             return " running ";
         }
-        final var duration = card.elapsedMs() > 0 ? card.elapsedMs() + " ms" : "done";
+        final var duration = card.elapsedMs() > 0 ? DurationFormat.humanize(card.elapsedMs()) : "done";
         return card.ordinal() >= 0 ? " #" + card.ordinal() + " - " + duration + " " : " " + duration + " ";
     }
 
@@ -3937,7 +4287,7 @@ public class TuiCommand implements Runnable {
         if (card.running()) {
             label.append(" - running...");
         } else if (card.elapsedMs() > 0) {
-            label.append(" - ").append(card.elapsedMs()).append(" ms");
+            label.append(" - ").append(DurationFormat.humanize(card.elapsedMs()));
         }
         if (card.failed()) {
             label.append(" - failed");
@@ -4039,16 +4389,17 @@ public class TuiCommand implements Runnable {
      * Header line opening a speaker turn: a role-colored label followed by a rule running
      * to the panel edge. The rule is what makes the block boundary survive scrolling back
      * through a long transcript - a bare label at the text indent reads as another line of
-     * prose. Both spans share the role color so the header reads as one unit; mono mode
-     * keeps the role in the glyph shape because colors collapse to the terminal default.
+     * prose. Both spans share the role color so the header reads as one unit; the role
+     * glyph survives only in mono terminals as a shape fallback (colors collapse to the
+     * terminal default, so the bar and the rule would no longer carry the role).
      *
-     * @param user {@code true} for a user turn
-     * @param width content width available to the turn (bar already excluded)
+     * @param user {@code true} for a user turn, {@code false} for an assistant turn
+     * @param width content width available to the header (the role bar is already excluded)
+     * @param label the speaker label to display, e.g. {@code [10:11:26] rmannibucau}
      */
-    private Line turnHeader(final boolean user, final int width, final TuiTranscriptModel model) {
+    private Line turnHeader(final boolean user, final int width, final String label) {
         final var color = user ? palette.primary() : palette.accent();
-        final var label = user ? model.userLabel() : model.assistantLabel();
-        final var head = (palette.mono() ? glyphs.roleMark(user) : glyphs.turnMark()) + " " + label;
+        final var head = (palette.mono() ? glyphs.roleMark(user) + " " : "") + label;
         // the rule fills whatever the label left, never overflowing the panel
         final var rule = glyphs.rule().repeat(Math.max(0, width - head.length() - 1));
         return Line.from(Span.styled(head, palette.bold(color)), Span.styled(" " + rule, palette.style(color)));
@@ -4432,23 +4783,27 @@ public class TuiCommand implements Runnable {
         final var metrics = state.session.metrics();
         if (metrics.showPerTurn() && state.model.turnLlmCalls() > 0) {
             final var mode = metrics.displayMode();
-            final var duration = String.format(Locale.ROOT, "%.1fs", state.model.turnDurationMs() / 1000.0);
+            final var duration = DurationFormat.humanize(state.model.turnDurationMs());
             // empty when the throughput cannot be measured: the segment is then simply skipped
             final var tokPerSec = MetricsFormat.tokPerSec(state.model.turnThroughput());
             final var throughput = tokPerSec.isEmpty() ? "" : " · " + tokPerSec;
             if (mode == MetricsDisplayMode.COMPACT) {
                 parts.add(Span.styled(
-                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms)"
+                        " · " + state.model.turnLlmCalls() + " LLM ("
+                                + DurationFormat.humanize(state.model.turnThinkingMs()) + ")"
                                 + throughput + " · " + state.model.turnToolsRun() + " tools ("
-                                + state.model.turnToolSumMs() + "/" + state.model.turnToolWallMs() + "ms) · " + duration
+                                + DurationFormat.humanize(state.model.turnToolSumMs()) + "/"
+                                + DurationFormat.humanize(state.model.turnToolWallMs()) + ") · " + duration
                                 + "  ",
                         muted));
             } else if (mode == MetricsDisplayMode.FULL) {
                 parts.add(Span.styled(
-                        " · " + state.model.turnLlmCalls() + " LLM (" + state.model.turnThinkingMs() + "ms think)"
+                        " · " + state.model.turnLlmCalls() + " LLM ("
+                                + DurationFormat.humanize(state.model.turnThinkingMs()) + " think)"
                                 + throughput + " · " + state.model.turnToolsRun() + " tools ("
-                                + state.model.turnToolSumMs() + "ms sum/" + state.model.turnToolWallMs()
-                                + "ms wall) · " + duration + "  ",
+                                + DurationFormat.humanize(state.model.turnToolSumMs()) + " sum/"
+                                + DurationFormat.humanize(state.model.turnToolWallMs())
+                                + " wall) · " + duration + "  ",
                         muted));
             }
         }
@@ -4835,6 +5190,10 @@ public class TuiCommand implements Runnable {
                         if (state.showToolActions != ToolOutputVisibility.HIDDEN) {
                             appendModalRegion(rows, region.text(), contentWidth, textStyle);
                         }
+                    } else if (region.log()) {
+                        // captured logs never originate from a subagent transcript; render
+                        // them plain if one ever shows up here
+                        appendModalRegion(rows, region.text(), contentWidth, textStyle);
                     } else if (!region.text().isBlank()) {
                         appendModalRegion(rows, region.text(), contentWidth, textStyle);
                     }
@@ -6010,6 +6369,28 @@ public class TuiCommand implements Runnable {
                 .title(title)
                 .borders(Borders.ALL)
                 .borderType(BorderType.ROUNDED)
+                .borderColor(Color.hex(palette.border()))
+                .build();
+    }
+
+    /**
+     * Conversation panel: rounded frame "open" on the left - the pane keeps its corners
+     * and its top/right/bottom walls, but draws no left wall. The per-region role bar
+     * replaces it, so the transcript reads as one changing left bar (mode gutter, then
+     * role bar) instead of a pane border next to a separator.
+     */
+    private Block conversationBlock() {
+        return Block.builder()
+                .title(" conversation ")
+                .borders(EnumSet.of(Borders.TOP, Borders.RIGHT, Borders.BOTTOM, Borders.LEFT))
+                .customBorderSet(BorderSet.builder()
+                        .horizontal("─")
+                        .rightVertical("│")
+                        .topLeft("╭")
+                        .topRight("╮")
+                        .bottomLeft("╰")
+                        .bottomRight("╯")
+                        .build())
                 .borderColor(Color.hex(palette.border()))
                 .build();
     }

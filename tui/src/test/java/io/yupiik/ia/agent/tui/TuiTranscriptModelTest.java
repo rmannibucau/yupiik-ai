@@ -195,6 +195,52 @@ class TuiTranscriptModelTest {
     }
 
     @Test
+    void splitTurnsMatchesMarkersWhoseTimestampDrifted() {
+        // speaker labels embed {{formatDate}}: the line written when the turn started keeps
+        // its own time while the marker looked up at render time shows the latest refresh,
+        // so the two no longer compare as equal strings. The leading [time] token must not
+        // break the boundary: the user header would otherwise leak into the body and inherit
+        // the previous (assistant) coloring.
+        final var md = "---\n\n**[10:11:26] rmannibucau**\n\nquestion\n\n"
+                + "**[10:11:38] freeinference::deepseek-v4-flash**\n\nanswer";
+        final var turns = TuiTranscriptModel.splitTurns(
+                md, "**[10:11:39] rmannibucau**", "**[10:11:38] freeinference::deepseek-v4-flash**");
+        assertEquals(2, turns.size());
+        assertTrue(turns.get(0).user());
+        assertTrue(turns.get(0).labelled());
+        assertEquals("[10:11:26] rmannibucau", turns.get(0).label());
+        assertTrue(turns.get(0).text().contains("question"));
+        assertFalse(turns.get(1).user());
+        assertTrue(turns.get(1).labelled());
+        assertEquals("[10:11:38] freeinference::deepseek-v4-flash", turns.get(1).label());
+        assertTrue(turns.get(1).text().contains("answer"));
+    }
+
+    @Test
+    void splitTurnsMatchesMarkersDriftedOnBothSides() {
+        // both markers drifted by a second: the roles must still be told apart and a user turn
+        // following an assistant marker must not swallow the assistant coloring
+        final var md = "**[10:11:20] Assistant**\n\nhello\n\n---\n\n" + "**[10:11:26] rmannibucau**\n\nquestion";
+        final var turns = TuiTranscriptModel.splitTurns(md, "**[10:11:27] rmannibucau**", "**[10:11:21] Assistant**");
+        assertEquals(2, turns.size());
+        assertFalse(turns.get(0).user());
+        assertTrue(turns.get(1).user());
+        assertTrue(turns.get(1).labelled());
+        assertEquals("[10:11:26] rmannibucau", turns.get(1).label());
+    }
+
+    @Test
+    void splitTurnsCarriesWrittenLabelForStrictMarkers() {
+        // labels without a timestamp keep strict equality and still expose their label so a
+        // later template change cannot redraw an older header with different content
+        final var turns = TuiTranscriptModel.splitTurns("**Boss**\n\ngo", "**Boss**", "**Robot**");
+        assertEquals(1, turns.size());
+        assertTrue(turns.get(0).user());
+        assertTrue(turns.get(0).labelled());
+        assertEquals("Boss", turns.get(0).label());
+    }
+
+    @Test
     void textResetDiscardsPendingAndThinkingBuffers() {
         model.onEvent(new AgentEvent.TextDelta("partial", "s1"));
         model.onEvent(new AgentEvent.ThinkingDelta("pondering", "s1"));

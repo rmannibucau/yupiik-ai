@@ -31,13 +31,17 @@ import java.util.Map;
  * The transcript holds markdown; thought and tool blocks are wrapped in
  * {@code THOUGHT_BEGIN}/{@code THOUGHT_END} and {@code TOOL_BEGIN}/
  * {@code TOOL_END} markers so frontends can render (or hide) them as typed
- * regions, see {@link #regions(String)}.
+ * regions; captured log records are wrapped in {@code LOG_BEGIN}/{@code LOG_END}
+ * markers so the TUI can render them with their own styling, see
+ * {@link #regions(String)}.
  */
 public class ConversationTranscript {
     public static final String THOUGHT_BEGIN = "<<<yca:thought>>>";
     public static final String THOUGHT_END = "<<<yca:/thought>>>";
     public static final String TOOL_BEGIN = "<<<yca:tool>>>";
     public static final String TOOL_END = "<<<yca:/tool>>>";
+    public static final String LOG_BEGIN = "<<<yca:log>>>";
+    public static final String LOG_END = "<<<yca:/log>>>";
 
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final int MAX_EMBEDDED_TOOL_CHARS = 4000;
@@ -726,15 +730,16 @@ public class ConversationTranscript {
         return result;
     }
 
-    public record Region(String text, boolean thought, boolean tool) {}
+    public record Region(String text, boolean thought, boolean tool, boolean log) {}
 
     /**
      * Splits the transcript markdown into typed regions based on the
      * {@code THOUGHT_BEGIN}/{@code THOUGHT_END} markers emitted by
-     * {@link #flushThinking} (rendered dimmed) and the
+     * {@link #flushThinking} (rendered dimmed), the
      * {@code TOOL_BEGIN}/{@code TOOL_END} markers wrapping tool actions and
-     * output (rendered even more subdued). Text outside markers is regular
-     * content.
+     * output (rendered even more subdued) and the {@code LOG_BEGIN}/
+     * {@code LOG_END} markers wrapping captured log records (rendered by the TUI
+     * with their own styling). Text outside markers is regular content.
      */
     public static List<Region> regions(final String md) {
         final var out = new ArrayList<Region>();
@@ -742,20 +747,22 @@ public class ConversationTranscript {
         while (true) {
             final var thought = md.indexOf(THOUGHT_BEGIN, from);
             final var tool = md.indexOf(TOOL_BEGIN, from);
-            if (thought < 0 && tool < 0) {
-                out.add(new Region(md.substring(from), false, false));
+            final var log = md.indexOf(LOG_BEGIN, from);
+            if (thought < 0 && tool < 0 && log < 0) {
+                out.add(new Region(md.substring(from), false, false, false));
                 return out;
             }
-            final var isThought = thought >= 0 && (tool < 0 || thought < tool);
-            final var begin = isThought ? thought : tool;
-            final var beginMarker = isThought ? THOUGHT_BEGIN : TOOL_BEGIN;
-            final var endMarker = isThought ? THOUGHT_END : TOOL_END;
-            out.add(new Region(md.substring(from, begin), false, false));
+            final var isThought = thought >= 0 && (tool < 0 || thought < tool) && (log < 0 || thought < log);
+            final var isLog = !isThought && log >= 0 && (tool < 0 || log < tool);
+            final var begin = isThought ? thought : isLog ? log : tool;
+            final var beginMarker = isThought ? THOUGHT_BEGIN : isLog ? LOG_BEGIN : TOOL_BEGIN;
+            final var endMarker = isThought ? THOUGHT_END : isLog ? LOG_END : TOOL_END;
+            out.add(new Region(md.substring(from, begin), false, false, false));
             final var end = md.indexOf(endMarker, begin + beginMarker.length());
             final var inner = end < 0
                     ? md.substring(begin + beginMarker.length())
                     : md.substring(begin + beginMarker.length(), end);
-            out.add(new Region(inner, isThought, !isThought));
+            out.add(new Region(inner, isThought, !isThought && !isLog, isLog));
             if (end < 0) {
                 return out;
             }
@@ -767,7 +774,7 @@ public class ConversationTranscript {
      * Head-truncates the persisted transcript once it grows beyond
      * {@code maxHistoryCharacters}, keeping the tail of the conversation.
      * Everything stays in memory between turns; only the rendered history is
-     * capped. The cut is aligned on a newline and any thought/tool region left
+     * capped. The cut is aligned on a newline and any thought/tool/log region left
      * incomplete by the truncation (pair straddling the cut) is dropped so the
      * renderer never sees a dangling marker.
      */
@@ -783,6 +790,7 @@ public class ConversationTranscript {
         var kept = md.substring(cut);
         kept = dropDanglingRegion(kept, THOUGHT_BEGIN, THOUGHT_END);
         kept = dropDanglingRegion(kept, TOOL_BEGIN, TOOL_END);
+        kept = dropDanglingRegion(kept, LOG_BEGIN, LOG_END);
         transcript.setLength(0);
         transcript.append(kept.stripLeading());
         touch();

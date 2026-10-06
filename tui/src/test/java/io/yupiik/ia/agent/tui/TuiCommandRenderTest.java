@@ -33,6 +33,7 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
+import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
@@ -61,12 +62,15 @@ import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ConfigCommands;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -96,6 +100,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 @ResourceLock("io.yupiik-jul-handler")
 @ExtendWith(TestJsonMapper.class)
 class TuiCommandRenderTest {
+    private static final Clock LABEL_CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
     private static final Duration TICK_RATE = Duration.ofMillis(2);
     private static final Duration POLL_TIMEOUT = Duration.ofMillis(2);
@@ -187,11 +192,23 @@ class TuiCommandRenderTest {
         final var userName = System.getProperty("user.name");
         final var userLabel = userName == null || userName.isBlank() ? "You" : userName;
         assertTrue(
-                anyRowContaining("\u258c " + userLabel + " \u2500"),
+                anyRowContaining("[10:11:12] " + userLabel + " \u2500"),
                 "the user turn header and rule should be rendered:\n" + backend.text());
         assertTrue(
-                anyRowContaining("\u258c default::test-model \u2500"),
+                anyRowContaining("[10:11:12] default::test-model \u2500"),
                 "the assistant turn header and rule should be rendered:\n" + backend.text());
+        // the header shares the role bar with the body and the pane has no left wall
+        // anymore: gutter (screen column 0) then a single role bar, then the header
+        assertTrue(
+                anyRowContaining("\u2503 [10:11:12] "),
+                "the turn header must keep the continuous role bar:\n" + backend.text());
+        awaitRowStartingWith("\u2502\u2503 [10:11:12]");
+        // the marker is consumed as a boundary: with a fresh render label moving on (live
+        // clock) the older marker would otherwise leak into the body as a bold line and drag
+        // the user turn styling onto the assistant palette
+        assertFalse(
+                anyRowContaining("**[10:11:12]"),
+                "the speaker marker must not leak into the turn body:\n" + backend.text());
 
         quit();
     }
@@ -443,7 +460,7 @@ class TuiCommandRenderTest {
     }
 
     @Test
-    void severeLogErrorRendersRedAfterMetricsAndKeepsStatusText() throws Exception {
+    void severeLogErrorRendersRedInBannerAndStatusStripAndKeepsStatusText() throws Exception {
         final var command = command(testRegistry(), stubAgentLoop());
         uiThread = new Thread(command, "tui-severe-error-test");
         uiThread.setDaemon(true);
@@ -452,22 +469,27 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
         awaitText("ready");
 
-        // redirectLoggerToUi routes a SEVERE record on the "io.yupiik" logger into modelError
+        // the capture handler routes a SEVERE record on the "io.yupiik" logger into the content
+        // view, the status-strip notification (WARNING+) and the Alt+E error modal (SEVERE)
         Logger.getLogger("io.yupiik").severe("LLM request failed (429) retry-after=1");
 
-        // the trailing red segment (single space after the cross glyph) shows the error after the
-        // metrics; the boxed banner below uses a double space, so this matches only the trailing one
-        awaitText("✗ LLM request failed (429) retry-after=1");
+        // the content view log region carries the level/logger bracket groups and the message
+        awaitText("[SEVERE][io.yupiik]");
+        awaitText("LLM request failed (429) retry-after=1");
+        // the status-strip notification carries the message (red while an error is active)
+        awaitText("ⓘ LLM request failed (429) retry-after=1");
+        // the boxed banner below the status line shows the full message (double space after the glyph)
+        awaitText("✖  LLM request failed (429) retry-after=1  (Alt+E for details)");
         // the far-left status text must keep the normal "ready", not be replaced by the error
         awaitText("ready");
 
-        // the error segment must be painted in the error red (#e06c75)
-        final var col = columnOfLineContaining("✗ LLM request failed");
-        final var row = rowOf("✗ LLM request failed");
+        // the error banner must be painted in the error red (#e06c75)
+        final var col = columnOfLineContaining("✖  LLM request failed");
+        final var row = rowOf("✖  LLM request failed");
         final var rgb = backend.fg(col, row).map(c -> c.toRgb()).orElse(null);
         assertTrue(
                 rgb != null && rgb.r() == 0xe0 && rgb.g() == 0x6c && rgb.b() == 0x75,
-                "expected the error segment to be painted in the error red, fg=" + backend.fg(col, row));
+                "expected the error banner to be painted in the error red, fg=" + backend.fg(col, row));
 
         quit();
     }
@@ -727,7 +749,7 @@ class TuiCommandRenderTest {
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
                 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode", "auto",
-                "auto", List.of(), null, true, 3, 10, "", "#ff5555");
+                "auto", List.of(), null, null, true, 3, 10, "", "#ff5555");
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -825,7 +847,12 @@ class TuiCommandRenderTest {
                 new SessionLifecycle(sessionStore),
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
-                new SpeakerLabels(configuration, chatClient, new ProviderManager(configuration, formatMapper)),
+                new SpeakerLabels(
+                        List.of(new FormatDatePromptHelper(LABEL_CLOCK)),
+                        configuration,
+                        chatClient,
+                        new ProviderManager(configuration, formatMapper)),
+                new AutoLogConfigurer(configuration),
                 mcpManager,
                 new VirtualThreadExecutor(),
                 providerManager,
