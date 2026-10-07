@@ -71,8 +71,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -102,7 +102,7 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 @ResourceLock("io.yupiik-jul-handler")
 @ExtendWith(TestJsonMapper.class)
 class TuiCommandRenderTest {
-    private static final Clock LABEL_CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
+
     private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
     private static final Duration TICK_RATE = Duration.ofMillis(2);
     private static final Duration POLL_TIMEOUT = Duration.ofMillis(2);
@@ -190,27 +190,27 @@ class TuiCommandRenderTest {
 
         // a labelled turn opens with a role-colored label and a rule running to the panel
         // edge; this is what keeps the user/assistant boundary readable while scrolling.
-        // the default user label is the OS user name ("You" when unavailable)
+        // the default user label is the OS user name ("You" when unavailable) and the
+        // stamp is the current local time (formatDate renders in the JVM default zone)
         final var userName = System.getProperty("user.name");
         final var userLabel = userName == null || userName.isBlank() ? "You" : userName;
+        final var stamp = "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] ";
         assertTrue(
-                anyRowContaining("[10:11:12] " + userLabel + " \u2500"),
+                anyRowContaining(stamp + userLabel + " \u2500"),
                 "the user turn header and rule should be rendered:\n" + backend.text());
         assertTrue(
-                anyRowContaining("[10:11:12] default::test-model \u2500"),
+                anyRowContaining(stamp + "default::test-model \u2500"),
                 "the assistant turn header and rule should be rendered:\n" + backend.text());
         // the header shares the role bar with the body and the pane has no left wall
         // anymore: gutter (screen column 0) then a single role bar, then the header
         assertTrue(
-                anyRowContaining("\u2503 [10:11:12] "),
+                anyRowContaining("\u2503 " + stamp),
                 "the turn header must keep the continuous role bar:\n" + backend.text());
-        awaitRowStartingWith("\u2502\u2503 [10:11:12]");
+        awaitRowStartingWith("\u2502\u2503 " + stamp);
         // the marker is consumed as a boundary: with a fresh render label moving on (live
         // clock) the older marker would otherwise leak into the body as a bold line and drag
         // the user turn styling onto the assistant palette
-        assertFalse(
-                anyRowContaining("**[10:11:12]"),
-                "the speaker marker must not leak into the turn body:\n" + backend.text());
+        assertFalse(anyRowContaining("**["), "the speaker marker must not leak into the turn body:\n" + backend.text());
 
         quit();
     }
@@ -393,6 +393,100 @@ class TuiCommandRenderTest {
         // Enter accepts the highlighted candidate into the line
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("/model m02");
+
+        quit();
+    }
+
+    @Test
+    void completionTabAppliesHighlightedAndIsIdempotent() throws Exception {
+        // Tab on an open completion popup applies the *highlighted* candidate and
+        // dismisses the popup; a second Tab recomputes against the new line (rather
+        // than re-applying a stale span, which would duplicate the token - the
+        // "yoyolo" bug) and is idempotent when the token is complete: with "/model
+        // m01" typed, m01 still matches itself and the line stays unchanged.
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-completion-tab-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        for (final var c : "/model m0".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01");
+
+        // Tab applies the highlighted candidate and the line becomes the full model
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB));
+        awaitText("/model m01");
+
+        // the caret lands right after the inserted token, not before it
+        final var modelLineCol = columnOfLineContaining("/model m01");
+        awaitCursorAt(modelLineCol + "/model m01".length());
+
+        // a second Tab must not swap to m02 nor duplicate the token: it recomputes
+        // against the applied line and stays idempotent
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.TAB));
+        awaitText("/model m01");
+        assertFalse(backend.text().contains("/model m02"), "second Tab must not apply m02:\n" + backend.text());
+
+        quit();
+    }
+
+    @Test
+    void completionEscDismissesAndSecondEnterSubmits() throws Exception {
+        // Esc on an open popup dismisses it without touching the line; with the popup
+        // gone, Enter then submits the raw line (instead of accepting a candidate)
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-completion-esc-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        for (final var c : "/model m".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01");
+
+        // Esc dismisses the popup: the candidates disappear, the line stays
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("> m01");
+        awaitText("/model m"); // the raw line is untouched
+
+        // Enter now submits the raw line (there is no popup to accept)
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("model: m"); // /model m executed (no candidate accepted)
+
+        quit();
+    }
+
+    @Test
+    void completionViewportScrollsSelectionIntoView() throws Exception {
+        // a model list longer than the 8-row popup must scroll the window so the
+        // highlighted candidate stays visible when navigating far enough
+        final var command = command(testRegistry(), stubAgentLoop());
+        uiThread = new Thread(command, "tui-completion-viewport-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // "m0" matches m01..m09 (9 candidates > the 8-row window)
+        for (final var c : "/model m0".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01");
+
+        // navigate down far enough to need scrolling: m09 is off the initial window
+        for (int i = 0; i < 8; i++) {
+            tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.DOWN));
+        }
+        awaitText("> m09"); // the highlighted row must still be rendered (scrolled into view)
+
+        // Enter accepts the scrolled-to candidate
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("/model m09");
 
         quit();
     }
@@ -787,7 +881,7 @@ class TuiCommandRenderTest {
         final var tuiConfiguration = new TuiConfiguration(
                 "#9d7cd8", "#fab283", "#7fd88f", "#f5a742", "#e06c75", "#b896d8", "#eeeeee", "#808080", -1.0, 0.22,
                 0.14, 0.85, "#484848", "#606060", "#141414", "auto", "auto", 4000L, 3500L, true, "unicode", "auto",
-                "auto", List.of(), null, null, true, 3, 10, "", "#ff5555");
+                "auto", List.of(), null, null, true, 3, 10, "", "#ff5555", null);
         final var sessionStore = new SessionStore() {
             @Override
             public String create() {
@@ -887,7 +981,7 @@ class TuiCommandRenderTest {
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
                 new SpeakerLabels(
-                        List.of(new FormatDatePromptHelper(LABEL_CLOCK)),
+                        List.of(new FormatDatePromptHelper()),
                         configuration,
                         chatClient,
                         new ProviderManager(configuration, formatMapper)),
@@ -1325,6 +1419,135 @@ class TuiCommandRenderTest {
         awaitText("✓ bash #1 - grep x src");
 
         quit();
+    }
+
+    @Test
+    void toolRunsAreIndependentPerUserTurnAndToggleIndependently() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-runs-independent-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // burst A: two consecutive finished calls
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class A {}", true, sid(shellRegistry)));
+
+        // a user turn separates the bursts: the runs must not merge into one mega-run
+        shellRegistry.onEvent(new AgentEvent.PromptIntegrated("second question", sid(shellRegistry)));
+
+        // burst B: another two consecutive finished calls
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"b.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class B {}", true, sid(shellRegistry)));
+
+        // both runs are collapsed by default in COLLAPSED mode: two independent run headers,
+        // and each collapsed run still renders one dim clickable one-liner per member
+        final var firstHeader = rowOf("2 tools");
+        awaitText("2 tools");
+        assertTrue(secondHeaderIsBelow(firstHeader, "2 tools"), "expected two separate run headers");
+        awaitText("✓ bash #1 - grep x src");
+        awaitText("✓ read_file #2 - a.java");
+        awaitText("✓ bash #3 - ls -la");
+        awaitText("✓ read_file #4 - b.java");
+        // full outputs stay hidden while the runs are collapsed
+        awaitTextGone("total 8");
+        awaitTextGone("class A {}");
+        awaitTextGone("class B {}");
+        // both headers are collapsed (▶ chevron): nothing is expanded yet
+        assertEquals(2, occurrences("▶ 2 tools"));
+        assertEquals(0, occurrences("▼ 2 tools"));
+
+        // clicking a collapsed run's member one-liner opens that tool's full-output modal
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ read_file #2 - a.java")));
+        awaitText("full output");
+        awaitText("class A {}");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("full output");
+
+        // run headers toggle independently: opening run A leaves run B collapsed
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, firstHeader));
+        awaitOccurrences("▼ 2 tools", 1);
+        assertEquals(1, occurrences("▶ 2 tools"));
+        // re-clicking the first header collapses it back
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, firstHeader));
+        awaitOccurrences("▼ 2 tools", 0);
+        assertEquals(2, occurrences("▶ 2 tools"));
+        // expanding the second run works even though the first is collapsed
+        final var secondHeader = rowOfBelow(firstHeader, "2 tools");
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, secondHeader));
+        awaitOccurrences("▼ 2 tools", 1);
+        assertEquals(1, occurrences("▶ 2 tools"));
+
+        // a collapsed member click still opens the modal (run A collapsed, run B open: the
+        // one-liner members are clickable in every run state under COLLAPSED mode)
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash #3 - ls -la")));
+        awaitText("full output");
+        awaitText("total 8");
+
+        quit();
+    }
+
+    /** Counts non-overlapping occurrences of {@code token} on the current screen. */
+    private int occurrences(final String token) {
+        final var text = backend.text();
+        var count = 0;
+        var from = 0;
+        while (true) {
+            final var idx = text.indexOf(token, from);
+            if (idx < 0) {
+                return count;
+            }
+            count++;
+            from = idx + token.length();
+        }
+    }
+
+    /** Waits until {@code token} appears exactly {@code expected} times on screen. */
+    private void awaitOccurrences(final String token, final int expected) throws InterruptedException {
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        while (occurrences(token) != expected) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("expected " + expected + " occurrence(s) of '" + token + "' within "
+                        + TIMEOUT_MS + "ms; last screen:\n" + backend.text());
+            }
+            assertTrue(backend.awaitFrame(1_000), "no frame received while waiting for '" + token + "' ×" + expected);
+        }
+    }
+
+    /** True when a *second* distinct row carries the token below the given row. */
+    private boolean secondHeaderIsBelow(final int firstRow, final String token) throws InterruptedException {
+        while (true) {
+            final var lines = backend.text().split("\n");
+            for (var y = firstRow + 1; y < lines.length; y++) {
+                if (lines[y].contains(token)) {
+                    return true;
+                }
+            }
+            assertTrue(
+                    backend.awaitFrame(1_000),
+                    "no frame received while waiting for a second '" + token + "' below " + firstRow + "\n"
+                            + backend.text());
+        }
+    }
+
+    /** The row of the first occurrence of the token strictly below {@code aboveRow}. */
+    private int rowOfBelow(final int aboveRow, final String token) throws InterruptedException {
+        while (true) {
+            final var lines = backend.text().split("\n");
+            for (var y = aboveRow + 1; y < lines.length; y++) {
+                if (lines[y].contains(token)) {
+                    return y;
+                }
+            }
+            assertTrue(
+                    backend.awaitFrame(1_000), "no frame received while waiting for '" + token + "' below " + aboveRow);
+        }
     }
 
     @Test
@@ -2478,6 +2701,31 @@ class TuiCommandRenderTest {
      * actually stopped so a missed quit fails fast instead of silently burning
      * the join timeout.
      */
+    @Test
+    void cleanQuitDisablesTheAnyMotionMouseMode() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-mouse-restore-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        quit();
+
+        // the clean-exit path must send ESC[?1003l (any-motion mouse tracking) - the mode
+        // yca enables itself on top of tamboui's ?1000h/?1002h/?1015h/?1006h capture, which
+        // tamboui's own cleanup() disables but ?1003 is not part of. Without it the terminal
+        // would keep reporting every mouse move after the TUI exits.
+        assertTrue(backend.raw().contains("\u001b[?1003l"), "expected ESC[?1003l on clean exit, raw=" + backend.raw());
+
+        // and the shutdown hook must be gone so a normal quit never races a JVM shutdown
+        assertTrue(
+                Thread.getAllStackTraces().keySet().stream()
+                        .noneMatch(t -> t.getName().equals("yca-tui-mouse-restore")),
+                "mouse-restore shutdown hook must be removed on clean exit");
+    }
+
     private void quit() throws InterruptedException {
         final var tui = tuiRef.get();
         if (tui != null && tui.isRunning()) {

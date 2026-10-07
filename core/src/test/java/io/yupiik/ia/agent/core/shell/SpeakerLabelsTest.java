@@ -35,8 +35,8 @@ import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
-import java.time.Instant;
-import java.time.ZoneOffset;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
@@ -53,12 +53,14 @@ class SpeakerLabelsTest {
     }
 
     /**
-     * Fixed clock so the default templates' {@code {{formatDate "HH:mm:ss"}}} renders a deterministic stamp.
-     * {@code 2026-09-24T10:11:12Z} in UTC -> {@code [10:11:12] }.
+     * The default templates render {@code {{formatDate "HH:mm:ss"}}} in the JVM default
+     * timezone on the current instant: assert the live-computed stamp, not a fixed one.
      */
-    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
+    private static final DateTimeFormatter STAMP_FORMATTER = DateTimeFormatter.ofPattern("HH:mm:ss");
 
-    private static final String STAMP = "[10:11:12] ";
+    private static String stamp() {
+        return "[" + LocalTime.now().format(STAMP_FORMATTER) + "] ";
+    }
 
     private static final String USER = System.getProperty("user.name");
     private static final String USER_FALLBACK = USER == null || USER.isBlank() ? "You" : USER;
@@ -84,7 +86,7 @@ class SpeakerLabelsTest {
 
     private SpeakerLabels labels(final CodingAgentConfiguration configuration) {
         return new SpeakerLabels(
-                List.of(new FormatDatePromptHelper(CLOCK)),
+                List.of(new FormatDatePromptHelper()),
                 configuration,
                 chatClient(configuration),
                 providerManager(configuration));
@@ -93,23 +95,24 @@ class SpeakerLabelsTest {
     @Test
     void defaultUserLabelIsTheOsUser() {
         final var configuration = configuration(Map.of());
-        assertEquals(
-                STAMP + USER_FALLBACK,
-                labels(configuration)
-                        .userLabel(new SpeakerLabels.Ctx("llm-test", "default", null, "plan", "s1", null)));
+        final var rendered =
+                labels(configuration).userLabel(new SpeakerLabels.Ctx("llm-test", "default", null, "plan", "s1", null));
+        assertTrue(rendered.startsWith(stamp()), rendered);
+        assertTrue(rendered.endsWith(USER_FALLBACK), rendered);
     }
 
     @Test
     void defaultAssistantLabelIsProviderColonColonModel() {
         final var configuration = configuration(Map.of());
-        assertEquals(
-                STAMP + "default::llm-test",
-                labels(configuration)
-                        .assistantLabel(new SpeakerLabels.Ctx("llm-test", "default", null, "plan", "s1", null)));
+        final var rendered = labels(configuration)
+                .assistantLabel(new SpeakerLabels.Ctx("llm-test", "default", null, "plan", "s1", null));
+        assertTrue(rendered.startsWith(stamp()), rendered);
+        assertTrue(rendered.endsWith("default::llm-test"), rendered);
         // no model resolved -> falls back to "Assistant"
-        assertEquals(
-                STAMP + "Assistant",
-                labels(configuration).assistantLabel(new SpeakerLabels.Ctx(null, null, null, "plan", "s1", null)));
+        final var fallenBack =
+                labels(configuration).assistantLabel(new SpeakerLabels.Ctx(null, null, null, "plan", "s1", null));
+        assertTrue(fallenBack.startsWith(stamp()), fallenBack);
+        assertTrue(fallenBack.endsWith("Assistant"), fallenBack);
     }
 
     @Test

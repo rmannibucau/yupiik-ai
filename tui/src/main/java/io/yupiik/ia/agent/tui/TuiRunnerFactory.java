@@ -26,6 +26,18 @@ import java.time.Duration;
  */
 @ApplicationScoped
 public class TuiRunnerFactory {
+    /**
+     * Any-motion mouse tracking ({@code ESC[?1003h}), enabled here so the tab-bar hover
+     * tooltip receives MOVE events. TamboUI's own mouse capture only uses
+     * {@code ?1000h}/{@code ?1002h}/{@code ?1015h}/{@code ?1006h}, so it has no idea
+     * {@code ?1003h} is on and never disables it - without a matching {@link #MOUSE_MOTION_DISABLE}
+     * the terminal keeps reporting every mouse move after the TUI exits and the shell
+     * prints the SGR reports ({@code ESC[<35;5;12M}) as garbage.
+     */
+    static final String MOUSE_MOTION_ENABLE = "\u001b[?1003h";
+
+    static final String MOUSE_MOTION_DISABLE = "\u001b[?1003l";
+
     public TuiRunner create(final TuiCommand.TuiConf conf) throws Exception {
         return create(conf, false);
     }
@@ -47,7 +59,9 @@ public class TuiRunnerFactory {
         // tamboui only enables ?1000h/?1002h (button/press tracking): motion (MOVE) events
         // are what drive the tab-bar hover tooltip, so additionally enable ?1003h
         // (any-motion tracking). Terminals without it simply never report MOVE events.
-        runner.backend().writeRaw("\u001b[?1003h");
+        // The matching ?1003l is sent by TuiCommand when the TUI exits (clean and abrupt
+        // paths), because tamboui's own cleanup() only disables the modes it enabled.
+        runner.backend().writeRaw(MOUSE_MOTION_ENABLE);
         runner.backend().flush();
         return runner;
     }

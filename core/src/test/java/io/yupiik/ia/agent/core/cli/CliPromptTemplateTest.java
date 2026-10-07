@@ -22,19 +22,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.test.TestJsonMapper;
-import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
 @ExtendWith(TestJsonMapper.class)
 class CliPromptTemplateTest {
-    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
+    private static final Pattern TIME_ONLY = Pattern.compile("\\d{2}:\\d{2}:\\d{2}");
 
     private JsonMapper mapper;
 
@@ -75,7 +78,7 @@ class CliPromptTemplateTest {
     }
 
     private static List<PromptHandlebarsHelper> helpers() {
-        return List.of(new TimePromptHelper(CLOCK), new FormatDatePromptHelper(CLOCK));
+        return List.of(new TimePromptHelper(), new FormatDatePromptHelper());
     }
 
     private static CodingAgentConfiguration config(final String template) {
@@ -164,19 +167,29 @@ class CliPromptTemplateTest {
     }
 
     @Test
-    void timeHelpersUseFixedClock() {
-        assertEquals("10:11:12", template("{{time}}").render(data("plan", null, "")));
-        assertEquals(
-                "2026-09-24 10:11:12.345",
-                template("{{time pattern=\"yyyy-MM-dd HH:mm:ss.SSS\"}}").render(data("plan", null, "")));
+    void timeHelpersRenderNowInTheJvmDefaultZone() {
+        final var rendered = template("{{time}}").render(data("plan", null, ""));
+        assertTrue(TIME_ONLY.matcher(rendered).matches(), rendered);
+        // the JVM default zone is pinned to UTC by the surefire argLine, so the parsed
+        // value is unambiguous and only its proximity to now matters
+        final var patternRendered =
+                template("{{time pattern=\"yyyy-MM-dd HH:mm:ss.SSS\"}}").render(data("plan", null, ""));
+        final var parsed = LocalDateTime.parse(patternRendered, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+                .atZone(ZoneOffset.UTC)
+                .toInstant();
+        assertTrue(Duration.between(parsed, Instant.now()).abs().toMillis() < 5_000, patternRendered);
     }
 
     @Test
-    void formatDateHelperUsesFixedClock() {
-        assertEquals("10:11:12", template("{{formatDate}}").render(data("plan", null, "")));
-        assertEquals(
-                "2026-09-24 10:11:12.345",
-                template("{{formatDate \"yyyy-MM-dd HH:mm:ss.SSS\"}}").render(data("plan", null, "")));
+    void formatDateHelperRendersNowInTheJvmDefaultZone() {
+        final var rendered = template("{{formatDate}}").render(data("plan", null, ""));
+        assertTrue(TIME_ONLY.matcher(rendered).matches(), rendered);
+        final var patternRendered =
+                template("{{formatDate \"yyyy-MM-dd HH:mm:ss.SSS\"}}").render(data("plan", null, ""));
+        final var parsed = LocalDateTime.parse(patternRendered, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+                .atZone(ZoneOffset.UTC)
+                .toInstant();
+        assertTrue(Duration.between(parsed, Instant.now()).abs().toMillis() < 5_000, patternRendered);
     }
 
     @Test

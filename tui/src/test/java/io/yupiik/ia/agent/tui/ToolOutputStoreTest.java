@@ -60,6 +60,68 @@ class ToolOutputStoreTest {
     }
 
     @Test
+    void reRecordingExistingOrdinalNeverRotatesEviction() {
+        // the reported bug: each stream chunk re-records the same running ordinal, and the
+        // unconditional ring push rotated the eviction order, evicting older tools around it
+        final var store = new ToolOutputStore(2, 1024);
+        store.record(1, new ToolOutputStore.Entry("bash", "{}", "0", false, -1L));
+        store.record(2, new ToolOutputStore.Entry("ls", "", "2", false, 0));
+        // stream 200 chunks on ordinal 1: must update in place, never push the ring
+        for (int i = 1; i <= 200; i++) {
+            store.record(1, new ToolOutputStore.Entry("bash", "{}", "chunk-" + i, false, -1L));
+        }
+        assertNotNull(store.get(1), "ordinal 1 must still be retained after 200 stream chunks");
+        assertNotNull(store.get(2), "ordinal 2 must not be evicted by stream chunks of ordinal 1");
+        assertEquals(2, store.size(), "re-records must not stack entries");
+        assertEquals("chunk-200", store.get(1).output());
+    }
+
+    @Test
+    void reRecordKeepsFirstInsertionSlotInFifoOrder() {
+        final var store = new ToolOutputStore(2, 1024);
+        store.record(1, new ToolOutputStore.Entry("a", "", "1", false, 0));
+        store.record(2, new ToolOutputStore.Entry("b", "", "2", false, 0));
+        // re-record 1 (like a finish): must not move it past 2 in the eviction order
+        store.record(1, new ToolOutputStore.Entry("a", "", "1-final", false, 5));
+        assertEquals("1-final", store.get(1).output());
+        // 3 evicts the oldest = 1, not 2, because 1 kept its original slot
+        store.record(3, new ToolOutputStore.Entry("c", "", "3", false, 0));
+        assertNull(store.get(1), "the updated ordinal 1 must still be the FIFO head and evict first");
+        assertEquals("2", store.get(2).output());
+        assertEquals("3", store.get(3).output());
+    }
+
+    @Test
+    void maxTotalCharsEvictsOldestUntilBudgetFits() {
+        final var store = new ToolOutputStore(128, 1024, 20);
+        store.record(1, new ToolOutputStore.Entry("a", "", "1111111111", false, 0)); // 10
+        store.record(2, new ToolOutputStore.Entry("b", "", "2222222222", false, 0)); // 10
+        store.record(3, new ToolOutputStore.Entry("c", "", "3333333333", false, 0)); // 10
+        // total is 30 > 20: evict oldest until <= 20 -> drops 1, keeps 2 and 3 (20 chars)
+        assertNull(store.get(1));
+        assertNotNull(store.get(2));
+        assertNotNull(store.get(3));
+        assertEquals(2, store.size());
+        assertEquals(20, store.totalChars());
+        // re-recording an existing ordinal that grows past the budget: 2 goes from 10 to 12 chars,
+        // total would be 22 > 20 -> evict the oldest (2) until the budget fits -> only 3 remains
+        store.record(2, new ToolOutputStore.Entry("b", "", "222222222222", false, 0)); // 12
+        assertNull(store.get(2), "growing an existing entry past the total budget evicts the oldest first");
+        assertEquals("3333333333", store.get(3).output());
+        assertEquals(10, store.totalChars());
+    }
+
+    @Test
+    void maxTotalCharsZeroMeansUnboundedByTotal() {
+        final var store = new ToolOutputStore(128, 1024, 0);
+        for (int i = 1; i <= 5; i++) {
+            store.record(i, new ToolOutputStore.Entry("a", "", "1234567890", false, 0));
+        }
+        assertEquals(5, store.size());
+        assertEquals(50, store.totalChars());
+    }
+
+    @Test
     void oversizedOutputKeepsTail() {
         final var store = new ToolOutputStore(8, 10);
         store.record(1, new ToolOutputStore.Entry("a", "", "0123456789ABCDEF", false, 0));

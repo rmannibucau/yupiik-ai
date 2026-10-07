@@ -72,6 +72,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BooleanSupplier;
 
 /**
  * Interactive plain-terminal REPL for yca. Requires only a terminal
@@ -122,6 +123,14 @@ public class CliCommand implements Runnable {
     private final Symbols symbols;
     private final AnsiShellFrontend frontend;
     private final AnsiShellIO io;
+    /**
+     * Interaction gates shared by the AnsiShellIO interactions and the interrupt menu
+     * read: they claim the terminal ({@link #interactionActive}) and suspend the turn
+     * output so it can never stomp an in-flight question line.
+     */
+    private final Runnable interactionStart;
+
+    private final Runnable interactionEnd;
     private final SpeakerLabels speakerLabels;
     private final boolean queueing;
     private final Deque<String> pendingPrompts = new ConcurrentLinkedDeque<>();
@@ -204,19 +213,16 @@ public class CliCommand implements Runnable {
                 conf.showThinking(),
                 showToolOutput,
                 externalOutput);
+        this.interactionStart = () -> {
+            interactionActive.set(true);
+            frontend.suspendOutput();
+        };
+        this.interactionEnd = () -> {
+            interactionActive.set(false);
+            frontend.resumeOutput();
+        };
         this.io = new AnsiShellIO(
-                prompt,
-                symbols,
-                this::onInterrupt,
-                () -> {
-                    interactionActive.set(true);
-                    frontend.suspendOutput();
-                },
-                () -> {
-                    interactionActive.set(false);
-                    frontend.resumeOutput();
-                },
-                frontend.renderLock());
+                prompt, symbols, this::onInterrupt, this.interactionStart, this.interactionEnd, frontend.renderLock());
         this.queueing = prompt instanceof LinedPrompt lined && lined.queuing();
     }
 
@@ -543,6 +549,7 @@ public class CliCommand implements Runnable {
      */
     private boolean runLine(final String text) {
         if (text.equals("exit")) {
+            requestQuit();
             println(MarkdownColorizer.status("bye"));
             return false;
         }
@@ -611,6 +618,9 @@ public class CliCommand implements Runnable {
         try {
             line = awaitLine("");
         } catch (final PromptInterruptException e) {
+            if (quitRequested) {
+                return false;
+            }
             // Ctrl-C while waiting: render the interrupt menu (or fall back to the legacy
             // immediate-cancel when the backend raises the exception without arming the menu)
             if (menuPending.compareAndSet(true, false)) {
@@ -620,12 +630,15 @@ public class CliCommand implements Runnable {
             }
             return !quitRequested;
         }
+        if (quitRequested) {
+            return false;
+        }
         // a Ctrl-C woke the turn-lane read (wakeAll -> empty line): render the menu, keep looping
         if (menuPending.compareAndSet(true, false)) {
             promptInterruptMenu();
             return !quitRequested;
         }
-        if (line.isEmpty() || quitRequested) {
+        if (line.isEmpty()) {
             return false;
         }
         final var text = line.get().strip();
@@ -633,6 +646,7 @@ public class CliCommand implements Runnable {
             return true;
         }
         if (text.equals("exit")) {
+            requestQuit();
             println(MarkdownColorizer.status("bye"));
             return false;
         }
@@ -703,6 +717,11 @@ public class CliCommand implements Runnable {
     private void drainQueueIfIdle() {
         turnLock.lock();
         try {
+            if (quitRequested) {
+                // a quit drops the queue: nothing may start a new turn while leaving
+                pendingPrompts.clear();
+                return;
+            }
             if (!pendingPrompts.isEmpty() && !turnActive() && (inFlight == null || inFlight.isDone())) {
                 final var next = pendingPrompts.pollFirst();
                 if (next != null) {
@@ -732,6 +751,12 @@ public class CliCommand implements Runnable {
      * until completion, keeping the CLI REPL synchronous by nature.
      */
     private void startTurn(final String prompt, final String agentName, final String blockedMessage) {
+        if (quitRequested) {
+            // never start (or restart) a turn once quitting: it would reset the
+            // cancellation flag and pin the exit on a fresh completion
+            pendingPrompts.clear();
+            return;
+        }
         cancelled.set(false);
         final var todosBefore = session.runtime().todos().all();
         activeTurns.incrementAndGet();
@@ -769,11 +794,59 @@ public class CliCommand implements Runnable {
      * interrupt menu (armed by Ctrl-C on the signal thread) is rendered on this
      * REPL thread and answered; this is what makes "interrupt without exiting"
      * work even on the jline backend whose reader cannot be polled.
+     * <p>
+     * Once a quit is requested (menu option {@code 2}, {@code exit}, double
+     * Ctrl-C) the menu is never rendered again and the turn gets a bounded
+     * grace period to unwind before the process is force-exited: quitting must
+     * terminate the CLI even when the turn hangs (a stuck LLM call must not be
+     * able to pin the REPL in this loop forever).
      */
     private void awaitTurn(final CompletableFuture<Boolean> future) {
+        awaitTurnLoop(
+                future,
+                menuPending,
+                () -> quitRequested,
+                this::promptInterruptMenu,
+                () -> forceQuit("turn did not stop - exiting anyway"),
+                CLEANUP_AWAIT_NANOS);
+    }
+
+    /**
+     * The wait loop behind {@link #awaitTurn(CompletableFuture)}, extracted with
+     * plain collaborators so the quit semantics are unit-testable without
+     * booting the whole CLI:
+     * <ul>
+     *     <li>while not quitting, a pending menu is rendered;</li>
+     *     <li>a quit stops menu rendering immediately and starts a grace clock;</li>
+     *     <li>when the grace elapses with the future still incomplete, {@code forceQuit} runs;</li>
+     *     <li>the future completing always ends the loop quietly.</li>
+     * </ul>
+     *
+     * @param future the in-flight turn completion.
+     * @param menuPending the armed-interrupt flag cleared by rendering the menu.
+     * @param quitRequested probe of the quit state (read on this thread).
+     * @param renderMenu renders and answers the interrupt menu.
+     * @param forceQuit tears the CLI down when the turn outlives the grace period.
+     * @param quitGraceNanos how long the turn may keep running after a quit request.
+     */
+    static void awaitTurnLoop(
+            final CompletableFuture<Boolean> future,
+            final AtomicBoolean menuPending,
+            final BooleanSupplier quitRequested,
+            final Runnable renderMenu,
+            final Runnable forceQuit,
+            final long quitGraceNanos) {
+        var quitSeen = false;
+        var quitAtNanos = 0L;
         while (!future.isDone()) {
-            if (menuPending.compareAndSet(true, false)) {
-                promptInterruptMenu();
+            final var quitting = quitRequested.getAsBoolean();
+            if (quitting && !quitSeen) {
+                quitSeen = true;
+                quitAtNanos = System.nanoTime();
+            }
+            if (!quitting && menuPending.compareAndSet(true, false)) {
+                renderMenu.run();
+                continue;
             }
             try {
                 future.get(100, TimeUnit.MILLISECONDS);
@@ -784,6 +857,10 @@ public class CliCommand implements Runnable {
                 throw new CompletionException(e);
             } catch (final TimeoutException e) {
                 // keep polling for the interrupt menu and the completion
+            }
+            if (quitSeen && !future.isDone() && System.nanoTime() - quitAtNanos >= quitGraceNanos) {
+                forceQuit.run();
+                return;
             }
         }
     }
@@ -934,7 +1011,7 @@ public class CliCommand implements Runnable {
         outcome.applyTo(frontend);
         if (outcome instanceof ShellOutcome.Quit) {
             println(MarkdownColorizer.status("bye"));
-            quitRequested = true;
+            requestQuit();
         }
     }
 
@@ -970,6 +1047,12 @@ public class CliCommand implements Runnable {
     }
 
     private void onInterrupt() {
+        if (quitRequested) {
+            // quit already requested (menu "2", exit, double ctrl-c): a new Ctrl-C must
+            // not re-open a menu which cannot do anything anymore, it forces the exit
+            forceQuit("bye");
+            return;
+        }
         // while a turn runs with no interactive read live, SIGINT arms the menu; the menu is
         // rendered on the REPL thread (the signal handler must not touch the jline reader)
         if (session.busy() && !interactionActive.get()) {
@@ -988,40 +1071,93 @@ public class CliCommand implements Runnable {
             case ARM_QUIT ->
                 println(MarkdownColorizer.status("press Ctrl+C again within 2s to quit (Ctrl-D exits too)"));
             case QUIT -> {
-                quitRequested = true;
-                wakePrompt();
+                requestQuit();
                 println(MarkdownColorizer.status("bye"));
             }
         }
     }
 
     /**
+     * Flags the quit, cancels the in-flight turn, drops every queued prompt (nothing
+     * may start a new turn once quit is requested) and wakes a waiting read. Shared by
+     * the interrupt menu, {@code exit}, {@code /exit} and the interrupt coordinator so
+     * all exit paths behave the same.
+     */
+    private void requestQuit() {
+        quitRequested = true;
+        cancelled.set(true);
+        pendingPrompts.clear();
+        wakePrompt();
+    }
+
+    /**
+     * Tears the CLI down without waiting any longer: the turn is cancelled, queued
+     * prompts are dropped and the JVM exits with the SIGINT status (130), the
+     * registered shutdown hook running the usual cleanup. Used when the turn outlives
+     * the post-quit grace period and when Ctrl-C is pressed after a quit request -
+     * mirroring the TUI {@code RunCommand} exit so quitting is always deterministic.
+     */
+    private void forceQuit(final String reason) {
+        requestQuit();
+        println(MarkdownColorizer.status(reason));
+        System.exit(130);
+    }
+
+    /** What an interrupt menu answer asks for; see {@link #menuChoice(String)}. */
+    enum MenuChoice {
+        CANCEL,
+        QUIT,
+        NONE
+    }
+
+    /**
+     * Parses an interrupt menu answer: {@code 1/c/cancel} cancels the current turn,
+     * {@code 2/e/exit/q} quits the CLI, anything else (including an empty line or a
+     * Ctrl-C that cancelled the read) keeps the turn running. Case and surrounding
+     * whitespace are ignored; {@code null} is an empty answer.
+     */
+    static MenuChoice menuChoice(final String answer) {
+        return switch (answer == null ? "" : answer.strip().toLowerCase(Locale.ROOT)) {
+            case "1", "c", "cancel" -> MenuChoice.CANCEL;
+            case "2", "e", "exit", "q" -> MenuChoice.QUIT;
+            default -> MenuChoice.NONE;
+        };
+    }
+
+    /**
      * Renders and answers the Ctrl-C interrupt menu: cancel the current turn (stays in the
-     * REPL) or exit. The read goes through the interaction lane so the answer is never handed
-     * to the turn queue; a Ctrl-C while the menu itself reads cancels the menu without effects.
+     * REPL) or exit. The read claims the terminal through the interaction gates (output
+     * suspended, {@link #interactionActive} set) so turn output cannot stomp the question
+     * and a Ctrl-C landing while the menu reads is routed to the interrupt coordinator
+     * instead of re-arming the menu.
      */
     private void promptInterruptMenu() {
+        final String raw;
+        interactionStart.run();
+        frontend.renderLock().lock();
         try {
-            final var answer = interactionLine(
-                            MarkdownColorizer.accent("What do you want to do? [1=cancel current turn, 2=exit] "))
-                    .map(line -> line.strip().toLowerCase(Locale.ROOT))
+            raw = interactionLine(MarkdownColorizer.accent("What do you want to do? [1=cancel current turn, 2=exit] "))
                     .orElse("");
-            if (answer.equals("1") || answer.equals("c") || answer.equals("cancel")) {
-                cancelled.set(true);
-                println(MarkdownColorizer.status("interrupting the current turn..."));
-            } else if (answer.equals("2") || answer.equals("e") || answer.equals("exit") || answer.equals("q")) {
-                // quitting also cancels a running turn so the REPL thread can actually exit
-                cancelled.set(true);
-                quitRequested = true;
-                wakePrompt();
-                println(MarkdownColorizer.status("bye"));
-            } else {
-                println(MarkdownColorizer.status("no change - turn keeps running"));
-            }
         } catch (final PromptInterruptException e) {
             println(MarkdownColorizer.status("interrupt cancelled"));
+            return;
         } catch (final IOException e) {
             println(MarkdownColorizer.status("interrupt cancelled"));
+            return;
+        } finally {
+            frontend.renderLock().unlock();
+            interactionEnd.run();
+        }
+        switch (menuChoice(raw)) {
+            case CANCEL -> {
+                cancelled.set(true);
+                println(MarkdownColorizer.status("interrupting the current turn..."));
+            }
+            case QUIT -> {
+                requestQuit();
+                println(MarkdownColorizer.status("bye"));
+            }
+            case NONE -> println(MarkdownColorizer.status("no change - turn keeps running"));
         }
     }
 

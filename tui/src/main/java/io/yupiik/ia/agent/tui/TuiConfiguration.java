@@ -186,4 +186,35 @@ public record TuiConfiguration(
                 defaultValue = "\"#ff5555\"",
                 documentation = "Yolo approval color (hex), used for the red 'yolo ⚠' badge in the status bar when the "
                         + "approval mode is set to yolo (danger mode).")
-        String yolo) {}
+        String yolo,
+
+        @Property(
+                documentation =
+                        "Tool output retention (full outputs kept for the Ctrl+O overlay and tool-card expansion).")
+        ToolOutputConfiguration toolOutput) {
+
+    /**
+     * Retention limits of the captured tool outputs (see {@link TuiConfiguration#toolOutput()}).
+     */
+    @JsonModel
+    public record ToolOutputConfiguration(
+            @Property(
+                    defaultValue = "128",
+                    documentation =
+                            "Maximum number of distinct tool calls kept per tab. Re-recording an existing call (stream chunks, "
+                                    + "its finish record) never counts as a new call, so only distinct calls consume a slot.")
+            int maxEntries,
+
+            @Property(
+                    defaultValue = "262144",
+                    documentation =
+                            "Maximum characters kept per tool output (256 KiB); longer outputs keep only the tail, flagged as truncated.")
+            int maxOutputChars,
+
+            @Property(
+                    defaultValue = "0L",
+                    documentation =
+                            "Maximum total characters kept for all tool outputs of a tab (0 = unbounded, bounded by maxEntries × maxOutputChars "
+                                    + "= 32 MiB at the defaults). When exceeded, the oldest tool calls are dropped first until the budget fits.")
+            long maxTotalChars) {}
+}

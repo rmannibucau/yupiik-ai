@@ -30,23 +30,22 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Overrides the built-in {@code {{time}}} helper: renders the current time (default {@code HH:mm:ss}) from the
- * injected {@link Clock}, or {@code {{time pattern="..."}}} with any java.time pattern (e.g. {@code yyyy-MM-dd
- * HH:mm:ss.SSS}). The injected clock makes rendering deterministic in tests.
+ * Overrides the built-in {@code {{time}}} helper: renders the current time (default {@code HH:mm:ss}) in the
+ * JVM default timezone (the end-user local time), or {@code {{time pattern="..."}} with any java.time pattern
+ * (e.g. {@code yyyy-MM-dd HH:mm:ss.SSS}). Display-only: the rendering deliberately uses
+ * {@link Clock#systemDefaultZone()} and is independent of the internal UTC {@code Clock} bean used by
+ * sessions/compaction/the LLM payload.
  */
 @ApplicationScoped
 public class TimePromptHelper implements PromptHandlebarsHelper {
     private static final String DEFAULT_TIME_PATTERN = "HH:mm:ss";
 
-    private final Clock clock;
+    private final Clock clock = Clock.systemDefaultZone();
     private final ConcurrentMap<String, DateTimeFormatter> formatters = new ConcurrentHashMap<>();
 
-    public TimePromptHelper(final Clock clock) {
-        this.clock = clock;
-    }
-
-    protected TimePromptHelper() {
-        this.clock = Clock.systemDefaultZone();
+    public TimePromptHelper() {
+        // DI instantiates the helper directly (no parameterized constructor) and tests
+        // construct it explicitly; the rendering always uses the JVM default zone.
     }
 
     @Override
@@ -56,7 +55,7 @@ public class TimePromptHelper implements PromptHandlebarsHelper {
 
     @Override
     public String description() {
-        return "the current time (HH:mm:ss), or with any java.time pattern when given as {{time pattern=\"...\"}}";
+        return "the current time in the JVM default timezone (end-user local time, HH:mm:ss), or with any java.time pattern when given as {{time pattern=\"...\"}}";
     }
 
     @Override

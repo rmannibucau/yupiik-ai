@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class SpinnerTest {
@@ -189,6 +190,30 @@ class SpinnerTest {
         final var text = stream.text();
         assertTrue(text.contains("\u001b[2K"), "the spinner row must be erased");
         assertTrue(text.endsWith("\n"), "the erase must close the row, or the next prompt lands over it");
+    }
+
+    @Test
+    void elapsedIsRenderedOnceAndParenthesised() throws InterruptedException {
+        // regression: the label used to bake a time in ("thinking... (0s)") while the
+        // worker appended its own counter, rendering the elapsed time twice. The
+        // suite's default locale is pinned JVM-wide in the root pom (argLine), so the
+        // "10.4s" spelling here is stable whatever the host locale is - production
+        // relies on the Spinner's Locale.ROOT formatting for the same reason.
+        final var stream = new RecordingStream();
+        final var spinner = new Spinner(new Symbols(true), stream.promptOutput(), true, new ReentrantLock(), 25);
+        spinner.start("thinking...");
+        // the counter only kicks in from 1s: poll real frames until it does
+        final var elapsed = Pattern.compile("thinking\\.\\.\\. \\(\\d+\\.\\ds\\)");
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        String text = "";
+        while (!elapsed.matcher(text).find() && System.nanoTime() < deadline) {
+            assertTrue(stream.awaitFrame(1, TimeUnit.SECONDS), "spinner stopped rendering frames");
+            stream.nextFrame();
+            text = stream.text();
+        }
+        assertTrue(elapsed.matcher(text).find(), "no single parenthesised elapsed time: " + text);
+        assertFalse(text.contains("(0s)"), "the label baked a stale time in: " + text);
+        spinner.stop();
     }
 
     /**

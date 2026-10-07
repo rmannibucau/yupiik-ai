@@ -66,9 +66,10 @@ public final class CompletionEngine {
     }
 
     private Suggestion suggestWithin(final String text, final int cursor) {
-        // token the cursor is inside of
+        // token the cursor is inside of (any whitespace, not only space: a
+        // tab-separated /model <model> must complete like a space-separated one)
         int tokenStart = cursor;
-        while (tokenStart > 0 && text.charAt(tokenStart - 1) != ' ') {
+        while (tokenStart > 0 && !Character.isWhitespace(text.charAt(tokenStart - 1))) {
             tokenStart--;
         }
         final var prefixInner = text.substring(tokenStart, cursor);
@@ -94,10 +95,12 @@ public final class CompletionEngine {
         final var command = firstToken.substring(1);
         // the arguments typed before the current token: the text before the
         // token minus the leading command name, so positional completions
-        // (e.g. /metrics session on|off) branch on the typed arguments only
+        // (e.g. /metrics session on|off) branch on the typed arguments only.
+        // Split on any whitespace (space, tab) so tab-separated args behave
+        // exactly like space-separated ones.
         final var typed = text.substring(0, tokenStart).strip();
-        final var arg =
-                typed.indexOf(' ') > 0 ? typed.substring(typed.indexOf(' ') + 1).strip() : "";
+        final var typedTokens = typed.split("\\s+", 2);
+        final var arg = typedTokens.length > 1 ? typedTokens[1].strip() : "";
         final var result = registry.completionFor(command).complete(arg, prefixInner, env);
         if (result.empty()) {
             return Suggestion.none();

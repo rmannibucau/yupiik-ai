@@ -17,23 +17,28 @@ package io.yupiik.ia.agent.core.cli;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
-import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
 class FormatDatePromptHelperTest {
-    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-09-24T10:11:12.345Z"), ZoneOffset.UTC);
+    private static final Pattern TIME_ONLY = Pattern.compile("\\d{2}:\\d{2}:\\d{2}");
 
     private static String render(final String template) {
         final var functions = new LinkedHashMap<
                 String,
                 java.util.function.Function<io.yupiik.fusion.framework.handlebars.helper.HelperContext, Object>>();
-        functions.put("formatDate", new FormatDatePromptHelper(CLOCK)::apply);
+        functions.put("formatDate", new FormatDatePromptHelper()::apply);
         return new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(
                         new HandlebarsCompiler.Settings().helpers(functions), template))
@@ -42,17 +47,35 @@ class FormatDatePromptHelperTest {
 
     @Test
     void defaultPatternIsTimeOnly() {
-        assertEquals("10:11:12", render("{{formatDate}}"));
+        final var rendered = render("{{formatDate}}");
+        assertTrue(TIME_ONLY.matcher(rendered).matches(), rendered);
     }
 
     @Test
     void positionalPatternIsApplied() {
-        assertEquals("2026-09-24 10:11:12.345", render("{{formatDate \"yyyy-MM-dd HH:mm:ss.SSS\"}}"));
+        // the pattern decides the shape; the value is the current instant rendered in the JVM
+        // default zone (surefire pins it to UTC for the whole suite) - only proximity to now matters
+        final var rendered = render("{{formatDate \"yyyy-MM-dd HH:mm:ss.SSS\"}}");
+        final var parsed = LocalDateTime.parse(rendered, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS"))
+                .atZone(ZoneOffset.UTC)
+                .toInstant();
+        final var delta = Duration.between(parsed, Instant.now()).abs();
+        assertTrue(delta.toMillis() < 5_000, rendered);
+    }
+
+    @Test
+    void rendersInTheJvmDefaultZone() {
+        // the rendered offset must be the JVM default zone, not a hardcoded one; the suite
+        // pins that zone to UTC (surefire argLine) so the assertion is machine-independent
+        final var rendered = render("{{formatDate \"yyyy-MM-dd HH:mm:ssXXX\"}}");
+        final var parsed = OffsetDateTime.parse(rendered, DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ssXXX"));
+        assertEquals(ZoneOffset.UTC, parsed.getOffset(), rendered);
     }
 
     @Test
     void blankPatternFallsBackToTheDefault() {
-        assertEquals("10:11:12", render("{{formatDate \"\"}}"));
+        final var rendered = render("{{formatDate \"\"}}");
+        assertTrue(TIME_ONLY.matcher(rendered).matches(), rendered);
     }
 
     @Test
@@ -62,6 +85,9 @@ class FormatDatePromptHelperTest {
 
     @Test
     void inlineCallRendersInThePromptLine() {
-        assertEquals("t:10:11:12", render("t:{{formatDate}}"));
+        final var rendered = render("t:{{formatDate}}");
+        assertTrue(TIME_ONLY.matcher(rendered.substring(2)).matches(), rendered);
+        assertEquals('t', rendered.charAt(0));
+        assertEquals(':', rendered.charAt(1));
     }
 }

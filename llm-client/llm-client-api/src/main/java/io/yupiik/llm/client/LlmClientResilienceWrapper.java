@@ -66,8 +66,8 @@ public final class LlmClientResilienceWrapper {
     private final Consumer<PauseEvent> pauseListener;
     /**
      * Scheduler parking the retry waits and polling the cancellation probe; {@code null} falls
-     * back to the JDK delayed executor (no early cancellation of the wait itself). Never shut
-     * down by the wrapper.
+     * back to the JDK delayed executor where the probe is only checked before the wait and
+     * again when it elapses (no mid-wait polling). Never shut down by the wrapper.
      */
     private final ScheduledExecutorService scheduler;
     /**
@@ -99,8 +99,9 @@ public final class LlmClientResilienceWrapper {
      * @param config resilience knobs (defaults applied when {@code null}).
      * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
      * @param scheduler scheduler used to park retry waits and poll the cancellation probe; {@code null}
-     *     (the default) falls back to {@link CompletableFuture#delayedExecutor}. The scheduler is never
-     *     shut down by the wrapper: as the application-wide one, its owner owns its lifecycle.
+     *     (the default) falls back to the JDK delayed executor where cancellation is checked before
+     *     the wait and when it elapses (no mid-wait polling). The scheduler is never shut down by the
+     *     wrapper: as the application-wide one, its owner owns its lifecycle.
      */
     public LlmClientResilienceWrapper(
             final LlmResilienceConfig config,
@@ -427,6 +428,14 @@ public final class LlmClientResilienceWrapper {
     private CompletionStage<Boolean> cancellableWait(final long waitMs, final BooleanSupplier cancelled) {
         final var waitMsScaled = Math.max(1L, (long) (waitMs * config.waitScale()));
         final var done = new CompletableFuture<Boolean>();
+        // an already-cancelled turn must never pay the wait: fail synchronously before scheduling
+        // anything. Without this, an already-set cancel still parked the full retry-after delay
+        // (a retry-after=30s cost 30s) before the post-wait check in retryAfter/retryStreamAfter
+        // could see it.
+        if (cancelled != null && cancelled.getAsBoolean()) {
+            done.completeExceptionally(new IOException("Cancelled"));
+            return done;
+        }
         if (scheduler == null) {
             CompletableFuture.delayedExecutor(waitMsScaled, TimeUnit.MILLISECONDS)
                     .execute(() -> done.complete(Boolean.TRUE));

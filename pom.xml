@@ -175,6 +175,14 @@
                    threads that outlive the surefire fork JVM and delay its exit by 30s -->
               <org.jline.terminal.type>dumb</org.jline.terminal.type>
             </systemPropertyVariables>
+            <!-- the whole suite pins the default zone to UTC so tests asserting wall-clock
+                 stamps (formatDate/time helpers, speaker labels, TUI headers) are exact and
+                 machine-independent: production renders in the end-user JVM zone, the tests
+                 just standardize on UTC. Same story for the default locale: number
+                 formatting (%.1f, %,d) follows it, so a French dev box would render
+                 "10,4s" while CI renders "10.4s". JVM-wide (argLine) on purpose: classes run
+                 concurrently, a per-test TimeZone/Locale.setDefault would race. -->
+            <argLine>-Duser.timezone=UTC -Duser.language=en -Duser.country=US</argLine>
           </configuration>
         </plugin>
         <plugin>

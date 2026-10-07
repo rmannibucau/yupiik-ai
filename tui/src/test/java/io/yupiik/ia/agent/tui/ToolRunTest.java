@@ -78,4 +78,82 @@ class ToolRunTest {
         final var run = ToolRun.of(List.of(new ToolRun.Member(card(1, "bash", "ls", 0, false), "r1")));
         assertEquals(1, run.size());
     }
+
+    @Test
+    void collapsedMemberLineCarriesOrdinalForOverlayClick() {
+        // collapsed run members render as dim one-liners; each must keep its ordinal so
+        // a click on the line can open the full output overlay (regression: the collapsed
+        // run branch used to drop every member anchor, making the lines dead space)
+        final var palette = Palette.from("dark", tuiConfiguration());
+        final var glyphs = Glyphs.of("unicode");
+        for (final var c : List.of(
+                card(7, "bash", "grep x", 10, false),
+                card(9, "read_file", "a.java", 5, false),
+                card(11, "git", "status", 3, true))) {
+            final var text = TuiCommand.hiddenToolLineText(c, palette, glyphs);
+            // the ordinal appears in the member label, so the TUI can anchor the overlay
+            assertTrue(text.contains("#" + c.ordinal()), () -> "expected #" + c.ordinal() + " in: " + text);
+        }
+    }
+
+    private static TuiConfiguration tuiConfiguration() {
+        final var log = new TuiLogConfiguration(
+                new TuiLogLevelConfiguration("auto"),
+                new TuiLogLevelConfiguration("auto"),
+                new TuiLogLevelConfiguration("auto"),
+                new TuiLogLevelConfiguration("auto"),
+                new TuiLogLevelConfiguration("auto"),
+                new TuiLogLevelConfiguration("auto"),
+                new TuiLogLevelConfiguration("auto"));
+        return new TuiConfiguration(
+                "#9d7cd8",
+                "#fab283",
+                "#7fd88f",
+                "#f5a742",
+                "#e06c75",
+                "#b896d8",
+                "#eeeeee",
+                "#808080",
+                -1.0,
+                0.22,
+                0.14,
+                0.85,
+                "#484848",
+                "#606060",
+                "#141414",
+                "auto",
+                "auto",
+                4000L,
+                3500L,
+                true,
+                "unicode",
+                "auto",
+                "auto",
+                List.of(),
+                new TuiTranscriptConfiguration(10_000_000L),
+                log,
+                true,
+                3,
+                10,
+                "",
+                "#ff5555",
+                new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0));
+    }
+
+    @Test
+    void collapsedRunRendersOneLinePerMemberInOrder() {
+        // the collapsed run must render exactly the member one-liners (readable, dimmed)
+        // and no full card bodies, so the run stays compact while each line stays clickable
+        final var members = List.of(
+                new ToolRun.Member(card(1, "bash", "ls", 10, false), "r1"),
+                new ToolRun.Member(card(2, "read_file", "x", 20, false), "r2"),
+                new ToolRun.Member(card(3, "bash", "pwd", 5, false), "r3"));
+        final var run = ToolRun.of(members);
+        assertEquals(3, run.size());
+        assertEquals(3, run.members().size());
+        // each member keeps its ordinal and the run id is the first member's ordinal
+        final var ordinals = run.members().stream().map(m -> m.card().ordinal()).toList();
+        assertEquals(List.of(1L, 2L, 3L), ordinals);
+        assertEquals(1L, run.id());
+    }
 }

@@ -129,7 +129,7 @@ public class SlashCommandCompleter implements Completer {
     }
 
     private static boolean isCompletingCommand(final String text, final int cursor) {
-        if (!text.startsWith("/") || cursor <= 0 || cursor > text.length()) {
+        if (!text.startsWith("/") || cursor <= 0 || cursor >= text.length()) {
             return false;
         }
         for (int i = 0; i < cursor; i++) {

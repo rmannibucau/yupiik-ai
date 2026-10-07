@@ -128,7 +128,8 @@ class TuiLogColorTest {
                         3,
                         10,
                         "",
-                        "#ff5555"));
+                        "#ff5555",
+                        new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0)));
         assertEquals("#d1383d", TuiCommand.logLevelColor(light, null, Level.SEVERE));
         assertEquals("#8a621f", TuiCommand.logLevelColor(light, null, Level.WARNING));
         assertEquals("#1f7a88", TuiCommand.logLevelColor(light, null, Level.INFO));

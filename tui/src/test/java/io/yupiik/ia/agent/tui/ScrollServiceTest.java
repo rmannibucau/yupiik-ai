@@ -120,6 +120,7 @@ class ScrollServiceTest {
                 scrollLines,
                 scrollPageLines,
                 "",
-                "#ff5555");
+                "#ff5555",
+                new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0));
     }
 }

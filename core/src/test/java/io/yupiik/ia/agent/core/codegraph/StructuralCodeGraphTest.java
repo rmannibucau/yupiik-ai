@@ -94,6 +94,26 @@ class StructuralCodeGraphTest {
         return graph;
     }
 
+    /**
+     * Waits (bounded) for the async build to expose a non-empty store so assertions never observe the pre-build
+     * empty window (a slow build used to surface as "expected X indexed" failures under parallel test load). On
+     * timeout the (still empty) store is returned and the calling assertion fails as before.
+     */
+    private GraphStore awaitNonEmpty(final StructuralCodeGraph graph) {
+        final var deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(15);
+        var store = graph.graph();
+        while (store.symbols().isEmpty() && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(10);
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+            store = graph.graph();
+        }
+        return store;
+    }
+
     private ChatClient chatClient(final CodingAgentConfiguration config, final JsonMapper mapper) {
         final var client = new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC());
         chatClients.add(client);
@@ -124,7 +144,7 @@ class StructuralCodeGraphTest {
 
         graph.ensureReady();
         graph.flushPersist();
-        final var built = graph.graph();
+        final var built = awaitNonEmpty(graph);
         assertEquals(4, built.symbols().size(), "expected Foo + Foo.add + Bar + Bar.go symbols");
         final var types = built.symbols().stream()
                 .filter(s -> s.kind() == GraphModel.Kind.TYPE)
@@ -199,7 +219,8 @@ class StructuralCodeGraphTest {
         // reload from disk must match in-memory state
         final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
-        assertEquals(afterDelete.symbols().size(), reloaded.graph().symbols().size());
+        assertEquals(
+                afterDelete.symbols().size(), awaitNonEmpty(reloaded).symbols().size());
     }
 
     @Test
@@ -213,7 +234,7 @@ class StructuralCodeGraphTest {
         final var config = config(project, Map.of());
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
-        assertEquals(2, graph.graph().symbols().size());
+        assertEquals(2, awaitNonEmpty(graph).symbols().size());
 
         graph.refreshFile(outside.resolve("Bar.java"));
         assertTrue(
@@ -289,7 +310,7 @@ class StructuralCodeGraphTest {
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
-        final var symbols = graph.graph().symbols();
+        final var symbols = awaitNonEmpty(graph).symbols();
         assertTrue(
                 symbols.stream().anyMatch(s -> s.fqn().equals("demo.A")),
                 "expected the source under src/main/java to be indexed");
@@ -327,7 +348,7 @@ class StructuralCodeGraphTest {
         final var graph = newGraph(config, mapper);
         graph.ensureReady();
 
-        final var symbols = graph.graph().symbols();
+        final var symbols = awaitNonEmpty(graph).symbols();
         assertTrue(symbols.stream().anyMatch(s -> s.fqn().equals("demo.A")), "expected demo.A indexed");
         assertTrue(symbols.stream().anyMatch(s -> s.fqn().equals("demo.F")), "expected demo.F indexed");
         assertTrue(
@@ -347,8 +368,8 @@ class StructuralCodeGraphTest {
         final var docRoot = Path.of(config.structuralCodeGraph().resolvedStoreDir(project.toString()))
                 .toAbsolutePath()
                 .normalize();
-        final var model =
-                new GraphModel("java", graph.graph().symbols(), graph.graph().edges());
+        final var built = awaitNonEmpty(graph);
+        final var model = new GraphModel("java", built.symbols(), built.edges());
         final var rel = "Foo.java";
         final var doc = docRoot.resolve("Foo.md");
 
@@ -419,7 +440,7 @@ class StructuralCodeGraphTest {
         // a fresh instance re-loaded from the same binary index must reproduce the same symbols
         final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
-        assertEquals(stored.symbols().size(), reloaded.graph().symbols().size());
+        assertEquals(stored.symbols().size(), awaitNonEmpty(reloaded).symbols().size());
     }
 
     @Test
@@ -535,7 +556,7 @@ class StructuralCodeGraphTest {
         graph.ensureReady();
         graph.flushPersist();
         assertTrue(
-                graph.graph().symbols().stream().anyMatch(s -> s.fqn().equals("demo.sub.Bar")),
+                awaitNonEmpty(graph).symbols().stream().anyMatch(s -> s.fqn().equals("demo.sub.Bar")),
                 "expected Bar symbols before the deletion");
 
         // delete a file offline (no refreshFile event): a resync must fully reconcile the store
@@ -565,7 +586,7 @@ class StructuralCodeGraphTest {
         reloaded.ensureReady();
         assertEquals(
                 after.symbols().size(),
-                reloaded.graph().symbols().size(),
+                awaitNonEmpty(reloaded).symbols().size(),
                 "reloaded index must not carry ghost symbols for the deleted file");
     }
 
@@ -584,7 +605,7 @@ class StructuralCodeGraphTest {
         final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
 
-        final var symbols = reloaded.graph().symbols();
+        final var symbols = awaitNonEmpty(reloaded).symbols();
         assertTrue(
                 symbols.stream().anyMatch(s -> s.fqn().equals("demo.Baz")),
                 "a file added offline must be indexed on session start");
@@ -622,7 +643,9 @@ class StructuralCodeGraphTest {
         // ... so the next session hits the fresh fast path and serves the same symbols
         final var third = newGraph(config, mapper);
         third.ensureReady();
-        assertEquals(reloaded.graph().symbols().size(), third.graph().symbols().size());
+        assertEquals(
+                awaitNonEmpty(reloaded).symbols().size(),
+                awaitNonEmpty(third).symbols().size());
     }
 
     private static String safeRead(final Path p) {

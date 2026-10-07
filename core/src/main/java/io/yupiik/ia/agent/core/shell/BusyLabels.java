@@ -35,6 +35,15 @@ public final class BusyLabels {
         return "thinking... (" + seconds + "s)";
     }
 
+    /**
+     * {@code thinking...} without any time: for surfaces whose spinner appends its
+     * own elapsed counter each frame (the CLI {@code Spinner}), so the label must
+     * not bake a time in or the row would render it twice.
+     */
+    public static String thinking() {
+        return "thinking...";
+    }
+
     /** {@code calling <command>} (the square-corner phase). */
     public static String calling(final String command) {
         return "calling " + (command == null ? "" : command);

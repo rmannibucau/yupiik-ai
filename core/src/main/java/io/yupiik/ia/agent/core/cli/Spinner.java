@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.cli;
 
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 
@@ -88,7 +89,7 @@ public final class Spinner {
                                     + String.valueOf(frames[i++ % frames.length])
                                     + ' '
                                     + label
-                                    + (seconds >= 1 ? String.format(" %.1fs", seconds) : ""));
+                                    + (seconds >= 1 ? String.format(Locale.ROOT, " (%.1fs)", seconds) : ""));
                             rowOwned = true;
                         }
                     } finally {

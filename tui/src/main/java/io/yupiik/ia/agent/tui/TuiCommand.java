@@ -595,6 +595,24 @@ public class TuiCommand implements Runnable {
             final var rootFeedback = redirectLoggerToUi("", tui);
             final var julFeedback = redirectLoggerToUi("io.yupiik", tui);
             final var jlineFeedback = redirectLoggerToUi("org.jline", tui);
+            // yca enables ESC[?1003h (any-motion mouse tracking, see TuiRunnerFactory) on top
+            // of tamboui's own mouse modes. TamboUI's cleanup() disables only ?1000/?1002/
+            // ?1006/?1015, so on its own the terminal would keep reporting every mouse move
+            // after the TUI exits and the shell would print the SGR reports as garbage.
+            // Restore ?1003l on both exit paths: after the runner's close below (clean exit)
+            // and from the JVM shutdown hook (SIGTERM / Ctrl-C when the signal handler is not
+            // installed), mirroring CliCommand's shutdown-cleanup pattern.
+            final var mouseRestoreHook = new Thread(
+                    () -> {
+                        try {
+                            tui.backend().writeRaw(TuiRunnerFactory.MOUSE_MOTION_DISABLE);
+                            tui.backend().flush();
+                        } catch (final java.io.IOException e) {
+                            // best-effort restoration on the abrupt path, never mask the shutdown
+                        }
+                    },
+                    "yca-tui-mouse-restore");
+            Runtime.getRuntime().addShutdownHook(mouseRestoreHook);
             try {
                 tui.run((event, runner) -> onKey(event, runner, active()), frame -> render(frame, active()));
             } finally {
@@ -625,6 +643,22 @@ public class TuiCommand implements Runnable {
                     gitBranchPoller.close();
                 }
                 executor.shutdown();
+                // clean-exit path of the ?1003l restore: the event loop has ended, so write
+                // the disable here while the terminal is still ours, then drop the shutdown
+                // hook (which exists only for the abrupt path). The try-with-resources closes
+                // the runner right after this block; tamboui's cleanup() then disables its own
+                // modes (?1000/?1002/?1006/?1015) after our write.
+                try {
+                    tui.backend().writeRaw(TuiRunnerFactory.MOUSE_MOTION_DISABLE);
+                    tui.backend().flush();
+                } catch (final java.io.IOException | RuntimeException e) {
+                    // best-effort restoration, never mask the normal teardown
+                }
+                try {
+                    Runtime.getRuntime().removeShutdownHook(mouseRestoreHook);
+                } catch (final IllegalStateException e) {
+                    // the JVM is already shutting down: the hook runs or ran on its own
+                }
             }
         } catch (final RuntimeException e) {
             throw e;
@@ -720,7 +754,7 @@ public class TuiCommand implements Runnable {
      * mirroring {@code /resume}. A brand-new id behaves exactly like {@link #newTab(TuiRunner)}.
      */
     private UiState newTab(final TuiRunner tui, final String sessionId) {
-        final var state = new UiState(thinkTags, clock);
+        final var state = new UiState(thinkTags, clock, tuiConfiguration.toolOutput());
         state.sessionId = sessionId;
         state.showThinking = conf.showThinking();
         state.runner = tui;
@@ -1307,9 +1341,10 @@ public class TuiCommand implements Runnable {
                 final var current = state.toolOutputs.get(ordinal);
                 if (current != null) {
                     var output = current.output();
-                    if (output.length() < ToolOutputStore.DEFAULT_MAX_OUTPUT_CHARS) {
+                    final var cap = state.toolOutputs.maxOutputChars();
+                    if (output.length() < cap) {
                         output += stream.fragment();
-                        if (current.output().length() >= ToolOutputStore.DEFAULT_MAX_OUTPUT_CHARS - 65536) {
+                        if (current.output().length() >= cap - 65536) {
                             output = output.substring(output.length() - 65536) + "\n... older output truncated";
                         }
                     }
@@ -1543,7 +1578,11 @@ public class TuiCommand implements Runnable {
                     }
                 }
                 // tool card headers: clicking toggles that card's collapse
-                // (a running card opens the live overlay instead: it has nothing to collapse)
+                // (a running card opens the live overlay instead: it has nothing to collapse).
+                // Collapsed cards opened through a run group (dim one-liner members) always
+                // open the full output - they are clicks on completed cards with no expansion
+                // left to do, and matching the old collapsed-mode behavior of opening the
+                // overlay rather than toggling state on a line that has no state to toggle.
                 for (final var anchor : state.toolAnchors) {
                     if (anchor.ordinal() >= 0 && anchor.header().contains(mouse.x(), mouse.y())) {
                         state.selection.clear();
@@ -1553,12 +1592,26 @@ public class TuiCommand implements Runnable {
                         } else if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
                             // condensed mode: the dim one-liner itself opens the full output
                             openToolOverlay(state, anchor.ordinal());
-                        } else if (state.showToolActions == ToolOutputVisibility.SHOWN
-                                && !state.collapsedTools.remove(anchor.ordinal())) {
+                        } else if (state.collapsedTools.contains(anchor.ordinal())) {
+                            // per-card collapsed (was a dim one-liner): open the full output
+                            openToolOverlay(state, anchor.ordinal());
+                        } else if (state.showToolActions == ToolOutputVisibility.SHOWN) {
+                            // fully rendered card: the header collapses the card itself
                             state.collapsedTools.add(anchor.ordinal());
                         }
                         return true;
                     }
+                }
+                // completion popup: a left click selects the clicked candidate row
+                // (the popup is a modal overlay, so it consumes the press entirely)
+                if (state.completionRect != null && state.completionRect.contains(mouse.x(), mouse.y())) {
+                    final var clicked = completionItemAt(state, mouse.x(), mouse.y());
+                    if (clicked >= 0) {
+                        state.completionIndex = clicked;
+                        state.completionNavigated = true;
+                        state.dirty = true;
+                    }
+                    return true;
                 }
                 // prompt input: a left click positions the edit caret (the selection
                 // press below still anchors the drag so text selection keeps working)
@@ -1769,6 +1822,9 @@ public class TuiCommand implements Runnable {
                 return true;
             }
             if (state.completion != null) {
+                // a completion popup is a modal-ish overlay: first Esc dismisses
+                // it without touching the prompt or the selection, so a second
+                // Esc can cancel/submit normally (pendingLine, selection, busy)
                 dismissCompletion(state);
                 return true;
             }
@@ -1808,7 +1864,10 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (key.isKey(KeyCode.TAB)) {
-            complete(runner, state);
+            // completion is a modal-ish overlay: Tab applies the highlighted
+            // candidate and keeps the popup open (idempotent); it never leaks
+            // to permission approvals (which live in the overlay chain above)
+            tabCompletion(state);
             return true;
         }
         if (key.hasAlt() && key.isCharIgnoreCase('b')) {
@@ -1872,10 +1931,11 @@ public class TuiCommand implements Runnable {
                 pending.complete(Optional.of(answer));
                 return true;
             }
-            if (state.completion != null && !state.completion.empty() && state.completionNavigated) {
-                // the user moved the completion highlight with Up/Down: Enter accepts the
-                // highlighted candidate instead of submitting the line (Tab still completes
-                // without pressing Enter)
+            if (state.completion != null && !state.completion.empty()) {
+                // a completion popup with candidates is a modal-ish overlay: Enter
+                // accepts the highlighted candidate instead of submitting the line
+                // (Esc dismisses the popup first, a second Enter then submits). The
+                // user may also keep typing to refine the candidates.
                 applyCompletion(state);
                 dismissCompletion(state);
                 return true;
@@ -2426,58 +2486,37 @@ public class TuiCommand implements Runnable {
         return "#1a1a1a".equalsIgnoreCase(palette.text());
     }
 
-    private void complete(final TuiRunner runner, final UiState state) {
-        final var row = state.input.cursorRow();
-        final var line = state.input.getLine(row);
-        final var cursor = state.input.cursorCol();
-        final var suggestion = completionEngine.suggest(line, cursor);
-        if (suggestion.empty()) {
-            notify(state, "no completion for '" + line + "'");
-            state.completion = null;
-            state.completionCursor = -1;
-            return;
-        }
-        // refresh the popup whenever the suggestion changes
-        if (state.completion == null || !sameText(suggestion, state.completion)) {
-            state.completion = suggestion;
-            state.completionCursor = cursor;
-            state.completionIndex = 0;
-            state.completionNavigated = false;
-        }
-        applyCompletion(state);
-    }
-
-    private static boolean sameText(final CompletionEngine.Suggestion a, final CompletionEngine.Suggestion b) {
-        if (a == b) {
-            return true;
-        }
-        return a != null
-                && b != null
-                && a.items().equals(b.items())
-                && a.replaceStart() == b.replaceStart()
-                && a.replaceEnd() == b.replaceEnd();
-    }
-
     private void applyCompletion(final UiState state) {
         final var suggestion = state.completion;
         if (suggestion == null || suggestion.empty()) {
             return;
         }
         final var items = suggestion.items();
+        // the *highlighted* candidate: applyCompletion never advances the highlight -
+        // that is Up/Down's job (cycleCompletion). Tab repeatedly applies the same row
+        // (idempotent), so the applied text always matches what is highlighted.
         final var choice = items.get(state.completionIndex % items.size());
-        state.completionIndex++;
         replaceInput(state, suggestion, choice);
+        state.completionIndex = state.completionIndex % items.size(); // keep the applied row selected
     }
 
     private void replaceInput(
             final UiState state, final CompletionEngine.Suggestion suggestion, final String replacement) {
         final var row = state.input.cursorRow();
         final var line = state.input.getLine(row);
-        final var newValue =
-                line.substring(0, suggestion.replaceStart()) + replacement + line.substring(suggestion.replaceEnd());
+        final var start = suggestion.replaceStart();
+        final var end = suggestion.replaceEnd();
+        // a degenerate span (start >= end, or out of the current line) can only
+        // duplicate text on re-application (e.g. a stale suggestion applied after
+        // the input moved on): refuse to mutate the line instead of producing
+        // "yoyolo"-style duplicates
+        if (start < 0 || end > line.length() || start >= end) {
+            return;
+        }
+        final var newValue = line.substring(0, start) + replacement + line.substring(end);
         setInputLine(state, row, newValue);
         // position the cursor just after the inserted replacement range
-        applyCursor(state, row, suggestion.replaceStart() + replacement.length());
+        applyCursor(state, row, start + replacement.length());
         state.completionCursor = state.input.cursorCol();
     }
 
@@ -2492,9 +2531,6 @@ public class TuiCommand implements Runnable {
         } else {
             state.completionIndex = (state.completionIndex + size - 1) % size;
         }
-        // arrow navigation marks the popup as explicitly navigated so Enter accepts the
-        // highlighted candidate; Tab resets it (Tab applies-and-advances by itself, Enter
-        // after Tab must keep submitting the line)
         state.completionNavigated = true;
         // the popup highlight is not an animated region: mark the tab dirty so the next
         // tick repaints the moved selection even when no other state changed
@@ -2504,29 +2540,64 @@ public class TuiCommand implements Runnable {
     private void dismissCompletion(final UiState state) {
         state.completion = null;
         state.completionCursor = -1;
+        state.completionIndex = 0;
         state.completionNavigated = false;
+        state.completionRect = null;
     }
 
     /**
-     * Live completion: keeps the popup in sync with what is typed, so slash
+     * Tab on the prompt line: with a candidate popup open, applies the *highlighted*
+     * candidate then dismisses the popup, so a further keystroke (or a second Tab)
+     * recomputes the suggestion against the new line instead of re-applying the
+     * previous candidate over a stale span (that would duplicate text: Tab on
+     * "/permissions yo" -> "/permissions yolo", a second Tab re-applying the old
+     * "[13,15)" span would produce "/permissions yoyolo"). Without a popup yet (live
+     * completion resolving asynchronously), computes the suggestion synchronously,
+     * applies the first candidate and dismisses the popup too - a single Tab never
+     * leaves a stale suggestion open. The applied text always matches the highlighted
+     * row, and the highlight never advances by itself.
+     */
+    private void tabCompletion(final UiState state) {
+        if (state.completion != null && !state.completion.empty()) {
+            applyCompletion(state);
+            dismissCompletion(state);
+            state.dirty = true;
+            return;
+        }
+        final var row = state.input.cursorRow();
+        final var line = state.input.getLine(row);
+        final var cursor = state.input.cursorCol();
+        final var suggestion = completionEngine.suggest(line, cursor);
+        if (suggestion.empty()) {
+            dismissCompletion(state);
+            return;
+        }
+        state.completion = suggestion;
+        state.completionCursor = cursor;
+        state.completionIndex = 0;
+        state.completionNavigated = false;
+        applyCompletion(state);
+        dismissCompletion(state);
+        state.dirty = true;
+    }
+
+    /**
+     * Live completion keeps the popup in sync with what is typed, so slash
      * commands and their parameters offer candidates without explicitly
      * pressing Tab. The popup opens for "/" prefixes and "@agent" tokens.
-     */
-    /**
-     * Live completion keeps the popup in sync with what is typed. The suggestion lookup
-     * (which may resolve the model list over the network) runs on the shared executor so
-     * it never blocks the UI/render thread; results are applied only when still relevant
-     * (generation + input unchanged) to avoid stale popups while typing fast.
+     * The suggestion lookup (which may resolve the model list over the
+     * network) runs on the shared executor so it never blocks the UI/render
+     * thread; results are applied only when still relevant (generation +
+     * input unchanged) to avoid stale popups while typing fast.
      */
     private void liveComplete(final UiState state) {
         final var line = state.input.getLine(state.input.cursorRow());
         final var cursor = state.input.cursorCol();
-        completionGeneration++;
+        final var gen = ++completionGeneration;
         if (!line.startsWith("/") && !tokenAt(line, cursor).startsWith("@")) {
             dismissCompletion(state);
             return;
         }
-        final var gen = completionGeneration;
         final var reqLine = line;
         final var reqCursor = cursor;
         executor.execute(() -> {
@@ -2537,12 +2608,23 @@ public class TuiCommand implements Runnable {
             if (suggestion.empty()) {
                 state.completion = null;
                 state.completionCursor = -1;
+                state.completionRect = null;
                 return;
             }
+            // keep the highlight when the user typed a char that did not change the
+            // candidate set (e.g. continuing to type the same token): resetting the
+            // index on every keystroke would discard an explicit Up/Down selection.
+            final var previous = state.completion;
+            final var sameList = previous != null
+                    && previous.items().equals(suggestion.items())
+                    && previous.replaceStart() == suggestion.replaceStart()
+                    && previous.replaceEnd() == suggestion.replaceEnd();
             state.completion = suggestion;
             state.completionCursor = reqCursor;
-            state.completionIndex = 0;
-            state.completionNavigated = false;
+            if (!sameList) {
+                state.completionIndex = 0;
+                state.completionNavigated = false;
+            }
         });
     }
 
@@ -3849,8 +3931,25 @@ public class TuiCommand implements Runnable {
         final var localToolTops = new ArrayList<UiState.ToolTop>();
         final var localFooterLinks = new ArrayList<UiState.FooterLink>();
         final var pendingRuns = new ArrayList<ToolRun.Builder>();
-        final Runnable flushRuns = () -> pendingRuns.forEach(builder -> addToolRunChunk(
-                local, builder.build(), width, state, localToolTops, localFooterLinks, localRunHeaders, localRows));
+        final Runnable flushRuns = () -> {
+            // flush once and drop: without the clear, every flushed run stayed in the
+            // list, later tool regions kept extending it (one mega-run per session) and
+            // every subsequent boundary re-rendered it with extra members - duplicated
+            // headers sharing the same run id (opening one opened "all" the copies) and
+            // overlapping full-width header rects stealing clicks from member cards
+            for (final var builder : pendingRuns) {
+                addToolRunChunk(
+                        local,
+                        builder.build(),
+                        width,
+                        state,
+                        localToolTops,
+                        localFooterLinks,
+                        localRunHeaders,
+                        localRows);
+            }
+            pendingRuns.clear();
+        };
         for (final var region : TuiTranscriptModel.regions(md)) {
             if (region.thought()) {
                 flushRuns.run();
@@ -4354,11 +4453,11 @@ public class TuiCommand implements Runnable {
                         .text(Text.from(header))
                         .overflow(Overflow.CLIP)
                         .build()));
-        if (collapsed) {
-            return;
-        }
-        if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
-            // collapsed mode with an open run: one dim line per member, indented under the header
+        if (collapsed || state.showToolActions == ToolOutputVisibility.COLLAPSED) {
+            // collapsed run (explicit override or the mode default) or an explicitly
+            // opened run under COLLAPSED mode: one dim line per member, indented under
+            // the header. Every member line is its own click target opening the full
+            // output overlay (only the run header keeps the collapse/expand toggle).
             var y = top + 1;
             for (final var member : run.members()) {
                 final var card = member.card();
@@ -4561,6 +4660,21 @@ public class TuiCommand implements Runnable {
 
     /** Single dim summary line shown for a tool action when tool blocks are hidden. */
     private Line hiddenToolLine(final ToolCard card) {
+        return hiddenToolLine(card, palette, glyphs);
+    }
+
+    /**
+     * Pure form of {@link #hiddenToolLine(ToolCard)} so the collapsed-run rendering
+     * can be asserted without a live TUI.
+     */
+    static String hiddenToolLineText(final ToolCard card, final Palette palette, final Glyphs glyphs) {
+        return hiddenToolLine(card, palette, glyphs).spans().stream()
+                .map(Span::content)
+                .collect(java.util.stream.Collectors.joining());
+    }
+
+    /** Internal shared implementation of the collapsed one-liner. */
+    static Line hiddenToolLine(final ToolCard card, final Palette palette, final Glyphs glyphs) {
         final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
         final var label = new StringBuilder();
         if (card.running()) {
@@ -4591,13 +4705,8 @@ public class TuiCommand implements Runnable {
                 Span.styled(label.toString(), Style.EMPTY.fg(Color.hex(palette.textMuted()))));
     }
 
-    /**
-     * The significant command of a tool card for the condensed rendering, with
-     * read/write/edit file paths shortened to their cwd-relative form so the
-     * working-directory prefix does not eat the whole line. The shortening is
-     * applied before the display clip so long absolute paths stay relative.
-     */
-    private String condensedCommand(final ToolCard card) {
+    /** Pure, static form of {@link #condensedCommand(ToolCard)}. */
+    static String condensedCommand(final ToolCard card) {
         if (!card.running()
                 && !card.failed()
                 && ("read_file".equals(card.name())
@@ -4923,9 +5032,37 @@ public class TuiCommand implements Runnable {
     }
 
     /**
+     * Maps a screen point inside the completion popup to a candidate index, or -1 when the
+     * point is on the border/title (the click should then just dismiss/ignore). The popup
+     * draws {@code items} inside a rounded block with a 1-row border; the index is
+     * {@code (y - rect.y - 1) + start} where {@code start} is the scroll window offset.
+     */
+    private static int completionItemAt(final UiState state, final int mx, final int my) {
+        final var rect = state.completionRect;
+        final var suggestion = state.completion;
+        if (rect == null || suggestion == null || suggestion.empty()) {
+            return -1;
+        }
+        final var items = suggestion.items();
+        final var visible = Math.min(items.size(), 8);
+        final var selected = state.completionIndex % items.size();
+        final var start = Math.max(0, Math.min(selected - visible + 1, items.size() - visible));
+        final var row = my - rect.y() - 1; // minus the top border
+        if (row < 0 || row >= visible) {
+            return -1;
+        }
+        final var index = start + row;
+        return index >= 0 && index < items.size() ? index : -1;
+    }
+
+    /**
      * Renders the completion candidate popup just above the prompt line when a
      * {@code /command} or parameter completion is active. The currently cycled
-     * match is highlighted among {@code items}.
+     * match is highlighted among {@code items}; when the list overflows the popup
+     * (8 rows max), the highlighted row is kept visible by scrolling the window,
+     * like the {@code PickerPrompt} list. The popup is anchored horizontally at
+     * the caret's display column so multi-word lines (e.g. {@code /model glm})
+     * show candidates under the token being completed, not at the line's left edge.
      */
     private void renderCompletionPopup(
             final Rect inputRect, final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -4935,14 +5072,19 @@ public class TuiCommand implements Runnable {
         }
         final var items = suggestion.items();
         final var visible = Math.min(items.size(), 8);
+        // scroll window: keep the highlighted row visible, like a list picker
+        final var selected = state.completionIndex % items.size();
+        final var start = Math.max(0, Math.min(selected - visible + 1, items.size() - visible));
         final var width = Math.clamp(frame.width() - 4, 20, 46);
         final var height = visible + 2; // border + items
-        final var x = Math.max(0, Math.min(inputRect.x() + 2, frame.width() - width));
+        // anchor at the caret's display column (clamped to the frame), not the input's left edge
+        final var caretCol = inputRect.x() + caretDisplayCol(state.input);
+        final var x = Math.max(0, Math.min(caretCol, frame.width() - width));
         final var y = Math.max(0, inputRect.y() - height);
         final var rect = new Rect(x, y, width, height);
+        state.completionRect = rect;
         frame.renderWidget(dev.tamboui.widgets.Clear.INSTANCE, rect);
         final var accent = Style.EMPTY.fg(Color.hex(palette.accent()));
-        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var textStyle = Style.EMPTY.fg(Color.hex(palette.text()));
         final var block = Block.builder()
                 .title(" " + (suggestion.label().isBlank() ? "complete" : suggestion.label()) + " ")
@@ -4956,8 +5098,9 @@ public class TuiCommand implements Runnable {
             return;
         }
         // the popup is drawn after the input, so registering it last makes it the
-        // topmost pane a press can resolve to
-        frameZones.add(inner);
+        // topmost pane a press can resolve to (the full block rect, so clicks on the
+        // border still resolve to the popup and are handled by itemAt below)
+        frameZones.add(rect);
         final var lines = new ArrayList<Line>();
         // the active row reads as a highlighted selection: accent bold foreground on a subtle
         // accent-tinted backdrop (padding the row so the backdrop spans the whole popup width)
@@ -4966,11 +5109,12 @@ public class TuiCommand implements Runnable {
                 .bold()
                 .bg(TuiColors.blend(palette.accent(), palette.backgroundPanel(), 0.85));
         for (var i = 0; i < visible; i++) {
-            final var selected = i == (state.completionIndex % items.size());
-            final var item = items.get(i);
-            final var style = selected ? selectedStyle : textStyle;
-            final var marker = selected ? "> " : "  ";
-            if (selected) {
+            final var itemIndex = start + i;
+            final var selectedRow = itemIndex == selected;
+            final var item = items.get(itemIndex);
+            final var style = selectedRow ? selectedStyle : textStyle;
+            final var marker = selectedRow ? "> " : "  ";
+            if (selectedRow) {
                 final var content = marker + item;
                 lines.add(Line.from(Span.styled(
                         content + " ".repeat(Math.max(0, inner.width() - content.length())), style)));
@@ -5703,7 +5847,12 @@ public class TuiCommand implements Runnable {
         }
         final var entry = state.toolOutputs.get(ordinal);
         if (entry == null) {
-            notify(state, "tool #" + ordinal + " output is no longer in memory");
+            notify(
+                    state,
+                    ordinal <= state.toolOutputs.maxOrdinalSeen()
+                            ? "tool #" + ordinal
+                                    + " output was evicted to bound memory (oldest tool outputs are dropped first)"
+                            : "tool #" + ordinal + " output is no longer in memory");
             return;
         }
         state.focusedToolOrdinal = ordinal;
@@ -7415,6 +7564,9 @@ public class TuiCommand implements Runnable {
         private volatile int completionIndex;
         private volatile int completionCursor = -1;
         private volatile boolean completionNavigated;
+        /** Screen hit-area of the completion popup (full box) as drawn last frame; null when no popup. */
+        private volatile Rect completionRect;
+
         private final SelectionState selection = new SelectionState();
         private volatile String[][] screenGrid = new String[0][0];
         private volatile Rect copyZone;
@@ -7524,10 +7676,20 @@ public class TuiCommand implements Runnable {
         }
 
         UiState(final ThinkTagSplitter thinkTags, final Clock clock) {
+            this(thinkTags, clock, null);
+        }
+
+        UiState(
+                final ThinkTagSplitter thinkTags,
+                final Clock clock,
+                final TuiConfiguration.ToolOutputConfiguration toolOutput) {
             this.model = new TuiTranscriptModel(thinkTags);
             this.clock = clock;
             this.session = new ShellSession();
-            this.toolOutputs = new ToolOutputStore();
+            final var limits =
+                    toolOutput == null ? new TuiConfiguration.ToolOutputConfiguration(128, 256 * 1024, 0) : toolOutput;
+            this.toolOutputs =
+                    new ToolOutputStore(limits.maxEntries(), limits.maxOutputChars(), limits.maxTotalChars());
             this.killRing = new KillRing();
             this.undoStack = new UndoStack();
             this.interruptor = new InterruptCoordinator(clock, true);

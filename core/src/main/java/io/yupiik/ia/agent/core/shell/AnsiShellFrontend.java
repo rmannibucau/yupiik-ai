@@ -308,7 +308,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         if (resumeThinking) {
             resumeThinking = false;
             if (!showThinking && !turnEnded && turnActive) {
-                beginSpinner(BusyLabels.thinking(0));
+                beginSpinner(BusyLabels.thinking());
             }
         }
     }
@@ -345,7 +345,7 @@ public class AnsiShellFrontend implements ShellFrontend {
             spinnerLock.unlock();
         }
         if (!showThinking) {
-            beginSpinner(BusyLabels.thinking(0));
+            beginSpinner(BusyLabels.thinking());
         }
     }
 
@@ -424,7 +424,7 @@ public class AnsiShellFrontend implements ShellFrontend {
                 stderrNeedsNewline = !delta.endsWith("\n");
                 stderrLineOwner = subagentId;
             } else {
-                beginSpinner(BusyLabels.thinking(0));
+                beginSpinner(BusyLabels.thinking());
             }
         } else if (event instanceof final AgentEvent.ToolStarted t) {
             stopSpinner();

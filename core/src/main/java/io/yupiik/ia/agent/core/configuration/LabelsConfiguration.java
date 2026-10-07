@@ -38,7 +38,8 @@ public record LabelsConfiguration(
                                 + "model (name, provider), provider, agent, mode (plan/build), sessionId and configuration (the whole "
                                 + "yca configuration as a map). The systemProperty helper reads a system property with an optional "
                                 + "default: {{systemProperty \"user.name\" \"You\"}}. The formatDate helper renders the current "
-                                + "date/time from the injected Clock: {{formatDate}} uses HH:mm:ss and "
+                                + "date/time in the JVM default timezone (end-user local time, independent of the internal UTC "
+                                + "clock): {{formatDate}} uses HH:mm:ss and "
                                 + "{{formatDate \"yyyy-MM-dd HH:mm:ss\"}} accepts any java.time pattern. Remove the formatDate "
                                 + "segment to disable the timestamp.")
         String userTemplate,
@@ -54,7 +55,7 @@ public record LabelsConfiguration(
                                 + "sessionId and configuration (the whole yca configuration as a map). "
                                 + "The default renders the active provider and model, e.g. openai::gpt-5-mini; when no model is "
                                 + "resolved (no provider configured yet) it falls back to: Assistant. The formatDate helper is "
-                                + "available exactly like in the user label: {{formatDate}} (HH:mm:ss) or "
+                                + "available exactly like in the user label (JVM default timezone): {{formatDate}} (HH:mm:ss) or "
                                 + "{{formatDate \"pattern\"}} with any java.time pattern; remove it to disable the timestamp.")
         String assistantTemplate,
 
@@ -65,8 +66,8 @@ public record LabelsConfiguration(
                                 + "content view. UI only: the LLM conversation is never affected. "
                                 + "Context keys: userName, modelName, model (name, provider), provider, agent, mode (plan/build), "
                                 + "sessionId and configuration (the whole yca configuration as a map). "
-                                + "The formatDate helper is available exactly like in the user/assistant labels: "
-                                + "{{formatDate}} (HH:mm:ss) or {{formatDate \"pattern\"}} with any java.time pattern; "
+                                + "The formatDate helper is available exactly like in the user/assistant labels (JVM default "
+                                + "timezone): {{formatDate}} (HH:mm:ss) or {{formatDate \"pattern\"}} with any java.time pattern; "
                                 + "remove it to disable the timestamp.")
         String logsTemplate) {
 

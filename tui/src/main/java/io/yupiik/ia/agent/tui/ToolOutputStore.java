@@ -24,8 +24,11 @@ import java.util.Map;
  * Captures the full (uncapped) output of finished tool calls, keyed by the
  * {@code #N} ordinal embedded in the transcript tool headers, so the UI can
  * expand a truncated tool card into a full-screen overlay. Entries live in a
- * bounded ring (default 128 calls, 256 KiB of output each) to bound memory.
- * Pure and terminal-free so it is unit testable.
+ * bounded FIFO ring (default 128 calls, 256 KiB of output each), optionally
+ * bounded by a total character budget. Re-recording an existing ordinal
+ * (stream chunks, the finish record) updates it in place without rotating the
+ * eviction order, so a long-running tool cannot evict the rest of the ring
+ * around itself. Pure and terminal-free so it is unit testable.
  */
 public final class ToolOutputStore {
     /** Full, uncapped record of a finished tool call; {@code elapsedMs < 0} marks a still-running call. */
@@ -41,17 +44,25 @@ public final class ToolOutputStore {
 
     private final int maxEntries;
     private final int maxOutputChars;
+    private final long maxTotalChars;
     private final Map<Long, Entry> entries = new HashMap<>();
     private final Deque<Long> order = new ArrayDeque<>();
+    private long totalChars;
     private long latest = -1;
+    private long maxOrdinalSeen = -1;
 
     public ToolOutputStore() {
-        this(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_OUTPUT_CHARS);
+        this(DEFAULT_MAX_ENTRIES, DEFAULT_MAX_OUTPUT_CHARS, 0);
     }
 
     public ToolOutputStore(final int maxEntries, final int maxOutputChars) {
+        this(maxEntries, maxOutputChars, 0);
+    }
+
+    public ToolOutputStore(final int maxEntries, final int maxOutputChars, final long maxTotalChars) {
         this.maxEntries = Math.max(1, maxEntries);
         this.maxOutputChars = Math.max(1, maxOutputChars);
+        this.maxTotalChars = Math.max(0, maxTotalChars);
     }
 
     public void record(final long ordinal, final Entry entry) {
@@ -62,13 +73,34 @@ public final class ToolOutputStore {
         if (output.length() > maxOutputChars) {
             output = output.substring(output.length() - maxOutputChars) + "\n... older output truncated";
         }
-        entries.put(ordinal, new Entry(entry.name(), entry.args(), output, entry.failed(), entry.elapsedMs()));
-        order.addLast(ordinal);
-        while (order.size() > maxEntries) {
-            entries.remove(order.removeFirst());
+        final var stored = new Entry(entry.name(), entry.args(), output, entry.failed(), entry.elapsedMs());
+        final var replaced = entries.put(ordinal, stored);
+        // Not a LinkedHashMap on purpose: the separate insertion deque lets us plug more
+        // complex eviction policies later (pinning running ordinals, two-tier aging, LRU...),
+        // not just the FIFO one. The guard below is the invariant an insertion-order
+        // LinkedHashMap would give for free: re-recording an existing ordinal (stream
+        // chunks, the finish record) updates it in place and must never rotate the
+        // eviction order, otherwise a long-running tool evicts the whole ring around it.
+        if (replaced == null) {
+            order.addLast(ordinal);
+            totalChars += output.length();
+        } else {
+            totalChars += output.length() - replaced.output().length();
         }
         if (ordinal > latest) {
             latest = ordinal;
+        }
+        if (ordinal > maxOrdinalSeen) {
+            maxOrdinalSeen = ordinal;
+        }
+        // FIFO eviction bound by the entry count and, when configured, by the total
+        // retained characters: the oldest entries drop first until the byte budget fits.
+        while (order.size() > maxEntries || (maxTotalChars > 0 && totalChars > maxTotalChars)) {
+            final var evicted = order.removeFirst();
+            final var entryEvicted = entries.remove(evicted);
+            if (entryEvicted != null) {
+                totalChars -= entryEvicted.output().length();
+            }
         }
     }
 
@@ -82,7 +114,26 @@ public final class ToolOutputStore {
         return latest;
     }
 
+    /**
+     * @return the highest ordinal ever recorded, even if it was evicted since;
+     *     lets the UI tell "captured then evicted" apart from "never captured".
+     */
+    public long maxOrdinalSeen() {
+        return maxOrdinalSeen;
+    }
+
+    /** @return the configured per-entry output cap (characters). */
+    public int maxOutputChars() {
+        return maxOutputChars;
+    }
+
+    /** @return how many distinct tool calls are currently retained. */
     public int size() {
         return entries.size();
+    }
+
+    /** @return total characters currently retained across all entries (truncation markers included). */
+    public long totalChars() {
+        return totalChars;
     }
 }

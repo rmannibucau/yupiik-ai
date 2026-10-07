@@ -23,25 +23,23 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Registers the {@code {{formatDate}}} helper: renders the current date/time from the injected
- * {@link Clock}, {@code {{formatDate}}} using the default {@code HH:mm:ss} pattern or
- * {@code {{formatDate "yyyy-MM-dd HH:mm:ss"}}} with any java.time pattern. The injected clock makes
- * rendering deterministic in tests and formatters are cached per pattern (created once per JVM,
- * never recompiled per render).
+ * Registers the {@code {{formatDate}}} helper: renders the current date/time in the
+ * JVM default timezone (the end-user local time), {@code {{formatDate}}} using the default
+ * {@code HH:mm:ss} pattern or {@code {{formatDate "yyyy-MM-dd HH:mm:ss"}}} with any java.time
+ * pattern. Display-only: the rendering deliberately uses {@link Clock#systemDefaultZone()} and is
+ * independent of the internal UTC {@code Clock} bean used by sessions/compaction/the LLM payload.
+ * Formatters are cached per pattern (created once per JVM, never recompiled per render).
  */
 @ApplicationScoped
 public class FormatDatePromptHelper implements PromptHandlebarsHelper {
     private static final String DEFAULT_PATTERN = "HH:mm:ss";
 
-    private final Clock clock;
+    private final Clock clock = Clock.systemDefaultZone();
     private final ConcurrentMap<String, DateTimeFormatter> formatters = new ConcurrentHashMap<>();
 
-    public FormatDatePromptHelper(final Clock clock) {
-        this.clock = clock;
-    }
-
-    protected FormatDatePromptHelper() {
-        this.clock = Clock.systemDefaultZone();
+    public FormatDatePromptHelper() {
+        // DI instantiates the helper directly (no parameterized constructor) and tests
+        // construct it explicitly; the rendering always uses the JVM default zone.
     }
 
     @Override
@@ -51,7 +49,7 @@ public class FormatDatePromptHelper implements PromptHandlebarsHelper {
 
     @Override
     public String description() {
-        return "the current date/time (HH:mm:ss), or with any java.time pattern when given as {{formatDate \"pattern\"}}";
+        return "the current date/time in the JVM default timezone (end-user local time): {{formatDate}} (HH:mm:ss) or with any java.time pattern when given as {{formatDate \"pattern\"}}";
     }
 
     @Override

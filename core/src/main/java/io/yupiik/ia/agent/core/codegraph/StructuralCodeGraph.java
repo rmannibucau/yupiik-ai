@@ -59,9 +59,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -301,9 +303,11 @@ public class StructuralCodeGraph implements AutoCloseable {
 
     /**
      * Ensures the code graph index is ready before serving a query. Synchronous and blocking so graph tools see an
-     * authoritative index: if the background preload (see {@link #ensureReadyAsync()}) is still in flight it is awaited
-     * (bounded, so a cold slow build never hangs a tool; on timeout the call proceeds and {@code queryIndex()} builds a
-     * transient index over the in-memory graph as a fallback). When nothing has been scheduled yet, schedules it now.
+     * authoritative index: the background preload (see {@link #ensureReadyAsync()}) is awaited - short bound first, then
+     * a generous ceiling while there is still nothing to serve - because an empty graph handed to a tool is strictly
+     * worse than waiting a few extra seconds for a cold build (a timeout used to let {@code graph()} and
+     * {@code queryIndex()} serve an empty store whenever the build outran the first bound). When nothing has been
+     * scheduled yet, schedules it now.
      */
     public void ensureReady() {
         if (!enabled() || index != null) {
@@ -314,10 +318,34 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (future == null) {
             return;
         }
+        if (awaitReady(future, refreshAwaitMs / 2)) {
+            return;
+        }
+        if (graph != null || index != null) {
+            return; // the build landed between the timeout check and now
+        }
+        // Still nothing to serve (both graph and index null): the build is in flight - keep awaiting it up to a
+        // generous ceiling instead of handing an empty store to the caller (the first, short bound used to expire
+        // under a cold start or heavy parallel load and graph()/queryIndex() then served an empty graph).
+        awaitReady(future, refreshAwaitMs * 10L);
+    }
+
+    /**
+     * Bounded wait on the ready future. Returns {@code true} when the caller can proceed (the build completed, failed
+     * or the wait was interrupted), {@code false} only on timeout - meaning the build is still in flight.
+     */
+    private boolean awaitReady(final CompletableFuture<Void> future, final long timeoutMs) {
         try {
-            future.get(refreshAwaitMs / 2, TimeUnit.MILLISECONDS);
-        } catch (final Exception e) {
-            // bounded wait: a slow build must not hang a tool; queryIndex() fills the transient-index gap
+            future.get(timeoutMs, TimeUnit.MILLISECONDS);
+            return true;
+        } catch (final TimeoutException e) {
+            return false;
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return true;
+        } catch (final ExecutionException e) {
+            LOGGER.warning("Code graph index preparation failed: " + e.getCause());
+            return true;
         }
     }
 
@@ -948,7 +976,13 @@ public class StructuralCodeGraph implements AutoCloseable {
     private List<Path> candidateFiles() {
         final var result = new ArrayList<Path>();
         if (!walkCandidates(result::add)) {
-            return List.of();
+            // A transient walk failure must not masquerade as "nothing to index": an empty-but-successful
+            // graph would silently hide every symbol. Retry once before settling for an empty candidate set.
+            result.clear();
+            if (!walkCandidates(result::add)) {
+                LOGGER.warning("Structural scan failed twice for " + projectDir + "; falling back to no candidates");
+                return List.of();
+            }
         }
         result.sort(Comparator.comparing(Path::toString));
         return result;
@@ -997,6 +1031,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 }
             });
         } catch (final IOException | UncheckedIOException e) {
+            LOGGER.warning("Structural scan of " + root + " failed: " + e);
             return false;
         }
         return true;

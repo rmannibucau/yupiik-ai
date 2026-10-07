@@ -416,6 +416,26 @@ class LlmClientResilienceWrapperTest {
         }
     }
 
+    @Test
+    void cancelAlreadySetWhenFailureLandsSkipsTheWaitWithoutInjectedScheduler() throws Exception {
+        // regression: without an injected scheduler the wait is a plain delayed executor and
+        // the probe is not polled mid-wait, so an already-set cancel used to park the whole
+        // retry-after (30s) before the post-wait check could see it
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
+        final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
+        final var cancelled = new java.util.concurrent.atomic.AtomicBoolean(true);
+        final var failure = assertThrows(
+                java.util.concurrent.ExecutionException.class,
+                () -> wrapper.chat(dial, null, cancelled::get)
+                        .toCompletableFuture()
+                        .get(2, TimeUnit.SECONDS));
+        assertTrue(
+                failure.getCause() instanceof IOException
+                        && "Cancelled".equals(failure.getCause().getMessage()),
+                "got: " + failure.getCause());
+        assertEquals(1, dial.calls.get(), "a canceled turn must not retry");
+    }
+
     private static LlmResponse response() {
         return new LlmResponse(
                 "id",

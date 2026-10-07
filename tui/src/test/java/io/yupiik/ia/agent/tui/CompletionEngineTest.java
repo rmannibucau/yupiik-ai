@@ -87,7 +87,22 @@ class CompletionEngineTest {
         return new ArgCompletion.Env() {
             @Override
             public List<String> models() {
-                return List.of("gpt-5-mini", "gpt-5", "qwen3-coder");
+                // >= 9 models so popup viewport/scrolling exercises the 8-row window,
+                // including exact-prefix duplicates (the glm-5.3 flash family) that
+                // make Tab/Enter semantics observable
+                return List.of(
+                        "glm-5.3-flash",
+                        "glm-5.3-flash-turbo",
+                        "gpt-5",
+                        "gpt-5-mini",
+                        "gpt-5-nano",
+                        "qwen3-coder",
+                        "qwen3-coder-32b",
+                        "qwen3-coder-14b",
+                        "claude-sonnet-4",
+                        "claude-opus-4",
+                        "deepseek-v3",
+                        "deepseek-r1");
             }
 
             @Override
@@ -185,13 +200,49 @@ class CompletionEngineTest {
         assertTrue(ask.items().contains("ask"));
         assertFalse(ask.items().contains("all"));
         final var y = engine().suggest("/permissions y", 14);
-        assertTrue(y.items().contains("yolo"));
+        assertTrue(y.items().contains("yolo"), y.items().toString());
         final var auto = engine().suggest("/permissions auto", 17);
         assertTrue(auto.items().contains("auto_edit"));
         final var n = engine().suggest("/permissions n", 14);
         assertTrue(n.items().contains("none"));
         final var s = engine().suggest("/permissions sh", 15);
         assertTrue(s.items().contains("show"));
+    }
+
+    @Test
+    void infixTypedTextDoesNotOfferCandidate() {
+        // containment is deliberate: "olo" is inside "yolo" and does match, just
+        // like "/model mini" -> "gpt-5-mini". The important invariant is the
+        // *span*: accepting replaces only the typed token, never duplicating it.
+        final var infix = engine().suggest("/permissions olo", 16);
+        assertTrue(infix.items().contains("yolo"), infix.items().toString());
+        assertEquals(13, infix.replaceStart());
+        assertEquals(16, infix.replaceEnd());
+        // a fully typed candidate still completes the argument (y -> yolo)
+        final var typed = engine().suggest("/permissions yolo", 17);
+        assertTrue(typed.items().contains("yolo"), typed.items().toString());
+        assertEquals(13, typed.replaceStart());
+        assertEquals(17, typed.replaceEnd());
+        // typing "yo" (a prefix) still offers yolo, with the span covering only the token
+        final var yo = engine().suggest("/permissions yo", 15);
+        assertTrue(yo.items().contains("yolo"), yo.items().toString());
+        assertEquals(13, yo.replaceStart());
+        assertEquals(15, yo.replaceEnd());
+    }
+
+    @Test
+    void permissionTokenReplacesOnlyTheTypedToken() {
+        // "/permissions y" - the span must cover only the current token (13..14),
+        // never the whole line, so an acceptance cannot duplicate text
+        final var s = engine().suggest("/permissions y", 14);
+        assertEquals(List.of("yolo"), s.items(), s.items().toString());
+        assertEquals(13, s.replaceStart());
+        assertEquals(14, s.replaceEnd());
+        // mid-token caret: the span covers the token the caret is inside
+        final var mid = engine().suggest("/permissions as", 15);
+        assertEquals(List.of("ask"), mid.items(), mid.items().toString());
+        assertEquals(13, mid.replaceStart());
+        assertEquals(15, mid.replaceEnd());
     }
 
     @Test
@@ -266,6 +317,20 @@ class CompletionEngineTest {
     }
 
     @Test
+    void exactPrefixDuplicatesStillBothMatch() {
+        // two candidates share the exact typed prefix: both must survive the
+        // prefixes match (a containment regression would drop one of them)
+        final var s = engine().suggest("/model glm-5.3", 14);
+        assertTrue(s.items().contains("glm-5.3-flash"), s.items().toString());
+        assertTrue(s.items().contains("glm-5.3-flash-turbo"), s.items().toString());
+        // a partly typed duplicate keeps both too
+        final var partial = engine().suggest("/model glm", 10);
+        assertTrue(partial.items().contains("glm-5.3-flash"), partial.items().toString());
+        assertTrue(
+                partial.items().contains("glm-5.3-flash-turbo"), partial.items().toString());
+    }
+
+    @Test
     void noMatchIsEmpty() {
         assertTrue(engine().suggest("/mode zzz", 9).empty());
     }
@@ -279,5 +344,29 @@ class CompletionEngineTest {
     @Test
     void pathCompletionWithoutTokenListsDirectory() {
         assertTrue(!CompletionEngine.pathCandidates("").isEmpty());
+    }
+
+    @Test
+    void exactPrefixKeepsBothCandidatesHighlightable() {
+        // "glm" matches both glm-5.3-flash and glm-5.3-flash-turbo: an exact-prefix
+        // duplicate must not collapse to a single candidate nor dead-end the popup
+        final var s = engine().suggest("/model glm", 10);
+        assertTrue(s.items().contains("glm-5.3-flash"), s.items().toString());
+        assertTrue(s.items().contains("glm-5.3-flash-turbo"), s.items().toString());
+        // and the exact candidate itself stays in the list when fully typed
+        final var exact = engine().suggest("/model glm-5.3-flash", 20);
+        assertTrue(exact.items().contains("glm-5.3-flash"), exact.items().toString());
+        assertTrue(exact.items().contains("glm-5.3-flash-turbo"), exact.items().toString());
+    }
+
+    @Test
+    void tabSeparatedTokenCompletesLikeSpaceSeparated() {
+        // the tokenization must treat any whitespace (tab included) as a token
+        // boundary, so /model<tab>glm completes the model - not the whole line
+        final var s = engine().suggest("/model\tglm", 10);
+        assertTrue(s.items().contains("glm-5.3-flash"), s.items().toString());
+        assertEquals(7, s.replaceStart());
+        assertEquals(10, s.replaceEnd());
+        assertEquals("model", s.label());
     }
 }

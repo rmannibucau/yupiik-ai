@@ -120,7 +120,11 @@ public interface ArgCompletion {
         return tokens.length == 0 ? "" : tokens[tokens.length - 1];
     }
 
-    /** Case-insensitive containment match, stable sorted; empty when nothing matches. */
+    /**
+     * Case-insensitive containment match, stable sorted; empty when nothing matches.
+     * Containment (not only prefix) is intentional: a model named
+     * {@code gpt-5-mini} is reachable by typing {@code mini}, its suffix.
+     */
     static Result fuzzyResult(final String label, final List<String> candidates, final String token) {
         if (candidates == null || candidates.isEmpty()) {
             return Result.of(label, List.of());
