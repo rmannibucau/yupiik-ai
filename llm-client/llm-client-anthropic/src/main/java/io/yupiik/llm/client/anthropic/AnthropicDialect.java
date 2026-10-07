@@ -92,13 +92,13 @@ public final class AnthropicDialect extends AbstractDialect {
 
     @Override
     protected void authenticate(final HttpRequest.Builder builder) {
-        if (provider.headers() != null && !provider.headers().containsKey("x-api-key")) {
+        // hardcoded Anthropic defaults; the ProviderSpec headersCustomizer is applied by
+        // AbstractDialect.http()/modelsRequest() AFTER this method with setHeader semantics,
+        // so a customizer x-api-key/anthropic-version overrides these defaults
+        if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
             builder.header("x-api-key", provider.apiKey());
         }
-        if (provider.headers() != null && !provider.headers().containsKey("anthropic-version")) {
-            builder.header("anthropic-version", "2023-06-01");
-        }
-        addHeaders(builder);
+        builder.header("anthropic-version", "2023-06-01");
     }
 
     @Override

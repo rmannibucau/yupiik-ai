@@ -17,6 +17,8 @@ package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
+import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
+import io.yupiik.fusion.framework.handlebars.spi.Template;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
@@ -40,6 +42,7 @@ import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import java.io.IOException;
 import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -86,6 +89,8 @@ public class ChatClient implements AutoCloseable {
     private final boolean ownsHttpClient;
     /** Shared application scheduler parking the resilient retry waits; {@code null} falls back to the JDK delayed executor. */
     private final ScheduledExecutorService scheduler;
+    /** Provides the {@code {{exec}}} handlebars helper for dynamic provider headers; {@code null} in tests/programmatic use. */
+    private final ExecTemplateHelper execTemplateHelper;
 
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
@@ -105,8 +110,18 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
-            final ScheduledExecutorService scheduler) {
-        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false, scheduler);
+            final ScheduledExecutorService scheduler,
+            final ExecTemplateHelper execTemplateHelper) {
+        this(
+                configuration,
+                mapper,
+                providerManager,
+                clock,
+                httpClient,
+                toolCallArgumentsRepairer,
+                false,
+                scheduler,
+                execTemplateHelper);
     }
 
     public ChatClient(
@@ -116,7 +131,7 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer) {
-        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false, null);
+        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false, null, null);
     }
 
     /**
@@ -138,6 +153,7 @@ public class ChatClient implements AutoCloseable {
                 httpClient,
                 new ToolCallArgumentsRepairer(mapper),
                 false,
+                null,
                 null);
     }
 
@@ -159,6 +175,7 @@ public class ChatClient implements AutoCloseable {
                 defaultClient(configuration),
                 new ToolCallArgumentsRepairer(mapper),
                 true,
+                null,
                 null);
     }
 
@@ -170,7 +187,8 @@ public class ChatClient implements AutoCloseable {
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
             final boolean ownsHttpClient,
-            final ScheduledExecutorService scheduler) {
+            final ScheduledExecutorService scheduler,
+            final ExecTemplateHelper execTemplateHelper) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
@@ -180,6 +198,7 @@ public class ChatClient implements AutoCloseable {
         this.httpClient = httpClient;
         this.ownsHttpClient = ownsHttpClient;
         this.scheduler = scheduler;
+        this.execTemplateHelper = execTemplateHelper;
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer; per-provider clients get their own resilience
         // wrapper so the concurrency budget is scoped to one provider base URL
@@ -229,6 +248,7 @@ public class ChatClient implements AutoCloseable {
         this.httpClient = null;
         this.ownsHttpClient = false;
         this.scheduler = null;
+        this.execTemplateHelper = null;
     }
 
     /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
@@ -300,14 +320,60 @@ public class ChatClient implements AutoCloseable {
                     ChatRoutes.chatEndpoint(provider.baseUrl(), flavor),
                     provider.resolveApiKey(),
                     Duration.ofSeconds(provider.timeoutSeconds()),
-                    provider.headers(),
-                    null);
+                    null,
+                    headersCustomizer(provider));
             final var bounds = provider.maxConcurrent() >= 0
                     ? provider.maxConcurrent()
                     : configuration.llm().maxConcurrent();
             return new DialectLlmClient(
                     dialect(flavor, spec), resiliences.computeIfAbsent(key, _ -> resilience(bounds)));
         });
+    }
+
+    /**
+     * The per-request header customizer for a provider: the static {@code headers} merged with the
+     * rendered {@code dynamicHeaders} handlebars templates. Templates are compiled once per provider
+     * (lazily, cached in a {@link ConcurrentHashMap}) and rendered at each request, so
+     * {@code {{exec ...}}} outputs refresh per its TTL cache; rendered blank values are skipped.
+     * Applied by the dialect AFTER its defaults with {@code setHeader}, so these headers win over
+     * the apiKey/version defaults when they target the same name.
+     */
+    private Consumer<HttpRequest.Builder> headersCustomizer(final ProviderConfiguration provider) {
+        final var staticHeaders = provider.headers() == null ? Map.<String, String>of() : provider.headers();
+        final var dynamic = provider.dynamicHeaders() == null ? Map.<String, String>of() : provider.dynamicHeaders();
+        if (staticHeaders.isEmpty() && (dynamic.isEmpty() || execTemplateHelper == null)) {
+            return _ -> {};
+        }
+        final var compiled = new ConcurrentHashMap<String, Template>();
+        final var exec = execTemplateHelper.exec();
+        return builder -> {
+            staticHeaders.forEach((k, v) -> {
+                if (k != null && !k.isBlank() && v != null && !v.isBlank()) {
+                    builder.setHeader(k, v);
+                }
+            });
+            dynamic.forEach((k, template) -> {
+                if (k == null || k.isBlank()) {
+                    return;
+                }
+                final var t = compiled.computeIfAbsent(
+                        k,
+                        name -> new HandlebarsCompiler()
+                                .compile(new HandlebarsCompiler.CompilationContext(
+                                        new HandlebarsCompiler.Settings().helpers(Map.of("exec", exec)),
+                                        template == null ? "" : template)));
+                final String rendered;
+                try {
+                    rendered = t.render(Map.of());
+                } catch (final RuntimeException e) {
+                    throw new IllegalArgumentException(
+                            "Cannot render dynamic header '" + k + "': " + e.getMessage(), e);
+                }
+                if (rendered != null && !rendered.isBlank()) {
+                    builder.setHeader(k, rendered);
+                }
+            });
+        };
     }
 
     private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec) {

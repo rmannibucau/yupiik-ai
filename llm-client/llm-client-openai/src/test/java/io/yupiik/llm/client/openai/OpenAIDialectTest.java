@@ -183,6 +183,38 @@ class OpenAIDialectTest {
     }
 
     @Test
+    void completionsDialectSendsRenderedDynamicHeaders(final JsonMapper mapper) throws Exception {
+        // the dynamic header is a {{exec}} template: the wire must carry the rendered stdout
+        // (with the exec_options cache warming so a second request reuses it)
+        server.createContext("/v1/chat/completions", exchange -> {
+            final var auth = exchange.getRequestHeaders().getFirst("authorization");
+            if (reqHeaders.compareAndSet(null, auth)) {
+                reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            }
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\","
+                            + "\"content\":\"hello\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,"
+                            + "\"completion_tokens\":1,\"total_tokens\":4}}");
+        });
+        server.start();
+        final var dialect = new OpenAICompletionsDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions",
+                        "sk-test",
+                        java.time.Duration.ofSeconds(5),
+                        java.util.Map.of(),
+                        builder -> builder.setHeader("authorization", "Bearer tok-abc")));
+        // the customizer is applied on each request (chat POST here)
+        dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals("Bearer tok-abc", reqHeaders.get());
+    }
+
+    @Test
     void completionsDialectReadsTheProviderSideGenerationTime(final JsonMapper mapper) throws Exception {
         server.createContext(
                 "/v1/chat/completions",

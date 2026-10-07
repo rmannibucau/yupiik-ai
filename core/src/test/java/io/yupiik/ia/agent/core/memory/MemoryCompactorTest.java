@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -27,9 +28,12 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -76,6 +80,50 @@ class MemoryCompactorTest {
     }
 
     @Test
+    void rewriteFailureEmitsAWarningNotice() throws Exception {
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        Files.createDirectories(store.projectFile().getParent());
+        final var original = "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n"
+                + "- the agent prefers tabs for indentation\n"
+                + "- another durable fact about the project that pushes the size over the threshold\n";
+        Files.writeString(store.projectFile(), original);
+        final List<AgentEvent> events = new ArrayList<>();
+        final var sessionId = "s-test";
+        final var compactor = new MemoryCompactor(
+                new FakeChatClient(true),
+                config,
+                store,
+                null,
+                null,
+                new io.yupiik.fusion.framework.api.event.Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        events.add((AgentEvent) event);
+                    }
+                },
+                sessionId);
+        final var result = compactor.compactNow();
+
+        assertTrue(
+                result.contains("left untouched"), "the rewrite failure must surface as a no-output result: " + result);
+        assertEquals(1, events.size(), "exactly one warning notice expected");
+        assertTrue(events.get(0) instanceof AgentEvent.Notice, "a Notice event expected");
+        final var notice = (AgentEvent.Notice) events.get(0);
+        assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
+        assertEquals(sessionId, notice.sessionId());
+        assertTrue(
+                notice.message().contains("memory compaction failed"),
+                "the notice must carry the failure context: " + notice.message());
+        assertTrue(
+                notice.message().contains("json was malformed"),
+                "the notice must keep the technical detail: " + notice.message());
+        assertTrue(
+                notice.message().contains("/memory compact"),
+                "the notice must include the recovery hint: " + notice.message());
+    }
+
+    @Test
     void compactDiscardsReductionBelowTwentyPercent() throws Exception {
         final var config = config(home);
         final var store = new MemoryStore(config);
@@ -103,8 +151,22 @@ class MemoryCompactorTest {
 
     /** Returns a fixed shortened memory, as a compact model would. */
     private static final class FakeChatClient extends ChatClient {
+        private final boolean fail;
+
+        private FakeChatClient() {
+            this(false);
+        }
+
+        private FakeChatClient(final boolean fail) {
+            this.fail = fail;
+        }
+
         @Override
-        public ChatResult chat(final ChatCompletionRequest request) {
+        public ChatResult chat(final ChatCompletionRequest request) throws IOException {
+            if (fail) {
+                throw new IOException(
+                        "LLM request failed (400): {\"error\":{\"type\":\"invalid_request_error\",\"message\":\"json was malformed\"}}");
+            }
             return new ChatResult(
                     Message.assistant(
                             "- the agent prefers tabs for indentation\n- in /tmp/bench one-off observation that is stale now\n",

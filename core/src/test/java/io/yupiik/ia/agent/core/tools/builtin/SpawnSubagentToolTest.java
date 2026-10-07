@@ -74,6 +74,7 @@ class SpawnSubagentToolTest {
                         300,
                         "",
                         Map.of(),
+                        Map.of(),
                         "",
                         null);
             }

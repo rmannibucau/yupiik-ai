@@ -111,7 +111,7 @@ public class MemoryExtractor {
                 if (LOGGER.isLoggable(Level.FINER)) {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
                 }
-                notifyFailure("memory extraction failed: " + e.getMessage());
+                notifyFailure("memory extraction aborted: " + e.getMessage());
             } finally {
                 if (memoryCompactor != null) {
                     memoryCompactor.maybeCompact(effective);
@@ -157,6 +157,19 @@ public class MemoryExtractor {
             if (usageTracker != null && res.result() != null) {
                 usageTracker.recordAuxiliary(res.result().usage());
             }
+            if (!res.structured()) {
+                // the provider rejected the JSON Schema (e.g. Anthropic 400 'json was malformed')
+                // and chatStructured already fell back to a plain completion: surface a soft notice
+                // with context, then still save the plain snippet below
+                final var fallbackContent = res.result() == null
+                                || res.result().message() == null
+                                || res.result().message().content() == null
+                        ? ""
+                        : String.valueOf(res.result().message().content());
+                notifyFailure(
+                        "memory extraction (structured facts) rejected by the provider; saving a plain snippet instead"
+                                + (fallbackContent.isBlank() ? "" : " (" + clamp(fallbackContent, 200) + ")"));
+            }
             if (res.structured()) {
                 final var content =
                         res.result().message() == null || res.result().message().content() == null
@@ -183,6 +196,7 @@ public class MemoryExtractor {
                 resetFailures();
                 return;
             }
+            // structured output unsupported or rejected: fall back to a plain compression snippet
             final var snippet = compressExcerpt(excerpt, settings);
             if (snippet != null && !snippet.isBlank()) {
                 memoryStore.appendText(false, snippet);
@@ -192,7 +206,7 @@ public class MemoryExtractor {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            notifyFailure("could not save memory: " + e.getMessage());
+            notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
         }
     }
 
@@ -203,11 +217,15 @@ public class MemoryExtractor {
         }
     }
 
+    private static String clamp(final String text, final int max) {
+        return text == null || text.length() <= max ? text == null ? "" : text : text.substring(0, max) + "...";
+    }
+
     private void resetFailures() {
         consecutiveFailures.set(0);
     }
 
-    private static Map<String, Object> factsSchema() {
+    public static Map<String, Object> factsSchema() {
         final var itemProperties = Map.<String, Object>of(
                 "text", Map.of("type", "string"),
                 "scope", Map.of("type", "string"));
@@ -220,7 +238,9 @@ public class MemoryExtractor {
                 List.of("text", "scope"),
                 "additionalProperties",
                 false);
-        final var facts = Map.<String, Object>of("type", "array", "items", item, "additionalProperties", false);
+        // no additionalProperties on the array wrapper: it is invalid JSON Schema there (the keyword
+        // only applies to objects) and Anthropic structured outputs reject the schema with a 400
+        final var facts = Map.<String, Object>of("type", "array", "items", item);
         return Map.<String, Object>of(
                 "type",
                 "object",
@@ -290,6 +310,9 @@ public class MemoryExtractor {
                 ? ""
                 : String.valueOf(res.message().content());
         final var snippet = content.strip();
+        if (snippet.isEmpty()) {
+            notifyFailure("memory extraction (fallback snippet) produced no output; memory left untouched");
+        }
         return snippet.isEmpty() ? null : snippet;
     }
 }

@@ -25,23 +25,37 @@ import io.yupiik.fusion.httpclient.core.listener.impl.CurlLoggerListener;
 import io.yupiik.fusion.httpclient.core.listener.impl.SetUserAgent;
 import io.yupiik.fusion.httpclient.core.request.UnlockedHttpRequest;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.HttpClientCertificateConfiguration;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.net.Authenticator;
 import java.net.InetSocketAddress;
 import java.net.PasswordAuthentication;
+import java.net.Proxy;
 import java.net.ProxySelector;
+import java.net.SocketAddress;
+import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpHeaders;
 import java.net.http.HttpRequest;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.security.KeyStore;
 import java.security.SecureRandom;
+import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.logging.Logger;
+import java.util.regex.Pattern;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
+import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 
 @DefaultScoped
@@ -59,7 +73,9 @@ public class HttpClientProducer {
                 .followRedirects(HttpClient.Redirect.NORMAL);
         final var proxy = cfg.proxy();
         if (proxy != null && proxy.host() != null && !proxy.host().isBlank()) {
-            builder.proxy(ProxySelector.of(InetSocketAddress.createUnresolved(proxy.host(), proxy.port())));
+            final var noProxyHosts = proxy.noProxyHosts() == null ? List.<String>of() : proxy.noProxyHosts();
+            final var address = InetSocketAddress.createUnresolved(proxy.host(), proxy.port());
+            builder.proxy(proxySelector(address, noProxyHosts));
             if (proxy.user() != null && !proxy.user().isBlank()) {
                 builder.authenticator(new Authenticator() {
                     @Override
@@ -80,6 +96,8 @@ public class HttpClientProducer {
                     setEndpointIdentificationAlgorithm(null);
                 }
             });
+        } else if (hasCertificates(cfg.certificates())) {
+            builder.sslContext(certificateSslContext(cfg.certificates()));
         }
         final var listeners = new ArrayList<RequestListener<?>>();
         if (cfg.headers() != null && !cfg.headers().isEmpty()) {
@@ -107,6 +125,164 @@ public class HttpClientProducer {
         }
         return HttpClient.Version.HTTP_1_1;
     }
+
+    private static boolean hasCertificates(final HttpClientCertificateConfiguration certificates) {
+        return certificates != null
+                && certificates.custom() != null
+                && !certificates.custom().isEmpty();
+    }
+
+    /**
+     * A proxy selector honoring the configured no-proxy hosts. With an empty list it behaves
+     * exactly like {@link ProxySelector#of(InetSocketAddress)} (the historical behavior):
+     * every URI resolves to the single configured proxy, and {@link Proxy#NO_PROXY} otherwise
+     * (blank-host URI which carries no proxy concept).
+     */
+    private static ProxySelector proxySelector(final InetSocketAddress proxy, final List<String> noProxyHosts) {
+        if (noProxyHosts.isEmpty()) {
+            return ProxySelector.of(proxy);
+        }
+        return new ProxySelector() {
+            @Override
+            public List<Proxy> select(final URI uri) {
+                final var host = uri.getHost();
+                if (host == null || matchesNoProxy(host, noProxyHosts)) {
+                    return List.of(Proxy.NO_PROXY);
+                }
+                return List.of(new Proxy(Proxy.Type.HTTP, proxy));
+            }
+
+            @Override
+            public void connectFailed(final URI uri, final SocketAddress sa, final IOException ioe) {
+                // nothing to do, matching ProxySelector.of
+            }
+        };
+    }
+
+    /**
+     * Case-insensitive no-proxy matching. An entry is one of: {@code *} (everything),
+     * {@code .domain} (the domain itself and any sub-domain), {@code *.domain} (any
+     * sub-domain, not the domain itself), or an exact host. A single {@code *} can appear
+     * anywhere in a pattern ({@code *corp*}); blank entries are ignored.
+     */
+    static boolean matchesNoProxy(final String host, final List<String> entries) {
+        final var h = host.toLowerCase(Locale.ROOT);
+        for (final var raw : entries) {
+            final var entry = raw == null ? "" : raw.strip().toLowerCase(Locale.ROOT);
+            if (entry.isEmpty()) {
+                continue;
+            }
+            if ("*".equals(entry) || glob(entry, h)) {
+                return true;
+            }
+            final var dotSuffix = entry.startsWith(".");
+            final var core = dotSuffix ? entry.substring(1) : entry;
+            if (h.equals(core) || (dotSuffix && h.endsWith("." + core))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean glob(final String pattern, final String value) {
+        if (pattern.indexOf('*') < 0) {
+            return false;
+        }
+        final var regex = new StringBuilder();
+        for (int i = 0; i < pattern.length(); i++) {
+            final var c = pattern.charAt(i);
+            regex.append(c == '*' ? ".*" : Pattern.quote(String.valueOf(c)));
+        }
+        return value.matches(regex.toString());
+    }
+
+    /** Builds an SSL context trusting the JVM global trust store (optional) plus the configured PEMs. */
+    private static SSLContext certificateSslContext(final HttpClientCertificateConfiguration certificates) {
+        try {
+            final var keyStore = KeyStore.getInstance(KeyStore.getDefaultType());
+            keyStore.load(null, null);
+            if (certificates.importGlobalCertificate()) {
+                importGlobalTrustStore(keyStore);
+            }
+            final var factory = CertificateFactory.getInstance("X.509");
+            final var custom = certificates.custom();
+            if (custom != null) {
+                for (int i = 0; i < custom.size(); i++) {
+                    final var pem = custom.get(i).pem();
+                    if (pem == null || pem.isBlank()) {
+                        continue;
+                    }
+                    final var certificate = (X509Certificate) factory.generateCertificate(
+                            new ByteArrayInputStream(Base64.getMimeDecoder().decode(pemBody(pem))));
+                    keyStore.setCertificateEntry("custom-" + i, certificate);
+                }
+            }
+            final var tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init(keyStore);
+            final var ctx = SSLContext.getInstance("TLS");
+            ctx.init(null, tmf.getTrustManagers(), new SecureRandom());
+            return ctx;
+        } catch (final Exception e) {
+            throw new IllegalStateException("Cannot build custom-certificates SSL context", e);
+        }
+    }
+
+    /**
+     * Seeds {@code keyStore} with the JVM global trust store: {@code javax.net.ssl.trustStore}
+     * when set and loadable, else the JDK cacerts (falling back from the default password to
+     * an empty one). Failures to load the global store are ignored (the agent keeps working
+     * with the custom certificates only).
+     */
+    private static void importGlobalTrustStore(final KeyStore keyStore) {
+        try {
+            final var props = System.getProperties();
+            final var configured = props.getProperty("javax.net.ssl.trustStore");
+            final var path = configured == null || configured.isBlank()
+                    ? Path.of(System.getProperty("java.home"), "lib", "security", "cacerts")
+                    : Path.of(configured);
+            if (!Files.isReadable(path)) {
+                return;
+            }
+            final var type = props.getProperty("javax.net.ssl.trustStoreType", KeyStore.getDefaultType());
+            final var source = KeyStore.getInstance(type);
+            final var password = props.getProperty("javax.net.ssl.trustStorePassword", "changeit");
+            try (final var in = Files.newInputStream(path)) {
+                try {
+                    source.load(in, password.toCharArray());
+                } catch (final IOException wrong) {
+                    try (final var retry = Files.newInputStream(path)) {
+                        source.load(retry, new char[0]);
+                    }
+                }
+            }
+            final var aliases = source.aliases();
+            while (aliases.hasMoreElements()) {
+                final var alias = aliases.nextElement();
+                if (source.isCertificateEntry(alias)) {
+                    keyStore.setCertificateEntry("global-" + alias, source.getCertificate(alias));
+                }
+            }
+        } catch (final Exception e) {
+            LOGGER.warning("Cannot import the JVM global trust store: " + e.getMessage());
+        }
+    }
+
+    private static String pemBody(final String pem) {
+        final var matcher = PEM_BEGIN.matcher(pem);
+        if (!matcher.find()) {
+            throw new IllegalArgumentException(
+                    "No PEM certificate marker (-----BEGIN CERTIFICATE-----) found in: " + pem);
+        }
+        final var end = matcher.end();
+        final var closing = pem.indexOf("-----END CERTIFICATE-----", end);
+        if (closing < 0) {
+            throw new IllegalArgumentException("Missing PEM end marker (-----END CERTIFICATE-----) in: " + pem);
+        }
+        return pem.substring(end, closing);
+    }
+
+    private static final Logger LOGGER = Logger.getLogger(HttpClientProducer.class.getName());
+    private static final Pattern PEM_BEGIN = Pattern.compile("-----BEGIN CERTIFICATE-----\\s*", Pattern.DOTALL);
 
     private static SSLContext trustAllSslContext() {
         final var tm = new X509TrustManager() {

@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.List;
 
 /**
  * HTTP proxy settings of the shared HTTP client. When {@code host} is blank (the
@@ -48,4 +49,10 @@ public record HttpClientProxyConfiguration(
                 defaultValue = "\"\"",
                 documentation =
                         "Optional proxy password for Basic proxy authentication, paired with the proxy user. Blank is ignored.")
-        String password) {}
+        String password,
+
+        @Property(
+                defaultValue = "java.util.List.of()",
+                documentation =
+                        "Hosts that bypass the proxy and are connected to directly, when a proxy host is set. Each entry is matched case-insensitively against the target host name (no port); forms: an exact host (api.internal.corp), a leading-dot domain suffix (.internal.corp matches internal.corp and any sub-domain), or a * wildcard pattern (*.internal.corp; a lone * bypasses every host). Blank or empty keeps today's behavior: every request goes through the proxy.")
+        List<String> noProxyHosts) {}

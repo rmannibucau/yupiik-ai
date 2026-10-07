@@ -102,6 +102,12 @@ public record ProviderConfiguration(
         Map<String, String> headers,
 
         @Property(
+                defaultValue = "java.util.Map.of()",
+                documentation =
+                        "Dynamic HTTP headers added to every request to this provider. Each value is a handlebars template compiled once per provider and rendered per request; blank rendered values are skipped. A dynamic header wins over the static `headers` map and over the default API-key authorization when it targets the same name (eg. \"authorization\": \"Bearer {{exec \\\"exec_options=ttl=3600,strip=true\\\" \\\"MY_ENV=foo\\\" \\\"somebin\\\" \\\"somearg\\\"}}\" renders the command stdout, cached for 3600 seconds). The exec helper runs the given command with the leading KEY=VALUE arguments as environment entries and returns its stripped stdout; exec_options is a comma-separated key=value list (ttl=N caches the output N seconds, strip=true|false trims it, strip defaults to true).")
+        Map<String, String> dynamicHeaders,
+
+        @Property(
                 defaultValue = "\"\"",
                 documentation =
                         "Base display tone (hex, eg. #e0a458) for every model of this provider. When blank the provider keeps the position-based tone. Per-model styles in the models field may override this tone for individual models.")

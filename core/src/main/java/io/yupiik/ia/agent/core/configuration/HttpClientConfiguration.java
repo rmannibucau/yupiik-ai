@@ -48,4 +48,9 @@ public record HttpClientConfiguration(
         @Property(
                 documentation =
                         "HTTP proxy settings of the shared client. When host is blank the JDK default proxy selection is kept (http.proxyHost system property, HTTPS_PROXY environment variable, ...). Applies to every request sent through the shared HTTP client: LLM calls, webfetch, websearch, MCP over HTTP and maven repository knowledge lookups.")
-        HttpClientProxyConfiguration proxy) {}
+        HttpClientProxyConfiguration proxy,
+
+        @Property(
+                documentation =
+                        "TLS trust settings of the shared client: optional import of the JVM global trust store plus explicit PEM certificates. Ignored when disableTlsCheck is enabled.")
+        HttpClientCertificateConfiguration certificates) {}

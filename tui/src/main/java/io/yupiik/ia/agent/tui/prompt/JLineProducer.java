@@ -23,13 +23,33 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import org.jline.reader.LineReader;
 import org.jline.reader.LineReaderBuilder;
-import org.jline.terminal.Size;
 import org.jline.terminal.Terminal;
 import org.jline.terminal.TerminalBuilder;
 
 /**
  * Producer for the JLine terminal and its reader so they can be injected
  * (instead of being built lazily inside {@link JLinePromptImpl}).
+ * <p>
+ * The terminal is deliberately the jline <em>system</em> terminal, never one
+ * built from custom streams. The system terminal reads and renders through the
+ * tty file descriptor directly, so it is immune to the {@link HackStdIo}
+ * takeover of {@code System.out}/{@code System.err} (its output can never
+ * re-enter the prompt sink) and it is the only terminal which puts the real
+ * tty in raw mode, disabling the tty echo jline would otherwise fight.
+ * <p>
+ * The {@code streams(...)} alternative (nested {@code PosixPtyTerminal}) was
+ * tried when the prompt-sink work landed (the {@code aea42d9} mistake): it
+ * made jline paint on a pty slave while a background pump copied the bytes to
+ * the real terminal and the real tty stayed cooked - so every line jline
+ * redrew (completion, backspace, cursor motion) raced with the tty echo and
+ * with the prompt sink writes, and the completed text was never repainted on
+ * the prompt row. The completion kept working in the buffer (a Tab then Enter
+ * still dispatched the command) but the screen went stale - the "completion
+ * is a rendering/flushing issue" bug.
+ * <p>
+ * The {@code HackStdIo} parameter is retained so the generated Fusion bean
+ * (which invokes {@code terminal(HackStdIo)}) stays binary compatible; the
+ * hijack does not influence the terminal selection anymore.
  */
 @DefaultScoped
 public class JLineProducer {
@@ -37,47 +57,10 @@ public class JLineProducer {
     @ApplicationScoped
     public Terminal terminal(final HackStdIo stdio) {
         try {
-            if (stdio.installed()) {
-                // NOT system(true): that resolves System.in/System.out at build time, and
-                // the runtime takes System.out over (HackStdIo) so every write is routed
-                // to the command owning the terminal. jline must keep writing to the
-                // pristine stream instead, otherwise its own painting would re-enter the
-                // prompt sink and loop.
-                // A terminal built from custom streams has no fd to ioctl: jline then
-                // reports a 0x0 size and paints its ">...." off-screen marker as the
-                // prompt, so the size is resolved against the real tty here. It is only
-                // refreshed at build time (a mid-session resize keeps this width until
-                // the next start).
-                return TerminalBuilder.builder()
-                        .streams(System.in, stdio.out())
-                        .size(terminalSize())
-                        .build();
-            }
             return TerminalBuilder.builder().system(true).build();
         } catch (final IOException e) {
             throw new UncheckedIOException("Can't initialize the JLine terminal", e);
         }
-    }
-
-    /**
-     * Resolves the size of the terminal owning the real tty without touching a file
-     * descriptor (the streams jline got are pristine copies, not the tty): a throwaway
-     * {@code system(true)} terminal measures it through the normal jline path
-     * ({@code ioctl}), then is closed - never read, so the terminal mode is left
-     * untouched. Falls back to the classic 80x24 when no tty is available (piped
-     * output, headless) - any sane non-zero size keeps jline from painting its
-     * off-screen ">...." marker.
-     */
-    private static Size terminalSize() {
-        try (final Terminal probe = TerminalBuilder.builder().system(true).build()) {
-            final var size = probe.getSize();
-            if (size.getRows() > 0 && size.getColumns() > 0) {
-                return size;
-            }
-        } catch (final Exception ignored) {
-            // no tty: fallback below
-        }
-        return new Size(80, 24);
     }
 
     @Bean

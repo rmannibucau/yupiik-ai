@@ -124,7 +124,8 @@ public class SessionRuntimeFactory {
         final var compactionCoordinator =
                 new CompactionCoordinator(configuration, chatClient, usage, providerManager, emitter, sessionId);
         final var contextManager = new ContextManager(configuration, usage, compactionCoordinator);
-        final var memoryCompactor = new MemoryCompactor(chatClient, configuration, memoryStore, providerManager, usage);
+        final var memoryCompactor =
+                new MemoryCompactor(chatClient, configuration, memoryStore, providerManager, usage, emitter, sessionId);
         final var memoryExtractor = new MemoryExtractor(
                 chatClient,
                 configuration,

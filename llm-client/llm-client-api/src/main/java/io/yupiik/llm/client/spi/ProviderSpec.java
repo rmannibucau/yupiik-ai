@@ -15,8 +15,10 @@
  */
 package io.yupiik.llm.client.spi;
 
+import java.net.http.HttpRequest;
 import java.time.Duration;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /**
  * Resolved provider connection settings. {@code baseUrl} is the full chat endpoint (e.g.
@@ -25,27 +27,33 @@ import java.util.Map;
  * @param baseUrl chat endpoint.
  * @param apiKey secret, resolved (e.g. from env) by the caller.
  * @param timeout per-request timeout.
- * @param headers extra HTTP headers.
  * @param options extra fields merged into every wire payload.
+ * @param headersCustomizer extra HTTP headers applied to every request, after the dialect
+ *     defaults (so it can override the apiKey/version headers with {@code setHeader}). The caller
+ *     owns the composition (static and dynamic headers, template rendering, caching).
  */
 public record ProviderSpec(
-        String baseUrl, String apiKey, Duration timeout, Map<String, String> headers, Map<String, Object> options) {
+        String baseUrl,
+        String apiKey,
+        Duration timeout,
+        Map<String, Object> options,
+        Consumer<HttpRequest.Builder> headersCustomizer) {
 
-    /** Defaults {@code timeout} to 120s and {@code headers}/{@code options} to empty maps. */
+    /** Defaults {@code timeout} to 120s and {@code options}/{@code headersCustomizer} to empty/no-op. */
     public ProviderSpec {
         timeout = timeout == null ? Duration.ofSeconds(120) : timeout;
-        headers = headers == null ? Map.of() : headers;
         options = options == null ? Map.of() : options;
+        headersCustomizer = headersCustomizer == null ? builder -> {} : headersCustomizer;
     }
 
     /**
-     * A spec with a 120s timeout and no extra headers/options.
+     * A spec with a 120s timeout and no extra options or header customization.
      *
      * @param baseUrl the full chat endpoint.
      * @param apiKey the provider secret.
      * @return the spec.
      */
     public static ProviderSpec of(final String baseUrl, final String apiKey) {
-        return new ProviderSpec(baseUrl, apiKey, Duration.ofSeconds(120), Map.of(), Map.of());
+        return new ProviderSpec(baseUrl, apiKey, Duration.ofSeconds(120), Map.of(), null);
     }
 }

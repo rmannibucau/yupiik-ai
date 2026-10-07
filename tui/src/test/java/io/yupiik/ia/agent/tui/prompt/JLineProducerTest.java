@@ -19,8 +19,8 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.wiring.HackStdIo;
-import java.io.ByteArrayInputStream;
 import java.io.PrintStream;
+import org.jline.terminal.Terminal;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -28,9 +28,12 @@ import org.junit.jupiter.api.parallel.ResourceLock;
 import org.junit.jupiter.api.parallel.Resources;
 
 /**
- * Guards the terminal wiring behind the prompt: jline built from custom streams
- * has no fd to measure, reports a 0x0 size and paints its ">...." off-screen
- * marker instead of the prompt - so a usable size must be provided.
+ * Guards the terminal wiring behind the prompt: the producer must always hand
+ * jline the <em>system</em> terminal ({@link TerminalBuilder#builder()}{@code
+ * .system(true)}) so the real tty is put in raw mode and jline's rendering
+ * reaches it directly - a terminal built from custom streams would paint on a
+ * pty slave instead and the completed text would never show up on the prompt
+ * row (the history {@code aea42d9} regression).
  */
 @ResourceLock(Resources.SYSTEM_OUT)
 @ResourceLock(Resources.SYSTEM_ERR)
@@ -51,22 +54,15 @@ class JLineProducerTest {
     }
 
     @Test
-    void hijackedTerminalStillReportsAUsableSize() throws Exception {
+    void hijackedRuntimeStillKeepsTheSystemTerminal() throws Exception {
         final var stdio = new HackStdIo();
-        final var originalIn = System.in;
         try {
             stdio.install();
-            // jline derives the terminal from System.in: when the fork is attached to a
-            // real terminal it allocates a PosixPtyTerminal whose pump threads outlive
-            // System.exit() and push surefire into its 30s kill-self-fork path. Hiding
-            // the tty behind a plain pipe keeps the streams path deterministic anywhere.
-            System.setIn(new ByteArrayInputStream(new byte[0]));
             assertTrue(stdio.installed(), "the runtime must have taken the streams over");
             try (final var terminal = new JLineProducer().terminal(stdio)) {
-                assertUsableSize(terminal);
+                assertSystemTerminal(terminal);
             }
         } finally {
-            System.setIn(originalIn);
             stdio.uninstall();
         }
     }
@@ -79,9 +75,16 @@ class JLineProducerTest {
         }
     }
 
-    private static void assertUsableSize(final org.jline.terminal.Terminal terminal) {
-        final var size = terminal.getSize();
-        assertTrue(size.getRows() > 0, "rows must never be zero: jline then paints its '>....' marker");
-        assertTrue(size.getColumns() > 0, "columns must never be zero: jline cannot lay the prompt out");
+    private static void assertSystemTerminal(final Terminal terminal) {
+        // a system terminal is either the real one (PosixSysTerminal / NativeSysTerminal)
+        // or the dumb fallback when no tty is attached (headless tests, piped stdout):
+        // both are fine - what must never come back is the streams-based pty slave
+        final var name = terminal.getClass().getName();
+        assertTrue(
+                !name.contains("PtyTerminal"),
+                "the hijacked runtime must not produce a streams-based pty terminal, got " + name);
+        // a headless build has no tty and legitimately yields a dumb terminal (0x0):
+        // only the class must be asserted here, the size comes from the real tty
+        assertNotNull(terminal.getSize(), "a size must always be exposed");
     }
 }

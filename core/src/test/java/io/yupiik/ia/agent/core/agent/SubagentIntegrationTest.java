@@ -144,6 +144,7 @@ class SubagentIntegrationTest {
                         300,
                         "",
                         Map.of(),
+                        Map.of(),
                         "",
                         null);
             }

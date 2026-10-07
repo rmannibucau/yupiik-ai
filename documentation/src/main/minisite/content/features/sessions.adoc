@@ -72,3 +72,10 @@ Memory hygiene is built in:
   and discarding rewrites that reduce the file by less than 20%.
   `/memory compact` runs it manually, `/memory` shows sizes, bullet counts and
   the last compaction.
+- *Structured extraction*: durable facts are extracted through a strict JSON
+  Schema (JSON mode); when a provider rejects the schema (e.g. Anthropic
+  structured outputs with `json was malformed`), yca falls back to a plain
+  compression snippet so memory is still saved. Failures surface a warning
+  naming the failing phase (`memory extraction (structured facts)`,
+  `memory extraction (fallback snippet)` or `memory compaction`) followed by
+  the technical detail and, for compaction, the `/memory compact` retry hint.

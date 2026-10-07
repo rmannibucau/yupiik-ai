@@ -204,6 +204,7 @@ public abstract class AbstractDialect implements Dialect {
                 .header("content-type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofByteArray(payload));
         authenticate(builder);
+        provider.headersCustomizer().accept(builder);
         return builder.build();
     }
 
@@ -219,6 +220,7 @@ public abstract class AbstractDialect implements Dialect {
                 .header("accept", "application/json")
                 .GET();
         authenticate(builder);
+        provider.headersCustomizer().accept(builder);
         return builder.build();
     }
 
@@ -232,7 +234,10 @@ public abstract class AbstractDialect implements Dialect {
     }
 
     /**
-     * Provider-specific authentication; default adds the OpenAI Bearer authorization.
+     * Provider-specific authentication; default adds the OpenAI Bearer authorization. The
+     * {@link ProviderSpec#headersCustomizer()} is applied by the callers of this method
+     * ({@link #http(byte[])} and {@link #modelsRequest()}) <em>after</em> these defaults with
+     * {@code setHeader} semantics, so caller headers override the apiKey/version ones.
      *
      * @param builder the request builder to authenticate.
      */
@@ -240,23 +245,6 @@ public abstract class AbstractDialect implements Dialect {
         if (provider.apiKey() != null && !provider.apiKey().isBlank()) {
             builder.header("authorization", "Bearer " + provider.apiKey());
         }
-        addHeaders(builder);
-    }
-
-    /**
-     * Merge the provider headers into the request, skipping null/blank keys and values.
-     *
-     * @param builder the request builder to enrich.
-     */
-    protected void addHeaders(final HttpRequest.Builder builder) {
-        if (provider.headers() == null || provider.headers().isEmpty()) {
-            return;
-        }
-        provider.headers().forEach((k, v) -> {
-            if (k != null && !k.isBlank() && v != null && !v.isBlank()) {
-                builder.header(k, v);
-            }
-        });
     }
 
     /**

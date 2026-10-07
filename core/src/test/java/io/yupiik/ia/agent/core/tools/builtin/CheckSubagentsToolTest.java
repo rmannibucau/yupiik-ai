@@ -68,6 +68,7 @@ class CheckSubagentsToolTest {
                         300,
                         "",
                         Map.of(),
+                        Map.of(),
                         "",
                         null);
             }

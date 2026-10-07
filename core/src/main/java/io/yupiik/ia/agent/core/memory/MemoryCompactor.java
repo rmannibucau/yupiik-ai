@@ -17,7 +17,9 @@ package io.yupiik.ia.agent.core.memory;
 
 import static java.util.stream.Collectors.toList;
 
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -63,20 +65,36 @@ public class MemoryCompactor {
     private final MemoryStore memoryStore;
     private final ProviderManager providerManager;
     private final UsageTracker usageTracker;
+    private final Emitter emitter;
+    private final String sessionId;
     private final AtomicLong lastRun = new AtomicLong();
     private final AtomicBoolean running = new AtomicBoolean();
 
+    /** Kept for callers (tests) that do not wire an emitter nor a session. */
     public MemoryCompactor(
             final ChatClient chatClient,
             final CodingAgentConfiguration configuration,
             final MemoryStore memoryStore,
             final ProviderManager providerManager,
             final UsageTracker usageTracker) {
+        this(chatClient, configuration, memoryStore, providerManager, usageTracker, null, null);
+    }
+
+    public MemoryCompactor(
+            final ChatClient chatClient,
+            final CodingAgentConfiguration configuration,
+            final MemoryStore memoryStore,
+            final ProviderManager providerManager,
+            final UsageTracker usageTracker,
+            final Emitter emitter,
+            final String sessionId) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.providerManager = providerManager;
         this.usageTracker = usageTracker;
+        this.emitter = emitter;
+        this.sessionId = sessionId;
     }
 
     protected MemoryCompactor() {
@@ -206,7 +224,14 @@ public class MemoryCompactor {
             }
             LOGGER.log(Level.FINE, "memory compaction LLM call failed", e);
             LOGGER.info("memory compaction failed; run /memory compact to retry");
+            emitNotice("memory compaction failed: " + e.getMessage() + " - run /memory compact to retry");
             return null;
+        }
+    }
+
+    private void emitNotice(final String message) {
+        if (emitter != null) {
+            emitter.emit(AgentEvent.Notice.warn(message, sessionId));
         }
     }
 

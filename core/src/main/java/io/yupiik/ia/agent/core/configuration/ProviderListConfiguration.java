@@ -124,6 +124,7 @@ public record ProviderListConfiguration(
                 timeoutSeconds,
                 "",
                 Map.of(),
+                Map.of(),
                 color == null ? "" : color,
                 new PromptConfiguration("auto"));
     }

@@ -132,7 +132,7 @@ public class PlanTodoSeeder {
         }
     }
 
-    private static Map<String, Object> stepsSchema() {
+    public static Map<String, Object> stepsSchema() {
         final var step = new LinkedHashMap<String, Object>();
         step.put("type", "object");
         step.put(
@@ -142,11 +142,13 @@ public class PlanTodoSeeder {
                         "status", Map.of("type", "string", "enum", List.of("pending"))));
         step.put("required", List.of("content", "status"));
         step.put("additionalProperties", false);
+        // no additionalProperties on the array wrapper: it is invalid JSON Schema there (the keyword
+        // only applies to objects) and Anthropic structured outputs reject the schema with a 400
         return Map.of(
                 "type",
                 "object",
                 "properties",
-                Map.of("steps", Map.of("type", "array", "items", step, "additionalProperties", false)),
+                Map.of("steps", Map.of("type", "array", "items", step)),
                 "required",
                 List.of("steps"),
                 "additionalProperties",

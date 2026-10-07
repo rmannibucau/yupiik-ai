@@ -177,13 +177,27 @@ JDK default proxy selection (the `http.proxyHost`/`https.proxyHost` system
 properties or the `HTTPS_PROXY`/`HTTP_PROXY` environment variables). When a
 host is set, every request of the shared client goes through that proxy - LLM
 calls, `webfetch`, `websearch`, MCP servers over HTTP and the maven repository
-knowledge lookups. `user`/`password` enable Basic proxy authentication
+knowledge lookups. `noProxyHosts` is a comma-separated list of hosts that
+bypass the proxy and are connected to directly (exact host, a leading-dot
+domain suffix like `.internal.corp`, or a `*` wildcard pattern like
+`*.internal.corp`; a lone `*` bypasses everything; matching is
+case-insensitive and ignores the port). `user`/`password` enable Basic proxy
+authentication
 (`Proxy-Authorization`, JDK `Authenticator`); note the JDK disables Basic
 authentication for HTTPS CONNECT tunneling by default
 (`jdk.http.auth.tunneling.disabledSchemes=Basic` in `$JAVA_HOME/conf/net.properties`),
 so proxy-authenticated HTTPS needs the JVM started with
 `-Djdk.http.auth.tunneling.disabledSchemes=` (plain-HTTP proxying works out of
 the box).
+
+The shared HTTP client also honors an optional `yca.httpClient.certificates`
+group (`importGlobalCertificate` default `true`, `custom` a list of PEM
+certificates): when set, the client trusts the JVM global trust store
+(cacerts, or `javax.net.ssl.trustStore` when configured) and/or the listed
+PEM certificates on top of it. Set `importGlobalCertificate=false` to trust
+only the listed certificates (private-CA-only mode). Each `custom` entry is a
+`pem` string (base64 between the `BEGIN CERTIFICATE` / `END CERTIFICATE`
+markers). `disableTlsCheck` still wins over this group when enabled.
 
 The `provider` group can hold a list of providers (`providers`), each with a
 unique `id` used to reference it as `$<id>/<model>` anywhere a model is

@@ -25,6 +25,33 @@ first, then to the implicit `default` provider). A provider's optional
 it. For single-provider setups, the flat `yca.provider.*` scalars build the
  implicit `default` provider.
 
+A provider's `dynamicHeaders` are handlebars templates rendered into every
+request to that provider (chat, streaming and models). They are resolved in
+core (the llm client stays vendor-agnostic: it receives a per-request header
+customizer from the caller). Each template is compiled once per provider and
+re-rendered per request; a rendered blank value is skipped and a dynamic header
+wins over the static `headers` map and over the default API-key authorization
+when it targets the same name. The `exec` helper runs a command and returns (by
+default stripped) stdout:
+
+[source,json]
+----
+{
+  "provider": {
+    "dynamicHeaders": {
+      "authorization": "Bearer {{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
+    }
+  }
+}
+----
+
+`KEY=VALUE` leading arguments are child environment entries, `exec_options` is
+a comma-separated `key=value` list (`ttl=N` caches the stdout for N seconds
+across renders and providers, `strip=true|false` trims the output, `strip`
+defaults to `true`), and every remaining argument is the command line (command
+then argv). A non-zero exit status fails the render: the header is not sent
+and the error surfaces loudly.
+
  Per-provider system-prompt tuning, such as the strength of todo-guidance
  (`yca.provider.*.prompt.todo`), is covered in
  xref:features/todo-guidance.adoc[Todo and plan guidance].
