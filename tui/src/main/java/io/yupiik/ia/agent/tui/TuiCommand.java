@@ -1589,6 +1589,10 @@ public class TuiCommand implements Runnable {
                         final var runningEntry = state.toolOutputs.get(anchor.ordinal());
                         if (runningEntry != null && runningEntry.running()) {
                             openToolOverlay(state, anchor.ordinal());
+                        } else if (anchor.runMember()) {
+                            // a member rendered inside a run box has no per-card collapse
+                            // state of its own: clicking it always opens the full output
+                            openToolOverlay(state, anchor.ordinal());
                         } else if (state.showToolActions == ToolOutputVisibility.COLLAPSED) {
                             // condensed mode: the dim one-liner itself opens the full output
                             openToolOverlay(state, anchor.ordinal());
@@ -3758,7 +3762,8 @@ public class TuiCommand implements Runnable {
             anchors.add(new UiState.ToolAnchor(
                     top.ordinal(),
                     new Rect(content.x(), inner.y() + top.row() - viewOffset, content.width(), 1),
-                    top.row()));
+                    top.row(),
+                    top.runMember()));
         }
         state.toolAnchors = anchors;
         // run headers: absolute transcript row per run, converted to a screen hit-area
@@ -3770,7 +3775,7 @@ public class TuiCommand implements Runnable {
             // collapsed run headers participate in Alt+Up/Down tool navigation as a single
             // stop: a negative ordinal marks the run header (never a real card ordinal)
             anchors.add(new UiState.ToolAnchor(
-                    -h.id(), new Rect(content.x(), y, h.header().width(), 1), h.row()));
+                    -h.id(), new Rect(content.x(), y, h.header().width(), 1), h.row(), false));
         }
         state.runHeaders = convertedRunHeaders;
         // "click to expand" links of truncated tool cards: screen hit-areas, only when on screen
@@ -3780,7 +3785,7 @@ public class TuiCommand implements Runnable {
             final var y = inner.y() + link.row() - viewOffset;
             if (y >= inner.y() && y < inner.y() + inner.height()) {
                 links.add(new UiState.ToolAnchor(
-                        link.ordinal(), new Rect(content.x(), y, content.width(), 1), link.row()));
+                        link.ordinal(), new Rect(content.x(), y, content.width(), 1), link.row(), false));
             }
         }
         state.toolFooterLinks = links;
@@ -4415,11 +4420,15 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Renders a finished-tool run as one collapsible group. In {@code HIDDEN} mode
-     * nothing is rendered; otherwise a one-line header (chevron + summary) is always
-     * shown, and the members follow when the run is open. The default state follows
-     * the current output mode ({@code SHOWN} open, {@code COLLAPSED} collapsed) unless
-     * the user toggled this run explicitly ({@link UiState#runCollapsed}).
+     * Renders a finished-tool run as one bordered, collapsible group. In {@code HIDDEN}
+     * mode nothing is rendered; the whole run (header + members) lives inside a single
+     * rounded {@link Block} so the grouping reads like a container again, with the header
+     * as the block title. The default state follows the current output mode
+     * ({@code SHOWN} open, {@code COLLAPSED} collapsed) unless the user toggled this run
+     * explicitly ({@link UiState#runCollapsed}): a collapsed run renders only the header
+     * row (chevron + summary), an expanded run renders the members below it (one-liners
+     * under {@code COLLAPSED}, full cards under {@code SHOWN}). Clicking the header flips
+     * the per-run override, which now visibly shows/hides the member lines in every mode.
      */
     private void addToolRunChunk(
             final List<RenderedChunk> out,
@@ -4443,44 +4452,94 @@ public class TuiCommand implements Runnable {
             return;
         }
         final var collapsed = runCollapsedState(run, state);
-        final var header = runHeaderLine(run, collapsed);
         final int top = out.stream().mapToInt(RenderedChunk::height).sum();
-        rows.add(plainText(header));
-        runHeaders.add(new UiState.RunHeader(run.id(), new Rect(0, top, width, 1), top));
-        out.add(new RenderedChunk(
-                1,
-                skip -> Paragraph.builder()
-                        .text(Text.from(header))
-                        .overflow(Overflow.CLIP)
-                        .build()));
-        if (collapsed || state.showToolActions == ToolOutputVisibility.COLLAPSED) {
-            // collapsed run (explicit override or the mode default) or an explicitly
-            // opened run under COLLAPSED mode: one dim line per member, indented under
-            // the header. Every member line is its own click target opening the full
-            // output overlay (only the run header keeps the collapse/expand toggle).
-            var y = top + 1;
+        // the whole run is ONE chunk: the box plus every inner line (header first). The
+        // collapsed/expanded content differs visually in every mode - collapsing shows only
+        // the header row, expanding reveals the member lines under it - so the toggle is
+        // always observable, unlike the previous "one dim line per member in both states"
+        // dead end where the chevron flipped state but the frame was byte-identical.
+        // Row accounting: absolute row 0 of the chunk is the box top border, so the first
+        // content row is at top+1 and the chunk height is inner lines + 2 (borders).
+        final var innerW = Math.max(1, width - 2);
+        final var lines = new ArrayList<Line>();
+        lines.add(runHeaderLine(run, collapsed));
+        rows.add(plainText(lines.get(0)));
+        runHeaders.add(new UiState.RunHeader(run.id(), new Rect(0, top + 1, width, 1), top + 1));
+        var y = top + 2;
+        if (!collapsed && state.showToolActions == ToolOutputVisibility.COLLAPSED) {
+            // opened under COLLAPSED mode: one dim line per member, indented under the
+            // header. Every member line is its own click target opening the full output
+            // overlay (only the run header keeps the collapse/expand toggle).
             for (final var member : run.members()) {
                 final var card = member.card();
                 final var line = indentLine(hiddenToolLine(card), "  ");
+                lines.add(line);
                 rows.add(plainText(line));
-                final var cardTop = y;
                 if (card.ordinal() >= 0) {
-                    toolTops.add(new UiState.ToolTop(card.ordinal(), cardTop));
+                    toolTops.add(new UiState.ToolTop(card.ordinal(), y, true));
                 }
-                out.add(new RenderedChunk(
-                        1,
-                        skip -> Paragraph.builder()
-                                .text(Text.from(line))
-                                .overflow(Overflow.CLIP)
-                                .build()));
                 y++;
             }
-        } else {
-            // SHOWN mode with an open run: full cards, indented under the header
+        } else if (!collapsed && state.showToolActions == ToolOutputVisibility.SHOWN) {
+            // SHOWN mode with an open run: the member cards render inside the box, as plain
+            // indented lines under the header (no nested bordered blocks: one outer container
+            // reads as the group, each member keeps its icon + command + output preview).
             for (final var member : run.members()) {
-                addToolCardChunk(out, member.regionText(), width, state, toolTops, footerLinks, rows);
+                final var card = member.card();
+                var first = true;
+                for (final var cardLine : toolRunCardLines(card, innerW)) {
+                    final var line = indentLine(cardLine, "  ");
+                    lines.add(line);
+                    rows.add(plainText(line));
+                    if (first && card.ordinal() >= 0) {
+                        // anchor the card on its header row: clicking it opens the full-output overlay
+                        toolTops.add(new UiState.ToolTop(card.ordinal(), y, true));
+                    }
+                    first = false;
+                    y++;
+                }
             }
         }
+        final var text = Text.from(lines.toArray(Line[]::new));
+        final var innerH = Math.max(text.height(), 1);
+        out.add(new RenderedChunk(
+                innerH + 2,
+                skip -> Paragraph.builder()
+                        .text(text)
+                        .block(runBlock(run))
+                        .overflow(Overflow.CLIP)
+                        .scroll(Math.clamp(innerH - 1, 0, skip))
+                        .build()));
+    }
+
+    /**
+     * The inner lines of one member card rendered inside an expanded run box (SHOWN mode):
+     * header (icon + name + ordinal + args) then the short output preview, so the container
+     * keeps the compact card feel without nesting a second bordered box. No footer link here:
+     * the whole card header is clickable and opens the full-output overlay.
+     */
+    private List<Line> toolRunCardLines(final ToolCard card, final int innerW) {
+        final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
+        final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
+        final var lines = new ArrayList<Line>();
+        final var headerSpans = new ArrayList<Span>();
+        headerSpans.add(Span.styled(
+                (card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check()) + " ",
+                Style.EMPTY.fg(statusColor).bold()));
+        headerSpans.add(Span.styled(card.name(), Style.EMPTY.bold().fg(Color.hex(palette.text()))));
+        if (card.ordinal() >= 0) {
+            headerSpans.add(Span.styled(" #" + card.ordinal(), muted));
+        }
+        if (!card.args().isBlank()) {
+            headerSpans.add(Span.styled((card.failed() ? "  " : " ") + card.args(), muted));
+        }
+        lines.add(Line.from(headerSpans.toArray(Span[]::new)));
+        if (!card.output().isBlank()) {
+            final var outputLines = toolBodyLines(
+                    card.name(), card.keyCommand(), null, card.output(), innerW, card.isDiff(diffRenderer));
+            lines.addAll(new ArrayList<>(outputLines.subList(0, Math.min(outputLines.size(), MAX_INLINE_TOOL_LINES))));
+        }
+        return lines;
     }
 
     /** True when a run is collapsed: explicit override first, else the mode default. */
@@ -4488,7 +4547,25 @@ public class TuiCommand implements Runnable {
         return state.runCollapsed.getOrDefault(run.id(), state.showToolActions == ToolOutputVisibility.COLLAPSED);
     }
 
-    /** The always-visible run header line: chevron + summary + failure/duration details. */
+    /**
+     * The box wrapping a whole tool run (header + members): rounded borders tinted with
+     * the run status (error when any member failed, success otherwise) and the same
+     * neutral background as single tool cards - so the group reads as one container
+     * instead of a bare header over loose children. No title: the first content row
+     * (chevron + summary) stays the run's clickable header, exactly like a lone card.
+     */
+    private Block runBlock(final ToolRun run) {
+        final var builder = Block.builder()
+                .borders(Borders.ALL)
+                .borderType(BorderType.ROUNDED)
+                .borderColor(palette.color(run.failures() > 0 ? palette.error() : palette.success()));
+        if (toolBg != null) {
+            builder.background(toolBg);
+        }
+        return builder.build();
+    }
+
+    /** The always-visible run header row (first content line inside the run box): chevron + summary + details. */
     private Line runHeaderLine(final ToolRun run, final boolean collapsed) {
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var chevron = collapsed ? "▶ " : "▼ ";
@@ -4566,7 +4643,7 @@ public class TuiCommand implements Runnable {
             final var top = out.stream().mapToInt(RenderedChunk::height).sum();
             // the running card is clickable too: its ordinal is stamped by the runner
             // (or resolved by the renderer), so the running-tool overlay opens on click
-            toolTops.add(new UiState.ToolTop(card.ordinal(), top));
+            toolTops.add(new UiState.ToolTop(card.ordinal(), top, false));
             final var line = hiddenToolLine(card);
             rows.add(plainText(line));
             out.add(new RenderedChunk(
@@ -4581,7 +4658,7 @@ public class TuiCommand implements Runnable {
         // the running card is clickable too: the ordinal is stamped by the runner
         // (or resolved by the renderer via pendingToolOrdinals), so clicking the live
         // block opens the running-tool overlay instead of doing nothing
-        toolTops.add(new UiState.ToolTop(card.ordinal(), top));
+        toolTops.add(new UiState.ToolTop(card.ordinal(), top, false));
         final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
         final var blockBuilder = Block.builder()
                 .borders(Borders.ALL)
@@ -7508,7 +7585,7 @@ public class TuiCommand implements Runnable {
         private record ErrorDetail(String message, String stack) {}
 
         /** Screen hit-area of a rendered tool card header (click to collapse/expand, Alt+Up/Down to navigate). */
-        private record ToolAnchor(long ordinal, Rect header, int row) {}
+        private record ToolAnchor(long ordinal, Rect header, int row, boolean runMember) {}
 
         /** Screen hit-area of a tool run header (click to collapse/expand the run). */
         private record RunHeader(long id, Rect header, int row) {}
@@ -7517,7 +7594,7 @@ public class TuiCommand implements Runnable {
         private record FooterLink(long ordinal, int row) {}
 
         /** A tool card position in the flat transcript row space (row = top line of the card). */
-        private record ToolTop(long ordinal, int row) {}
+        private record ToolTop(long ordinal, int row, boolean runMember) {}
 
         private final TuiTranscriptModel model;
         private final Clock clock;
