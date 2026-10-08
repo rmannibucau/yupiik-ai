@@ -411,6 +411,7 @@ public class ConversationTranscript {
                         double percent,
                         int lastRealPromptTokens,
                         double calibrationRatio,
+                        String model,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {

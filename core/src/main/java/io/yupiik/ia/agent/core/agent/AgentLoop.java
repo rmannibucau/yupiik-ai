@@ -856,13 +856,15 @@ public class AgentLoop {
             final int estimatedContextTokens,
             final double contextPercent,
             final int lastRealPromptTokens,
-            final double calibrationRatio) {
+            final double calibrationRatio,
+            final String model) {
         return new AgentEvent.UsageUpdated(
                 usage,
                 estimatedContextTokens,
                 contextPercent,
                 lastRealPromptTokens,
                 calibrationRatio,
+                model,
                 currentSessionId,
                 subagentId,
                 subagentName);
@@ -2874,7 +2876,8 @@ public class AgentLoop {
                 effective,
                 usageTracker.contextPercent(effective),
                 usageTracker.lastRealPromptTokens(),
-                usageTracker.calibrationRatio()));
+                usageTracker.calibrationRatio(),
+                requestModel(resolvedModel())));
     }
 
     /**

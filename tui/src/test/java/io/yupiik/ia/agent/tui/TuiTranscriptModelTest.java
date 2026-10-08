@@ -344,7 +344,7 @@ class TuiTranscriptModelTest {
 
     @Test
     void usageUpdatedTracksTokens() {
-        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, 40000, 1.05, "s1", null, null));
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, 40000, 1.05, null, "s1", null, null));
         assertEquals(0, model.promptTokens());
         assertEquals(0, model.completionTokens());
         assertEquals(42000, model.estimatedContext());

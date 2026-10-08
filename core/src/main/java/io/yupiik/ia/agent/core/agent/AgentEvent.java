@@ -101,12 +101,13 @@ public sealed interface AgentEvent {
             double contextPercent,
             int lastRealPromptTokens,
             double calibrationRatio,
+            String model,
             String sessionId,
             String subagentId,
             String subagentName)
             implements AgentEvent {
         public UsageUpdated(Usage usage, int estimatedContextTokens, double contextPercent, String sessionId) {
-            this(usage, estimatedContextTokens, contextPercent, 0, -1, sessionId, null, null);
+            this(usage, estimatedContextTokens, contextPercent, 0, -1, null, sessionId, null, null);
         }
     }
 

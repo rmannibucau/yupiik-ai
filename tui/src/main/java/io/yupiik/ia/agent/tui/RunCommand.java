@@ -275,6 +275,8 @@ public class RunCommand implements Runnable {
                 + " promptTokens=" + metrics.promptTokens.get()
                 + " completionTokens=" + metrics.completionTokens.get()
                 + " totalTokens=" + metrics.totalTokens.get()
+                + " cacheReadTokens=" + metrics.cacheReadTokens.get()
+                + " cacheWriteTokens=" + metrics.cacheWriteTokens.get()
                 + " contextTokens=" + metrics.contextTokens
                 + " contextPct=" + metrics.contextPercent
                 + " compactions=" + metrics.compactions.get()
@@ -292,7 +294,8 @@ public class RunCommand implements Runnable {
                 + " llmActiveMs=" + metrics.throughput.get().activeMs()
                 + " outTokPerSec=" + rate(metrics.throughput.get().tokensPerSecond())
                 + " realTokPerSec=" + rate(metrics.throughput.get().reportedTokensPerSecond())
-                + " answerChars=" + metrics.answerChars.get();
+                + " answerChars=" + metrics.answerChars.get()
+                + " model=" + metrics.model;
         try {
             Files.writeString(
                     Paths.get(conf.metricsOutputFile()), line + System.lineSeparator(), StandardCharsets.UTF_8);
@@ -316,6 +319,8 @@ public class RunCommand implements Runnable {
         private final AtomicLong promptTokens = new AtomicLong();
         private final AtomicLong completionTokens = new AtomicLong();
         private final AtomicLong totalTokens = new AtomicLong();
+        private final AtomicLong cacheReadTokens = new AtomicLong();
+        private final AtomicLong cacheWriteTokens = new AtomicLong();
         private final AtomicInteger compactions = new AtomicInteger();
         private final AtomicInteger codeTools = new AtomicInteger();
         private final AtomicInteger llmCalls = new AtomicInteger();
@@ -333,18 +338,27 @@ public class RunCommand implements Runnable {
         private volatile long contextTokens;
         private volatile double contextPercent;
         private volatile long maxContext;
+        private volatile String model = "";
         private long prevPromptTokens;
         private long prevCompletionTokens;
+        private long prevCacheReadTokens;
+        private long prevCacheWriteTokens;
         private long perCallReasoning;
 
         void accept(final AgentEvent event, final long started, final Detail detail) {
             if (event instanceof final AgentEvent.UsageUpdated u) {
+                if (u.model() != null && !u.model().isBlank()) {
+                    model = u.model();
+                }
                 final var callPrompt = Math.max(0, u.usage().promptTokens() - prevPromptTokens);
                 final var callCompletion = Math.max(0, u.usage().completionTokens() - prevCompletionTokens);
+                final var callCacheRead = Math.max(0, u.usage().cacheReadTokens() - prevCacheReadTokens);
                 prevPromptTokens = u.usage().promptTokens();
                 prevCompletionTokens = u.usage().completionTokens();
+                prevCacheReadTokens = u.usage().cacheReadTokens();
                 promptTokens.addAndGet(callPrompt);
                 completionTokens.addAndGet(callCompletion);
+                cacheReadTokens.addAndGet(callCacheRead);
                 totalTokens.addAndGet(u.usage().totalTokens());
                 contextTokens = u.estimatedContextTokens();
                 contextPercent = u.contextPercent();
@@ -353,7 +367,14 @@ public class RunCommand implements Runnable {
                 }
                 sumContext.addAndGet(u.estimatedContextTokens());
                 llmCalls.incrementAndGet();
-                detail.llm(started, contextTokens, contextPercent, callPrompt, callCompletion, perCallReasoning);
+                detail.llm(
+                        started,
+                        contextTokens,
+                        contextPercent,
+                        callPrompt,
+                        callCompletion,
+                        callCacheRead,
+                        perCallReasoning);
                 perCallReasoning = 0;
             } else if (event instanceof final AgentEvent.Compacted c) {
                 compactions.incrementAndGet();
@@ -451,12 +472,14 @@ public class RunCommand implements Runnable {
                 final double pct,
                 final long prompt,
                 final long completion,
+                final long cacheRead,
                 final long reasoning) {
             write("llm t=" + (System.nanoTime() - started) / 1_000_000L
                     + " context=" + context
                     + " pct=" + pct
                     + " prompt=" + prompt
                     + " completion=" + completion
+                    + " cacheRead=" + cacheRead
                     + " reasoningChars=" + reasoning);
         }
 
