@@ -515,8 +515,9 @@ public class TuiCommand implements Runnable {
         // info-tinted panel (terminals have no alpha, a pre-blended bg IS the tint)
         this.thoughtBg = palette.mono() ? null : TuiColors.blend(palette.info(), palette.backgroundPanel(), 0.9);
         this.thoughtBarStyle = palette.blended(palette.info(), 0.15);
-        // tool cards get a neutral background tint derived from the default background
-        // so streamed command output reads as a distinct block (mono terminals skip it)
+        // single tool cards get a neutral background tint derived from the default background
+        // so streamed command output reads as a distinct block (mono terminals skip it);
+        // the collapsible tool-run container deliberately inherits the transcript background
         this.toolBg = palette.mono() ? null : TuiColors.blend(palette.text(), palette.backgroundPanel(), 0.95);
         final var toolOpacity = Math.clamp(tuiConfiguration.toolOutputOpacity(), 0.05, 0.95);
         this.toolStyle = palette.blended(palette.text(), toolOpacity);
@@ -4549,20 +4550,18 @@ public class TuiCommand implements Runnable {
 
     /**
      * The box wrapping a whole tool run (header + members): rounded borders tinted with
-     * the run status (error when any member failed, success otherwise) and the same
-     * neutral background as single tool cards - so the group reads as one container
-     * instead of a bare header over loose children. No title: the first content row
+     * the run status (error when any member failed, success otherwise) over the
+     * transcript background - no interior fill, unlike single tool cards, so the group
+     * reads as one container instead of a bare header over loose children without
+     * adding a second tinted plane to the transcript. No title: the first content row
      * (chevron + summary) stays the run's clickable header, exactly like a lone card.
      */
     private Block runBlock(final ToolRun run) {
-        final var builder = Block.builder()
+        return Block.builder()
                 .borders(Borders.ALL)
                 .borderType(BorderType.ROUNDED)
-                .borderColor(palette.color(run.failures() > 0 ? palette.error() : palette.success()));
-        if (toolBg != null) {
-            builder.background(toolBg);
-        }
-        return builder.build();
+                .borderColor(palette.color(run.failures() > 0 ? palette.error() : palette.success()))
+                .build();
     }
 
     /** The always-visible run header row (first content line inside the run box): chevron + summary + details. */

@@ -219,6 +219,16 @@ final class HeadlessBackend implements Backend {
         }
     }
 
+    /** Background color at a screen coordinate. */
+    Optional<Color> bg(final int x, final int y) {
+        lock.lock();
+        try {
+            return buffer.get(x, y).style().bg();
+        } finally {
+            lock.unlock();
+        }
+    }
+
     /** True when the cell at the coordinate carries the reversed-video modifier. */
     boolean reversed(final int x, final int y) {
         lock.lock();

@@ -1512,6 +1512,53 @@ class TuiCommandRenderTest {
         quit();
     }
 
+    @Test
+    void toolRunContainerHasNoBackgroundWhileLoneCardsKeepTheTint() throws Exception {
+        // the collapsible run container inherits the transcript background (no interior
+        // fill), while a lone tool card keeps its neutral background tint - this is the
+        // visual contract for the run-box change, asserted on the rendered cells
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-run-bg-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // two consecutive finished calls group into one collapsible run (the box renders
+        // in every visibility mode; SHOWN keeps it open with its member cards)
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class A {}", true, sid(shellRegistry)));
+        awaitText("2 tools");
+
+        // SHOWN opens the run: the member cards render inside the box
+        tuiRef.get().dispatch(new PasteEvent("/tool-output show"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("a.java");
+
+        // the box spans the full chat body: its top border sits one row above the header
+        // (rowOf is the first row containing the token), the interior starts inside the
+        // rounded border (x=3, one column past the left border)
+        final var runTop = rowOf("2 tools") - 1;
+        assertTrue(backend.bg(3, runTop + 1).isEmpty(), "run box interior must not be tinted:\n" + backend.text());
+        assertTrue(backend.bg(10, runTop + 1).isEmpty(), "run box interior must not be tinted:\n" + backend.text());
+
+        // a turn boundary flushes the run; the next lone tool renders as a single tinted card
+        shellRegistry.onEvent(new AgentEvent.TurnDone("wrapped up", sid(shellRegistry)));
+        awaitText("wrapped up");
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
+        awaitText("ls -la");
+        final var header = rowOf("ls -la"); // first content row, right below the card top border
+        final var expected = TuiColors.blend("#eeeeee", "#141414", 0.95).toRgb();
+        final var actual = backend.bg(3, header).orElseThrow().toRgb();
+        assertEquals(expected, actual, "lone tool card must keep its background tint:\n" + backend.text());
+
+        quit();
+    }
+
     /** Counts non-overlapping occurrences of {@code token} on the current screen. */
     private int occurrences(final String token) {
         final var text = backend.text();
