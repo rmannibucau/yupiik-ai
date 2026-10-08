@@ -83,6 +83,30 @@ Memory hygiene is built in:
   naming the failing phase (`memory extraction (structured facts)`,
   `memory extraction (fallback snippet)` or `memory compaction`) followed by
   the technical detail and, for compaction, the `/memory compact` retry hint.
+- *Bounded extraction cost*: the end-of-turn extraction runs at most once per
+  `yca.memory.extractDebounceMs` (default 10 minutes) per session, and only
+  when at least `yca.memory.extractMinChars` (default 1000) characters of
+  *new* (not yet extracted) user/assistant text accumulated - chit-chat does
+  not cost a call. The model input contains only the durable signal: user and
+  assistant text messages (oldest first, newest 20), excluding tool calls and
+  tool results, the system prompt, compaction/prune digests and the volatile
+  `<session-state>` tail, capped at ~12 KB (assistant messages are dropped
+  oldest-first before any user message when the cap binds). A per-session
+  watermark records how far extraction got, so the periodic pass never
+  re-processes what was already extracted.
+- *Forced extraction at session close*: when a tab closes, the headless run
+  ends, or the TUI exits, the pending delta is extracted synchronously
+  (bypassing the debounce and the min-chars threshold, still honoring the
+  watermark) - the deterministic sibling of the periodic pass, so a short
+  session never loses its facts to a debounce window. An abrupt JVM shutdown
+  (SIGTERM, or Ctrl-C without a cooperative handler) is covered by a shutdown
+  hook bounded by `yca.memory.shutdownTimeoutSeconds` (default 5; `0` waits
+  indefinitely, a negative value disables the hook); there is no startup
+  recovery, so a hard crash (SIGKILL) loses at most the delta accumulated
+  since the last extraction - always less than `extractDebounceMs` of
+  conversation. Sub-agents never run extraction: durable facts discovered
+  there surface through the parent conversation, and explicit `memory_write`
+  calls from a sub-agent already persist directly.
 - *Self-describing provider failures*: a response that cannot be decoded is
   reported with its dialect, endpoint, HTTP status, content-type and a body
   excerpt (never a bare parser message), and an error envelope received with

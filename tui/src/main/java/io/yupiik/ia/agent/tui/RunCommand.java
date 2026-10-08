@@ -45,6 +45,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 @DefaultScoped
@@ -188,11 +189,39 @@ public class RunCommand implements Runnable {
         if (agentName != null && agentProvider.byName(agentName) == null) {
             throw new IllegalArgumentException("Unknown agent: " + agentName + " (configure one under yca.agents)");
         }
+        // abrupt-exit memory backup: the double-Ctrl-C "forced exit" path (System.exit) and SIGKILL
+        // bypass the finally below, so persist the pending delta from a shutdown hook, capped so the
+        // process exit is never blocked for the provider timeout. The clean path removes it right
+        // after the finally runs, so it never double-extracts.
+        final var memoryShutdownHook = new Thread(
+                () -> {
+                    try {
+                        if (!sessionStore.isEmpty(sessionId)) {
+                            runtime.loop()
+                                    .forceExtractNow(sessionStore.load(sessionId), runtime.chatSettings(), 5_000L);
+                        }
+                    } catch (final RuntimeException e) {
+                        LOGGER.log(Level.FINE, "Shutdown memory extraction failed", e);
+                    }
+                },
+                "yca-run-memory-extract");
+        Runtime.getRuntime().addShutdownHook(memoryShutdownHook);
         try {
             runtime.loop().run(conf.prompt(), agentName, sessionId, null, installCancelHandler(userCancelled));
         } finally {
             System.out.flush();
             shellRegistry.unregister(shellEnv);
+            // headless run end: persist the pending memory delta now, before the JVM exits
+            try {
+                runtime.loop().forceExtractNow(sessionStore.load(sessionId), runtime.chatSettings());
+            } catch (final RuntimeException e) {
+                LOGGER.log(Level.FINE, "Forced memory extraction on run end failed", e);
+            }
+            try {
+                Runtime.getRuntime().removeShutdownHook(memoryShutdownHook);
+            } catch (final IllegalStateException e) {
+                // the JVM is already shutting down (forced-exit path): the hook runs on its own
+            }
             detailLog.close();
             writeMetrics(metrics, started);
         }

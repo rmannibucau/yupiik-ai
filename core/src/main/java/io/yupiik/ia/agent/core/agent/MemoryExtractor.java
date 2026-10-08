@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -36,9 +37,74 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+/**
+ * Extracts durable facts (user preferences, project decisions, long-lived
+ * knowledge) out of a session conversation into the shared memory store.
+ *
+ * <p>Cost shaping: the end-of-turn hook runs at most once per
+ * {@code memory.extractDebounceMs} per session, and only when at least
+ * {@code memory.extractMinChars} characters of <em>new</em> (not yet
+ * extracted) user/assistant text accumulated since the last successful
+ * extraction. Tool results, tool-call frames, the system prompt, compaction/
+ * prune digests and the volatile {@code <session-state>} tail are excluded
+ * from the excerpt: they carry no durable signal. A {@code close()} /
+ * {@code forceExtractNow()} call persists the remaining delta synchronously
+ * when the session stops (tab close, headless run end, shutdown hook) - the
+ * deterministic counterpart of the ecosystems' idle-triggered extraction.</p>
+ *
+ * <p>The watermark is an in-memory message-count: side-effect free on crash
+ * (nothing to recover - a killed session simply never ran its forced pass),
+ * and re-feeding already extracted messages on resume is harmless thanks to
+ * the fuzzy deduplication in {@link MemoryStore}.</p>
+ */
 public class MemoryExtractor {
     private static final Logger LOGGER = Logger.getLogger(MemoryExtractor.class.getName());
-    private static final long DEBOUNCE_MS = 60_000;
+
+    /** Max messages of the delta fed to the model (newest kept). */
+    private static final int MAX_MESSAGES = 20;
+
+    /** Hard cap on the excerpt characters (newest kept, role-aware). */
+    private static final int MAX_EXCERPT_CHARS = 12_000;
+
+    /**
+     * Markers of synthetic/injected user content that must never be mined for
+     * facts: compaction/prune digests, truncation nudges, the volatile tail,
+     * context-overflow re-asks. Mirrors {@code AgentLoop.lastUserPrompt}.
+     */
+    static boolean isSyntheticUserContent(final Message message) {
+        if (message.others() != null && Boolean.TRUE.equals(message.others().get("volatileTail"))) {
+            return true;
+        }
+        final var content = message.content();
+        if (!(content instanceof String s)) {
+            return true;
+        }
+        return s.contains("<compacted-context>")
+                || s.contains("<pruned-context>")
+                || s.startsWith("... output truncated")
+                || s.startsWith("When a compacted context is provided");
+    }
+
+    /** Whether this message carries durable signal worth feeding the extractor. */
+    static boolean isMemoryWorthy(final Message message) {
+        if ("tool".equals(message.role())) {
+            return false;
+        }
+        if ("system".equals(message.role())) {
+            return false;
+        }
+        if (isSyntheticUserContent(message)) {
+            return false;
+        }
+        final var content = message.content();
+        if (!(content instanceof String s) || s.isBlank()) {
+            return false;
+        }
+        // assistant tool-call frames carry no text (only tool_calls)
+        return !"assistant".equals(message.role())
+                || message.toolCalls() == null
+                || message.toolCalls().isEmpty();
+    }
 
     private final ChatClient chatClient;
     private final CodingAgentConfiguration configuration;
@@ -53,6 +119,8 @@ public class MemoryExtractor {
     private final UsageTracker usageTracker;
     private final String sessionId;
     private final MemoryCompactor memoryCompactor;
+    /** Number of messages already extracted (in-memory watermark). */
+    private final AtomicLong watermark = new AtomicLong();
 
     public MemoryExtractor(
             final ChatClient chatClient,
@@ -93,25 +161,34 @@ public class MemoryExtractor {
         this.memoryCompactor = null;
     }
 
+    /**
+     * End-of-turn hook: debounced (max once per {@code extractDebounceMs} per
+     * session), async, gated on the new-message delta. Most turns are no-ops
+     * (below {@code extractMinChars} of new text, or inside the debounce
+     * window).
+     */
     public void maybeExtract(final List<Message> messages) {
         maybeExtract(messages, ChatSettings.EMPTY);
     }
 
     public void maybeExtract(final List<Message> messages, final ChatSettings settings) {
-        if (!configuration.memory().enabled()
-                || configuration.memory().maxRatio() <= 0
-                || configuration.memory().maxChars() <= 0) {
-            return; // memory auto-disabled by budget ratio: never store facts that would not be injected
+        if (!enabled()) {
+            return;
         }
         final var now = clock.millis();
         final var last = lastRun.get();
-        if (now - last < DEBOUNCE_MS || !lastRun.compareAndSet(last, now)) {
+        if (now - last < configuration.memory().extractDebounceMs() || !lastRun.compareAndSet(last, now)) {
+            return;
+        }
+        // gate synchronously: a delta that is empty or below the min-chars threshold costs no task at all
+        if (!hasMeaningfulDelta(messages)) {
+            watermark.set(messages.size());
             return;
         }
         final var effective = settings == null ? ChatSettings.EMPTY : settings;
         executor.execute(() -> {
             try {
-                doExtract(messages, effective);
+                doExtract(messages, effective, false);
             } catch (final RuntimeException e) {
                 if (LOGGER.isLoggable(Level.FINER)) {
                     LOGGER.log(Level.FINER, "Memory extraction failed", e);
@@ -125,27 +202,112 @@ public class MemoryExtractor {
         });
     }
 
-    private void doExtract(final List<Message> messages, final ChatSettings settings) {
-        final var sb = new StringBuilder();
-        var count = 0;
-        for (var i = messages.size() - 1; i >= 0 && count < 20; i--) {
-            final var m = messages.get(i);
-            final var others = m.others();
-            if (others != null && Boolean.TRUE.equals(others.get("volatileTail"))) {
-                continue; // synthetic session-state tail: never gain insights from it
-            }
-            count++;
-            final var content = m.content() instanceof String s ? s : String.valueOf(m.content());
-            sb.insert(
-                    0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');
+    /**
+     * Synchronous forced extraction, used at session close (disposeTab, run
+     * end, shutdown hook). Bypasses the debounce and the min-chars threshold,
+     * but still honors the watermark and the meaningful-delta gate: a session
+     * whose periodic pass already extracted everything costs nothing at close,
+     * and a short session still persists its facts instead of losing them to
+     * the JVM exit.
+     *
+     * @return {@code true} when an extraction pass ran, {@code false} when
+     *         there was nothing new to extract.
+     */
+    public boolean forceExtractNow(final List<Message> messages) {
+        return forceExtractNow(messages, ChatSettings.EMPTY);
+    }
+
+    public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings) {
+        if (!enabled() || !hasMeaningfulDelta(messages)) {
+            return false;
         }
-        final var excerpt = sb.toString();
-        // provider-level override (blank = this provider's own model, "inherit" = the global
-        // chain) then the global resolvedMemory chain, kept routable
-        final var memoryModel = memoryModel(settings);
+        final var effective = settings == null ? ChatSettings.EMPTY : settings;
+        try {
+            doExtract(messages, effective, true);
+            return true;
+        } catch (final RuntimeException e) {
+            LOGGER.log(Level.FINE, "Forced memory extraction failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * Shutdown-hook variant: bound the wait to {@code timeoutMs} so an abrupt
+     * exit (SIGTERM/SIGINT when no signal handler is installed) is not blocked
+     * for the full provider timeout. {@code timeoutMs <= 0} waits indefinitely
+     * (synchronous pass). Returns {@code false} when the pass did not complete
+     * in time - the JVM halts right after the hooks anyway, so a dropped tail
+     * on the abrupt path is the accepted trade-off (the periodic pass covered
+     * it at most {@code extractDebounceMs} ago, and the clean close paths are
+     * synchronous and uncapped).
+     */
+    public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings, final long timeoutMs) {
+        if (!enabled() || !hasMeaningfulDelta(messages)) {
+            return false;
+        }
+        final var effective = settings == null ? ChatSettings.EMPTY : settings;
+        if (timeoutMs <= 0) {
+            return forceExtractNow(messages, effective); // no bound: synchronous, wait as long as needed
+        }
+        try {
+            final var future = executor.submit(() -> {
+                doExtract(messages, effective, true);
+                return true;
+            });
+            return future.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (final java.util.concurrent.RejectedExecutionException e) {
+            // the executor was already shut down: run synchronously in the hook thread (blocking
+            // the exit a little longer is the durability price, rare and bounded by the provider)
+            return forceExtractNow(messages, effective);
+        } catch (final java.util.concurrent.TimeoutException e) {
+            LOGGER.log(Level.FINE, "Forced memory extraction did not complete within " + timeoutMs + "ms; dropped");
+            return false;
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (final java.util.concurrent.ExecutionException e) {
+            LOGGER.log(Level.FINE, "Forced memory extraction failed", e.getCause());
+            return false;
+        }
+    }
+
+    private boolean enabled() {
+        return configuration.memory().enabled()
+                && configuration.memory().maxRatio() > 0
+                && configuration.memory().maxChars() > 0;
+    }
+
+    /**
+     * Whether the pending delta contains at least one memory-worthy message:
+     * a delta made only of tool frames, digest or tail messages must not fire
+     * an extraction call (nothing to gain), and must not block the watermark
+     * either - those messages will never become worthy, so skipping them is
+     * a terminal decision.
+     */
+    private boolean hasMeaningfulDelta(final List<Message> messages) {
+        for (final var m : delta(messages)) {
+            if (isMemoryWorthy(m)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void doExtract(final List<Message> messages, final ChatSettings settings, final boolean forced) {
+        final var delta = delta(messages);
+        if (!forced && deltaChars(delta) < configuration.memory().extractMinChars()) {
+            // below the threshold: nothing worth a call; the forced path still runs on any
+            // meaningful delta (a short session must not lose its facts to the JVM exit)
+            watermark.set(messages.size());
+            return;
+        }
+        final var excerpt = buildExcerpt(delta);
         try {
             final var request = new ChatCompletionRequest(
-                            memoryModel == null || memoryModel.isBlank() ? null : memoryModel,
+                            memoryModel(settings) == null
+                                            || memoryModel(settings).isBlank()
+                                    ? null
+                                    : memoryModel(settings),
                             List.of(
                                     Message.system(
                                             "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
@@ -183,8 +345,8 @@ public class MemoryExtractor {
                                 : String.valueOf(res.result().message().content());
                 final var facts = parseFacts(content);
                 if (!facts.isEmpty()) {
-                    final var global = new java.util.ArrayList<String>();
-                    final var project = new java.util.ArrayList<String>();
+                    final var global = new ArrayList<String>();
+                    final var project = new ArrayList<String>();
                     for (final var fact : facts) {
                         if ("global".equals(fact.scope())) {
                             global.add(fact.text());
@@ -200,6 +362,7 @@ public class MemoryExtractor {
                     }
                 }
                 resetFailures();
+                watermark.set(messages.size());
                 return;
             }
             // structured output unsupported or rejected: fall back to a plain compression snippet
@@ -208,6 +371,7 @@ public class MemoryExtractor {
                 memoryStore.appendText(false, snippet);
             }
             resetFailures();
+            watermark.set(messages.size());
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
@@ -234,7 +398,120 @@ public class MemoryExtractor {
                 notifyFailure("memory extraction (structured facts) failed: " + e.getMessage()
                         + " (fallback snippet also failed: " + fallbackFailure.getMessage() + ")");
             }
+            // the watermark is NOT advanced on failure: the delta stays pending for the next
+            // pass (periodic or forced at close), so a transient failure never loses facts
         }
+    }
+
+    /**
+     * The not-yet-extracted messages: everything after the watermark. Pruning
+     * (AgentLoop) may have shrunk the live list below the watermark; the delta
+     * then falls back to the whole available list - re-processing a few already
+     * extracted messages is harmless thanks to memory dedup, and facts added
+     * before the shrink are never lost. When the watermark is exactly at the
+     * end, the delta is empty: nothing new to extract.
+     */
+    private List<Message> delta(final List<Message> messages) {
+        final var wm = watermark.get();
+        if (wm == messages.size()) {
+            return messages.subList(messages.size(), messages.size()); // empty
+        }
+        final var from = wm > messages.size() ? 0 : (int) wm;
+        return messages.subList(from, messages.size());
+    }
+
+    private static long deltaChars(final List<Message> delta) {
+        var chars = 0L;
+        for (final var m : delta) {
+            if (isMemoryWorthy(m)) {
+                chars += String.valueOf(m.content()).length();
+            }
+        }
+        return chars;
+    }
+
+    /**
+     * Builds the model excerpt from the delta: only user and assistant text
+     * messages, rendered chronological oldest-first, capped at
+     * {@link #MAX_MESSAGES} messages then {@link #MAX_EXCERPT_CHARS} chars.
+     * When the char cap binds, assistant messages are dropped oldest-first
+     * before any user message is dropped: the user's own words are the
+     * durable signal and are never sacrificed while an assistant message can
+     * still be shed. A single over-long user message is truncated to fit (the
+     * tail is kept: the most recent part of a paste is its content).
+     */
+    static String buildExcerpt(final List<Message> delta) {
+        // 1. keep the newest MAX_MESSAGES worthy messages, oldest-first order for rendering
+        final var worthy = new ArrayList<Message>();
+        for (var i = delta.size() - 1; i >= 0 && worthy.size() < MAX_MESSAGES; i--) {
+            final var m = delta.get(i);
+            if (isMemoryWorthy(m)) {
+                worthy.add(m);
+            }
+        }
+        java.util.Collections.reverse(worthy);
+        if (worthy.isEmpty()) {
+            return "";
+        }
+
+        // 2. enforce the char cap role-aware: drop assistant messages oldest-first
+        //    before any user message, drop user messages oldest-first only when all
+        //    assistants are gone. Always keep the newest message (truncated to fit
+        //    as a last resort, tail kept: the most recent part of a paste is its content).
+        var chars = 0L;
+        for (final var m : worthy) {
+            chars += contentLen(m);
+        }
+        if (chars > MAX_EXCERPT_CHARS) {
+            final var keep = new ArrayList<>(worthy);
+            // drop assistant messages oldest-first
+            for (var i = 0; i < keep.size() && chars > MAX_EXCERPT_CHARS; ) {
+                if ("assistant".equals(keep.get(i).role())) {
+                    chars -= contentLen(keep.remove(i));
+                } else {
+                    i++;
+                }
+            }
+            // still over: drop user messages oldest-first, never the newest one
+            while (chars > MAX_EXCERPT_CHARS && keep.size() > 1) {
+                var dropped = -1;
+                for (var i = 0; i < keep.size() - 1; i++) {
+                    if ("user".equals(keep.get(i).role())) {
+                        dropped = i;
+                        break;
+                    }
+                }
+                if (dropped < 0) {
+                    break; // only the newest (user) message remains: truncate below
+                }
+                chars -= contentLen(keep.remove(dropped));
+            }
+            worthy.clear();
+            worthy.addAll(keep);
+        }
+        // last resort: a single over-long message is truncated to fit (tail kept)
+        if (chars > MAX_EXCERPT_CHARS && worthy.size() == 1) {
+            final var text = String.valueOf(worthy.get(0).content());
+            final var truncated = text.substring(Math.max(0, text.length() - MAX_EXCERPT_CHARS));
+            return "[" + worthy.get(0).role() + "] " + truncated + '\n';
+        }
+        return render(worthy);
+    }
+
+    private static long contentLen(final Message m) {
+        return String.valueOf(m.content()).length();
+    }
+
+    private static String render(final List<Message> messages) {
+        final var sb = new StringBuilder();
+        for (final var m : messages) {
+            sb.append('[')
+                    .append(m.role())
+                    .append("] ")
+                    .append(String.valueOf(m.content()))
+                    .append('\n');
+        }
+        return sb.toString();
     }
 
     private void notifyFailure(final String message) {
@@ -283,11 +560,11 @@ public class MemoryExtractor {
 
     private List<Fact> parseFacts(final String content) {
         try {
-            final var root = mapper.fromString(Object.class, content);
+            final var root = mapper == null ? parseFactsMinimal(content) : mapper.fromString(Object.class, content);
             if (!(root instanceof Map<?, ?> map) || !(map.get("facts") instanceof List<?> facts)) {
                 return List.of();
             }
-            final var out = new java.util.ArrayList<Fact>();
+            final var out = new ArrayList<Fact>();
             for (final var raw : facts) {
                 if (raw instanceof Map<?, ?> f) {
                     final var text = String.valueOf(f.get("text"));
@@ -302,6 +579,25 @@ public class MemoryExtractor {
             LOGGER.log(Level.FINEST, "Unparsable structured memory facts: " + content, e);
             return List.of();
         }
+    }
+
+    /**
+     * Minimal {@code {"facts":[{"text":"...","scope":"..."}]} parser used when no {@link JsonMapper} is
+     * wired (unit tests, defensive): enough for the small, model-produced facts payload. Falls back to
+     * an empty map when the shape is unexpected.
+     */
+    private static Object parseFactsMinimal(final String content) {
+        if (content == null || content.isBlank()) {
+            return Map.of();
+        }
+        final var facts = new ArrayList<Map<String, String>>();
+        final var matcher = java.util.regex.Pattern.compile(
+                        "\\{\\s*\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*,\\s*\"scope\"\\s*:\\s*\"([^\"]*)\"\\s*}")
+                .matcher(content);
+        while (matcher.find()) {
+            facts.add(Map.of("text", matcher.group(1).replace("\\\"", "\""), "scope", matcher.group(2)));
+        }
+        return Map.of("facts", facts);
     }
 
     /**

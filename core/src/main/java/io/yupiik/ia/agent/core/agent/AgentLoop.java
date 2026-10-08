@@ -528,6 +528,28 @@ public class AgentLoop {
     }
 
     /**
+     * Synchronous forced memory extraction of the persisted transcript, used when the session
+     * stops (tab close, headless run end, shutdown hook). The periodic end-of-turn hook is
+     * debounced and async; this is the deterministic sibling that guarantees the pending delta
+     * (since the last successful extraction) is persisted before the session goes away.
+     *
+     * @return {@code true} when an extraction pass ran, {@code false} when there was nothing new.
+     */
+    public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings) {
+        return memoryExtractor != null && memoryExtractor.forceExtractNow(messages, settings);
+    }
+
+    /**
+     * Capped variant for shutdown hooks: the extraction runs on the background executor and
+     * the wait is bounded by {@code timeoutMs}, so an abrupt JVM exit is never blocked for the
+     * full provider timeout (a dropped tail on the abrupt path is the accepted trade-off - the
+     * periodic pass covered it at most {@code extractDebounceMs} ago).
+     */
+    public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings, final long timeoutMs) {
+        return memoryExtractor != null && memoryExtractor.forceExtractNow(messages, settings, timeoutMs);
+    }
+
+    /**
      * Builds the wire tool list for the current call, hiding the file-mutating
      * tools (EDIT category) while the agent runs in PLAN mode: the model then
      * simply cannot call them - the strongest form of "plan must not build".
@@ -710,7 +732,9 @@ public class AgentLoop {
         } finally {
             pauseListener = null;
             statusReporter.setSink(null);
-            memoryExtractor.maybeExtract(messages, chatSettings);
+            if (memoryExtractor != null) {
+                memoryExtractor.maybeExtract(messages, chatSettings);
+            }
         }
     }
 

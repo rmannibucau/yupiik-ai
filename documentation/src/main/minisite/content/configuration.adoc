@@ -114,6 +114,41 @@ the incremental fingerprint re-indexing. See
 xref:features/code-graph-index.adoc[Compact binary code graph index] for the
 on-disk format and the memory-mapped dependency-jar sidecars.
 
+== Memory extraction
+
+Durable knowledge (user preferences, project decisions, long-lived facts) is
+extracted from each session's conversation into the shared memory files with a
+dedicated LLM call (the `yca.model.memory` model, falling back to `compact`).
+Extraction is deliberately cheap and deterministic:
+
+- the end-of-turn hook runs at most once per `yca.memory.extractDebounceMs`
+  (default 10 minutes) per session, asynchronously, and only when at least
+  `yca.memory.extractMinChars` characters of *new* (not yet extracted)
+  user/assistant text accumulated. Chit-chat below the threshold is skipped:
+  it would only produce an empty facts array while still costing a call.
+- the excerpt fed to the model contains only user and assistant text
+  messages: tool results, tool-call frames, the system prompt, compaction/
+  prune digests and the volatile session-state tail are excluded (they carry
+  no durable signal). It is chronological, capped at the newest 20 messages
+  then ~12KB; when the cap binds, assistant messages are dropped oldest-first
+  before any user message, so the user's own words are never sacrificed while
+  an assistant message can still be shed.
+- every clean session stop (tab close, headless run end) runs a synchronous
+  forced extraction that bypasses the debounce and the min-chars threshold but
+  still honors the per-session watermark (a session whose periodic pass
+  already extracted everything costs nothing at close). A JVM shutdown hook
+  (SIGTERM, or Ctrl-C when no cooperative handler is installed) persists the
+  pending delta too, bounded by `yca.memory.shutdownTimeoutSeconds` so the
+  process exit is never blocked for the provider timeout. There is no startup
+  recovery: a killed process loses at most the conversation tail since the
+  last extraction (bounded by the debounce window), and memory deduplication
+  makes re-extraction on resume harmless.
+- sub-agents never run extraction: their task execution is exactly the
+  transient state the extractor drops, and durable facts surface through the
+  parent session's loop anyway.
+
+See the `yca.memory.*` entries in the generated list below for the tunables.
+
 == Custom agents
 
 `yca.agents` defines named custom agents. Each agent is mainly a prompt whose

@@ -199,18 +199,6 @@ public class SubagentRunner {
                 providerManager,
                 todoPromptResolver,
                 mavenRepositoryKnowledge);
-        final var subagentMemoryExtractor = new MemoryExtractor(
-                chatClient,
-                configuration,
-                providerManager,
-                memoryStore,
-                mapper,
-                executor,
-                emitter,
-                clock,
-                subagentUsageTracker,
-                state.parentSessionId(),
-                null);
         final var subagentContextView = new ContextView();
         final var subagentCompactionCoordinator = new CompactionCoordinator(
                 configuration, chatClient, subagentUsageTracker, providerManager, emitter, state.parentSessionId());
@@ -228,7 +216,9 @@ public class SubagentRunner {
                 subagentContextView,
                 subagentSessionStore,
                 subagentSystemPromptBuilder,
-                subagentMemoryExtractor,
+                null, // sub-agents never run memory extraction: no user instructions there, and the parent
+                // session's extractor (same shared MemoryStore) already captures durable facts surfaced
+                // through the sub-agent result; a per-subagent extractor would only add duplicate calls
                 subagentStatusReporter,
                 emitter,
                 mapper,
