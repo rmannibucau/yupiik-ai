@@ -114,7 +114,62 @@ public record ProviderConfiguration(
         String color,
 
         @Property(documentation = "Provider-tunable system prompt sections (todo/plan guidance).")
-        PromptConfiguration prompt) {
+        PromptConfiguration prompt,
+
+        @Property(
+                documentation =
+                        "Per-provider overrides of the global yca.model.* background models (same compact/prune/memory shape). "
+                                + "Resolution per background call (compaction summarizer, memory writes): a non-blank, non-\"inherit\" "
+                                + "value is that model - a bare name is this provider's own model (implicitly routed to this provider), "
+                                + "a $provider/model reference keeps its explicit routing; the \"inherit\" keyword resolves the global "
+                                + "yca.model.* chain (including its compact fallbacks); a blank value (the default) means this provider's "
+                                + "own default model, ie. no dedicated background model for this provider.")
+        ModelConfiguration backgroundModelOverrides) {
+
+    /** Constructor accepting the fields before {@code backgroundModelOverrides} (it defaults to null). */
+    public ProviderConfiguration(
+            final String id,
+            final String baseUrl,
+            final String apiKey,
+            final String model,
+            final ApiFlavor api,
+            final int contextWindow,
+            final int outputTokens,
+            final String releaseDate,
+            final ModelTuningConfiguration tuning,
+            final List<ProviderModelConfiguration> models,
+            final int maxConcurrent,
+            final int timeoutSeconds,
+            final String providerSpecificOptions,
+            final Map<String, String> headers,
+            final Map<String, String> dynamicHeaders,
+            final String color,
+            final PromptConfiguration prompt) {
+        this(
+                id,
+                baseUrl,
+                apiKey,
+                model,
+                api,
+                contextWindow,
+                outputTokens,
+                releaseDate,
+                tuning,
+                models,
+                maxConcurrent,
+                timeoutSeconds,
+                providerSpecificOptions,
+                headers,
+                dynamicHeaders,
+                color,
+                prompt,
+                null);
+    }
+
+    /** True when the value is the reserved "inherit" keyword (resolves the global yca.model.* chain). */
+    public static boolean isInheritKeyword(final String value) {
+        return value != null && "inherit".equalsIgnoreCase(value.strip());
+    }
 
     public String resolveApiKey() {
         if (apiKey != null && !apiKey.isBlank()) {

@@ -129,6 +129,7 @@ public class SessionRuntimeFactory {
         final var memoryExtractor = new MemoryExtractor(
                 chatClient,
                 configuration,
+                providerManager,
                 memoryStore,
                 mapper,
                 executor,

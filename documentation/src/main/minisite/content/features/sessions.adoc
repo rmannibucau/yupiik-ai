@@ -73,9 +73,22 @@ Memory hygiene is built in:
   `/memory compact` runs it manually, `/memory` shows sizes, bullet counts and
   the last compaction.
 - *Structured extraction*: durable facts are extracted through a strict JSON
-  Schema (JSON mode); when a provider rejects the schema (e.g. Anthropic
-  structured outputs with `json was malformed`), yca falls back to a plain
+  Schema (JSON mode); on the Anthropic wire the schema is normalized to the
+  subset the API accepts (unsupported constraints move into the field
+  `description`, every object gains `additionalProperties: false`) and an
+  existing `output_config` (e.g. an effort level) is preserved. When a
+  provider rejects the schema (e.g. `json was malformed`) the rejection is
+  remembered per provider/model/schema and yca degrades to a plain
   compression snippet so memory is still saved. Failures surface a warning
   naming the failing phase (`memory extraction (structured facts)`,
   `memory extraction (fallback snippet)` or `memory compaction`) followed by
   the technical detail and, for compaction, the `/memory compact` retry hint.
+- *Self-describing provider failures*: a response that cannot be decoded is
+  reported with its dialect, endpoint, HTTP status, content-type and a body
+  excerpt (never a bare parser message), and an error envelope received with
+  a 2xx status is raised instead of being read as an empty completion. Some
+  Anthropic-compatible gateways (e.g. Azure AI Foundry) answer a
+  non-streaming request with an SSE body despite `"stream": false`: yca
+  detects that content-type and reconstructs the completion from the frames,
+  so background calls (memory extraction, compaction, todo seeding) keep
+  working on such gateways.

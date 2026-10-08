@@ -66,6 +66,44 @@ class StructuredOutputSchemasTest {
         return properties == null ? null : asMap(properties.get(name));
     }
 
+    @Test
+    void sanitizerIsIdempotentOnTheBuiltInSchemas() {
+        // yca's own schemas are already in the Anthropic-accepted subset: the sanitizer must not
+        // change them (no added description, no forced properties), so their wire form stays as today
+        final var facts = io.yupiik.ia.agent.core.llm.ChatClient.sanitizeSchema(MemoryExtractor.factsSchema());
+        org.junit.jupiter.api.Assertions.assertEquals(MemoryExtractor.factsSchema(), facts);
+    }
+
+    @Test
+    void sanitizerMovesUnsupportedConstraintsToDescriptionAndForcesAdditionalProperties() {
+        final var schema = Map.<String, Object>of(
+                "type",
+                "object",
+                "properties",
+                Map.of(
+                        "age",
+                        Map.of("type", "integer", "minimum", 0, "maximum", 150),
+                        "name",
+                        Map.of("type", "string", "maxLength", 10, "format", "email")),
+                "required",
+                java.util.List.of("age"));
+        final var sanitized = io.yupiik.ia.agent.core.llm.ChatClient.sanitizeSchema(schema);
+        // objects gain additionalProperties:false at every level
+        assertTrue(Boolean.FALSE.equals(sanitized.get("additionalProperties")), "root object must be closed");
+        final var age = asMap(asMap(sanitized.get("properties")).get("age"));
+        assertFalse(age.containsKey("minimum"), "unsupported constraint must be dropped from the wire schema");
+        assertFalse(age.containsKey("maximum"), "unsupported constraint must be dropped from the wire schema");
+        assertTrue(
+                age.get("description") instanceof String s && s.contains("minimum") && s.contains("maximum"),
+                "dropped constraints must move into the description: " + age.get("description"));
+        // a supported format is kept, an unsupported one moves to the description
+        final var name = asMap(asMap(sanitized.get("properties")).get("name"));
+        org.junit.jupiter.api.Assertions.assertEquals("email", name.get("format"));
+        assertTrue(
+                name.get("description") instanceof String d && d.contains("maxLength"),
+                "maxLength is unsupported and must move to the description: " + name.get("description"));
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> asMap(final Object value) {
         return value instanceof Map ? (Map<String, Object>) value : null;

@@ -265,17 +265,7 @@ public class CompactionCoordinator {
         while (true) {
             final var chunks = chunkCompact(messages.subList(from, boundary), chunkCap);
             outcome = summarizeReducing(
-                    "compaction",
-                    configSystemPrompt(),
-                    chunks,
-                    prior,
-                    focus,
-                    chunkCap,
-                    compactCfg.summarizerChunkChars() > 0
-                            ? null
-                            : configuration.model().compact(),
-                    cancelled,
-                    settings);
+                    "compaction", configSystemPrompt(), chunks, prior, focus, chunkCap, cancelled, settings);
             if (!outcome.sizeError()) {
                 break;
             }
@@ -573,7 +563,6 @@ public class CompactionCoordinator {
             final String priorSummary,
             final String focus,
             final int chunkCap,
-            final String modelOverride,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
         final var digestCap = effectiveDigestCap();
@@ -583,6 +572,7 @@ public class CompactionCoordinator {
         warnOnceWhenNoCompactModel();
         emit(new AgentEvent.Status(
                 "compacting (" + label + ", chunk 1/" + chunks.size() + ")...", sessionId, null, null));
+        final var model = compactModelReference(settings);
         for (var c = 0; c < chunks.size(); c++) {
             if (cancelled.getAsBoolean()) {
                 return new Outcome("", label + " cancelled", calls, false);
@@ -591,11 +581,15 @@ public class CompactionCoordinator {
             String part = null;
             String error = null;
             for (var attempt = 0; attempt < retries(); attempt++) {
-                final var model = resolveModel(modelOverride);
                 try {
+                    // no explicit compact model: the request settings alone resolve the route
+                    // (the session's effective provider/model); otherwise the resolved
+                    // $provider/model reference pins the target provider
+                    final var requestModel = model == null || model.isBlank() ? null : model;
+                    final var routedSettings = settings == null ? ChatSettings.EMPTY : settings;
                     final var res = chatClient.chat(
                             new ChatCompletionRequest(
-                                            model,
+                                            requestModel,
                                             List.of(Message.system(systemPrompt), Message.user(prompt)),
                                             null,
                                             null,
@@ -605,7 +599,7 @@ public class CompactionCoordinator {
                                             null,
                                             null,
                                             null)
-                                    .withSettings(settings),
+                                    .withSettings(routedSettings),
                             // surface provider throttles/backoffs during compaction too:
                             // transient right-slot feedback, never the leading status
                             pause -> emit(new AgentEvent.Pause(
@@ -876,8 +870,37 @@ public class CompactionCoordinator {
         }
     }
 
-    private String resolveModel(final String override) {
-        return providerManager.resolveModel(override);
+    /**
+     * Resolves the summarizer model reference for a compaction pass: the effective provider's
+     * {@code backgroundModelOverrides.compact} (blank = its own default model, "inherit" = the
+     * global chain) wins, then the global {@code yca.model.compact}, then the session selection
+     * routes the call (its provider, and its model when the session overrides it). Null means
+     * "no explicit model": the request settings alone resolve it.
+     */
+    private String compactModelReference(final ChatSettings settings) {
+        if (providerManager != null && configuration != null) {
+            final var resolved = providerManager.resolvedCompact(settings);
+            if (resolved != null && !resolved.isBlank()) {
+                return resolved;
+            }
+        } else if (configuration != null
+                && configuration.model() != null
+                && configuration.model().compact() != null
+                && !configuration.model().compact().isBlank()) {
+            // no provider manager (test wiring): still honor the global compact reference
+            return configuration.model().compact();
+        }
+        // no background model resolved: use the session's provider/model (kept empty when the
+        // selection carries no model override: the effective model of the session applies)
+        if (settings == null) {
+            return null;
+        }
+        final var providerId = settings.providerId();
+        final var model = settings.model();
+        if (model == null || model.isBlank()) {
+            return providerId == null ? null : "$" + providerId + "/";
+        }
+        return (providerId == null ? "" : "$" + providerId + "/") + model;
     }
 
     /**

@@ -83,8 +83,14 @@ accepted but ignored).
 
 Compaction (default trigger: 80% of the usable window, or a provider context
 overflow with retry) summarizes the old part of the conversation with the LLM
-(`model.compact`, falling back to the provider model) and keeps a verbatim
-tail.
+and keeps a verbatim tail.
+
+The summarizer model resolves per background call: the effective provider's
+`backgroundModelOverrides.compact` wins when set, then the global
+`model.compact`, then the session's own provider/model. The same resolution
+applies to the memory write path (`backgroundModelOverrides.memory` vs
+`model.memory`) and to pruning (`backgroundModelOverrides.prune` vs
+`model.prune`).
 
 The summary follows a fixed structure - `## Objective`, `## Important Details`,
 `## Work State` (Completed / Active / Blocked), `## Next Move` and

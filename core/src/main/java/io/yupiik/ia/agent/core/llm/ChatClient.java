@@ -33,6 +33,7 @@ import io.yupiik.llm.client.DialectLlmClient;
 import io.yupiik.llm.client.DialectNotSupportedException;
 import io.yupiik.llm.client.LlmClientResilienceWrapper;
 import io.yupiik.llm.client.LlmResilienceConfig;
+import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.RoutingLlmClient;
 import io.yupiik.llm.client.anthropic.AnthropicDialect;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -99,9 +100,8 @@ public class ChatClient implements AutoCloseable {
     // provider-scoped facts. With per-session providers (one per tab) a single process-wide slot would
     // leak a tab A provider observation (AUTO fell back to completions, structured unsupported) to tab B
     private final ConcurrentHashMap<String, ApiFlavor> resolvedFlavors = new ConcurrentHashMap<>();
-    private final Set<String> structuredOutputUnsupported = ConcurrentHashMap.newKeySet();
+    private final Set<String> structuredOutputRejected = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, ModelsResponse> cachedModelsByProvider = new ConcurrentHashMap<>();
-    private volatile ProviderConfiguration targetProvider;
 
     public ChatClient(
             final CodingAgentConfiguration configuration,
@@ -619,11 +619,10 @@ public class ChatClient implements AutoCloseable {
     public void setProvider(final String id) {
         providerManager.setProvider(id);
         final var providerId = providerManager.currentProviderId();
-        this.targetProvider = null;
         this.dialectClients.clear();
         // the new provider never observed the response route or structured output yet
         this.resolvedFlavors.remove(providerId);
-        this.structuredOutputUnsupported.remove(providerId);
+        this.structuredOutputRejected.remove(providerId);
         this.cachedModelsByProvider.remove(providerId);
     }
 
@@ -738,17 +737,18 @@ public class ChatClient implements AutoCloseable {
     /** The provider currently targeted by the in-flight request: the session's effective provider
      * (per-tab override, then process current) unless a {@code $provider} ref routed it. */
     private ProviderConfiguration target(final ChatCompletionRequest request) {
-        final var t = targetProvider;
-        return t == null ? provider(settings(request)) : t;
+        return provider(settings(request));
     }
 
     /**
      * Resolve the concrete model for a request: an explicit request model wins (plain name or
      * {@code $provider/model}), then the request's session selection ({@link ChatSettings#model()}),
      * then the effective provider's configured model. A {@code $provider/model} reference
-     * additionally routes the request to that provider.
+     * additionally routes the request to that provider, returned as the rebased request carrying a
+     * routing {@link ChatSettings} (request-scoped: no shared mutable routing state, so two tabs on
+     * different providers never route each other's calls).
      */
-    private String resolveModel(final ChatCompletionRequest request) throws IOException {
+    private RoutedRequest resolveModel(final ChatCompletionRequest request) throws IOException {
         final var settings = settings(request);
         final var provider = provider(settings);
         final var explicit = request.model();
@@ -757,21 +757,25 @@ public class ChatClient implements AutoCloseable {
                 ? explicit
                 : (override != null && !override.isBlank() ? override : (provider == null ? null : provider.model()));
         final var resolvedModel = providerManager.resolve(ref);
-        if (ref != null && ref.startsWith("$")) {
-            // an explicit $provider/model reference routes this request to that provider; a plain
-            // reference must never capture the process provider into the shared routing slot (it would
-            // leak to every other tab running on its own provider)
-            this.targetProvider = resolvedModel.provider();
-        } else {
-            this.targetProvider = null;
+        var routed = request;
+        final var routedProviderId = resolvedModel.provider() == null ? null : providerIdOf(resolvedModel.provider());
+        if (ref != null && ref.startsWith("$") && routedProviderId != null) {
+            // an explicit $provider/model reference routes this request to that provider: record it
+            // in the request's own settings so every later read (target(), applyOutputBudget, ...)
+            // sees the same routing without any cross-request shared state
+            routed = request.withSettings(
+                    new ChatSettings(routedProviderId, settings.model(), settings.variant(), settings.sampling()));
         }
         final var model = resolvedModel.model();
         if (model == null || model.isBlank()) {
             throw new IOException(
                     "no model configured: set yca.provider.model (--yca-provider-model, configuration.json or YCA_PROVIDER_MODEL)");
         }
-        return model.trim();
+        return new RoutedRequest(routed, model.trim());
     }
+
+    /** A request rebased onto its resolved routing (provider in the settings) plus the concrete model name. */
+    private record RoutedRequest(ChatCompletionRequest request, String model) {}
 
     private ChatCompletionRequest useModel(final ChatCompletionRequest request) throws IOException {
         return withPromotedExtras(applyModelDefaults(request));
@@ -785,8 +789,10 @@ public class ChatClient implements AutoCloseable {
      * The provider routing is resolved here so the variant and defaults are those of the target model.
      */
     private ChatCompletionRequest applyModelDefaults(final ChatCompletionRequest request) throws IOException {
-        final var model = resolveModel(request);
-        final var provider = target(request);
+        final var routed = resolveModel(request);
+        final var model = routed.model();
+        final var request_ = routed.request();
+        final var provider = target(request_);
         final var providerId = provider == null ? null : provider.id();
         final var others = new LinkedHashMap<String, Object>();
         if (request.others() != null) {
@@ -856,21 +862,21 @@ public class ChatClient implements AutoCloseable {
                 variant == null ? null : variant.reasoningEffort(),
                 tuning == null ? null : tuning.reasoningEffort(),
                 providerId);
-        if (isClaude(model) && reasoningEffort != null) {
-            applyClaudeThinking(others, reasoningEffort);
-        }
+        // the thinking budget depends on the resolved max_tokens (the API requires
+        // 1024 <= budget < max_tokens), so the injection happens in doWithFallback after
+        // applyOutputBudget rather than here
         return new ChatCompletionRequest(
                 model,
-                applyCaching(request.messages(), providerId),
+                applyCaching(request_.messages(), providerId),
                 temperature,
                 topP,
-                request.stream(),
-                request.tools(),
-                request.toolChoice(),
+                request_.stream(),
+                request_.tools(),
+                request_.toolChoice(),
                 maxTokens,
                 reasoningEffort,
                 others,
-                request.settings());
+                request_.settings());
     }
 
     /**
@@ -1142,13 +1148,40 @@ public class ChatClient implements AutoCloseable {
         return model != null && model.startsWith("claude");
     }
 
-    private static void applyClaudeThinking(final Map<String, Object> others, final String effort) {
-        final int budget =
+    /**
+     * Whether a claude id can use extended thinking: everything from 3.7 on, but the plain 3.x
+     * family has no thinking support at all (a {@code thinking} request field would be rejected).
+     * Unknown/newer ids stay optimistic.
+     */
+    private static boolean isThinkingCapableClaude(final String model) {
+        if (model == null || !model.startsWith("claude")) {
+            return false;
+        }
+        final var lower = model.toLowerCase(Locale.ROOT);
+        return !(lower.startsWith("claude-3-") || lower.startsWith("claude-3.") || lower.equals("claude-3"));
+    }
+
+    /**
+     * Injects an Anthropic thinking budget derived from the resolved reasoning effort and the
+     * effective output budget, honoring the API invariants: {@code 1024 <= budget_tokens < max_tokens}.
+     * An explicit {@code thinking} entry (a selected variant, a user/tuning config) always wins, and a
+     * budget that cannot satisfy the invariant skips thinking rather than failing the request.
+     */
+    private static void applyClaudeThinking(
+            final Map<String, Object> others, final String effort, final Integer maxTokens) {
+        if (others.containsKey("thinking")) {
+            return; // a variant/config-provided thinking configuration owns the field
+        }
+        final var target =
                 switch (effort) {
                     case "low" -> 1024;
                     case "high", "xhigh", "max" -> 8192;
                     default -> 2048;
                 };
+        final var budget = maxTokens == null || maxTokens <= 0 ? target : Math.min(target, maxTokens - 1);
+        if (budget < 1024) {
+            return; // no room for thinking within the output budget
+        }
         others.put("thinking", Map.of("type", "enabled", "budget_tokens", budget));
     }
 
@@ -1189,12 +1222,13 @@ public class ChatClient implements AutoCloseable {
      */
     private static ChatCompletionRequest withPromotedExtras(final ChatCompletionRequest request) {
         final var extras = request.others();
-        if (extras == null
-                || extras.isEmpty()
-                || (!extras.containsKey("temperature")
-                        && !extras.containsKey("max_tokens")
-                        && !extras.containsKey("max_output_tokens")
-                        && !extras.containsKey("top_p"))) {
+        final var hasPromoted = extras != null
+                && (extras.containsKey("temperature")
+                        || extras.containsKey("max_tokens")
+                        || extras.containsKey("max_output_tokens")
+                        || extras.containsKey("top_p"));
+        final var hasReserved = extras != null && RESERVED_WIRE_KEYS.stream().anyMatch(extras::containsKey);
+        if (extras == null || extras.isEmpty() || (!hasPromoted && !hasReserved)) {
             return request;
         }
         Double temperature = request.temperature();
@@ -1211,12 +1245,21 @@ public class ChatClient implements AutoCloseable {
         }
         final var stripped = new LinkedHashMap<String, Object>(extras.size());
         extras.forEach((k, v) -> {
-            if (!"temperature".equals(k)
-                    && !"max_tokens".equals(k)
-                    && !"max_output_tokens".equals(k)
-                    && !"top_p".equals(k)) {
-                stripped.put(k, v);
+            if ("temperature".equals(k)
+                    || "max_tokens".equals(k)
+                    || "max_output_tokens".equals(k)
+                    || "top_p".equals(k)) {
+                return; // promoted into the typed fields, never sent twice
             }
+            if (RESERVED_WIRE_KEYS.contains(k)) {
+                // a free-form option must never override a protocol field: the payload would carry
+                // both the typed value and a duplicate from the extras (the dialect encoder flattens
+                // the latter last), silently flipping behavior like streaming for every call
+                LOGGER.warning(() -> "ignoring reserved provider option '" + k
+                        + "' (provider/providerOptions/variant config): it would override the request field");
+                return;
+            }
+            stripped.put(k, v);
         });
         return new ChatCompletionRequest(
                 request.model(),
@@ -1231,6 +1274,10 @@ public class ChatClient implements AutoCloseable {
                 stripped,
                 request.settings());
     }
+
+    /** Protocol fields that free-form options must never override (duplicate-key protection). */
+    private static final Set<String> RESERVED_WIRE_KEYS =
+            Set.of("stream", "model", "messages", "system", "tools", "tool_choice", "tool_calls");
 
     private static Integer extrasNumber(final Map<String, Object> extras, final String... keys) {
         for (final var key : keys) {
@@ -1249,6 +1296,38 @@ public class ChatClient implements AutoCloseable {
      * explicitly set (request, per-model override or provider default): a detected or fallback value is
      * deliberately not force-sent there so proxies governing their own server-side default keep working.
      */
+    /**
+     * Injects the Anthropic thinking budget once the output budget is resolved (the API requires
+     * {@code 1024 <= budget_tokens < max_tokens}). Runs only for the Anthropic flavor and only for
+     * thinking-capable claude ids, so an OpenAI-compatible gateway fronting a claude never receives
+     * a non-standard {@code thinking} field, and an explicit variant/config thinking entry wins.
+     */
+    private ChatCompletionRequest applyClaudeThinking(final ChatCompletionRequest request, final ApiFlavor flavor) {
+        if (flavor != ApiFlavor.ANTHROPIC
+                || request.reasoningEffort() == null
+                || !isThinkingCapableClaude(request.model())
+                || request.others().containsKey("thinking")) {
+            return request;
+        }
+        final var others = new LinkedHashMap<String, Object>(request.others());
+        applyClaudeThinking(others, request.reasoningEffort(), request.maxTokens());
+        if (others.size() == request.others().size()) {
+            return request; // no room for thinking within the resolved budget
+        }
+        return new ChatCompletionRequest(
+                request.model(),
+                request.messages(),
+                request.temperature(),
+                request.topP(),
+                request.stream(),
+                request.tools(),
+                request.toolChoice(),
+                request.maxTokens(),
+                request.reasoningEffort(),
+                others,
+                request.settings());
+    }
+
     private ChatCompletionRequest applyOutputBudget(final ChatCompletionRequest request, final ApiFlavor flavor) {
         if (flavor == null || flavor == ApiFlavor.AUTO) {
             return request;
@@ -1271,9 +1350,12 @@ public class ChatClient implements AutoCloseable {
                 : null;
         final var decision = OutputBudgetResolver.resolveTracked(
                 request.maxTokens(), perModel, perProvider, detectedMaxTokens, contextWindow);
+        // the Anthropic API caps max_tokens per model family; only auto-resolved budgets (fallback or
+        // detected /v1/models value) are clamped, an explicit request/configured value always wins
+        final var budget = flavor == ApiFlavor.ANTHROPIC ? anthropicCeiling(model, decision) : decision.budget();
         logBudgetOnce(flavor, providerId, model, decision);
         final var maxTokens = request.maxTokens();
-        if (maxTokens != null && decision.budget() == maxTokens) {
+        if (maxTokens != null && budget == maxTokens) {
             return request;
         }
         return new ChatCompletionRequest(
@@ -1284,10 +1366,55 @@ public class ChatClient implements AutoCloseable {
                 request.stream(),
                 request.tools(),
                 request.toolChoice(),
-                decision.budget(),
+                budget,
                 request.reasoningEffort(),
                 request.others(),
                 request.settings());
+    }
+
+    /**
+     * Clamps an auto-resolved Anthropic output budget to the documented per-family ceiling: sending
+     * the generic 32 000 fallback to a claude with a smaller cap is an immediate 400. Explicit
+     * request/configured budgets never go through here, and unknown/non-claude ids keep the generic
+     * default so only the documented families are touched.
+     */
+    private static int anthropicCeiling(final String model, final OutputBudgetResolver.Decision decision) {
+        final var source = decision.source();
+        if (!(source.startsWith("fallback-") || source.startsWith("detected"))) {
+            return decision.budget(); // request/configured value: always wins
+        }
+        final var ceiling = claudeOutputCeiling(model);
+        return ceiling > 0 ? Math.min(decision.budget(), ceiling) : decision.budget();
+    }
+
+    /** Documented {@code max_tokens} ceilings for claude ids, 0 when unknown (no clamping). */
+    private static int claudeOutputCeiling(final String model) {
+        if (model == null || !model.startsWith("claude")) {
+            return 0;
+        }
+        final var lower = model.toLowerCase(Locale.ROOT);
+        if (lower.contains("claude-3-5") || lower.contains("claude-3.5")) {
+            return 8_192; // claude 3.5 sonnet/haiku
+        }
+        if (lower.contains("claude-3-")) {
+            return 4_096; // claude 3 opus/sonnet/haiku
+        }
+        if (lower.contains("claude-4-0")
+                || lower.contains("claude-4.0")
+                || lower.contains("claude-4-1")
+                || lower.contains("claude-4.1")) {
+            return lower.contains("opus") ? 32_000 : 8_192;
+        }
+        if (lower.contains("claude-4-5")
+                || lower.contains("claude-4.5")
+                || lower.contains("claude-4-6")
+                || lower.contains("claude-4.6")) {
+            return 64_000;
+        }
+        if (lower.contains("claude-4-7") || lower.contains("claude-4.7") || lower.contains("claude-5")) {
+            return 128_000;
+        }
+        return 0; // unknown claude: keep the generic budget
     }
 
     /**
@@ -1341,8 +1468,10 @@ public class ChatClient implements AutoCloseable {
     public StructuredResult chatStructured(
             final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
             throws IOException, InterruptedException {
-        final var model = resolveModel(request);
-        final var flavor = effectiveFlavor(request.settings());
+        final var routed = resolveModel(request);
+        final var model = routed.model();
+        final var routedReq = routed.request();
+        final var flavor = effectiveFlavor(routedReq.settings());
         final var base = new LinkedHashMap<String, Object>();
         if (request.others() != null) {
             base.putAll(request.others());
@@ -1358,7 +1487,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 base,
-                request.settings());
+                routedReq.settings());
         final var structuredReq = new ChatCompletionRequest(
                 model,
                 request.messages(),
@@ -1372,31 +1501,166 @@ public class ChatClient implements AutoCloseable {
                 withStructuredField(base, flavor, schemaName, schema),
                 request.settings());
         final var providerId = providerIdFor(request);
-        if (structuredOutputUnsupported.contains(providerId)) {
+        final var rejectionKey = providerId + ":" + model + ":" + schemaName;
+        if (structuredOutputRejected.contains(rejectionKey)) {
             return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
         }
         try {
             return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(structuredReq))), true);
         } catch (final IOException first) {
-            if (!isStatus400(first)) {
-                throw first;
-            }
-            try {
-                return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
-            } catch (final IOException second) {
-                if (!isStatus400(second)) {
-                    throw second;
-                }
-                structuredOutputUnsupported.add(providerId);
+            if (isSchemaRejection(first)) {
+                // the provider rejected the JSON Schema (e.g. Anthropic 400 'json was malformed' or a
+                // response-parse failure of the structured attempt): degrade once to the plain request
+                // and remember it per (provider, model, schema) so a model that does not support
+                // structured output stops burning a rejection round-trip per call
+                structuredOutputRejected.add(rejectionKey);
                 return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
             }
+            throw first;
         }
+    }
+
+    /**
+     * Whether an {@link IOException} from the structured attempt is a JSON-Schema rejection (the plain
+     * fallback is the right recovery) rather than a transport/config failure that must surface.
+     */
+    private static boolean isSchemaRejection(final IOException e) {
+        if (isStatus400(e)) {
+            final var m = e.getMessage();
+            final var lower = m == null ? "" : m.toLowerCase(Locale.ROOT);
+            // body markers of a schema rejection; 'invalid_request_error' is deliberately absent as
+            // Anthropic classifies every 400 under it, including max_tokens/thinking config errors
+            // that must surface instead of being hidden by the plain fallback
+            return lower.contains("json was malformed")
+                    || lower.contains("output_config")
+                    || lower.contains("output_format")
+                    || lower.contains("schema");
+        }
+        // a response-parse failure (e.g. the gateway answered SSE with no usable frame) is also a
+        // structured-output failure of this provider/model/schema: degrade once
+        return e instanceof LlmResponseParseException;
     }
 
     private static boolean isStatus400(final IOException e) {
         final var m = e.getMessage();
         return m != null && m.startsWith("LLM request failed (400)");
     }
+
+    /**
+     * Transforms a caller JSON Schema into the subset Anthropic structured outputs accepts (the same
+     * normalization the official SDKs apply): unsupported validation keywords are removed and folded
+     * into the sibling {@code description}, every object gains {@code additionalProperties:false}
+     * (required by the API), string formats are restricted to the supported set and the recursion
+     * covers {@code properties}/{@code items}/{@code $defs}. Idempotent: a schema already in that
+     * shape comes back unchanged.
+     */
+    public static Map<String, Object> sanitizeSchema(final Map<String, Object> schema) {
+        if (schema == null) {
+            return null;
+        }
+        final var out = new LinkedHashMap<String, Object>();
+        final var unsupported = new LinkedHashMap<String, Object>();
+        for (final var entry : schema.entrySet()) {
+            final var key = entry.getKey();
+            final var value = entry.getValue();
+            switch (key) {
+                case "minimum",
+                        "maximum",
+                        "exclusiveMinimum",
+                        "exclusiveMaximum",
+                        "minLength",
+                        "maxLength",
+                        "minItems",
+                        "maxItems",
+                        "minProperties",
+                        "maxProperties",
+                        "pattern",
+                        "multipleOf",
+                        "uniqueItems",
+                        "default" -> unsupported.put(key, value);
+                case "format" -> {
+                    if (value instanceof String s && SUPPORTED_FORMATS.contains(s)) {
+                        out.put(key, value);
+                    } else {
+                        unsupported.put(key, value);
+                    }
+                }
+                case "properties" -> out.put(key, sanitizeProperties(value));
+                case "items" -> out.put(key, sanitizeItems(value));
+                case "$defs", "definitions" -> out.put(key, sanitizeProperties(value));
+                case "additionalProperties" -> {
+                    // only meaningful on objects: keep the caller value when boolean, force false otherwise
+                    if (value instanceof Boolean b) {
+                        out.put(key, b);
+                    } else {
+                        unsupported.put("additionalProperties", value);
+                    }
+                }
+                default -> out.put(key, value);
+            }
+        }
+        // required by Anthropic: every object must set additionalProperties:false
+        if ("object".equals(out.get("type")) && !out.containsKey("additionalProperties")) {
+            out.put("additionalProperties", false);
+        }
+        // surface dropped constraints to the model instead of silently losing them
+        if (!unsupported.isEmpty()) {
+            final var description = new StringBuilder(out.get("description") instanceof String s ? s : "");
+            if (description.length() > 0) {
+                description.append(' ');
+            }
+            description.append("Constraints: ").append(unsupported);
+            out.put("description", description.toString());
+        }
+        return out;
+    }
+
+    private static Map<String, Object> sanitizeProperties(final Object properties) {
+        if (!(properties instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        final var out = new LinkedHashMap<String, Object>();
+        for (final var entry : map.entrySet()) {
+            if (entry.getValue() instanceof Map<?, ?> sub) {
+                out.put(String.valueOf(entry.getKey()), sanitizeSchema(castMap(sub)));
+            } else {
+                out.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        }
+        return out;
+    }
+
+    private static Object sanitizeItems(final Object items) {
+        if (items instanceof Map<?, ?> map) {
+            return sanitizeSchema(castMap(map));
+        }
+        return items; // tuple/array forms are passed through (rare, and the API rejects unknown shapes)
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castMap(final Map<?, ?> map) {
+        return (Map<String, Object>) map;
+    }
+
+    private static final Set<String> SUPPORTED_FORMATS = Set.of(
+            "date-time",
+            "time",
+            "date",
+            "duration",
+            "email",
+            "hostname",
+            "ipv4",
+            "ipv6",
+            "uuid",
+            "uri",
+            "uri-reference",
+            "binary",
+            "byte",
+            "password",
+            "int32",
+            "int64",
+            "float",
+            "double");
 
     /** Compose the flavor-specific JSON Schema field into a copy of {@code others}. */
     private static Map<String, Object> withStructuredField(
@@ -1406,8 +1670,20 @@ public class ChatClient implements AutoCloseable {
             final Map<String, Object> schema) {
         final var out = new LinkedHashMap<String, Object>(others);
         switch (flavor) {
-            case ANTHROPIC ->
-                out.put("output_config", Map.of("format", Map.of("type", "json_schema", "schema", schema)));
+            case ANTHROPIC -> {
+                // deep-merge into a possibly existing output_config (eg. an effort or thinking
+                // setting coming from providerSpecificOptions/variant extras): replacing the whole
+                // object would silently drop those options
+                final var outputConfig = new LinkedHashMap<String, Object>();
+                final var existing = out.get("output_config");
+                if (existing instanceof Map<?, ?> map) {
+                    for (final var entry : map.entrySet()) {
+                        outputConfig.put(String.valueOf(entry.getKey()), entry.getValue());
+                    }
+                }
+                outputConfig.put("format", Map.of("type", "json_schema", "schema", sanitizeSchema(schema)));
+                out.put("output_config", outputConfig);
+            }
             case RESPONSES ->
                 out.put(
                         "text",
@@ -1510,9 +1786,9 @@ public class ChatClient implements AutoCloseable {
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        final var model = resolveModel(request);
+        final var routed = resolveModel(request);
         final var effective = applyModelDefaults(new ChatCompletionRequest(
-                model,
+                routed.model(),
                 request.messages(),
                 request.temperature(),
                 request.topP(),
@@ -1522,7 +1798,7 @@ public class ChatClient implements AutoCloseable {
                 request.maxTokens(),
                 request.reasoningEffort(),
                 request.others(),
-                request.settings()));
+                routed.request().settings()));
         return doWithFallback(withPromotedExtras(effective), pauseListener, cancelled, true, onDelta);
     }
 
@@ -1537,7 +1813,8 @@ public class ChatClient implements AutoCloseable {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
         final var settings = request.settings();
         final var provider = provider(settings);
-        final var effective = applyOutputBudget(request, flavorForRouting(request.settings()));
+        final var flavor = flavorForRouting(request.settings());
+        final var effective = applyClaudeThinking(applyOutputBudget(request, flavor), flavor);
         final Consumer<io.yupiik.llm.client.PauseEvent> libraryListener =
                 pauseListener == null ? null : event -> onLibraryPause(event, pauseListener);
         final var dialect = dialectClient(flavorForRouting(settings), provider);

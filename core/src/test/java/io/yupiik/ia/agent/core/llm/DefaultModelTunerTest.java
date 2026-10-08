@@ -205,6 +205,10 @@ class DefaultModelTunerTest {
                 new DefaultModelTuner.ModelContext("kimi-k2.5", "moonshot", ApiFlavor.ANTHROPIC, null, null));
         assertEquals(List.of("low", "medium", "high", "xhigh", "max"), namesOf(variants));
         assertTrue(variants.get(0).extra().contains("\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"}"));
+        // the Messages API documents effort inside output_config, not at the request top level
+        assertTrue(
+                variants.get(0).extra().contains("\"output_config\":{\"effort\":\"low\"}"),
+                "effort must sit in output_config: " + variants.get(0).extra());
     }
 
     @Test

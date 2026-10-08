@@ -480,7 +480,15 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         final var cfg = configuration.structuralCodeGraph();
         final var override = cfg == null ? null : cfg.model();
         if (override != null && !override.isBlank()) {
-            return providerManager.resolveModel(override);
+            // keep the $provider/ prefix (or pin a bare name to its provider) so enrichment is
+            // not routed to a session's provider that does not host the model
+            return providerManager.toRoutedReference(override);
+        }
+        // no explicit enrichment model: the process-default provider's backgroundModelOverrides
+        // decide (enrichment is not session-bound), then the global yca.model chain
+        final var resolved = providerManager.resolvedCompact(null);
+        if (resolved != null && !resolved.isBlank()) {
+            return resolved;
         }
         final var current = providerManager.current();
         return current == null

@@ -490,6 +490,101 @@ class AnthropicDialectTest {
         assertEquals("anthropic-messages", dialect.name());
     }
 
+    @Test
+    void chatReconstructsCompletionFromSseBody(final JsonMapper mapper) throws Exception {
+        // an Anthropic-compatible gateway that streams unconditionally (Azure AI Foundry, captured
+        // 2026-10-08): chat() must reconstruct the completion from the SSE frames, not fail on 'event:'
+        final var sse = String.join(
+                "\n",
+                "event: message_start",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-5-5\",\"id\":\"msg_011CfpewfcKbiNrxAKGN2bXG\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}",
+                "",
+                "event: content_block_start",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}             }",
+                "",
+                "event: ping",
+                "data: {\"type\": \"ping\"}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}         }",
+                "",
+                "event: content_block_stop",
+                "data: {\"type\":\"content_block_stop\",\"index\":0     }",
+                "",
+                "event: message_delta",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":18,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":4}}     }",
+                "",
+                "event: message_stop",
+                "data: {\"type\":\"message_stop\"        }",
+                "");
+        server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        // text reconstructed from the frames, finish reason mapped, usage carried
+        final var choice = response.first();
+        assertEquals("ok", String.valueOf(choice.message().content()));
+        assertEquals("stop", choice.finishReason());
+        assertEquals(18L, response.usage().prompt());
+        assertEquals(4L, response.usage().completion());
+        assertEquals(22L, response.usage().total());
+        // id/model surfaced from message_start (optional but useful for usage tracking)
+        assertEquals("claude-sonnet-5-5", response.model());
+        assertEquals("msg_011CfpewfcKbiNrxAKGN2bXG", response.id());
+    }
+
+    @Test
+    void chatReconstructsToolUseFromSseBody(final JsonMapper mapper) throws Exception {
+        // the gateway streaming path for tool_use: content_block_start + input_json_delta frames
+        final var sse = String.join(
+                "\n",
+                "event: message_start",
+                "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"id\":\"msg1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}",
+                "",
+                "event: content_block_start",
+                "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\"}}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"ls\\\"}\"}}",
+                "",
+                "event: message_delta",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}",
+                "",
+                "event: message_stop",
+                "data: {\"type\":\"message_stop\"}",
+                "");
+        server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var calls = response.first().message().toolCalls();
+        assertEquals(1, calls.size());
+        assertEquals("t1", calls.get(0).id());
+        assertEquals("bash", calls.get(0).function().name());
+        assertEquals("{\"command\":\"ls\"}", calls.get(0).function().arguments());
+        assertEquals("tool_calls", response.first().finishReason());
+    }
+
+    @Test
+    void chatFailsWithContextOnEmptySseBody(final JsonMapper mapper) throws Exception {
+        // a stream without any usable frame must produce a contextual error, never an empty completion
+        server.createContext(
+                "/v1/messages", exchange -> respondSse(exchange, "event: ping\ndata: {\"type\": \"ping\"}\n"));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var completion = dialect.chat(request(false)).toCompletableFuture();
+        final var failure = failureOf(completion).orElseThrow();
+        assertTrue(
+                failure.getMessage() != null
+                        && failure.getMessage().contains("provider answered with a stream for a non-streaming request"),
+                () -> "expected the contextual stream error but got: " + failure);
+    }
+
     private static <T> Optional<Throwable> failureOf(final java.util.concurrent.CompletableFuture<T> future) {
         try {
             future.join();

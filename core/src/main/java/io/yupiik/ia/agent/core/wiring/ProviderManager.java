@@ -18,12 +18,14 @@ package io.yupiik.ia.agent.core.wiring;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -141,8 +143,10 @@ public class ProviderManager {
         if (ref != null && ref.startsWith("$")) {
             final var slash = ref.indexOf('/');
             final var id = slash > 1 ? ref.substring(1, slash) : ref.substring(1);
+            final var target = provider(id);
             final var name = slash >= 0 && slash + 1 < ref.length() ? ref.substring(slash + 1) : "";
-            return new ResolvedModel(provider(id), name);
+            // $id/ (no model part): the provider's own configured model applies
+            return new ResolvedModel(target, name.isBlank() ? (target == null ? "" : target.model()) : name);
         }
         final var current = current();
         return new ResolvedModel(current, ref == null ? "" : ref);
@@ -156,6 +160,106 @@ public class ProviderManager {
         }
         final var resolved = resolve(modelReference);
         return resolved.model() == null ? "" : resolved.model();
+    }
+
+    /**
+     * Turn a configured background-model reference (compact/memory/enrichment) into a routable
+     * one: a {@code $provider/model} reference is kept as-is, a bare name is pinned to the
+     * provider declaring that model (when identifiable) so a session running on another provider
+     * cannot hijack the call into a "No such model" 400, and a blank reference stays null.
+     */
+    public String toRoutedReference(final String modelReference) {
+        if (modelReference == null || modelReference.isBlank()) {
+            return null;
+        }
+        final var ref = modelReference.strip();
+        if (ref.startsWith("$")) {
+            return ref;
+        }
+        for (final var p : providers()) {
+            if (p.models() != null && p.models().stream().anyMatch(m -> m != null && ref.equals(m.model()))) {
+                return "$" + (p.id() == null || p.id().isBlank() ? "default" : p.id()) + "/" + ref;
+            }
+        }
+        return ref;
+    }
+
+    /**
+     * The routable compact model reference for a session: the effective provider's
+     * {@code backgroundModelOverrides.compact} (blank = this provider's own default model,
+     * {@code inherit} = the global {@code yca.model.compact} chain, otherwise that model) wins,
+     * then the global {@code yca.model.compact}, then null (no explicit model: the session's
+     * selection routes the call). Returns a reference the ChatClient routes correctly: bare
+     * provider-level names are pinned to their provider.
+     */
+    public String resolvedCompact(final ChatSettings settings) {
+        return resolveBackground(
+                settings,
+                configuration.model() == null ? null : configuration.model().compact(),
+                overrides -> overrides.compact());
+    }
+
+    /**
+     * The routable prune model reference for a session, with the global {@code resolvedPrune}
+     * fallback chain (prune falls back to compact); otherwise like {@link #resolvedCompact}.
+     */
+    public String resolvedPrune(final ChatSettings settings) {
+        return resolveBackground(
+                settings,
+                configuration.model() == null ? null : configuration.model().resolvedPrune(),
+                overrides -> overrides.prune());
+    }
+
+    /**
+     * The routable memory model reference for a session, with the global {@code resolvedMemory}
+     * fallback chain (memory falls back to compact); otherwise like {@link #resolvedCompact}.
+     */
+    public String resolvedMemory(final ChatSettings settings) {
+        return resolveBackground(
+                settings,
+                configuration.model() == null ? null : configuration.model().resolvedMemory(),
+                overrides -> overrides.memory());
+    }
+
+    /**
+     * The background-model resolution core behind {@link #resolvedCompact}, {@link #resolvedPrune}
+     * and {@link #resolvedMemory}: the effective provider's (session override, else process
+     * default) {@code backgroundModelOverrides} entry decides per the blank/inherit/value
+     * semantics on the requested field; inherited and global references are made routable via
+     * {@link #toRoutedReference} so a bare global name is still pinned to the provider hosting it
+     * when identifiable.
+     */
+    private String resolveBackground(
+            final ChatSettings settings,
+            final String global,
+            final java.util.function.Function<ModelConfiguration, String> field) {
+        final var override = settings == null ? null : settings.providerId();
+        final var provider = provider(override == null || override.isBlank() ? currentProviderId() : override);
+        final var overrides = provider == null ? null : provider.backgroundModelOverrides();
+        if (overrides != null
+                && ((overrides.compact() != null && !overrides.compact().isBlank())
+                        || (overrides.prune() != null && !overrides.prune().isBlank())
+                        || (overrides.memory() != null && !overrides.memory().isBlank()))) {
+            // the group is present (at least one field configured): the requested field decides
+            final var raw = field.apply(overrides);
+            if (raw != null && !raw.isBlank()) {
+                if (ProviderConfiguration.isInheritKeyword(raw)) {
+                    return toRoutedReference(global);
+                }
+                // a bare name on a provider is that provider's own model; a $ref routes explicitly
+                return raw.startsWith("$") ? raw.strip() : "$" + providerIdOf(provider) + "/" + raw.strip();
+            }
+            // the field is blank: the provider opts out of a dedicated background model,
+            // its own default model applies
+            return null;
+        }
+        return toRoutedReference(global);
+    }
+
+    /** The provider id used for routing ({@code "default"} when blank): see {@link #providerIdOf} in ChatClient. */
+    private String providerIdOf(final ProviderConfiguration provider) {
+        final var id = provider == null || provider.id() == null ? "" : provider.id();
+        return id.isBlank() ? "default" : id;
     }
 
     /**

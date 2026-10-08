@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -116,6 +117,98 @@ class AnthropicMessagesClientTest {
                 64,
                 null,
                 null);
+    }
+
+    @Test
+    void autoResolvedClaudeBudgetIsClampedToTheFamilyCeiling() throws Exception {
+        server.createContext("/anthropic/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            final var bytes = "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                    .concat("\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\"}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        // claude-3-5 with no configured/detected budget: the 32 000 fallback would 400 on the real
+        // API (8 192 ceiling), so the auto-resolved budget must be clamped
+        final var configuration = TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry("yca.provider.providers.0.baseUrl", base()),
+                Map.entry("yca.provider.providers.0.apiKey", "sk-test"),
+                Map.entry("yca.provider.providers.0.model", "claude-3-5-haiku-latest"),
+                Map.entry("yca.provider.providers.0.api", "anthropic"),
+                Map.entry("yca.provider.providers.0.contextWindow", "1000000"),
+                Map.entry("yca.provider.providers.0.outputTokens", "-1"),
+                Map.entry("yca.provider.providers.0.timeoutSeconds", "30"),
+                Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
+                Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
+                Map.entry("yca.llm.maxConcurrent", "1")));
+        client = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
+        client.chat(new ChatCompletionRequest(
+                "claude-3-5-haiku-latest",
+                List.of(new Message("user", "hi", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+        assertTrue(
+                reqBody.get().contains("\"max_tokens\":8192"),
+                "auto-resolved budget must be clamped to the haiku-3.5 ceiling: " + reqBody.get());
+    }
+
+    @Test
+    void claude3GetsNoThinkingFieldAndNewerGetsAClampedBudget() throws Exception {
+        server.createContext("/anthropic/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            final var bytes = "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                    .concat("\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\"}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        client = client();
+        // claude-3-5 does not support extended thinking: no thinking field must be sent
+        client.chat(new ChatCompletionRequest(
+                        "claude-3-5-haiku-latest",
+                        List.of(new Message("user", "hi", null, null, null, null)),
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        8192,
+                        "high",
+                        null)
+                .withSettings(ChatSettings.EMPTY));
+        assertFalse(
+                reqBody.get().contains("\"thinking\""), "claude-3 must not receive a thinking field: " + reqBody.get());
+
+        // a thinking-capable claude with a small budget gets a clamped-but-valid thinking budget
+        client.chat(new ChatCompletionRequest(
+                "claude-sonnet-4-5-latest",
+                List.of(new Message("user", "hi", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                null,
+                2048,
+                "high",
+                null));
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"thinking\""), "4.5 must receive a thinking field: " + body);
+        assertTrue(body.contains("\"budget_tokens\":2047"), "the budget must stay strictly below max_tokens: " + body);
     }
 
     @Test

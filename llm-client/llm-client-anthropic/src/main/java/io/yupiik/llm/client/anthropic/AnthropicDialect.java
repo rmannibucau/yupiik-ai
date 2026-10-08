@@ -17,6 +17,7 @@ package io.yupiik.llm.client.anthropic;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.anthropic.model.AnthropicMessage;
 import io.yupiik.llm.client.anthropic.model.AnthropicMessagesRequest;
 import io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse;
@@ -35,8 +36,11 @@ import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
 import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -110,11 +114,251 @@ public final class AnthropicDialect extends AbstractDialect {
     public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
             final var payload = mapper.toBytes(toWire(request, false));
-            return post(payload)
-                    .thenApply(response -> toLlmResponse(parse(AnthropicMessagesResponse.class, response.body())));
+            return post(payload).thenCompose(response -> {
+                try {
+                    return CompletableFuture.completedFuture(
+                            isStreaming(response)
+                                    ? reconstruct(response.body())
+                                    : toLlmResponse(parseResponse(AnthropicMessagesResponse.class, response)));
+                } catch (final LlmResponseParseException e) {
+                    return failed(e);
+                }
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }
+    }
+
+    /**
+     * Whether the response to a non-streaming {@link #chat(LlmRequest, BooleanSupplier)} is actually an
+     * SSE stream. Some Anthropic-compatible gateways (e.g. Azure AI Foundry) ignore {@code stream: false}
+     * and always answer with {@code text/event-stream}; the collected body must then be reconstructed
+     * from the frames instead of being handed to the JSON mapper (whose first-byte failure on
+     * {@code event:}/{@code data:} was the observable "Expected structural character" warning).
+     */
+    private static boolean isStreaming(final HttpResponse<String> response) {
+        return response.headers()
+                .firstValue("content-type")
+                .orElse("")
+                .toLowerCase(Locale.ROOT)
+                .contains("text/event-stream");
+    }
+
+    /**
+     * Reconstructs an {@link LlmResponse} from an SSE body received as the answer to a non-streaming
+     * request. Reuses the exact same frame mapping as the streaming path ({@link #mapEvent}) and the
+     * same text/tool-call accumulation as the core pump, so an always-streaming gateway produces the
+     * same neutral result as a compliant one. A frame set that yields neither text nor tool calls and
+     * no terminal {@code message_delta} is treated as a failed reconstruction (the caller surfaces the
+     * contextual error), never as an empty completion.
+     */
+    private LlmResponse reconstruct(final String body) {
+        final var text = new StringBuilder();
+        final var toolCalls = new ArrayList<LlmToolCall>();
+        final var byId = new HashMap<String, PartialToolCall>();
+        final var byIndex = new HashMap<Integer, PartialToolCall>();
+        final var creationOrder = new ArrayList<PartialToolCall>();
+        final var usage = new Usage[] {Usage.EMPTY};
+        final var finish = new String[] {null};
+        final var started = new boolean[] {false};
+        final var ended = new boolean[] {false};
+        final var id = new String[] {null};
+        final var model = new String[] {null};
+        final var sse = new SseParser();
+        for (final var rawLine : body.split("\n", -1)) {
+            for (final var event : sse.feed(rawLine)) {
+                final var wire = parse(AnthropicStreamEvent.class, event.data());
+                switch (wire.type()) {
+                    case "message_start" -> {
+                        started[0] = true;
+                        if (wire.message() != null) {
+                            id[0] = wire.message().id();
+                            model[0] = wire.message().model();
+                        }
+                    }
+                    case "content_block_delta" -> {
+                        if (wire.delta() == null) {
+                            break;
+                        }
+                        final var deltaText = wire.delta().text();
+                        if (deltaText != null && !deltaText.isEmpty()) {
+                            text.append(deltaText);
+                        }
+                        if ("input_json_delta".equals(wire.delta().type())
+                                && wire.delta().partialJson() != null) {
+                            final var index = wire.index() == null ? 0 : wire.index();
+                            toolCallDelta(
+                                    byId,
+                                    byIndex,
+                                    creationOrder,
+                                    index,
+                                    null,
+                                    null,
+                                    wire.delta().partialJson());
+                        }
+                    }
+                    case "content_block_start" -> {
+                        if (wire.contentBlock() != null
+                                && "tool_use".equals(wire.contentBlock().type())) {
+                            final var index = wire.index() == null ? 0 : wire.index();
+                            toolCallDelta(
+                                    byId,
+                                    byIndex,
+                                    creationOrder,
+                                    index,
+                                    wire.contentBlock().id(),
+                                    wire.contentBlock().name(),
+                                    "");
+                        }
+                    }
+                    case "message_delta" -> {
+                        ended[0] = true;
+                        if (wire.delta() != null && wire.delta().stopReason() != null) {
+                            finish[0] = finishReason(wire.delta().stopReason());
+                        }
+                        if (wire.usage() != null) {
+                            usage[0] = toUsage(wire.usage());
+                        }
+                    }
+                    default -> {
+                        // content_block_stop / message_stop / ping ignored
+                    }
+                }
+            }
+        }
+        for (final var call : creationOrder) {
+            toolCalls.add(call.toToolCall());
+        }
+        if (!toolCalls.isEmpty()) {
+            final var index = new AtomicInteger();
+            final var neutralCalls = new ArrayList<LlmToolCall>(toolCalls.size());
+            for (final var call : toolCalls) {
+                neutralCalls.add(new LlmToolCall(call.id(), call.type(), call.function(), index.getAndIncrement()));
+            }
+            return new LlmResponse(
+                    id[0],
+                    model[0],
+                    null,
+                    List.of(new LlmResponse.LlmChoice(
+                            0, new LlmMessage("assistant", null, null, neutralCalls, null, null), "tool_calls")),
+                    usage[0],
+                    null);
+        }
+        final var content = text.toString();
+        if (!started[0] || (!ended[0] && content.isEmpty())) {
+            throw new IllegalStateException(
+                    "provider answered with a stream for a non-streaming request but produced no complete message (started="
+                            + started[0] + ", ended=" + ended[0] + ", chars=" + content.length() + ", tools="
+                            + toolCalls.size() + ")");
+        }
+        final var finishReason = finish[0] == null ? "stop" : finish[0];
+        return new LlmResponse(
+                id[0],
+                model[0],
+                null,
+                List.of(new LlmResponse.LlmChoice(
+                        0, new LlmMessage("assistant", content, null, null, null, null), finishReason)),
+                usage[0],
+                null);
+    }
+
+    /** Registers/appends a tool-call argument fragment, mirroring the streaming-path assembly. */
+    private static void toolCallDelta(
+            final Map<String, PartialToolCall> byId,
+            final Map<Integer, PartialToolCall> byIndex,
+            final List<PartialToolCall> creationOrder,
+            final int index,
+            final String id,
+            final String name,
+            final String args) {
+        final var partial = resolvePartial(byId, byIndex, index, id, creationOrder);
+        if (id != null) {
+            byId.put(id, partial);
+        }
+        byIndex.put(index, partial);
+        if (id != null && partial.id == null) {
+            partial.id = id;
+        }
+        if (name != null) {
+            partial.name = name;
+        }
+        if (args != null) {
+            partial.arguments.append(args);
+        }
+    }
+
+    /** Minimal partial tool-call accumulator (mirrors the core pump's {@code PartialToolCall}). */
+    private static final class PartialToolCall {
+        private final int index;
+        private String id;
+        private String name;
+        private final StringBuilder arguments = new StringBuilder();
+
+        private PartialToolCall(final int index) {
+            this.index = index;
+        }
+
+        private LlmToolCall toToolCall() {
+            return new LlmToolCall(id, "function", new LlmToolCall.FunctionCall(name, arguments.toString()), index);
+        }
+
+        private String arguments() {
+            return arguments.toString();
+        }
+    }
+
+    private static PartialToolCall resolvePartial(
+            final Map<String, PartialToolCall> byId,
+            final Map<Integer, PartialToolCall> byIndex,
+            final int index,
+            final String id,
+            final List<PartialToolCall> creationOrder) {
+        final var fromId = id != null ? byId.get(id) : null;
+        final var fromIndex = byIndex.get(index);
+        if (fromId != null
+                && fromIndex != null
+                && fromIndex != fromId
+                && fromIndex.id != null
+                && !fromIndex.id.equals(id)) {
+            byIndex.put(index, fromId);
+            return fromId;
+        }
+        if (fromId == null && fromIndex != null && fromIndex.id != null && id != null && !fromIndex.id.equals(id)) {
+            final var created = new PartialToolCall(index);
+            created.id = id;
+            creationOrder.add(created);
+            byId.put(id, created);
+            byIndex.put(index, created);
+            return created;
+        }
+        if (fromId != null) {
+            if (fromIndex != null && fromIndex != fromId) {
+                fromId.arguments.append(fromIndex.arguments());
+                if (fromId.name == null) {
+                    fromId.name = fromIndex.name;
+                }
+                if (fromId.id == null) {
+                    fromId.id = fromIndex.id;
+                }
+                byIndex.put(index, fromId);
+            } else if (fromIndex == null) {
+                byIndex.put(index, fromId);
+            }
+            return fromId;
+        }
+        if (fromIndex != null) {
+            if (id != null) {
+                byId.put(id, fromIndex);
+            }
+            return fromIndex;
+        }
+        final var created = new PartialToolCall(index);
+        creationOrder.add(created);
+        if (id != null) {
+            byId.put(id, created);
+        }
+        byIndex.put(index, created);
+        return created;
     }
 
     @Override
@@ -135,7 +379,13 @@ public final class AnthropicDialect extends AbstractDialect {
     @Override
     public CompletionStage<LlmModels> models() {
         try {
-            return getModels().thenApply(response -> toModels(parse(Map.class, response.body())));
+            return getModels().thenCompose(response -> {
+                try {
+                    return CompletableFuture.completedFuture(toModels(parseResponse(Map.class, response)));
+                } catch (final LlmResponseParseException e) {
+                    return failed(e);
+                }
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }

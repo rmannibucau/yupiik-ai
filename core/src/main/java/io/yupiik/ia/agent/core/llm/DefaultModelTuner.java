@@ -216,7 +216,8 @@ public final class DefaultModelTuner {
         }
         if (glm52 && anthropic) {
             return List.of(
-                    variant("high", null, "{\"effort\":\"high\"}"), variant("max", null, "{\"effort\":\"max\"}"));
+                    variant("high", null, "{\"output_config\":{\"effort\":\"high\"}}"),
+                    variant("max", null, "{\"output_config\":{\"effort\":\"max\"}}"));
         }
 
         // Kimi on the Anthropic-compatible wire uses adaptive efforts low..max.
@@ -226,8 +227,8 @@ public final class DefaultModelTuner {
                 vars.add(variant(
                         effort,
                         null,
-                        "{\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"effort\":\"" + effort
-                                + "\"}"));
+                        "{\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\""
+                                + effort + "\"}}"));
             }
             return vars;
         }
@@ -332,10 +333,13 @@ public final class DefaultModelTuner {
             final var vars = new ArrayList<ModelVariantConfiguration>();
             for (final var effort : adaptiveEfforts.split(",")) {
                 final var display = omitted ? ",\"display\":\"summarized\"" : "";
+                // effort lives in output_config per the Messages API (a top-level 'effort' is not a
+                // documented parameter and strict endpoints reject or ignore it)
                 vars.add(variant(
                         effort,
                         null,
-                        "{\"thinking\":{\"type\":\"adaptive\"" + display + "},\"effort\":\"" + effort + "\"}"));
+                        "{\"thinking\":{\"type\":\"adaptive\"" + display + "},\"output_config\":{\"effort\":\"" + effort
+                                + "\"}}"));
             }
             return vars;
         }

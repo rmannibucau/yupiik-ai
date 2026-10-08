@@ -17,6 +17,7 @@ package io.yupiik.llm.client.openai;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
@@ -98,8 +99,14 @@ public class OpenAICompletionsDialect extends AbstractDialect {
     public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
             final var payload = mapper.toBytes(toWire(request, false));
-            return post(payload)
-                    .thenApply(response -> toLlmResponse(parse(ChatCompletionResponse.class, response.body())));
+            return post(payload).thenCompose(response -> {
+                try {
+                    return CompletableFuture.completedFuture(
+                            toLlmResponse(parseResponse(ChatCompletionResponse.class, response)));
+                } catch (final LlmResponseParseException e) {
+                    return failed(e);
+                }
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }
@@ -123,7 +130,13 @@ public class OpenAICompletionsDialect extends AbstractDialect {
     @Override
     public CompletionStage<LlmModels> models() {
         try {
-            return getModels().thenApply(response -> toModels(parse(Map.class, response.body())));
+            return getModels().thenCompose(response -> {
+                try {
+                    return CompletableFuture.completedFuture(toModels(parseResponse(Map.class, response)));
+                } catch (final LlmResponseParseException e) {
+                    return failed(e);
+                }
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }
@@ -149,7 +162,10 @@ public class OpenAICompletionsDialect extends AbstractDialect {
                 request.temperature(),
                 request.topP(),
                 null,
-                stream ? Boolean.TRUE : null,
+                // explicit intent on both branches: background (non-streaming) calls must be
+                // distinguishable from an omitted field, and some OpenAI-compatible servers
+                // misbehave when the flag is absent
+                stream,
                 tools,
                 request.toolChoice(),
                 request.maxTokens(),

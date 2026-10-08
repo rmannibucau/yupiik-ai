@@ -185,9 +185,10 @@ public class MemoryCompactor {
     }
 
     private String rewrite(final String content, final ChatSettings settings) {
-        final var memory =
-                configuration.model() == null ? null : configuration.model().resolvedMemory();
-        final var model = providerManager == null ? null : providerManager.resolveModel(memory);
+        // provider-level override (blank = this provider's own model, "inherit" = the global
+        // chain) then the global resolvedMemory chain, kept routable so the rewrite is not
+        // routed to a session's provider that does not host the model
+        final var model = providerManager == null ? null : providerManager.resolvedMemory(settings);
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(
                             model,

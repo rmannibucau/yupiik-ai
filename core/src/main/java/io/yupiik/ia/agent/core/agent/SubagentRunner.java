@@ -202,6 +202,7 @@ public class SubagentRunner {
         final var subagentMemoryExtractor = new MemoryExtractor(
                 chatClient,
                 configuration,
+                providerManager,
                 memoryStore,
                 mapper,
                 executor,

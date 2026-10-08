@@ -20,6 +20,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.DialectNotSupportedException;
 import io.yupiik.llm.client.LlmHttpFailureException;
+import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.model.LlmModel;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
@@ -257,6 +258,102 @@ public abstract class AbstractDialect implements Dialect {
      */
     protected <A> A parse(final Class<A> type, final String json) {
         return mapper.fromString(type, json);
+    }
+
+    /**
+     * Parses the body of a successful (2xx) HTTP response, wrapping any parsing failure into a
+     * contextual {@link LlmResponseParseException} that carries the dialect name, the endpoint URL,
+     * the HTTP status, the content-type and a bounded single-line body excerpt — so a malformed
+     * provider body is never surfaced to callers as a bare JSON-parser message. Also detects a
+     * provider error envelope ({@code {"error":{...}}} / {@code {"type":"error","error":{...}}})
+     * inside a 2xx body and raises a typed error carrying the provider message instead of letting
+     * it become an empty completion.
+     *
+     * @param <A> the target type.
+     * @param type the target class.
+     * @param response the successful HTTP response.
+     * @return the parsed value.
+     * @throws LlmResponseParseException when the body is unparseable or carries an error envelope.
+     */
+    protected <A> A parseResponse(final Class<A> type, final java.net.http.HttpResponse<String> response)
+            throws LlmResponseParseException {
+        final var body = response.body();
+        final var providerError = providerError(body);
+        if (providerError != null) {
+            throw new LlmResponseParseException(
+                    name(),
+                    endpoint(),
+                    response.statusCode(),
+                    response.headers().firstValue("content-type").orElse(null),
+                    excerpt(body),
+                    new IllegalStateException("provider error: " + providerError));
+        }
+        try {
+            return parse(type, body);
+        } catch (final RuntimeException e) {
+            throw new LlmResponseParseException(
+                    name(),
+                    endpoint(),
+                    response.statusCode(),
+                    response.headers().firstValue("content-type").orElse(null),
+                    excerpt(body),
+                    e);
+        }
+    }
+
+    /**
+     * Extracts a provider error message from a 2xx body, or null when there is none.
+     *
+     * @param body the response body.
+     * @return the provider error message, or null.
+     */
+    private String providerError(final String body) {
+        if (body == null || body.isBlank()) {
+            return null;
+        }
+        final var trimmed = body.strip();
+        // strict top-level detection: {"type":"error","error":{...}} (Anthropic-ish) or {"error":{...}} (OpenAI-ish)
+        if (!(trimmed.startsWith("{\"type\":\"error\"") || trimmed.startsWith("{\"error\""))) {
+            return null;
+        }
+        try {
+            final Object root = parse(Map.class, trimmed);
+            if (root instanceof Map<?, ?> rootMap) {
+                final Object error = rootMap.get("error");
+                if (error instanceof Map<?, ?> errorMap) {
+                    final var message = errorMap.get("message");
+                    if (message != null) {
+                        return String.valueOf(message);
+                    }
+                }
+            }
+        } catch (final RuntimeException ignored) {
+            // unparseable envelope: fall through to the parse-failure path which carries the body
+        }
+        return null;
+    }
+
+    /**
+     * The chat endpoint of this dialect, derived from the provider base URL.
+     *
+     * @return the chat endpoint URL.
+     */
+    private String endpoint() {
+        return provider.baseUrl();
+    }
+
+    /**
+     * A bounded single-line excerpt of a response body, so huge or binary payloads stay readable.
+     *
+     * @param body the response body.
+     * @return the excerpt, at most 400 chars, CR/LF collapsed.
+     */
+    private static String excerpt(final String body) {
+        if (body == null) {
+            return "";
+        }
+        final var singleLine = body.replace("\r", " ").replace("\n", " ").strip();
+        return singleLine.length() <= 400 ? singleLine : singleLine.substring(0, 400) + "...";
     }
 
     /**

@@ -16,8 +16,10 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.sun.net.httpserver.HttpServer;
@@ -220,6 +222,91 @@ class ChatClientFlavorTest {
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
         assertTrue(result.structured());
         assertEquals("hello there", result.result().message().content());
+    }
+
+    @Test
+    void chatStructuredDegradesOnceOnSchemaRejectionAndRemembersItPerModel() throws Exception {
+        stop();
+        final var structuredHits = new java.util.concurrent.atomic.AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
+        server.createContext("/v1/chat/completions", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (body.contains("response_format") || body.contains("json_schema")) {
+                structuredHits.incrementAndGet();
+                respond(
+                        exchange,
+                        400,
+                        "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"json was malformed\"}}",
+                        "application/json");
+            } else {
+                respond(exchange, 200, """
+                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain answer"},"finish_reason":"stop"}]}""", "application/json");
+            }
+        });
+        server.start();
+        final var cfg = configuration();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // first call: the structured attempt is rejected (one request), then the plain fallback succeeds
+        final var first = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
+        assertFalse(first.structured(), "the schema rejection must degrade to the plain request");
+        assertEquals("plain answer", first.result().message().content());
+        assertEquals(1, structuredHits.get(), "the rejection must not be retried within the call");
+
+        // second call on the same (provider, model, schema): the rejection is remembered, no structured request
+        final var second = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
+        assertFalse(second.structured());
+        assertEquals(1, structuredHits.get(), "the rejection must be memoized per (provider, model, schema)");
+
+        // a different schema is not poisoned by that verdict
+        final var other = client.chatStructured(request(), "memory_facts", Map.of("type", "object"));
+        assertFalse(other.structured());
+        assertEquals(2, structuredHits.get(), "another schema must still try the structured request once");
+    }
+
+    @Test
+    void chatStructuredSurfacesNonSchema400WithoutFallingBack() throws Exception {
+        stop();
+        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
+        server.createContext("/v1/chat/completions", exchange -> {
+            hits.incrementAndGet();
+            respond(
+                    exchange,
+                    400,
+                    "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"max_tokens: 4096 > 1024, which is the maximum allowed\"}}",
+                    "application/json");
+        });
+        server.start();
+        final var cfg = configuration();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // a non-schema 400 (thinking/max_tokens config) must surface as-is, not be hidden by a fallback
+        final var failure = assertThrows(
+                IOException.class, () -> client.chatStructured(request(), "todo_steps", Map.of("type", "object")));
+        assertEquals(1, hits.get(), "a non-schema 400 must not trigger a fallback request");
+        assertTrue(failure.getMessage().contains("LLM request failed (400)"), failure.getMessage());
+    }
+
+    @Test
+    void reservedProviderOptionsNeverReachTheWire() throws Exception {
+        // a free-form option (providerSpecificOptions/model tuning/variant extras) must not duplicate
+        // a protocol field: the encoder flattens extras last, so a 'stream' key would flip every call
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.providerSpecificOptions",
+                "{\"stream\":true,\"model\":\"hijacked\",\"temperature\":0.5}"));
+        client.close();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        final var result = client.chat(request());
+        assertEquals("hello there", result.message().content());
+        final var body = bodies.get(bodies.size() - 1);
+        assertEquals(1, occurrences(body, "\"stream\""), "exactly one stream field expected: " + body);
+        assertTrue(body.contains("\"stream\":false"), "the typed stream value must win: " + body);
+        assertEquals(0, occurrences(body, "\"hijacked\""), "the reserved model key must be dropped: " + body);
+        assertTrue(body.contains("\"temperature\":0.5"), "non-reserved options still flow through: " + body);
     }
 
     @Test

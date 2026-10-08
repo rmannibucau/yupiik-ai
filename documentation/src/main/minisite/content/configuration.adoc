@@ -25,6 +25,25 @@ first, then to the implicit `default` provider). A provider's optional
 it. For single-provider setups, the flat `yca.provider.*` scalars build the
  implicit `default` provider.
 
+Each provider can also declare `backgroundModelOverrides` (same
+`compact`/`prune`/`memory` shape as `yca.model`) to override the global
+background models for the sessions running on it. Resolution per field:
+
+- a non-blank, non-`inherit` value is that model: a bare name is the
+  provider's own model (implicitly routed to this provider, even when it is
+  not listed in `models`), a `$provider/model` reference keeps its explicit
+  routing (eg. a small local provider borrowing a remote summarizer);
+- the `inherit` keyword resolves the global `yca.model.*` chain instead
+  (including its `memory` -> `compact` and `prune` -> `compact` fallbacks);
+- a blank value (the default) means the provider's own default model, ie. no
+  dedicated background model for this provider.
+
+A provider-level entry wins over the global one field by field, so a provider
+can override `compact` while `inherit`ing `memory`. Code graph enrichment
+(`yca.structural-code-graph.model`) keeps its own explicit override; when unset
+it follows the default provider's `backgroundModelOverrides.compact`, then the
+global chain.
+
 A provider's `dynamicHeaders` are handlebars templates rendered into every
 request to that provider (chat, streaming and models). They are resolved in
 core (the llm client stays vendor-agnostic: it receives a per-request header

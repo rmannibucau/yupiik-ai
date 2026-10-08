@@ -17,6 +17,7 @@ package io.yupiik.llm.client.openai;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
@@ -102,7 +103,13 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
     public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
         try {
             final var payload = mapper.toBytes(toWire(request, false));
-            return post(payload).thenApply(response -> toLlmResponse(asMap(parse(Map.class, response.body()))));
+            return post(payload).thenCompose(response -> {
+                try {
+                    return CompletableFuture.completedFuture(toLlmResponse(asMap(parseResponse(Map.class, response))));
+                } catch (final LlmResponseParseException e) {
+                    return failed(e);
+                }
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }
@@ -127,7 +134,13 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
     @Override
     public CompletionStage<LlmModels> models() {
         try {
-            return getModels().thenApply(response -> toModels(parse(Map.class, response.body())));
+            return getModels().thenCompose(response -> {
+                try {
+                    return CompletableFuture.completedFuture(toModels(parseResponse(Map.class, response)));
+                } catch (final LlmResponseParseException e) {
+                    return failed(e);
+                }
+            });
         } catch (final RuntimeException e) {
             return failed(e);
         }

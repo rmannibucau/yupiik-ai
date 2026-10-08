@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.List;
@@ -41,6 +42,7 @@ public class MemoryExtractor {
 
     private final ChatClient chatClient;
     private final CodingAgentConfiguration configuration;
+    private final ProviderManager providerManager;
     private final MemoryStore memoryStore;
     private final JsonMapper mapper;
     private final VirtualThreadExecutor executor;
@@ -55,6 +57,7 @@ public class MemoryExtractor {
     public MemoryExtractor(
             final ChatClient chatClient,
             final CodingAgentConfiguration configuration,
+            final ProviderManager providerManager,
             final MemoryStore memoryStore,
             final JsonMapper mapper,
             final VirtualThreadExecutor executor,
@@ -65,6 +68,7 @@ public class MemoryExtractor {
             final MemoryCompactor memoryCompactor) {
         this.chatClient = chatClient;
         this.configuration = configuration;
+        this.providerManager = providerManager;
         this.memoryStore = memoryStore;
         this.mapper = mapper;
         this.executor = executor;
@@ -78,6 +82,7 @@ public class MemoryExtractor {
     protected MemoryExtractor() {
         this.chatClient = null;
         this.configuration = null;
+        this.providerManager = null;
         this.memoryStore = null;
         this.mapper = null;
         this.executor = null;
@@ -135,8 +140,9 @@ public class MemoryExtractor {
                     0, '[' + m.role() + "] " + (content.length() > 1500 ? content.substring(0, 1500) : content) + '\n');
         }
         final var excerpt = sb.toString();
-        final var memoryModel =
-                configuration.model() == null ? null : configuration.model().resolvedMemory();
+        // provider-level override (blank = this provider's own model, "inherit" = the global
+        // chain) then the global resolvedMemory chain, kept routable
+        final var memoryModel = memoryModel(settings);
         try {
             final var request = new ChatCompletionRequest(
                             memoryModel == null || memoryModel.isBlank() ? null : memoryModel,
@@ -205,8 +211,29 @@ public class MemoryExtractor {
         } catch (final IOException | InterruptedException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
+                notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
+                return;
             }
-            notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
+            // the structured call failed on the wire (e.g. a gateway that streams unconditionally and
+            // drops the flag, or a transient HTTP failure): save memory via the plain snippet fallback
+            // instead of losing the turn, and surface a soft notice with the contextual detail
+            try {
+                final var snippet = compressExcerpt(excerpt, settings);
+                if (snippet == null || snippet.isBlank()) {
+                    notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
+                } else {
+                    memoryStore.appendText(false, snippet);
+                    resetFailures();
+                    notifyFailure("memory extraction (structured facts) failed: " + e.getMessage()
+                            + "; saving a plain snippet instead: " + clamp(snippet, 200));
+                }
+            } catch (final IOException | InterruptedException fallbackFailure) {
+                if (fallbackFailure instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                notifyFailure("memory extraction (structured facts) failed: " + e.getMessage()
+                        + " (fallback snippet also failed: " + fallbackFailure.getMessage() + ")");
+            }
         }
     }
 
@@ -228,7 +255,7 @@ public class MemoryExtractor {
     public static Map<String, Object> factsSchema() {
         final var itemProperties = Map.<String, Object>of(
                 "text", Map.of("type", "string"),
-                "scope", Map.of("type", "string"));
+                "scope", Map.of("type", "string", "enum", List.of("global", "project")));
         final var item = Map.<String, Object>of(
                 "type",
                 "object",
@@ -284,8 +311,7 @@ public class MemoryExtractor {
      */
     private String compressExcerpt(final String excerpt, final ChatSettings settings)
             throws IOException, InterruptedException {
-        final var memoryModel =
-                configuration.model() == null ? null : configuration.model().resolvedMemory();
+        final var memoryModel = memoryModel(settings);
         final var res = chatClient.chat(new ChatCompletionRequest(
                         memoryModel == null || memoryModel.isBlank() ? null : memoryModel,
                         List.of(
@@ -314,5 +340,17 @@ public class MemoryExtractor {
             notifyFailure("memory extraction (fallback snippet) produced no output; memory left untouched");
         }
         return snippet.isEmpty() ? null : snippet;
+    }
+
+    /**
+     * The routable memory model for the session: the effective provider's
+     * {@code backgroundModelOverrides.memory} (blank = its own default model, "inherit" = the
+     * global chain), then the global {@code yca.model.memory} chain (memory falls back to
+     * compact), then null (the request settings resolve the model).
+     */
+    private String memoryModel(final ChatSettings settings) {
+        return providerManager == null
+                ? (configuration.model() == null ? null : configuration.model().resolvedMemory())
+                : providerManager.resolvedMemory(settings);
     }
 }

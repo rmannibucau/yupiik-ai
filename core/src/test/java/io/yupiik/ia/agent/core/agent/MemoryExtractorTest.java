@@ -87,6 +87,7 @@ class MemoryExtractorTest {
         final var extractor = new MemoryExtractor(
                 chat,
                 config,
+                null, // provider manager: the global memory model chain applies
                 store,
                 null, // mapper unused by the fallback path
                 new VirtualThreadExecutor(),
@@ -127,5 +128,70 @@ class MemoryExtractorTest {
         // the fallback snippet path must still save memory
         final var project = store.readProject();
         assertTrue(project.contains("a durable fact"), "the fallback snippet must be saved: " + project);
+    }
+
+    @Test
+    void structuredExceptionFallsBackToSnippetAndWarns() throws Exception {
+        // P0-D: a wire failure of the structured call (e.g. a gateway that streams unconditionally) used
+        // to lose the whole memory pass; now it must still save a plain snippet and name the phase
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var events = new ArrayList<AgentEvent>();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws IOException {
+                throw new IOException("anthropic-messages: unparseable response from https://gw/v1/messages (HTTP 200, "
+                        + "text/event-stream): Unexpected character 'e'");
+            }
+
+            @Override
+            public ChatResult chat(final ChatCompletionRequest request) throws IOException, InterruptedException {
+                return new ChatResult(
+                        Message.assistant("- durable: the team standard is tabs\n", null), new Usage(1, 1, 2));
+            }
+        };
+        final var done = new CountDownLatch(1);
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null, // provider manager: the global memory model chain applies
+                store,
+                null,
+                new VirtualThreadExecutor(),
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        events.add((AgentEvent) event);
+                        done.countDown();
+                    }
+                },
+                Clock.systemUTC(),
+                null,
+                "s-test",
+                null);
+        extractor.maybeExtract(List.of(Message.user("user said: we use tabs now")), ChatSettings.EMPTY);
+        assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
+        final var projectFile = store.projectFile();
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while ((!Files.exists(projectFile) || !Files.readString(projectFile).contains("the team standard is tabs"))
+                && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+
+        assertEquals(1, events.size(), "one warning expected");
+        final var notice = (AgentEvent.Notice) events.get(0);
+        assertTrue(
+                notice.message().contains("structured facts"),
+                "the notice must name the failing phase: " + notice.message());
+        assertTrue(
+                notice.message().contains("saving a plain snippet instead"),
+                "the notice must mention the fallback: " + notice.message());
+        assertTrue(
+                notice.message().contains("Unexpected character 'e'"),
+                "the notice must carry the contextual detail: " + notice.message());
+        final var project = store.readProject();
+        assertTrue(project.contains("the team standard is tabs"), "the fallback snippet must be saved: " + project);
     }
 }
