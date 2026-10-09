@@ -1140,7 +1140,12 @@ public class ChatClient implements AutoCloseable {
         if (configEffort != null && !configEffort.isBlank()) {
             return configEffort;
         }
-        return DefaultModelTuner.reasoningEffort(model, providerId);
+        // opencode parity: do not force an implicit reasoning effort on the wire. The provider's
+        // own default applies unless the user selected a variant or configured one explicitly
+        // (an unset deepeesk-v4 used to fall back to "max", which made freeinference emit tens of
+        // thousands of reasoning characters per call). The implicit per-family effort remains
+        // available for display/selection through DefaultModelTuner variants, not as a wire default.
+        return null;
     }
 
     /** Anthropic claude models map a reasoning effort hint to an explicit thinking budget. */

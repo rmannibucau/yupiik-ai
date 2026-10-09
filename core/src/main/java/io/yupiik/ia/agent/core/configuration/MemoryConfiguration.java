@@ -26,7 +26,7 @@ public record MemoryConfiguration(
         boolean enabled,
 
         @Property(
-                defaultValue = "8000",
+                defaultValue = "2000",
                 documentation = "Maximum number of characters of memory injected in the system prompt.")
         int maxChars,
 
@@ -50,31 +50,22 @@ public record MemoryConfiguration(
         boolean compactEnabled,
 
         @Property(
-                defaultValue = "600000L",
-                documentation = "Minimum delay in milliseconds between two automatic memory extractions of one session "
-                        + "(default 10 minutes). The end-of-turn hook is mostly a cheap timer check: when the "
-                        + "filtered conversation delta is below extractMinChars nothing runs at all, and a "
-                        + "forced extraction still happens when the session is closed, so a short session does "
-                        + "not rely on this window to persist its facts.")
-        long extractDebounceMs,
-
-        @Property(
                 defaultValue = "1000",
                 documentation =
                         "Minimum number of characters of new (not yet extracted) user/assistant text required to "
-                                + "trigger a periodic memory extraction. Chit-chat below this threshold is skipped: it "
+                                + "trigger an end-of-turn memory extraction. Chit-chat below this threshold is skipped: it "
                                 + "would only produce an empty facts array while still costing an LLM call. The forced "
                                 + "extraction at session close ignores this threshold (but still honors the per-session "
                                 + "watermark, so it never re-processes already extracted messages).")
         int extractMinChars,
 
         @Property(
-                defaultValue = "5L",
-                documentation = "Maximum time in seconds a forced memory extraction may take when it runs from a JVM "
-                        + "shutdown hook (abrupt exit: SIGTERM, or Ctrl-C with no cooperative handler). "
-                        + "0 waits indefinitely (the process only exits after the extraction completes), "
-                        + "a negative value skips the shutdown-hook extraction entirely (the clean close "
-                        + "paths - tab close, headless run end - are always synchronous and unaffected). "
-                        + "The default bounds the hook so the process exit is never blocked for the full "
-                        + "provider timeout.")
-        long shutdownTimeoutSeconds) {}
+                defaultValue = "200",
+                documentation =
+                        "Deterministic per-scope memory cap (number of bullets). Beyond it, older bullets are dropped "
+                                + "on write - a cheap, model-free floor that prevents unbounded growth even when the "
+                                + "LLM-based compaction (compactEnabled) is disabled or below its size threshold. The "
+                                + "selection ranker still picks the most relevant bullets for the prompt, so a full "
+                                + "cap does not mean the model sees everything - only that the store does not grow "
+                                + "forever. Applies to the global memory file and to the project memory file.")
+        int maxLines) {}

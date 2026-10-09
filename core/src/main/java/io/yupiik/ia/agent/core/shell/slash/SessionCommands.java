@@ -21,6 +21,7 @@ import io.yupiik.fusion.json.pretty.PrettyJsonMapper;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
@@ -387,7 +388,12 @@ public class SessionCommands implements SlashCommandSet {
             }
         }
 
-        sb.append("## Tools (").append(payload.tools().size()).append(")\n\n");
+        sb.append("## Tools (")
+                .append(payload.tools().size())
+                .append(")\n\n")
+                .append('~')
+                .append(payload.toolsTokens())
+                .append(" tokens estimated for all the tool schemas.\n\n");
         for (final var tool : payload.tools()) {
             if (tool == null || tool.function() == null) {
                 continue;
@@ -401,10 +407,11 @@ public class SessionCommands implements SlashCommandSet {
             if (function.description() != null && !function.description().isBlank()) {
                 sb.append(function.description()).append("\n\n");
             }
-            sb.append("**parameters** (")
-                    .append(payload.toolsTokens())
-                    .append(" tokens estimated for all the tool schemas)\n\n")
-                    .append(fence(json(function.parameters(), pretty), "json"))
+            final var parameters = json(function.parameters(), pretty);
+            sb.append("**parameters** (~")
+                    .append(TokenEstimator.estimate(parameters))
+                    .append(" tokens estimated)\n\n")
+                    .append(fence(parameters, "json"))
                     .append("\n\n");
         }
         return sb.toString();

@@ -136,6 +136,11 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
             <artifactId>asciidoc-java</artifactId>
             <version>${yupiik-tools.version}</version>
           </dependency>
+          <dependency>
+            <groupId>io.yupiik.maven</groupId>
+            <artifactId>ascii2svg</artifactId>
+            <version>${yupiik-tools.version}</version>
+          </dependency>
         </dependencies>
         <executions>
           <execution>

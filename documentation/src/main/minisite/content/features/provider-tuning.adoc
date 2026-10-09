@@ -1,0 +1,175 @@
+= Provider tuning
+:minisite-breadcrumb: Home[index.html] > Features > Provider tuning
+
+How yca shapes the LLM request payload per provider and per model: reasoning
+effort, output budget, sampling and the per-family implicit defaults. Includes
+the wire comparison with opencode observed on a real proxy capture and the
+measured parity benchmark (context and wall-clock) against opencode.
+
+== What yca sends by default
+
+For every chat completion request yca resolves a per-model *budget*, a
+*reasoning effort* and a *variant*. The resolution chain is (first match wins):
+
+1. the explicit request/session value (eg. a `/model` command with a variant),
+2. a value already merged in `providerSpecificOptions` (put-if-absent),
+3. the selected per-model variant (`tuning.variants`),
+4. the provider-level tuning (`tuning.reasoningEffort`),
+5. otherwise *absent* - there is no implicit per-family default anymore.
+
+[a2s]
+....
+  request value
+      |  (1)
+  providerSpecificOptions (reasoning_effort already there?)
+      |  (2)
+  per-model variant tuning.variants[].reasoningEffort
+      |  (3)
+  provider tuning.reasoningEffort
+      |  (4)
+  absent (no implicit default; field not sent)
+      |  (5)
+  payload: { model, messages, tools, reasoning_effort?, store:false, max_tokens?, ... }
+....
+== Reasoning effort
+
+Some models expose a reasoning effort tier (deepseek-v4, gpt-5, gemini
+thinking). yca mirrors opencode's tuning concept:
+
+- `tuning.reasoningEffort` at provider level, or per-model in `models[].behavior` /
+  `models[].tuning` - accepted values depend on the family, typically
+  `none`, `low`, `medium`, `high` (and `max`/`xhigh` for the families that
+  support them);
+- unset leaves the field **absent** on the wire for every model - the provider
+  default applies, with no implicit per-family tier injected by yca (deepseek-v4
+  is *not* forced to `max`, gpt-5 is *not* forced to `medium`). Reasoning is an
+  explicit opt-in, never a surprise.
+
+[NOTE]
+.Why there is no implicit default
+Historically yca injected a per-family effort (notably deepseek-v4 -> `max`),
+mirroring opencode's strongest-profile default. That is expensive: on
+deepseek-v4 a single call can emit tens of thousands of reasoning characters.
+Today the field is simply absent unless you configure it - opencode parity on
+the wire and the leanness that gave, see <<benchmark-parity>>. Set
+`reasoningEffort` explicitly (e.g. `medium`) when a task genuinely benefits
+from chain-of-thought.
+
+== Output budget
+
+`max_tokens` (or `max_completion_tokens` for OpenAI-compatible wire) is
+resolved from:
+
+- the request/session value,
+- the per-variant `maxTokens`,
+- the provider `outputTokens` (auto-detected from `/v1/models` when unset,
+  cached one day per provider/model),
+- the model's own declared limit.
+
+A large budget does not force the model to emit more: generation stops at the
+natural endpoint (`stop`). Capping `maxTokens` mid-reasoning forces extra
+rounds instead (measured: capping Q3 at 6000 made it *slower* - 521s vs
+277s), so prefer an effort change to a hard cap.
+
+== Sampling
+
+`temperature`/`topP` are left to the provider defaults unless explicitly set
+in `models[].options` / `tuning` / `providerSpecificOptions`. yca does not
+force sampling values.
+
+== Benchmark parity with opencode (proxy capture) <a id="benchmark-parity"></a>
+
+On 2026-10-09 we captured both tools' actual first request to
+freeinference.org/v1 (same model `deepseek-v4-flash`, mitmproxy, TLS-capped):
+
+[cols="1,2,2", options="header"]
+|===
+| field | opencode | yca 
+| `reasoning_effort`
+| absent
+| absent (no implicit default; only set when `tuning.reasoningEffort` is configured)
+
+| `store`
+| `store:false` (+ `max_completion_tokens: 256000`)
+| `store:false`
+
+| `max_tokens` field
+| `max_completion_tokens: 256000`
+| `max_tokens: 393000`
+
+| `temperature`/`topP`
+| absent
+| absent
+
+| tools exposed
+| 13 (`compress, edit, glob, grep, question, read, shell, skill, subagent, webfetch, websearch, write`)
+| 20 (adds `apply_patch, ask_user, check_subagents, code_resolve, list_dir, manage_context, maven_knowledge_content, memory_write, read_symbol, write_file, write_todo`)
+
+| visible reasoning in the stream
+| 0 chars
+| 0 chars (no implicit reasoning effort anywhere)
+|===
+
+Takeaways:
+
+- yca sends *no* `reasoning_effort` by default for any model — absent means
+  "provider default" (identical wire posture to opencode, which also omits it).
+  Configure `tuning.reasoningEffort` only when a model genuinely benefits from
+  it; there is no implicit fallback anymore, so reasoning is always an explicit
+  opt-in, never a surprise.
+- `store:false` is wired from the core request builder (opencode parity), so
+  requests are marked not-to-retain server-side.
+- opencode's wire has fewer tool schemas (13 vs 20 in full); each schema rides
+  every request, so a leaner tool allow-list (`yca.tools.builtin.enabledTools`)
+  is a per-call token saving for any agent.
+- `max_completion_tokens` vs `max_tokens` is a naming difference on the same
+  wire family; both are "headroom", not forced output.
+
+=== Measured parity (2026-10-09, N=3 median, deepseek-v4-flash)
+
+yca was run with reasoning absent + `store:false` + a 7-tool allow-list
+(`bash, read_file, write_file, edit_file, glob, grep, list_dir`) + the log-noise
+output filter + the configurable bash output cap. opencode ran on the same
+prompts, model and repository tasks (verified = the produced project passes its
+`mvn test`).
+
+[cols="1,4,3,3,2", options="header"]
+|===
+| task | metric (median) | yca | opencode | yca/oc
+| Q1 (scaffold REST API)
+| wall-clock (s)
+| 29.5
+| 48.0
+| 0.61
+| Q1 | max context (tokens)
+| 7 865
+| 12 785
+| 0.62
+| Q1 | LLM calls | 10 | 11 | 0.91
+| Q2 (fix greeting)
+| wall-clock (s)
+| 17.2
+| 29.0
+| 0.59
+| Q2 | max context | 6 609
+| 11 755
+| 0.56
+| Q2 | LLM calls | 6 | 6 | 1.00
+| Q3 (fix discount, harder)
+| wall-clock (s)
+| 101.9
+| 157.0
+| 0.65
+| Q3 | max context | 25 112
+| 45 455
+| 0.55
+| Q3 | accumulated context (sum) | 222 K | 467 K | 0.47
+| Q3 | LLM calls | 15 | 15 | 1.00
+|===
+
+With the lean wire posture (no reasoning, `store:false`, fewer tool schemas,
+log-noise filter and the bash cap) yca completes all three tasks *faster* than
+opencode and with roughly *half* the context ceiling (max context 0.55-0.62x,
+accumulated context ~0.5x) at the same task-success rate. The largest relative
+win is on the multi-file Q3, which is where uncontrolled framework-log noise and
+huge tool outputs otherwise inflate the transcript.

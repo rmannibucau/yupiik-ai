@@ -1,0 +1,231 @@
+= Memory
+:minisite-breadcrumb: Home[index.html] > Features > Memory
+
+yca keeps a durable, cross-session memory so preferences and project decisions
+survive individual conversations. This page explains how memory is *written*,
+how it is *selected* into the model context, and how to tune it.
+
+== Overview
+
+[a2s]
+....
+                     WRITE                                READ (turn start)
+  turn ends ──► idle extraction (LLM) ─┐                  user prompt + todos
+  memory_write (explicit) ─────────────┤                       │
+                                       ▼                       ▼
+                              MemoryStore.append        BM25-lite ranking
+                              dedup + fuzzy-replace     (global + project,
+                                       │                recency tie-break)
+                                       ▼                       ▼
+                              MEMORY.md files          greedy fill 50/50
+                              (global + project,       + spillover <= maxChars
+                               capped maxLines)               │
+                                       │                       ▼
+                                       └──────────►  <memory> in stable prefix
+                                                     <memory-diff> in volatile
+                                                     tail (mid-turn writes)
+....
+
+Memory lives in two scopes, persisted as markdown bullet lists:
+
+* *Global* (`~/.yupiik/coding-agent/memory/MEMORY.md`) - durable user
+  preferences and cross-project rules ("always use tabs", "never edit
+  generated files").
+* *Project* (`<project>/.yca/memory/MEMORY.md`) - project-specific decisions
+  and knowledge.
+
+Both files share the same simple format:
+
+[source]
+----
+# Memory
+
+Durable facts, decisions and preferences. One bullet per line.
+
+- Always use tabs for indentation.
+- The CLI must be backward compatible with v1.
+- Run `mvn -q -pl tui -am package` to build the fat jar.
+----
+
+== Writing memory
+
+=== Automatic extraction (default)
+
+At the end of a turn, `MemoryExtractor` asks the model to distill the
+conversation into at most 3 durable facts:
+
+[source,json]
+----
+{"facts": [{"text": "...", "scope": "global" | "project"}]}
+----
+
+Extraction is:
+
+* *idle* - runs asynchronously while yca waits for the next input, never
+  blocking a turn,
+* *best-effort* - failures are silent (memory is never corrupted),
+* *throttled* - at least `memory.extractMinChars` (default 1000) characters of
+  *new* text must accumulate before another extraction costs an LLM call,
+* *deduplicated* - the watermark prevents re-processing already extracted
+  excerpts, and `MemoryStore.append` skips exact duplicates.
+
+=== Manual write
+
+The `memory_write` tool persists a fact immediately:
+
+[source]
+----
+memory_write(fact: "The build uses Java 21.", scope: "project")
+----
+
+=== Near-duplicate replacement
+
+`append` detects that a new bullet *supersedes* an existing one (normalized
+token Dice similarity >= 0.8 with at least 4 shared tokens). The old wording is
+replaced, not duplicated - so reformulations do not accumulate.
+
+=== Deterministic cap
+
+Each scope is capped at `memory.maxLines` (default 200) bullets. Beyond it,
+the *oldest* bullets are dropped on write. This is a cheap, model-free floor
+that prevents unbounded growth even when the LLM-based compaction is disabled
+or below its size threshold.
+
+=== LLM compaction (optional)
+
+When the project file grows past 64 KB, `MemoryCompactor` can rewrite it with a
+compact model: near-duplicates are merged, superseded and one-off facts are
+dropped. A backup (`MEMORY.md.bak`) is kept, and rewrites reducing the file by
+less than 20% are discarded. Enabled with `memory.compactEnabled` (default
+true) - this is the *quality* counterpart of the deterministic cap (which
+bounds size even when no model call is wanted).
+
+== Selecting memory into context
+
+At the start of each turn, yca injects a `<memory>` section into the system
+prompt, capped at `memory.maxChars` (default 2000) characters:
+
+[source]
+----
+<memory>
+<global>
+- Always use tabs for indentation.
+- Run `mvn -q -pl tui -am package` to build the fat jar.
+</global>
+<project>
+- The CLI must be backward compatible with v1.
+</project>
+</memory>
+----
+
+=== Ranking
+
+Both scopes are ranked with a *BM25-lite* scorer against a query built from the
+latest user turn **plus** the current todo list, so durable facts relevant to
+the active plan surface even when the last message is terse.
+
+The selection is *greedy and scope-fair*:
+
+1. fill global with its top entries up to 50% of the budget,
+2. fill project with its top entries up to the other 50%,
+3. spill the remaining budget to whichever scope has the most relevant
+   leftovers (global first - directives are usually higher value).
+
+=== Recency tie-break
+
+Global facts are append-only: the newest durable facts sit at the tail of the
+file, which head-bounded selection used to starve. The ranker applies a small
+recency multiplier (at most +10%, tie-break only) to global bullets, so a
+recently appended fact wins against an equally-relevant older one without
+letting recency override relevance.
+
+=== No-query fallback
+
+When there is no ranking signal (a context dump, a resumed session, a bare
+prompt), global keeps its head and project its head, capped at half the budget
+each - deterministic and bounded.
+
+=== Durable-directive floor
+
+Global memory is never fully dropped: even when no global bullet matches the
+query, the established head of the global file is still injected (up to
+2/3 of the global half-budget). Relevance trims the stale tail, not the core
+directives.
+
+=== Mid-turn updates: the memory diff
+
+When a `memory_write` (or an extraction) happens mid-turn, the durable memory
+in the stable system prefix must not be re-sent whole (it would break the
+byte-stable prefix that keeps provider prompt caches working, and cost tokens).
+Instead, the volatile `<session-state>` tail carries only what changed:
+
+[source]
+----
+<session-state>
+Date: 2026-10-09
+Mode: BUILD
+<memory-diff>
+- The build uses Java 21.
+</memory-diff>
+Context usage: ~42% ...
+</session-state>
+----
+
+The diff is *per-session*: parallel sessions never see each other's memory
+deltas. If the memory files changed on disk outside the agent (an external
+edit), the tail falls back to re-sending the full section so nothing is lost.
+
+== Configuration reference
+
+[cols="2,1,2,2", options="header"]
+|===
+| Property | Default | Scope | Meaning
+
+| `memory.enabled`
+| `true`
+| both
+| Enable extraction and injection.
+
+| `memory.maxChars`
+| `2000`
+| context
+| Max chars of memory injected in the system prompt (per turn).
+
+| `memory.maxRatio`
+| `0.2`
+| context
+| Memory budget is `min(maxChars, systemPromptCap * maxRatio)`; 0 = plain
+  maxChars. Auto-disables memory below 1000 chars budget.
+
+| `memory.maxLines`
+| `200`
+| store
+| Deterministic per-scope cap; older bullets dropped on write.
+
+| `memory.extractMinChars`
+| `1000`
+| extraction
+| Min new text before an extraction runs.
+
+| `memory.compactEnabled`
+| `true`
+| store
+| LLM rewrite of the project file past 64 KB (>= 20% reduction kept).
+|===
+
+== Tips
+
+* Memory is *ranked*, not dumped: with `maxChars=2000` the model sees the
+  facts most relevant to the current turn, not the oldest 2000 chars. If a
+  relevant fact does not surface, enrich the todo list (it is part of the
+  ranking query) or write it with `memory_write` right before it matters.
+
+* `memory.maxLines` bounds the file with no model cost; `compactEnabled` keeps
+  the file *clean* with a model cost. Both default on.
+
+* The memory files are plain markdown - they can be edited by hand. An
+  external edit bumps the content version and is picked up at the next turn
+  (the tail refreshes to the full section once).
+
+* To disable memory entirely: `memory.enabled=false` (extraction is skipped
+  too, nothing is written).

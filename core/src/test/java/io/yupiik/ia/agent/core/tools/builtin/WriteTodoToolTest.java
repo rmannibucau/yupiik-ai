@@ -198,21 +198,21 @@ class WriteTodoToolTest {
     }
 
     @Test
-    void descriptionCarriesPlanModeRuleAndAtomicRejection() {
+    void descriptionCarriesPlanModeRuleAndParallelBuildStatuses() {
         final var tool = new WriteTodoTool();
         final var description = tool.description();
         assertTrue(
-                description.contains("PLAN mode (the default)"),
-                "the description must lead with the plan-mode contract (default mode): " + description);
+                description.contains("In PLAN mode"),
+                "the description must carry the plan-mode contract (plan is the default mode): " + description);
         assertTrue(
-                description.contains("new items must stay 'pending'"),
+                description.contains("(the list IS the plan)"),
+                "the description must state that the plan-mode list is the plan: " + description);
+        assertTrue(
+                description.contains("new items stay 'pending'"),
                 "the description must state the all-pending plan rule: " + description);
         assertTrue(
-                description.contains("nothing is written"),
-                "the description must state the atomic-rejection wording: " + description);
-        assertTrue(
-                description.contains("one or several may be in_progress at once"),
-                "the description must allow parallel in_progress in build mode: " + description);
+                description.contains("mark in_progress as you start"),
+                "the description must allow in_progress items in build mode: " + description);
         assertFalse(
                 description.contains("exactly one in_progress"),
                 "the description must not carry the relaxed single-in_progress rule anymore: " + description);

@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.List;
 import java.util.Map;
@@ -65,12 +66,21 @@ public class MemoryWriteTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var fact = arg(args, "fact");
         if (fact == null || fact.isBlank()) {
             return ToolResult.error("fact is required");
         }
         final var global = "global".equalsIgnoreCase(arg(args, "scope") == null ? "project" : arg(args, "scope"));
         final var added = memoryStore.append(global, List.of(fact));
+        if (!added.isEmpty() && context != null) {
+            // record the per-session diff so the wire tail can re-send only what changed
+            memoryStore.recordDiff(context.sessionId(), added);
+        }
         return added.isEmpty()
                 ? ToolResult.ok("Already remembered (or skipped).")
                 : ToolResult.ok("Remembered (" + (global ? "global" : "project") + "): " + added.get(0));

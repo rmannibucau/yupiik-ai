@@ -614,39 +614,6 @@ public class TuiCommand implements Runnable {
                     },
                     "yca-tui-mouse-restore");
             Runtime.getRuntime().addShutdownHook(mouseRestoreHook);
-            // abrupt-exit memory backup: on SIGTERM (or Ctrl-C when the cooperative signal handler is
-            // not wired) the run() finally block never executes, so the per-tab forced extraction in
-            // disposeTab is skipped. This hook persists each tab's pending delta (bounded by
-            // memory.shutdownTimeoutSeconds - 0 waits indefinitely, negative skips; the clean paths are
-            // synchronous and uncapped). The clean path removes this hook right after teardown, so it
-            // never double-runs.
-            final var shutdownTimeoutMs = configuration.memory().shutdownTimeoutSeconds() * 1_000L;
-            final var memoryShutdownHook = shutdownTimeoutMs < 0
-                    ? null
-                    : new Thread(
-                            () -> {
-                                final var states = List.copyOf(tabManager.list());
-                                for (final var state : states) {
-                                    try {
-                                        if (state.runtime() != null
-                                                && state.sessionId != null
-                                                && !sessionStore.isEmpty(state.sessionId)) {
-                                            state.runtime()
-                                                    .loop()
-                                                    .forceExtractNow(
-                                                            sessionStore.load(state.sessionId),
-                                                            state.runtime().chatSettings(),
-                                                            shutdownTimeoutMs);
-                                        }
-                                    } catch (final RuntimeException e) {
-                                        LOG.log(Level.FINE, "Shutdown memory extraction failed", e);
-                                    }
-                                }
-                            },
-                            "yca-tui-memory-extract");
-            if (memoryShutdownHook != null) {
-                Runtime.getRuntime().addShutdownHook(memoryShutdownHook);
-            }
             try {
                 tui.run((event, runner) -> onKey(event, runner, active()), frame -> render(frame, active()));
             } finally {
@@ -692,13 +659,6 @@ public class TuiCommand implements Runnable {
                     Runtime.getRuntime().removeShutdownHook(mouseRestoreHook);
                 } catch (final IllegalStateException e) {
                     // the JVM is already shutting down: the hook runs or ran on its own
-                }
-                if (memoryShutdownHook != null) {
-                    try {
-                        Runtime.getRuntime().removeShutdownHook(memoryShutdownHook);
-                    } catch (final IllegalStateException e) {
-                        // the JVM is already shutting down: the hook runs or ran on its own
-                    }
                 }
             }
         } catch (final RuntimeException e) {
@@ -826,10 +786,12 @@ public class TuiCommand implements Runnable {
     }
 
     /**
-     * Releases a tab: unregisters its shell, drops the per-session gates, persists the session
-     * memory (forced synchronous extraction - the tab may never come back, so its facts must
-     * not be lost to a pending debounce window) and deletes the session when it never got any
-     * content. Does not wait for turns: the caller does.
+     * Releases a tab: unregisters its shell, drops the per-session gates and deletes the
+     * session when it never got any content. Memory extraction is NOT run here: the
+     * end-of-turn hook already extracted the delta asynchronously while the app was idle
+     * waiting for the user, so a close-time forced pass would be a watermark no-op - and
+     * when the user exits right after a turn, waiting for a synchronous extraction would
+     * block the quit. Does not wait for turns: the caller does.
      */
     private void disposeTab(final UiState state) {
         final var runner = state.runner;
@@ -840,16 +802,6 @@ public class TuiCommand implements Runnable {
         if (runtime != null) {
             runtime.permissions().setGate(null);
             runtime.feedback().setGate(null);
-        }
-        // forced memory extraction at close: the transcript is persisted, so load it and
-        // extract whatever the periodic pass has not covered yet; the watermark makes this
-        // a cheap no-op when everything was already extracted
-        if (state.sessionId != null && !sessionStore.isEmpty(state.sessionId)) {
-            try {
-                runtime.loop().forceExtractNow(sessionStore.load(state.sessionId), runtime.chatSettings());
-            } catch (final RuntimeException e) {
-                LOG.log(Level.FINE, "Forced memory extraction on tab close failed", e);
-            }
         }
         if (state.sessionId != null && sessionStore.isEmpty(state.sessionId)) {
             sessionStore.delete(state.sessionId);

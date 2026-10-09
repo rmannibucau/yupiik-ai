@@ -46,7 +46,8 @@ public class AskUserTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Ask the user questions and get their answers. Use it whenever you need a decision, a preference or missing input the user did not specify. Each question prompts live in the terminal UI (one tab per question, then a confirm tab). Supports both single (radio) and multiple (checkbox) choice plus a free-text 'your own answer' option.";
+        return "Ask the user for a decision, preference or missing input. Each question opens a terminal "
+                + "prompt tab; supports single (radio), multiple (checkbox) and free-text answers.";
     }
 
     @Override
@@ -63,25 +64,16 @@ public class AskUserTool implements EmbeddedTool {
     public Map<String, Object> schema() {
         final var question = Schemas.object(
                 Map.of(
-                        "id",
-                                Schemas.str(
-                                        "A stable unique identifier for this question; the answer is returned under this key."),
-                        "prompt", Schemas.str("The question to ask the user."),
+                        "id", Schemas.str("Stable unique id; the answer is returned under this key."),
+                        "prompt", Schemas.str("The question to ask."),
                         "options",
                                 Schemas.arrayOf(
-                                        "Proposed answers the user can pick from (radio for single, checkbox for multiple). May be empty.",
+                                        "Proposed answers (radio single / checkbox multiple). May be empty.",
                                         Schemas.str("One proposed answer.")),
-                        "multiple",
-                                Schemas.bool(
-                                        "false = the user picks exactly one option, true = the user can select several options.")),
+                        "multiple", Schemas.bool("false = single choice, true = multiple choice.")),
                 "id",
                 "prompt");
-        return Schemas.object(
-                Map.of(
-                        "questions",
-                        Schemas.arrayOf(
-                                "The questions to ask the user. Each gets its own tab in the prompt panel.", question)),
-                "questions");
+        return Schemas.object(Map.of("questions", Schemas.arrayOf("The questions to ask.", question)), "questions");
     }
 
     @Override

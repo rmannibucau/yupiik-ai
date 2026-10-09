@@ -221,9 +221,13 @@ class SessionCommandsTest {
         assertTrue(markdown.contains("boom"), markdown);
         assertTrue(markdown.contains("**tool_call** read_file [h1]"), markdown);
         assertTrue(markdown.contains("## Tools (1)"), markdown);
+        assertTrue(markdown.contains("~42 tokens estimated for all the tool schemas"), markdown);
         assertTrue(markdown.contains("### read_file (function)"), markdown);
         assertTrue(markdown.contains("read a file from disk"), markdown);
-        assertTrue(markdown.contains("**parameters**"), markdown);
+        // two-part header: the aggregate estimate is stated once, each per-tool header carries its own
+        assertTrue(markdown.contains("**parameters** (~"), markdown);
+        assertEquals(1, count(markdown, "estimated for all the tool schemas"), markdown);
+        assertEquals(1, count(markdown, "tokens estimated)"), markdown);
 
         // the very same dump, written to a file
         final var target = dir.resolve("sub").resolve("payload.md");
@@ -332,5 +336,13 @@ class SessionCommandsTest {
                         .findFirst()
                         .orElseThrow()
                         .completion();
+    }
+
+    private static int count(final String text, final String needle) {
+        int occurrences = 0;
+        for (int from = 0; (from = text.indexOf(needle, from)) >= 0; from += needle.length()) {
+            occurrences++;
+        }
+        return occurrences;
     }
 }

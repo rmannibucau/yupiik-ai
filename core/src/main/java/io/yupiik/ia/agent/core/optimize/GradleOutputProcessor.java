@@ -25,6 +25,15 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class GradleOutputProcessor implements OutputProcessor {
+    private final LogNoiseOutputProcessor logNoise;
+
+    public GradleOutputProcessor(final LogNoiseOutputProcessor logNoise) {
+        this.logNoise = logNoise;
+    }
+
+    public GradleOutputProcessor() {
+        this(new LogNoiseOutputProcessor());
+    }
 
     @Override
     public boolean supports(final String command) {
@@ -55,7 +64,7 @@ public class GradleOutputProcessor implements OutputProcessor {
 
         for (final var raw : all) {
             final var line = Optimizers.stripAnsi(raw);
-            if (line.startsWith("Download ")) {
+            if (logNoise.drop(line) || line.startsWith("Download ")) {
                 continue;
             }
             if (line.startsWith("BUILD SUCCESSFUL")) {

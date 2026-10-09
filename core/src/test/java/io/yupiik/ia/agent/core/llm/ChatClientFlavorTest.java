@@ -668,12 +668,16 @@ class ChatClientFlavorTest {
     }
 
     @Test
-    void gpt5EmitsDefaultReasoningEffortOnTheWire() throws Exception {
+    void gpt5DoesNotForceAnImplicitReasoningEffortOnTheWire() throws Exception {
         final var cfg = configuration(Map.of("yca.provider.providers.0.model", "gpt-5"));
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
 
         assertEquals("hello there", client.chat(request(null)).message().content());
-        assertEquals(1, occurrences(bodies.getLast(), "\"reasoning_effort\":\"medium\""), bodies.getLast());
+        assertEquals(
+                0,
+                occurrences(bodies.getLast(), "\"reasoning_effort\""),
+                "no implicit reasoning effort must reach the wire (provider default applies, opencode parity): "
+                        + bodies.getLast());
     }
 
     @Test

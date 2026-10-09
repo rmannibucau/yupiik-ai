@@ -15,12 +15,14 @@
  */
 package io.yupiik.maven.knowledge.mcp.configuration;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 
 /**
  * Configuration for the maven-repository-knowledge MCP server. All keys are prefixed with {@code yca.maven.}.
  */
+@ApplicationScoped
 @RootConfiguration("yca.maven")
 public record MavenKnowledgeConfiguration(
         @Property(defaultValue = "\"~/.m2/repository\"", documentation = "Local Maven repository to index.")

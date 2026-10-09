@@ -49,6 +49,19 @@ public class MemoryStore {
      */
     private volatile int contentVersion = -1;
 
+    /**
+     * Facts appended since the last time the wire diff was drained for each session
+     * (mid-turn memory_write): keyed by session id so parallel sessions never see each
+     * other's memory deltas. A small LRU guard prevents unbounded growth.
+     */
+    private final java.util.Map<String, java.util.Deque<String>> pendingDiffs =
+            new java.util.LinkedHashMap<>(8, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(final java.util.Map.Entry<String, java.util.Deque<String>> eldest) {
+                    return size() > 64;
+                }
+            };
+
     private volatile long globalMtime = Long.MIN_VALUE;
     private volatile long globalSize = Long.MIN_VALUE;
     private volatile long projectMtime = Long.MIN_VALUE;
@@ -230,38 +243,85 @@ public class MemoryStore {
             final String projectRaw,
             final String prompt,
             final int max) {
-        // Global facts are durable high-value directives: keep their HEAD (top lines), never tail.
-        final var global = globalText.isBlank() ? globalText : bounded(globalText, max / 2, false);
-        final var total = global.length() + (projectText.isBlank() ? 0 : Math.min(projectText.length(), max / 2));
-        if (total + MARKUP_OVERHEAD <= max) {
-            return new ScopeSelection(globalText, projectText);
+        if (max <= 0) {
+            return new ScopeSelection("", "");
         }
-        // over budget: keep global whole (bounded, head) and rank project lines against the prompt,
-        // keeping only the most relevant ones until fitting the shared budget (incl. markup overhead).
-        if (prompt == null || prompt.isBlank() || projectText.isBlank()) {
-            // no query to rank against: fall back to keeping the tail of project lines
-            final var g = bounded(globalText, max / 2, false);
-            final var p = projectText.isBlank() ? "" : bounded(projectText, max - g.length() - MARKUP_OVERHEAD, true);
-            return new ScopeSelection(g, p);
+        // Both scopes get the same treatment: rank every bullet against the query (the latest
+        // user turn + todo items), keep the top scorers per scope, then spill the remaining
+        // budget to whichever scope has the most relevant leftovers. Global keeps a small
+        // recency tie-break (its file is the flat append-only store where the newest facts
+        // sit at the tail and would otherwise be starved by the older head).
+        final var query = prompt == null || prompt.isBlank() ? List.<String>of() : tokens(prompt);
+        if (query.isEmpty()) {
+            // no ranking signal (context dump, resume, bare prompt): keep the head of each scope,
+            // capped at half the budget - deterministic and still bounded.
+            return new ScopeSelection(
+                    bounded(globalText, max / 2, false),
+                    bounded(projectText, max - (max / 2) - MARKUP_OVERHEAD, false));
         }
-        final var promptTokens = tokens(prompt);
-        final List<Entry> ranked = rank(projectText, promptTokens);
-        final var g = bounded(globalText, max / 2, false);
-        var remaining = max - g.length() - MARKUP_OVERHEAD;
-        final var projectSb = new StringBuilder();
+        final var globalEntries = ranked(globalText, query, true);
+        final var projectEntries = ranked(projectText, query, false);
+        final var gSb = new StringBuilder();
+        final var pSb = new StringBuilder();
+        final var half = max / 2;
+        final var usedAfterFirst = fill(globalEntries, gSb, half) + fill(projectEntries, pSb, half);
+        final var remaining = max - usedAfterFirst - MARKUP_OVERHEAD - (gSb.length() > 0 && pSb.length() > 0 ? 1 : 0);
+        if (remaining > 0) {
+            // spillover: global first (directives are usually the higher-value), then project
+            final var afterGlobal = fill(globalEntries, gSb, half + remaining) + pSb.length();
+            fill(projectEntries, pSb, half + remaining + (afterGlobal - usedAfterFirst));
+        }
+        // durable-directive floor: even when no global bullet matches the query, keep the head of
+        // the global scope (the most established directives) so global memory is never fully
+        // dropped - only its stale tail is. This preserves the pre-ranking behavior when there is
+        // no query signal while still favoring relevance when there is one.
+        if (gSb.isEmpty() && !globalText.isBlank()) {
+            gSb.append(bounded(globalText, Math.min(globalText.length(), half * 2 / 3), false));
+        }
+        return new ScopeSelection(gSb.toString(), pSb.toString());
+    }
+
+    /** Deterministic ranked entries: score desc, then file line index asc (stable). */
+    private List<Entry> ranked(final String text, final List<String> query, final boolean recencyBoost) {
+        if (text == null || text.isBlank() || query.isEmpty()) {
+            return List.of();
+        }
+        final var ranked = rank(text, query);
+        if (!recencyBoost) {
+            return ranked;
+        }
+        // tie-break only: at most +10% for the newest bullet (tail of the file), so a
+        // recently appended durable fact wins over an equally-relevant older one, without
+        // letting recency override relevance. index is the line position in the corpus.
+        final var lineCount = Math.max(1, text.lines().toList().size() - 1);
+        final var boosted = new ArrayList<Entry>(ranked.size());
         for (final var entry : ranked) {
-            final var wouldAdd = projectSb.length()
-                    + (projectSb.isEmpty() ? 0 : 1)
-                    + entry.line().length();
-            if (wouldAdd > remaining) {
+            boosted.add(
+                    new Entry(entry.line(), entry.score * (1 + 0.1 * ((double) entry.index / lineCount)), entry.index));
+        }
+        boosted.sort(Comparator.comparingDouble(Entry::score).reversed().thenComparingInt(Entry::index));
+        return boosted;
+    }
+
+    /** Adds entries until the budget is exhausted; returns the chars consumed. */
+    private int fill(final List<Entry> entries, final StringBuilder sb, final int budget) {
+        if (budget <= 0) {
+            return sb.length();
+        }
+        var remaining = budget;
+        for (final var entry : entries) {
+            final var line = entry.line();
+            final var add = line.length() + (sb.length() == 0 ? 0 : 1);
+            if (add > remaining) {
                 break;
             }
-            if (!projectSb.isEmpty()) {
-                projectSb.append('\n');
+            if (sb.length() > 0) {
+                sb.append('\n');
             }
-            projectSb.append(entry.line());
+            sb.append(line);
+            remaining -= add;
         }
-        return new ScopeSelection(g, projectSb.toString());
+        return sb.length();
     }
 
     private static String bounded(final String content, final int limit, final boolean tail) {
@@ -375,18 +435,18 @@ public class MemoryStore {
                 }
             }
             if (score > 0) {
-                pq.offer(new Entry(lines.get(i), score));
+                pq.offer(new Entry(lines.get(i), score, i));
                 if (pq.size() > 64) {
                     pq.poll();
                 }
             }
         }
         final var all = new ArrayList<>(pq);
-        all.sort(Comparator.comparingDouble(Entry::score).reversed());
+        all.sort(Comparator.comparingDouble(Entry::score).reversed().thenComparingInt(Entry::index));
         return all;
     }
 
-    private record Entry(String line, double score) {}
+    private record Entry(String line, double score, int index) {}
 
     private record ScopeSelection(String global, String project) {}
 
@@ -423,6 +483,20 @@ public class MemoryStore {
             }
             if (!added.isEmpty()) {
                 write(file, existing);
+            }
+            // deterministic floor: cap the store size per scope so memory cannot grow unbounded
+            // even when the LLM-based compaction is disabled or below its size threshold.
+            final var maxLines = configuration.memory().maxLines();
+            if (maxLines > 0 && existing.size() > maxLines) {
+                final var capped = new LinkedHashSet<String>();
+                var i = 0;
+                for (final var line : existing) {
+                    if (i >= existing.size() - maxLines) {
+                        capped.add(line);
+                    }
+                    i++;
+                }
+                write(file, capped);
             }
             return added;
         } catch (final IOException e) {
@@ -515,6 +589,55 @@ public class MemoryStore {
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /**
+     * Drains and returns the facts appended since the last call (mid-turn memory_write diff).
+     * Used by the volatile session tail so a memory refresh only re-sends what changed
+     * instead of the whole section. Returns the facts in insertion order.
+     */
+    /**
+     * Records the facts just written by {@code sessionId} so the next wire tail of that session
+     * can re-send only what changed. Call from the session-aware execution path.
+     */
+    public void recordDiff(final String sessionId, final java.util.List<String> facts) {
+        if (sessionId == null || sessionId.isBlank() || facts == null || facts.isEmpty()) {
+            return;
+        }
+        final java.util.Deque<String> queue;
+        synchronized (pendingDiffs) {
+            queue = pendingDiffs.computeIfAbsent(sessionId, k -> new java.util.ArrayDeque<>());
+        }
+        synchronized (queue) {
+            queue.addAll(facts);
+        }
+    }
+
+    /** Drains and returns this session's pending memory diff (facts written since the last tail). */
+    public java.util.List<String> drainPendingDiff(final String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return java.util.List.of();
+        }
+        final java.util.Deque<String> queue;
+        synchronized (pendingDiffs) {
+            queue = pendingDiffs.get(sessionId);
+            if (queue == null) {
+                return java.util.List.of();
+            }
+        }
+        final var out = new java.util.ArrayList<String>();
+        synchronized (queue) {
+            String fact;
+            while ((fact = queue.poll()) != null) {
+                out.add(fact);
+            }
+            if (queue.isEmpty()) {
+                synchronized (pendingDiffs) {
+                    pendingDiffs.remove(sessionId);
+                }
+            }
+        }
+        return out;
     }
 
     private void write(final Path file, final LinkedHashSet<String> lines) throws IOException {

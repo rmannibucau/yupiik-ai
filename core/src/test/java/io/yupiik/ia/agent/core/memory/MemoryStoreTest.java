@@ -119,6 +119,22 @@ class MemoryStoreTest {
         assertEquals(1, count(section, "the agent prefers spaces"), "distinct fact must be kept: " + section);
     }
 
+    @Test
+    void pendingDiffIsIsolatedPerSession() {
+        final var store = new MemoryStore(config(home, Map.of()));
+        store.append(true, List.of("base fact"));
+        store.recordDiff("session-a", List.of("a's new fact"));
+        store.recordDiff("session-b", List.of("b's new fact"));
+
+        final var a1 = store.drainPendingDiff("session-a");
+        assertEquals(List.of("a's new fact"), a1, "session a must see its own diff");
+        assertTrue(store.drainPendingDiff("session-a").isEmpty(), "session a must not see the same diff twice");
+
+        assertEquals(List.of("b's new fact"), store.drainPendingDiff("session-b"), "session b sees its own");
+        assertTrue(store.drainPendingDiff("unknown").isEmpty(), "unknown session has no diff");
+        assertTrue(store.drainPendingDiff(null).isEmpty(), "null session drains nothing");
+    }
+
     private static int count(final String haystack, final String needle) {
         var out = 0;
         var from = 0;

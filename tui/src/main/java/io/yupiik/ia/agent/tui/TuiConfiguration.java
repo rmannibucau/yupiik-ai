@@ -15,11 +15,13 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import java.util.List;
 
+@ApplicationScoped
 @RootConfiguration("yca.tui")
 @JsonModel
 public record TuiConfiguration(

@@ -177,6 +177,8 @@ public class OpenAICompletionsDialect extends AbstractDialect {
                 null,
                 request.reasoningEffort(),
                 request.responseFormat(),
+                // server-side conversation storage opt-out (OpenAI `store`), null = provider default
+                request.store(),
                 streamExtras(request, stream));
     }
 

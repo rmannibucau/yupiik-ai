@@ -101,6 +101,7 @@ class OpenAIDialectTest {
                 null,
                 null,
                 stream,
+                false,
                 extensions);
     }
 
@@ -575,6 +576,7 @@ class OpenAIDialectTest {
                 null,
                 null,
                 "low",
+                false,
                 false,
                 java.util.Map.of());
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);

@@ -30,6 +30,16 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class MavenOutputProcessor implements OutputProcessor {
+    private final LogNoiseOutputProcessor logNoise;
+
+    public MavenOutputProcessor(final LogNoiseOutputProcessor logNoise) {
+        this.logNoise = logNoise;
+    }
+
+    public MavenOutputProcessor() {
+        this(new LogNoiseOutputProcessor());
+    }
+
     private static final Pattern RUNNING = Pattern.compile("\\[INFO] Running ([\\w.,\\s]+)$");
     private static final Pattern TESTS_RUN =
             Pattern.compile("Tests run: (\\d+), Failures: (\\d+), Errors: (\\d+), Skipped: (\\d+)");
@@ -66,7 +76,7 @@ public class MavenOutputProcessor implements OutputProcessor {
 
         for (final var raw : lines.toArray(String[]::new)) {
             final var line = Optimizers.stripAnsi(raw);
-            if (NOISE.matcher(line).matches()) {
+            if (logNoise.drop(line) || NOISE.matcher(line).matches()) {
                 continue;
             }
             final var m = RUNNING.matcher(line);

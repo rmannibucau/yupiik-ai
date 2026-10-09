@@ -264,6 +264,15 @@ public class AgentLoop {
     private volatile boolean lastRequestProducedReasoning;
 
     /**
+     * Whether the turn just ended on a real, non-empty model reply (a {@code TurnDone} with
+     * content was emitted). Set by {@link #emitTurnMetrics} when content is non-null and
+     * non-blank; every other terminal path (cancel, interrupt, hard stop, empty completion,
+     * error) leaves it false. Gates the end-of-turn memory extraction in {@code doRun}'s
+     * finally: only a turn the user actually saw an answer from is worth mining.
+     */
+    private volatile boolean lastTurnEndedWithContent;
+
+    /**
      * Doom-loop breaker state for the current turn: counts repeated tool calls (normalized args)
      * and remembers the last output per signature for the no-progress termination. Created fresh
      * per turn, mutated on the loop thread only.
@@ -529,24 +538,14 @@ public class AgentLoop {
 
     /**
      * Synchronous forced memory extraction of the persisted transcript, used when the session
-     * stops (tab close, headless run end, shutdown hook). The periodic end-of-turn hook is
-     * debounced and async; this is the deterministic sibling that guarantees the pending delta
-     * (since the last successful extraction) is persisted before the session goes away.
+     * stops (tab close, headless run end). The end-of-turn hook already covered the delta
+     * asynchronously while the app was idle; this is normally a watermark no-op and stays as
+     * the deterministic last-resort for sessions closed before their first turn ever finished.
      *
      * @return {@code true} when an extraction pass ran, {@code false} when there was nothing new.
      */
     public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings) {
         return memoryExtractor != null && memoryExtractor.forceExtractNow(messages, settings);
-    }
-
-    /**
-     * Capped variant for shutdown hooks: the extraction runs on the background executor and
-     * the wait is bounded by {@code timeoutMs}, so an abrupt JVM exit is never blocked for the
-     * full provider timeout (a dropped tail on the abrupt path is the accepted trade-off - the
-     * periodic pass covered it at most {@code extractDebounceMs} ago).
-     */
-    public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings, final long timeoutMs) {
-        return memoryExtractor != null && memoryExtractor.forceExtractNow(messages, settings, timeoutMs);
     }
 
     /**
@@ -732,8 +731,14 @@ public class AgentLoop {
         } finally {
             pauseListener = null;
             statusReporter.setSink(null);
-            if (memoryExtractor != null) {
-                memoryExtractor.maybeExtract(messages, chatSettings);
+            // End-of-turn memory: best-effort, asynchronous, only when the turn ended where the
+            // user sees it - a real (non-empty) reply. Empty completions, hard stops (no progress,
+            // plateau, max iterations), interrupts and uncaught failures all leave
+            // lastTurnEndedWithContent false: there is nothing durable to mine (the excerpt gate
+            // would filter empty deltas anyway), and extraction while the app is already idle
+            // waiting for the next input means the close paths never need to block on it.
+            if (memoryExtractor != null && lastTurnEndedWithContent) {
+                memoryExtractor.asyncExtractNow(messages, chatSettings);
             }
         }
     }
@@ -975,6 +980,7 @@ public class AgentLoop {
         thinkingActive = false;
         thinkingStartNanos = 0;
         turnStartNanos = System.nanoTime();
+        lastTurnEndedWithContent = false;
         // A "window" is one bounded run of the round loop. Every todo auto-continuation starts a fresh
         // window with a new maxIterations budget - yca.todos.maxContinues bounds the number of windows -
         // while empty-completion and truncation retries keep sharing the current window's budget. Without
@@ -1347,8 +1353,11 @@ public class AgentLoop {
             final String prompt,
             final int memoryVersionAtTurnStart,
             final int toolsTokens) {
+        // The tail keeps a stable compact shape across every request so the prefix (system +
+        // user + tail) stays byte-identical and provider prompt caches keep hitting; only the
+        // todo list (delta of what changed) and the usage line move between requests.
         final var state = "<session-state>\n"
-                + systemPromptBuilder.sessionState(prompt)
+                + systemPromptBuilder.sessionStateDelta()
                 + memoryRefresh(prompt, memoryVersionAtTurnStart)
                 + contextUsageLine(messages, toolsTokens)
                 + nudgeBlock(messages, toolsTokens)
@@ -1389,8 +1398,28 @@ public class AgentLoop {
         if (systemPromptBuilder.memoryVersion() == memoryVersionAtTurnStart) {
             return "";
         }
-        final var section = systemPromptBuilder.memorySection(prompt);
-        return section.isBlank() ? "" : "\n" + section + "\n";
+        // Mid-turn memory write: re-send only the facts that changed since the last tail
+        // (the durable full memory sits in the stable system prefix, built once per turn).
+        final var store = memoryStoreAccess();
+        if (store == null) {
+            return "";
+        }
+        final var diff = store.drainPendingDiff(currentSessionId);
+        if (diff.isEmpty()) {
+            // version bumped but nothing drained yet (external edit): fall back to full section
+            final var section = systemPromptBuilder.memorySection(prompt);
+            return section.isBlank() ? "" : "\n" + section + "\n";
+        }
+        final var sb = new StringBuilder("\n<memory-diff>\n");
+        for (final var fact : diff) {
+            sb.append(fact).append('\n');
+        }
+        sb.append("</memory-diff>\n");
+        return sb.toString();
+    }
+
+    private io.yupiik.ia.agent.core.memory.MemoryStore memoryStoreAccess() {
+        return systemPromptBuilder.memoryStore();
     }
 
     private void emitTurnMetrics(final String content, final long turnStartNanos) {
@@ -1400,6 +1429,7 @@ public class AgentLoop {
         }
         emit(turnMetrics(turnLlmCalls, turnThinkingMs, turnToolSumMs, turnToolWallMs, turnToolsRun, turnDurationMs));
         if (content != null) {
+            lastTurnEndedWithContent = !content.isBlank();
             emit(turnDone(content));
         }
     }

@@ -37,12 +37,15 @@ import java.util.regex.Pattern;
  */
 public class SyntaxHighlighter {
 
-    // a fence closes only on its own opening delimiter: a backreference to a
-    // non-participating group fails in Java, so each alternative only matches
-    // its own token; an info string may follow the language tag
-    private static final Pattern FENCE = Pattern.compile(
-            "(?m)^[ \\t]*(?:(?<bt>```)|(?<tt>~~~))(?<lang>[A-Za-z0-9_+.-]*)[^\\n]*\\n(?<body>.*?)^[ \\t]*(?:\\k<bt>|\\k<tt>)[ \\t]*$",
-            Pattern.DOTALL);
+    // Fenced code blocks are located by a linear line scanner ({@link #scanFences})
+    // instead of a DOTALL-lazy backreference regex. The old `(?<body>.*?)` pattern
+    // matched the whole region between the opening and closing fence by expanding
+    // one character at a time and re-testing the anchored close fence over the whole
+    // remaining tail on every step - quadratic on large fenced bodies (the busy path
+    // is exactly a long `---text``` tool output block). The scanner walks the region
+    // once line by line, so every character is examined a bounded number of times.
+    // Semantics are preserved: a fence closes only on its own delimiter, an info
+    // string may follow the language tag, and an opener with no close stays plain text.
 
     private static final int DEFAULT_MAX_LINE_LENGTH = 10_000;
     private static final int MAX_SPLIT_CACHE = 32;
@@ -527,38 +530,171 @@ public class SyntaxHighlighter {
         if (markdown == null || markdown.isBlank()) {
             return List.of();
         }
-        List<Segment> cached;
         synchronized (splitCache) {
-            cached = splitCache.get(markdown);
+            return splitLocked(markdown);
         }
+    }
+
+    private List<Segment> splitLocked(final String markdown) {
+        final var cached = splitCache.get(markdown);
         if (cached != null) {
             return cached;
         }
-        final var out = new ArrayList<Segment>();
-        final Matcher m = FENCE.matcher(markdown);
-        var last = 0;
-        while (m.find()) {
-            final var before = markdown.substring(last, m.start());
-            if (!before.isBlank()) {
-                out.add(new Segment(Segment.Type.TEXT, null, before));
-            }
-            out.add(new Segment(
-                    Segment.Type.CODE,
-                    m.group("lang") == null ? "" : m.group("lang").strip(),
-                    codeBody(m.group("body"))));
-            last = m.end();
+        // Full linear fence scan (no backtracking). The streaming frame cost is O(n) for the
+        // changed region; stable regions hit splitCache, and unchanged frames are short-circuited
+        // by ContentKey before split is even called, so the transcript never re-parses wholesale.
+        final var scanned = scanFences(markdown);
+        if (!scanned.pendingTail.isBlank()) {
+            scanned.committed.add(new Segment(Segment.Type.TEXT, null, scanned.pendingTail));
         }
-        if (last < markdown.length()) {
-            final var rest = markdown.substring(last);
-            if (!rest.isBlank()) {
-                out.add(new Segment(Segment.Type.TEXT, null, rest));
-            }
-        }
-        final var immutable = List.copyOf(out);
-        synchronized (splitCache) {
-            splitCache.put(markdown, immutable);
-        }
+        final var immutable = List.copyOf(scanned.committed);
+        splitCache.put(markdown, immutable);
         return immutable;
+    }
+
+    private static final class ScanResult {
+        final List<Segment> committed; // segments up to the last closed fence
+        final String pendingTail; // text after the last closed fence (may turn into CODE later)
+
+        private ScanResult(final List<Segment> committed, final String pendingTail) {
+            this.committed = committed;
+            this.pendingTail = pendingTail;
+        }
+    }
+
+    /**
+     * Linear, backtracking-free fence scan: walks the region line by line once, committing
+     * a {@code TEXT} segment for the text before a closing fence and a {@code CODE} segment for
+     * each fenced block. Every character is examined a bounded number of times, so the cost is
+     * O(n) for the whole region regardless of fence count or body size.
+     */
+    private static ScanResult scanFences(final String markdown) {
+        if (markdown.indexOf('`') < 0 && markdown.indexOf('~') < 0) {
+            // no fence marker anywhere: a single pending TEXT region, no committed segment
+            return new ScanResult(new ArrayList<>(), markdown);
+        }
+        final var committed = new ArrayList<Segment>();
+        final var n = markdown.length();
+        var textStart = 0;
+        // monotonic cursors: the first unscanned candidate line start for each delimiter's
+        // closing fence. close searches only move forward, so the whole scan is O(n).
+        int btCursor = 0;
+        int ttCursor = 0;
+        var lineStart = 0;
+        while (lineStart < n) {
+            final var nl = markdown.indexOf('\n', lineStart);
+            final var lineEnd = nl < 0 ? n : nl;
+            // an opener needs a newline-terminated line (a trailing "```" without "\n" never opens)
+            if (nl >= 0) {
+                final var delim = fenceDelim(markdown, lineStart, lineEnd);
+                if (delim != 0) {
+                    final var lang = fenceLang(markdown, lineStart, lineEnd);
+                    final var bodyStart = nl + 1;
+                    final var cursor = delim == '`' ? btCursor : ttCursor;
+                    final var closeStart = Math.max(cursor, bodyStart) >= n
+                            ? -1
+                            : nextClose(markdown, delim, Math.max(cursor, bodyStart), n);
+                    if (delim == '`') {
+                        btCursor = closeStart < 0 ? n : closeLineEnd(markdown, closeStart);
+                    } else {
+                        ttCursor = closeStart < 0 ? n : closeLineEnd(markdown, closeStart);
+                    }
+                    if (closeStart >= 0) {
+                        if (textStart < lineStart
+                                && !markdown.substring(textStart, lineStart).isBlank()) {
+                            committed.add(
+                                    new Segment(Segment.Type.TEXT, null, markdown.substring(textStart, lineStart)));
+                        }
+                        committed.add(new Segment(
+                                Segment.Type.CODE, lang, codeBody(markdown.substring(bodyStart, closeStart))));
+                        final var closeEnd = closeLineEnd(markdown, closeStart);
+                        textStart = closeEnd;
+                        lineStart = closeEnd;
+                        continue;
+                    }
+                    // opener never closes: it is plain text; keep scanning for a later fence
+                    lineStart = lineEnd + 1;
+                    continue;
+                }
+            }
+            lineStart = lineEnd + 1;
+        }
+        return new ScanResult(committed, markdown.substring(textStart));
+    }
+
+    /** Returns the opening-fence delimiter (`` ` `` or `~`) if the line opens a fence, else 0. */
+    private static char fenceDelim(final String md, final int start, final int end) {
+        var k = start;
+        while (k < end && (md.charAt(k) == ' ' || md.charAt(k) == '\t')) {
+            k++;
+        }
+        if (k + 3 <= end) {
+            final var c = md.charAt(k);
+            if ((c == '`' || c == '~') && md.charAt(k + 1) == c && md.charAt(k + 2) == c) {
+                return c;
+            }
+        }
+        return 0;
+    }
+
+    /** Language tag of a fence-opening line (the run of {@code [A-Za-z0-9_+.-]} right after the delimiter). */
+    private static String fenceLang(final String md, final int start, final int end) {
+        var k = start;
+        while (k < end && (md.charAt(k) == ' ' || md.charAt(k) == '\t')) {
+            k++;
+        }
+        k += 3; // skip the delimiter
+        final var langStart = k;
+        while (k < end && isLangChar(md.charAt(k))) {
+            k++;
+        }
+        return md.substring(langStart, k);
+    }
+
+    private static boolean isLangChar(final char c) {
+        return (c >= 'a' && c <= 'z')
+                || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9')
+                || c == '_'
+                || c == '+'
+                || c == '.'
+                || c == '-';
+    }
+
+    /**
+     * Char offset right after the closing-fence line (or the region end when it is the last line).
+     * The closing fence is {@code [ \t]*<delim><delim><delim>[ \t]*} alone on its line.
+     */
+    private static int closeLineEnd(final String md, final int closeLineStart) {
+        final var nl = md.indexOf('\n', closeLineStart);
+        return nl < 0 ? md.length() : nl + 1;
+    }
+
+    /** Whether the line starting at {@code lineStart} is a closing fence for {@code delim}. */
+    private static boolean isCloseLine(final String md, final int lineStart, final int lineEnd, final char delim) {
+        int a = lineStart;
+        while (a < lineEnd && (md.charAt(a) == ' ' || md.charAt(a) == '\t')) {
+            a++;
+        }
+        int b = lineEnd;
+        while (b > a && (md.charAt(b - 1) == ' ' || md.charAt(b - 1) == '\t')) {
+            b--;
+        }
+        return b - a == 3 && md.charAt(a) == delim && md.charAt(a + 1) == delim && md.charAt(a + 2) == delim;
+    }
+
+    /** Start of the next closing-fence line of {@code delim} at-or-after {@code from}, or -1 if none. */
+    private static int nextClose(final String md, final char delim, final int from, final int n) {
+        var line = from;
+        while (line < n) {
+            final var nl = md.indexOf('\n', line);
+            final var le = nl < 0 ? n : nl;
+            if (isCloseLine(md, line, le, delim)) {
+                return line;
+            }
+            line = le + 1;
+        }
+        return -1;
     }
 
     /**

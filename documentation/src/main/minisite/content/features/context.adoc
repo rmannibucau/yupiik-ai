@@ -172,6 +172,9 @@ The default, so `/context` and `/context out.txt` keep working unchanged.
 |The exact last request sent to the provider: every message with its full content,
 the assistant tool calls with their raw arguments, and the wire tool schemas.
 This is what the model really received, which the transcript is not.
+The tools section header summarizes the aggregate estimated token cost of all
+the wire schemas (`~N tokens estimated for all the tool schemas`); each per-tool
+block carries its own estimate too (`**parameters** (~N tokens estimated)`).
 
 |`next-request`
 |The request the next round would carry, rebuilt from the persisted session and the

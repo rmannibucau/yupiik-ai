@@ -70,6 +70,9 @@ final class LlmWire {
                 null,
                 request.reasoningEffort(),
                 request.stream(),
+                // yca opts out of server-side conversation storage (OpenAI `store`): no provider
+                // (freeinference included) is asked to retain the chat server-side.
+                false,
                 extensions);
     }
 

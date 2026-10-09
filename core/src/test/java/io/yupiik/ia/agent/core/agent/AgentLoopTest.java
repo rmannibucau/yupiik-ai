@@ -3990,7 +3990,9 @@ class AgentLoopTest {
         assertTrue(
                 secondTail.contains("fact after"),
                 "a mid-turn memory_write must refresh the volatile tail: " + secondTail);
-        assertTrue(secondTail.contains("<memory>"), "the refreshed tail must carry the memory section: " + secondTail);
+        assertTrue(
+                secondTail.contains("<memory-diff>"),
+                "the refreshed tail must carry the memory diff, not the whole section: " + secondTail);
     }
 
     /** A registry exposing one wire tool, so a captured payload has a non-empty tools list. */
@@ -4429,10 +4431,10 @@ class AgentLoopTest {
                         : promptBuilder,
                 new MemoryExtractor() {
                     @Override
-                    public void maybeExtract(final List<Message> messages) {}
+                    public void asyncExtractNow(final List<Message> messages) {}
 
                     @Override
-                    public void maybeExtract(final List<Message> messages, final ChatSettings settings) {}
+                    public void asyncExtractNow(final List<Message> messages, final ChatSettings settings) {}
                 },
                 new StatusReporter(),
                 new Emitter() {

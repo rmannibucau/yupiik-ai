@@ -137,23 +137,23 @@ public class SystemPromptBuilder {
         sb.append("- Prefer the provided tools over printing code for the user to apply.\n");
         sb.append("- Read files before editing them; keep edits minimal and focused.\n");
         sb.append(
-                "- Use write_todo to track multi-step work and keep it up to date; completed and cancelled items stay in the list until the user asks to clear it.\n");
+                "- Track multi-step work with write_todo; completed/cancelled items stay in the list until the user asks to clear it.\n");
         sb.append(
-                "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative and a request may end without one when nothing changed. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
+                "- The conversation carries <session-state> blocks with the current todo list, mode, date and memory; the most recent one is authoritative. Read it at the start of every turn: pending items are the task queue - continue with them unless the user redirects. Keep the list accurate with write_todo as work progresses.\n");
         sb.append(
-                "- The conversation may carry a <compacted-context> digest of earlier history: treat it as authoritative historical state; never reload, reconstruct or repeat actions already described in it - only call tools that serve the current task.\n");
+                "- A <compacted-context> digest of earlier history is authoritative: never reload or repeat actions already described in it.\n");
         if (configuration.pruning().nudgeThresholdPercent() > 0
                 && configuration.tools().manageContext() != null
                 && configuration.tools().manageContext().enabled()) {
             sb.append(
-                    "- The <session-state> tail reports the current context usage percentage and the prune/compaction thresholds; when it gets high, proactively call manage_context (action=prune or action=compact) instead of waiting for the hard limit.\n");
+                    "- When <session-state> shows context usage near the thresholds, proactively call manage_context (action=prune or action=compact) instead of waiting for the hard limit.\n");
         }
-        sb.append("- Use memory_write to persist durable facts, decisions or user preferences.\n");
+        sb.append("- Persist durable facts/decisions with memory_write.\n");
         sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
         sb.append(
-                "- Paths: always work with absolute paths; resolve any relative path the user mentions against its intended root to form the full path before using a tool.\n");
+                "- Work with absolute paths; resolve relative paths against their intended root before using a tool.\n");
         sb.append(
-                "- Target directory: if the user names an explicit directory for the task (for example \"generate/create/scaffold in <dir> ...\" or \"in /tmp/foo build ...\"), treat that directory as the target of the task and build there, regardless of where the tool was started. The working-directory repository is only where you launched; do not assume the task belongs in it, do not index it, and do not apply changes to it unless the user explicitly says so. If the task is a scaffold into an empty directory, create the project structure there from scratch and do not reuse the working-directory code.\n");
+                "- Target directory: if the user names an explicit directory for the task, treat it as the target and build there, regardless of where the tool was started; the working-directory repository is only where you launched. For a scaffold into an empty directory create the structure there from scratch.\n");
         appendTodoGuidance(sb);
         sb.append('\n');
         sb.append("You may invoke a tool only if its exact name appears in the `tools` field of this request. "
@@ -162,14 +162,11 @@ public class SystemPromptBuilder {
                 + "and propose the closest available tool instead of calling an unknown one.\n");
         sb.append('\n');
         sb.append("Tool usage policy:\n");
-        sb.append("- Use the dedicated search tools for code exploration: grep for content search, glob for file name "
-                + "patterns, read_file to read files, list_dir to list directories. Do NOT use bash for these "
-                + "(no `grep`/`rg`/`find`/`cat`/`ls`/`head`/`tail`/`sed` in bash): the dedicated tools are faster, "
-                + "skip build output and ignored directories, and return self-describing results. Reserve bash for "
-                + "actual system commands (git, mvn, npm, docker...).\n");
-        sb.append("- Batch independent tool calls in a single reply: when several searches or reads do not depend on "
-                + "each other, issue them all at once - consecutive read-only calls run concurrently, so N independent "
-                + "calls cost one round-trip. Only sequence calls that need previous results as inputs.\n");
+        sb.append(
+                "- Use the dedicated search tools for code exploration (grep, glob, read_file, list_dir); do NOT use "
+                        + "bash for grep/rg/find/cat/ls/head/tail/sed - reserve bash for real system commands (git, mvn, npm, docker...).\n");
+        sb.append("- Batch independent tool calls in one reply: consecutive read-only calls run concurrently, so N "
+                + "independent calls cost one round-trip. Only sequence calls that need previous results.\n");
         sb.append(
                 "- Avoid tiny repeated slices: when you need more context around a hit, read a larger window instead of many 30-line chunks.\n");
         sb.append('\n');
@@ -271,11 +268,45 @@ public class SystemPromptBuilder {
     }
 
     /**
+     * Renders only the part of the session state that is likely to have changed since the last
+     * request: the todo list. Date, mode and the memory version are stable within a turn/session
+     * and are already covered by the stable prefix or the dedup of {@code appendStateIfChanged};
+     * callers that want the full state use {@link #sessionState(String)} (first tail of a turn).
+     */
+    public String sessionStateDelta() {
+        final var sb = new StringBuilder();
+        sb.append("Date: ").append(LocalDate.now()).append('\n');
+        if (permissionService != null) {
+            sb.append("Mode: ").append(permissionService.mode().name()).append('\n');
+        }
+        if (todoStore != null) {
+            final var rendered = todoStore.render(5); // wire view: pending + 5 most recent done
+            if (!rendered.isBlank() && !"(empty)".equals(rendered)) {
+                sb.append("Current todo list:\n").append(rendered).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
      * The durable memory section, {@code "&lt;memory&gt;...&lt;/memory&gt;"} (capped and prompt-ranked).
      * Empty when memory is disabled or not stored.
+     * <p>
+     * The ranking query is the user prompt enriched with the current todo list: durable facts
+     * relevant to the active plan surface even when the last user message is terse.
      */
     public String memorySection(final String prompt) {
-        return memoryStore == null ? "" : memoryStore.promptSection(prompt, resolvedMemoryBudget());
+        if (memoryStore == null) {
+            return "";
+        }
+        final var query = new StringBuilder(prompt == null ? "" : prompt);
+        if (todoStore != null) {
+            final var todos = todoStore.render();
+            if (!todos.isBlank() && !"(empty)".equals(todos)) {
+                query.append(' ').append(todos);
+            }
+        }
+        return memoryStore.promptSection(query.toString(), resolvedMemoryBudget());
     }
 
     /**
@@ -285,6 +316,10 @@ public class SystemPromptBuilder {
      */
     public int memoryVersion() {
         return memoryStore == null ? -1 : memoryStore.version();
+    }
+    /** The underlying memory store, or {@code null} when memory is disabled. */
+    public MemoryStore memoryStore() {
+        return memoryStore;
     }
 
     /**

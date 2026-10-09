@@ -15,11 +15,13 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import io.yupiik.fusion.framework.api.configuration.Configuration;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.ia.agent.core.optimize.Optimizers;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Tool output optimization settings (rtk style token reduction).
@@ -61,7 +63,18 @@ public record OptimizeConfiguration(
                         "Per-tool output tuning, one field per processor; every entry carries an `enabled` flag "
                                 + "(true by default) to disable a single processor (identity passthrough). "
                                 + "Absent entries use the built-in defaults.")
-        ProcessorOutputConfiguration toolOutputs) {
+        ProcessorOutputConfiguration toolOutputs,
+
+        @Property(
+                documentation =
+                        "Shared framework/test-runner log-noise filter (yupiik-logging-jul, Spring Boot, Tomcat, "
+                                + "Jetty formats). `excludes` drops matching lines from the transcript; `includes` "
+                                + "keeps a line even when it also matches an exclude (include wins). Used by the maven "
+                                + "and gradle output processors (and reusable for spring-cli) so the massive runtime "
+                                + "INFO/debug logs of a test run do not bloat every subsequent LLM turn. By default "
+                                + "dropped levels are INFO/FINE/FINER/FINEST/CONFIG/DEBUG; WARNING/SEVERE/ERROR are "
+                                + "never dropped.")
+        LogNoiseConfiguration logNoise) {
 
     /**
      * @return true when the processor/command is disabled by the global {@code disabled} list
@@ -132,5 +145,17 @@ public record OptimizeConfiguration(
             }
         }
         return false;
+    }
+
+    /**
+     * Builds the {@link OptimizeConfiguration} with every nested default applied (in particular the
+     * {@link LogNoiseConfiguration} drop rules declared in {@code @Property(defaultValue=...)}), as
+     * the container would at startup with no {@code yca.optimize.*} property set. This is the
+     * defaults materialized from the config model — there is no separate runtime default constant.
+     */
+    public static OptimizeConfiguration defaults() {
+        return new CodingAgentConfiguration$FusionConfigurationFactory(Configuration.of(Map.of()))
+                .get()
+                .optimize();
     }
 }

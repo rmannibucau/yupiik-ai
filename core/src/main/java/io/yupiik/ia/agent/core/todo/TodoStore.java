@@ -124,11 +124,29 @@ public class TodoStore {
     }
 
     public String render() {
+        return render(Integer.MAX_VALUE);
+    }
+
+    /**
+     * Renders the todo list for the wire (session-state tail): pending/in-progress items always,
+     * completed/cancelled ones limited to the most recent {@code maxDone} so a long history does
+     * not get re-sent in full on every round. The store keeps the full list; only the wire view
+     * is capped.
+     */
+    public String render(final int maxDone) {
         if (todos.isEmpty()) {
             return "(empty)";
         }
         final var sb = new StringBuilder();
+        var done = 0;
         for (final var t : todos) {
+            final boolean isDone = "completed".equals(t.status()) || "cancelled".equals(t.status());
+            if (isDone && done >= maxDone) {
+                continue;
+            }
+            if (isDone) {
+                done++;
+            }
             sb.append(
                             switch (t.status() == null ? "" : t.status()) {
                                 case "in_progress" -> "[> ] ";

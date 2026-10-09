@@ -100,7 +100,7 @@ public record LlmConfiguration(
         int streamRetriesMaxAttempts,
 
         @Property(
-                defaultValue = "32000",
+                defaultValue = "16000",
                 documentation =
-                        "Global system prompt maximum character budget. The resolved cap is: per-model behavior > per-provider tuning > this value > a value derived from the provider context window (big windows keep ~32k, small windows shrink to fit the input budget).")
+                        "Global system prompt maximum character budget. The resolved cap is: per-model behavior > per-provider tuning > this value > a value derived from the provider context window (big windows keep ~16k with this default, small ones shrink to fit the input budget).")
         int systemPromptMaxChars) {}

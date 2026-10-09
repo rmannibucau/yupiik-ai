@@ -197,8 +197,7 @@ public class RunCommand implements Runnable {
                 () -> {
                     try {
                         if (!sessionStore.isEmpty(sessionId)) {
-                            runtime.loop()
-                                    .forceExtractNow(sessionStore.load(sessionId), runtime.chatSettings(), 5_000L);
+                            runtime.loop().forceExtractNow(sessionStore.load(sessionId), runtime.chatSettings());
                         }
                     } catch (final RuntimeException e) {
                         LOGGER.log(Level.FINE, "Shutdown memory extraction failed", e);

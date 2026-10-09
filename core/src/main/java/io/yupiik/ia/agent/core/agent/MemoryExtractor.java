@@ -41,21 +41,23 @@ import java.util.logging.Logger;
  * Extracts durable facts (user preferences, project decisions, long-lived
  * knowledge) out of a session conversation into the shared memory store.
  *
- * <p>Cost shaping: the end-of-turn hook runs at most once per
- * {@code memory.extractDebounceMs} per session, and only when at least
+ * <p>The end-of-turn hook ({@link #asyncExtractNow(List, ChatSettings)}) runs
+ * immediately after a turn ends - while the app sits idle waiting for the
+ * next user input - asynchronously and best-effort, and only when at least
  * {@code memory.extractMinChars} characters of <em>new</em> (not yet
  * extracted) user/assistant text accumulated since the last successful
  * extraction. Tool results, tool-call frames, the system prompt, compaction/
  * prune digests and the volatile {@code <session-state>} tail are excluded
- * from the excerpt: they carry no durable signal. A {@code close()} /
- * {@code forceExtractNow()} call persists the remaining delta synchronously
- * when the session stops (tab close, headless run end, shutdown hook) - the
- * deterministic counterpart of the ecosystems' idle-triggered extraction.</p>
+ * from the excerpt: they carry no durable signal. Because the extraction
+ * happens while the session is already idle, nothing is left to do at close:
+ * {@code forceExtractNow()} (session close) is then a watermark no-op, so a
+ * clean exit never blocks on the memory call.</p>
  *
  * <p>The watermark is an in-memory message-count: side-effect free on crash
- * (nothing to recover - a killed session simply never ran its forced pass),
- * and re-feeding already extracted messages on resume is harmless thanks to
- * the fuzzy deduplication in {@link MemoryStore}.</p>
+ * (nothing to recover - a killed session simply never ran its pass), and
+ * re-feeding already extracted messages on resume is harmless thanks to the
+ * fuzzy deduplication in {@link MemoryStore}. It guarantees the pending delta
+ * is extracted at most once until new messages appear.</p>
  */
 public class MemoryExtractor {
     private static final Logger LOGGER = Logger.getLogger(MemoryExtractor.class.getName());
@@ -112,7 +114,6 @@ public class MemoryExtractor {
     private final MemoryStore memoryStore;
     private final JsonMapper mapper;
     private final VirtualThreadExecutor executor;
-    private final AtomicLong lastRun = new AtomicLong();
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private final Emitter emitter;
     private final Clock clock;
@@ -162,32 +163,30 @@ public class MemoryExtractor {
     }
 
     /**
-     * End-of-turn hook: debounced (max once per {@code extractDebounceMs} per
-     * session), async, gated on the new-message delta. Most turns are no-ops
-     * (below {@code extractMinChars} of new text, or inside the debounce
-     * window).
+     * End-of-turn hook: fires immediately - no debounce - and best-effort, asynchronously, on
+     * the background executor. It runs while the app sits idle waiting for the next user input,
+     * so the memory LLM latency is invisible; the watermark guarantees the pending delta is
+     * extracted at most once until new messages appear, which is what makes the close-time
+     * forced pass a no-op. The {@code extractMinChars} threshold and the meaningful-delta gate
+     * are applied on the executor task, keeping the idle-hook itself a near-free call.
      */
-    public void maybeExtract(final List<Message> messages) {
-        maybeExtract(messages, ChatSettings.EMPTY);
+    public void asyncExtractNow(final List<Message> messages) {
+        asyncExtractNow(messages, ChatSettings.EMPTY);
     }
 
-    public void maybeExtract(final List<Message> messages, final ChatSettings settings) {
+    public void asyncExtractNow(final List<Message> messages, final ChatSettings settings) {
         if (!enabled()) {
-            return;
-        }
-        final var now = clock.millis();
-        final var last = lastRun.get();
-        if (now - last < configuration.memory().extractDebounceMs() || !lastRun.compareAndSet(last, now)) {
-            return;
-        }
-        // gate synchronously: a delta that is empty or below the min-chars threshold costs no task at all
-        if (!hasMeaningfulDelta(messages)) {
-            watermark.set(messages.size());
             return;
         }
         final var effective = settings == null ? ChatSettings.EMPTY : settings;
         executor.execute(() -> {
             try {
+                // a delta made only of tool frames/digests is a terminal skip: those messages
+                // will never become worthy, so the watermark advances and no call is ever made
+                if (!hasMeaningfulDelta(messages)) {
+                    watermark.set(messages.size());
+                    return;
+                }
                 doExtract(messages, effective, false);
             } catch (final RuntimeException e) {
                 if (LOGGER.isLoggable(Level.FINER)) {
@@ -203,12 +202,11 @@ public class MemoryExtractor {
     }
 
     /**
-     * Synchronous forced extraction, used at session close (disposeTab, run
-     * end, shutdown hook). Bypasses the debounce and the min-chars threshold,
-     * but still honors the watermark and the meaningful-delta gate: a session
-     * whose periodic pass already extracted everything costs nothing at close,
-     * and a short session still persists its facts instead of losing them to
-     * the JVM exit.
+     * Synchronous extraction used when the session stops (tab close, headless run end). With
+     * the end-of-turn hook covering the delta while the app was idle, this is normally a
+     * watermark no-op; it stays as the deterministic last-resort guarantee for sessions closed
+     * before their first turn ever finished (e.g. a prompt typed while the previous session
+     * still ran elsewhere).
      *
      * @return {@code true} when an extraction pass ran, {@code false} when
      *         there was nothing new to extract.
@@ -218,13 +216,8 @@ public class MemoryExtractor {
     }
 
     public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings) {
-        if (!enabled() || !hasMeaningfulDelta(messages)) {
-            return false;
-        }
-        final var effective = settings == null ? ChatSettings.EMPTY : settings;
         try {
-            doExtract(messages, effective, true);
-            return true;
+            return doExtractNow(messages, settings == null ? ChatSettings.EMPTY : settings, true);
         } catch (final RuntimeException e) {
             LOGGER.log(Level.FINE, "Forced memory extraction failed", e);
             return false;
@@ -232,43 +225,16 @@ public class MemoryExtractor {
     }
 
     /**
-     * Shutdown-hook variant: bound the wait to {@code timeoutMs} so an abrupt
-     * exit (SIGTERM/SIGINT when no signal handler is installed) is not blocked
-     * for the full provider timeout. {@code timeoutMs <= 0} waits indefinitely
-     * (synchronous pass). Returns {@code false} when the pass did not complete
-     * in time - the JVM halts right after the hooks anyway, so a dropped tail
-     * on the abrupt path is the accepted trade-off (the periodic pass covered
-     * it at most {@code extractDebounceMs} ago, and the clean close paths are
-     * synchronous and uncapped).
+     * Shared synchronous entry point behind {@link #forceExtractNow(List, ChatSettings)};
+     * {@code forced} makes the close-time pass bypass the {@code extractMinChars} threshold
+     * (a short session must not lose its facts when it closes).
      */
-    public boolean forceExtractNow(final List<Message> messages, final ChatSettings settings, final long timeoutMs) {
+    private boolean doExtractNow(final List<Message> messages, final ChatSettings settings, final boolean forced) {
         if (!enabled() || !hasMeaningfulDelta(messages)) {
             return false;
         }
-        final var effective = settings == null ? ChatSettings.EMPTY : settings;
-        if (timeoutMs <= 0) {
-            return forceExtractNow(messages, effective); // no bound: synchronous, wait as long as needed
-        }
-        try {
-            final var future = executor.submit(() -> {
-                doExtract(messages, effective, true);
-                return true;
-            });
-            return future.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
-        } catch (final java.util.concurrent.RejectedExecutionException e) {
-            // the executor was already shut down: run synchronously in the hook thread (blocking
-            // the exit a little longer is the durability price, rare and bounded by the provider)
-            return forceExtractNow(messages, effective);
-        } catch (final java.util.concurrent.TimeoutException e) {
-            LOGGER.log(Level.FINE, "Forced memory extraction did not complete within " + timeoutMs + "ms; dropped");
-            return false;
-        } catch (final InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        } catch (final java.util.concurrent.ExecutionException e) {
-            LOGGER.log(Level.FINE, "Forced memory extraction failed", e.getCause());
-            return false;
-        }
+        doExtract(messages, settings, forced);
+        return true;
     }
 
     private boolean enabled() {

@@ -21,6 +21,7 @@ import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -39,15 +40,25 @@ import java.util.concurrent.TimeUnit;
 public class BashTool implements EmbeddedTool {
     private final Emitter emitter;
     private final ProcessService processes;
+    private final int maxOutputChars;
+
+    public BashTool(
+            final Emitter emitter, final ProcessService processes, final CodingAgentConfiguration configuration) {
+        this.emitter = emitter;
+        this.processes = processes;
+        this.maxOutputChars = configuration.tools().maxOutputChars();
+    }
 
     public BashTool(final Emitter emitter, final ProcessService processes) {
         this.emitter = emitter;
         this.processes = processes;
+        this.maxOutputChars = 65536;
     }
 
     protected BashTool() {
         this.emitter = null;
         this.processes = null;
+        this.maxOutputChars = 65536;
     }
 
     @Override
@@ -57,12 +68,14 @@ public class BashTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Run a shell command (sh -c) and return its combined stdout/stderr. "
-                + "IMPORTANT: this tool is for terminal operations only (git, mvn, gradle, npm, docker...). "
-                + "Do NOT use it for file operations - reading, writing, editing, searching or finding files: "
-                + "use the dedicated read_file, grep, glob and list_dir tools instead, they are faster and filtered. "
-                + "Avoid `cd <dir> && <cmd>`: use the workdir parameter. Prefer && for dependent commands and "
-                + "batch independent commands as separate bash calls in the same reply.";
+        return "Run a shell command (sh -c) and return its combined stdout/stderr "
+                + "(truncated at maxOutputChars, " + toolOutputCapHuman() + "). "
+                + "For terminal operations (git, mvn, npm, docker...); file ops use the dedicated "
+                + "read_file/grep/glob/list_dir tools. Use the workdir parameter instead of `cd <dir> && <cmd>`.";
+    }
+
+    private String toolOutputCapHuman() {
+        return maxOutputChars >= 1000 ? (maxOutputChars / 1000) + "k chars" : maxOutputChars + " chars";
     }
 
     @Override
@@ -117,7 +130,7 @@ public class BashTool implements EmbeddedTool {
                 String line;
                 while ((line = r.readLine()) != null) {
                     synchronized (out) {
-                        if (out.length() < 400_000) {
+                        if (out.length() < maxOutputChars) {
                             out.append(line).append('\n');
                         }
                     }
@@ -163,7 +176,7 @@ public class BashTool implements EmbeddedTool {
         }
         if (!finished) {
             dispose(process);
-            return ToolResult.error("Command timed out after " + timeout + "s\n" + snapshot(out));
+            return ToolResult.error("Command timed out after " + timeout + "s\n" + snapshot(out, maxOutputChars));
         }
         try {
             reader.join(2000);
@@ -171,7 +184,7 @@ public class BashTool implements EmbeddedTool {
             Thread.currentThread().interrupt();
         }
         final var code = process.exitValue();
-        return ToolResult.ok(snapshot(out) + "\nExit code: " + code);
+        return ToolResult.ok(snapshot(out, maxOutputChars) + "\nExit code: " + code);
     }
 
     /** Kills and reaps the whole process tree through the service (null-safe for standalone tests). */
@@ -183,10 +196,12 @@ public class BashTool implements EmbeddedTool {
         }
     }
 
-    private static String snapshot(final StringBuilder out) {
+    private static String snapshot(final StringBuilder out, final int maxOutputChars) {
         synchronized (out) {
             final var s = out.toString();
-            return s.length() > 400_000 ? s.substring(0, 400_000) + "\n... output truncated" : s.stripTrailing();
+            return s.length() > maxOutputChars
+                    ? s.substring(0, maxOutputChars) + "\n... output truncated"
+                    : s.stripTrailing();
         }
     }
 }

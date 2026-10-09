@@ -125,6 +125,17 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
   <div class="col-12 col-lg-4 py-3">
     <div class="card shadow-sm">
       <div class="card-body">
+        <h5 class="card-title"><a href="features/memory.html">Memory pipeline</a></h5>
+        <div class="card-text">
+          How durable facts are written, ranked and injected: scopes, BM25 selection, budget and the per-session diff.
+        </div>
+        <a title="Memory" class="card-link-mask" href="features/memory.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
         <h4 class="card-title mb-3">
           <span class="theme-icon-holder card-icon-holder mr-2 category-default">
             <i class="fas fa-user-shield"></i>
@@ -263,6 +274,21 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
           Index the local Maven repository so the agent never rediscovers library usage.
         </div>
         <a title="Maven repository knowledge" class="card-link-mask" href="features/maven-knowledge.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title"><a href="features/provider-tuning.html">Provider tuning</a></h5>
+        <div class="card-text">
+          Reasoning effort, output budget, variants and the per-family implicit defaults - with the opencode wire parity reference.
+        </div>
+        <a title="Provider tuning" class="card-link-mask" href="features/provider-tuning.html"></a>
+      </div>
+    </div>
+  </div>
+
       </div>
     </div>
   </div>

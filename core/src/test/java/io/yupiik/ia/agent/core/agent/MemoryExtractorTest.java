@@ -73,7 +73,7 @@ class MemoryExtractorTest {
         map.put("yca.memory.maxChars", "8000");
         map.put("yca.memory.maxRatio", "0.2");
         // the tests feed short single messages; disable the min-chars gate so the
-        // debounced periodic path actually fires (the gate itself has its own test)
+        // async extraction path actually fires (the gate itself has its own test)
         map.put("yca.memory.extractMinChars", "0");
         return TestConfigs.codingAgent(map);
     }
@@ -120,7 +120,7 @@ class MemoryExtractorTest {
                 null,
                 "s-test",
                 null);
-        extractor.maybeExtract(List.of(Message.user("user said: the project now uses tabs")), ChatSettings.EMPTY);
+        extractor.asyncExtractNow(List.of(Message.user("user said: the project now uses tabs")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
         // the notice fires before the snippet write: wait for the file to be updated
         final var projectFile = store.projectFile();
@@ -189,7 +189,7 @@ class MemoryExtractorTest {
                 null,
                 "s-test",
                 null);
-        extractor.maybeExtract(List.of(Message.user("user said: we use tabs now")), ChatSettings.EMPTY);
+        extractor.asyncExtractNow(List.of(Message.user("user said: we use tabs now")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
         final var projectFile = store.projectFile();
         final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
@@ -267,9 +267,9 @@ class MemoryExtractorTest {
 
     @Test
     void minCharsGateSkipsTinyDeltas() throws Exception {
-        // periodic extraction (maybeExtract) honors memory.extractMinChars: a tiny delta is not
+        // end-of-turn extraction (asyncExtractNow) honors memory.extractMinChars: a tiny delta is not
         // worth an LLM call. The forced path (forceExtractNow, session close) bypasses the gate,
-        // so this only exercises the periodic path.
+        // so this only exercises the end-of-turn path.
         final var config = config(home);
         final var store = new MemoryStore(config);
         final var calls = new java.util.concurrent.atomic.AtomicInteger();
@@ -301,7 +301,7 @@ class MemoryExtractorTest {
                 "s-min",
                 null);
         // re-enable the default 1000-char gate for this test: config() sets it to 0 so the
-        // debounced periodic tests fire, but this test wants the gate active
+        // async extraction tests fire, but this test wants the gate active
         final var map = new HashMap<String, String>();
         map.put("yca.storageHome", home.toString());
         map.put("yca.workingDir", home.toString());
@@ -326,10 +326,10 @@ class MemoryExtractorTest {
                 null,
                 "s-min",
                 null);
-        // tiny delta below the default 1000-char gate: no call (periodic path only)
-        gated.maybeExtract(List.of(Message.user("hi")), ChatSettings.EMPTY);
-        Thread.sleep(200); // give the async periodic task a chance to (not) run
-        assertEquals(0, calls.get(), "a tiny delta must not fire a periodic extraction");
+        // tiny delta below the default 1000-char gate: no call (end-of-turn path only)
+        gated.asyncExtractNow(List.of(Message.user("hi")), ChatSettings.EMPTY);
+        Thread.sleep(200); // give the async task a chance to (not) run
+        assertEquals(0, calls.get(), "a tiny delta must not fire an end-of-turn extraction");
     }
 
     @Test
@@ -388,7 +388,7 @@ class MemoryExtractorTest {
     }
 
     @Test
-    void debounceThrottlesPeriodicExtraction() throws Exception {
+    void asyncExtractRunsImmediatelyButTheWatermarkDedups() throws Exception {
         final var config = config(home);
         final var store = new MemoryStore(config);
         final var calls = new java.util.concurrent.atomic.AtomicInteger();
@@ -417,13 +417,16 @@ class MemoryExtractorTest {
                 },
                 Clock.systemUTC(),
                 null,
-                "s-debounce",
+                "s-async",
                 null);
-        // two turns within the 10-minute window: the second must be throttled (no second call)
-        extractor.maybeExtract(List.of(Message.user("one")), ChatSettings.EMPTY);
-        extractor.maybeExtract(List.of(Message.user("two")), ChatSettings.EMPTY);
-        Thread.sleep(300); // give the async task a chance (both calls would have fired otherwise)
-        assertEquals(1, calls.get(), "the debounce must allow at most one extraction per window");
+        // the end-of-turn hook is not debounced: the first call must run right away
+        extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
+        Thread.sleep(300); // give the async task time to run
+        assertEquals(1, calls.get(), "the async pass must run immediately (no debounce)");
+        // a second hook on the same messages is a watermark no-op: the delta was already extracted
+        extractor.asyncExtractNow(List.of(Message.user("two")), ChatSettings.EMPTY);
+        Thread.sleep(300);
+        assertEquals(1, calls.get(), "the watermark must dedup the already-extracted delta");
     }
 
     @Test

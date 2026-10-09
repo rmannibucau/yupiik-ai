@@ -122,7 +122,14 @@ public class McpManager {
         close("yca");
         toolsByServer.remove("yca");
         // Built-in tools are served in-process: no MCP round-trip, error ToolResult(s) keep their exact output.
-        toolsByServer.put("yca", new ArrayList<>(localTools == null ? List.of() : localTools));
+        // An optional allow/deny-list slims the wire tool schemas (see features/provider-tuning).
+        final var builtin = configuration.tools().builtin();
+        final var filtered = localTools == null
+                ? List.<EmbeddedTool>of()
+                : localTools.stream()
+                        .filter(t -> builtin.keeps(t.name()))
+                        .collect(java.util.stream.Collectors.toList());
+        toolsByServer.put("yca", new ArrayList<>(filtered));
     }
 
     private void startServer(final McpServerConfiguration server) {

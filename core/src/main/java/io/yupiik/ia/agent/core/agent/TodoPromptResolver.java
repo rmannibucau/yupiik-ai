@@ -55,41 +55,27 @@ public class TodoPromptResolver {
 
     private static final String OPENAI = """
             Task Management:
-            Use the write_todo tool to manage and plan tasks. Use it frequently so your todos track your progress and give the user visibility into it. It is also very useful to break a larger task down into smaller concrete steps.
-            It is critical that you mark a todo as completed as soon as the task it describes is actually done, including any verification. Do not batch up several todos before marking them completed, and keep the in_progress statuses accurate - one or several may be in_progress at once when you work them in parallel. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+            Use write_todo to manage and plan tasks: break larger tasks into concrete steps and mark each completed as soon as it is done (including verification), cancelled when unnecessary. Do not batch up several todos. You may have several in_progress at once when you work in parallel. Completed/cancelled stay in the list as progress history. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String OPENAI_PLAN = """
             Task Management (plan mode):
-            The todo list is the plan, not a progress report: record it with write_todo and keep every item 'pending' - statuses only advance in build mode, once a step is actually executed.
-            Whenever a follow-up message changes the plan (scope, steps, approach, trade-offs), update the list in the same turn with write_todo so it always mirrors the latest agreed plan.
-            Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: it must match the plan you just agreed on.""";
+            The todo list is the plan: record it with write_todo and keep every item 'pending' - statuses only advance in build mode. Whenever a follow-up changes the plan, update the list in the same turn so it always mirrors the plan you just agreed on. Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them. Consult the todo list in the <session-state> block at the start of each turn: it must match the plan you just agreed on.""";
 
     private static final String ANTHROPIC = """
             Task Management:
-            You have access to the write_todo tool to help you manage and plan tasks. Use it VERY frequently to ensure you are tracking your tasks and giving the user visibility into your progress. It is also EXTREMELY helpful for planning, and for breaking down larger complex tasks into smaller steps; if you do not use it when planning you may forget to do important tasks - and that is unacceptable.
-            It is critical that you mark todos as completed as soon as you are done with a task. Do not batch up multiple tasks before marking them as completed, and work through the whole list to completion. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+            You have access to the write_todo tool to help you manage and plan tasks. Use it VERY frequently: it is EXTREMELY helpful for planning and breaking down complex tasks, and without it you may forget important steps. Mark todos completed as soon as done, cancelled when unnecessary - never drop history. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String ANTHROPIC_PLAN = """
             Task Management (plan mode):
-            The todo list IS the plan: use write_todo EXTREMELY frequently to record it and to keep it in sync with the discussion, so the user can watch the plan evolve and approve it. Every item must stay 'pending' - statuses only advance in build mode, once a step is actually executed.
-            Whenever a follow-up message refines the plan (scope, steps, approach, trade-offs), update the list in the same turn so it always mirrors the latest agreed plan.
-            Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
+            The todo list IS the plan: use write_todo EXTREMELY frequently to record it and keep it in sync with the discussion. Every item must stay 'pending' - statuses only advance in build mode. Update the list in the same turn whenever the plan changes (scope, steps, approach, trade-offs). Completed/cancelled items from build sessions are the progress history: keep them, never drop them. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
 
     private static final String GEMINI = """
             Task Management:
-            Use the write_todo tool to keep a structured task list for multi-step work. Mark each item in_progress as you start it and completed as soon as it is really done - several items may be in_progress at once when you work them in parallel, and do not batch completion updates. Prefer writing a todo when the request involves several distinct steps. If a step turns out to be unnecessary, mark it cancelled instead of leaving it pending. Completed and cancelled todos stay in the list: they are the progress history and must never be silently dropped.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
+            Use the write_todo tool to keep a structured task list for multi-step work. Mark items in_progress as you start them and completed as soon as really done (several may be in_progress in parallel; do not batch completion updates). Mark unnecessary steps cancelled; keep completed/cancelled as history. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending a turn: pending items are your queue.""";
 
     private static final String GEMINI_PLAN = """
             Task Management (plan mode):
-            Keep the todo list as the structured plan: every item 'pending' - statuses advance only in build mode, once a step is actually executed.
-            Use write_todo to record the plan and to update it whenever a follow-up message changes it (scope, steps, approach, trade-offs), so the list always mirrors the latest agreed plan.
-            Completed and cancelled items recorded during build sessions are the progress history: keep them, never drop them.
-            Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
+            Keep the todo list as the structured plan: every item 'pending' - statuses advance only in build mode. Use write_todo to record the plan and update it in the same turn whenever a follow-up changes it (scope, steps, approach, trade-offs). Completed/cancelled items from build sessions are the history: keep them. Consult the todo list in the <session-state> block at the start of each turn and re-check it before ending one: it must match the plan you just agreed on.""";
 
     private static final List<Family> FAMILIES = List.of(
             new Family("anthropic", List.of("anthropic", "claude"), ANTHROPIC, ANTHROPIC_PLAN),

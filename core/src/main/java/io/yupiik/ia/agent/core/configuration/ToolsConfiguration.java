@@ -39,6 +39,15 @@ public record ToolsConfiguration(
         boolean parallelReadonly,
 
         @Property(
+                defaultValue = "65536",
+                documentation =
+                        "Maximum characters of a bash command output kept in the transcript (and returned to the model);"
+                                + " beyond it the output is truncated with a marker. Mirrors opencode's ~50 KiB tool-output"
+                                + " cap (64 KiB default keeps a little headroom) so a verbose test/build log cannot bloat"
+                                + " every later LLM turn (see also optimize.logNoise for framework log filtering).")
+        int maxOutputChars,
+
+        @Property(
                 defaultValue = "false",
                 documentation =
                         "When enabled, the code_resolve tool also appends its short Maven artifact-knowledge note"

@@ -285,6 +285,62 @@ class SyntaxHighlighterTest {
     }
 
     @Test
+    void unterminatedFenceStaysPlainText() {
+        // no closing fence: the whole region is one TEXT segment, matching the regex behavior
+        final var segments = highlighter.split("before\n```\nnever closes");
+        assertEquals(1, segments.size());
+        assertEquals(SyntaxHighlighter.Segment.Type.TEXT, segments.get(0).type());
+        assertEquals("before\n```\nnever closes", segments.get(0).text());
+    }
+
+    @Test
+    void openerWithoutCloseIsTextThenLaterClosedFenceStillResolves() {
+        // the first ``` has no close, so it is plain text; the later ~~~ fence closes normally
+        final var segments = highlighter.split("AAA\n```\nBBB\n```x\n~~~\nCCC\n~~~\nDDD");
+        assertEquals(3, segments.size());
+        assertEquals(SyntaxHighlighter.Segment.Type.TEXT, segments.get(0).type());
+        assertEquals("AAA\n```\nBBB\n```x", segments.get(0).text().strip());
+        assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(1).type());
+        assertEquals("", segments.get(1).language());
+        assertEquals("CCC", segments.get(1).text());
+        assertEquals(SyntaxHighlighter.Segment.Type.TEXT, segments.get(2).type());
+        assertEquals("DDD", segments.get(2).text().strip());
+    }
+
+    @Test
+    void largeFencedBodySplitsLinearlyWithinBudget() {
+        // the old DOTALL-lazy backreference regex was quadratic on a large fenced body (tens of
+        // seconds even for a few hundred KB); the line scanner must finish far inside the budget
+        // even for a multi-megabyte block
+        final var body = "line " + "x".repeat(200) + "\n";
+        final var bigBlock = "```text\n" + body.repeat(30_000) + "```\n";
+        assertTimeoutPreemptively(
+                Duration.ofSeconds(2),
+                () -> {
+                    final var segments = highlighter.split(bigBlock);
+                    assertEquals(1, segments.size());
+                    assertEquals(
+                            SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
+                },
+                "a large fenced body must be split in linear (not quadratic) time");
+    }
+
+    @Test
+    void appendOnlyGrowthKeepsSplittingCorrectly() {
+        // the growing trailing answer is re-scanned each change; it must stay linear and correct
+        // (the code block keeps its CODE segment and the appended prose its trailing TEXT one)
+        var stream = "```java\nint a = 1;\n```\n";
+        for (var i = 0; i < 2_000; i++) {
+            stream += " more prose " + i + " ";
+            final var segments = highlighter.split(stream);
+            assertEquals(SyntaxHighlighter.Segment.Type.CODE, segments.get(0).type());
+            assertEquals(
+                    SyntaxHighlighter.Segment.Type.TEXT,
+                    segments.get(segments.size() - 1).type());
+        }
+    }
+
+    @Test
     void themeChangeInvalidatesCachedHighlights() {
         final var oneDark = highlighter.highlightLines("java", "public class A");
         highlighter.theme(CodeTheme.ONE_LIGHT);

@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.configuration;
 
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
@@ -23,6 +24,7 @@ import java.util.List;
 
 @RootConfiguration("yca")
 @JsonModel
+@ApplicationScoped
 public record CodingAgentConfiguration(
         @Property(
                 defaultValue = "\"~/.yupiik/coding-agent\"",

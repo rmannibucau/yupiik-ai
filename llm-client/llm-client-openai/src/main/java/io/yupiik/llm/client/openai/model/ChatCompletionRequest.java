@@ -63,4 +63,6 @@ public record ChatCompletionRequest(
         @JsonProperty("reasoning_effort") String reasoningEffort,
         // object ({"type":"json_object"} or {"type":"json_schema","json_schema":{...}})
         @JsonProperty("response_format") Object responseFormat,
+        // server-side conversation storage opt-out (OpenAI `store`): false = do not retain
+        @JsonProperty("store") Boolean store,
         @JsonOthers Map<String, Object> others) {}

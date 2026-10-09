@@ -36,6 +36,7 @@ import java.util.Map;
  * @param responseFormat response format / structured output (provider-specific value).
  * @param reasoningEffort reasoning effort hint.
  * @param stream whether to stream the answer.
+ * @param store whether the provider may retain the conversation server-side (OpenAI `store`; false = opt-out, null = provider default).
  * @param extensions provider-specific fields merged verbatim into the wire payload.
  */
 public record LlmRequest(
@@ -50,7 +51,38 @@ public record LlmRequest(
         Object responseFormat,
         String reasoningEffort,
         Boolean stream,
+        Boolean store,
         Map<String, Object> extensions) {
+
+    /** Legacy 12-arg form (no {@code store}); defaults server-side storage to provider default. */
+    public LlmRequest(
+            final String model,
+            final List<LlmMessage> messages,
+            final Double temperature,
+            final Double topP,
+            final Integer maxTokens,
+            final List<String> stop,
+            final List<LlmTool> tools,
+            final Object toolChoice,
+            final Object responseFormat,
+            final String reasoningEffort,
+            final Boolean stream,
+            final Map<String, Object> extensions) {
+        this(
+                model,
+                messages,
+                temperature,
+                topP,
+                maxTokens,
+                stop,
+                tools,
+                toolChoice,
+                responseFormat,
+                reasoningEffort,
+                stream,
+                null,
+                extensions);
+    }
 
     /**
      * A request with no optional fields set.
@@ -60,7 +92,7 @@ public record LlmRequest(
      * @return the request.
      */
     public static LlmRequest of(final String model, final List<LlmMessage> messages) {
-        return new LlmRequest(model, messages, null, null, null, null, null, null, null, null, null, Map.of());
+        return new LlmRequest(model, messages, null, null, null, null, null, null, null, null, null, false, Map.of());
     }
 
     /**
@@ -82,6 +114,7 @@ public record LlmRequest(
                 responseFormat,
                 reasoningEffort,
                 stream,
+                store,
                 extensions);
     }
 
@@ -104,6 +137,7 @@ public record LlmRequest(
                 responseFormat,
                 reasoningEffort,
                 stream,
+                store,
                 extensions);
     }
 
@@ -126,6 +160,7 @@ public record LlmRequest(
                 responseFormat,
                 reasoningEffort,
                 stream,
+                store,
                 extensions);
     }
 
@@ -148,6 +183,7 @@ public record LlmRequest(
                 responseFormat,
                 reasoningEffort,
                 stream,
+                store,
                 extensions);
     }
 }
