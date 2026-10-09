@@ -77,6 +77,54 @@ rounds instead (measured: capping Q3 at 6000 made it *slower* - 521s vs
 in `models[].options` / `tuning` / `providerSpecificOptions`. yca does not
 force sampling values.
 
+== Azure AI Gateway (Anthropic-compatible) reasoning
+
+Azure AI Gateway / Azure AI Foundry can host Claude behind the Anthropic
+Messages API on a `/messages` route. yca detects the anthropic wire
+automatically from a base URL ending in `/messages` (or via an explicit
+`api: anthropic`) and lets you configure the extended reasoning shape the
+gateway understands - adaptive (or enabled) thinking plus an `output_config`
+effort - through `providerSpecificOptions`:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [{
+      "id": "azure-claude",
+      "baseUrl": "https://<region>.inference.ai.azure.com/<project>/anthropic/v1/messages",
+      "api": "anthropic",
+      "model": "$azure-claude/claude-sonnet-5-5",
+      "providerSpecificOptions": {
+        "thinking": { "type": "adaptive", "display": "summarized" },
+        "output_config": { "effort": "max" }
+      }
+    }]
+  }
+}
+----
+
+The `thinking`/`output_config` objects are merged verbatim into the top level
+of every requests payload for that provider, mirroring the native Anthropic
+extended-thinking request (`max_tokens` headroom is applied as usual). For the
+modern Claude families (claude-4.7+ / claude-5.x, plus kimi/glm/minimax on the
+anthropic wire) the same shape is also exposed implicitly as the `low`..`max`
+adaptive tiers of the `/model` variant selector - selecting a variant is
+equivalent to configuring `output_config.effort`.
+
+Precedence: an explicitly configured reasoning shape (provider- or model-level
+`providerSpecificOptions`) *fully overrides* the selected variant's
+`thinking`/`output_config`. The variant extras do not leak extra sub-keys (eg.
+a default `display`) into an explicitly configured object - explicit
+configuration always wins verbatim.
+
+When thinking is on, the Anthropic gateway reports the hidden reasoning spend
+in `output_tokens_details.thinking_tokens`. yca surfaces it into the token
+metrics, so `/metrics full` shows the thinking/visible breakdown and the
+session reasoning total for the anthropic wire exactly like it does for
+OpenAI `reasoning_tokens`. The thinking text itself streams live
+(`thinking_delta`) so you see the chain of thought as it is produced.
+
 == Benchmark parity with opencode (proxy capture) <a id="benchmark-parity"></a>
 
 On 2026-10-09 we captured both tools' actual first request to

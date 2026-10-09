@@ -6,6 +6,12 @@
   <name>YCA :: TUI</name>
   <description>YCA terminal user interface based on TamboUI and fusion-cli.</description>
 
+  <properties>
+    <graalvm.version>25.0.2</graalvm.version>
+    <image.registry>ossyupiik</image.registry>
+    <image.name>${image.registry}/coding-agent-${project.artifactId}:${project.version}</image.name>
+  </properties>
+
   <dependencies>
     <dependency>
       <groupId>io.yupiik.ia.agent</groupId>
@@ -137,4 +143,62 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <id>native</id>
+      <build>
+        <plugins>
+          <plugin>
+            <!--
+            mvn [process-classes] arthur:native-image -Pnative (for binaries)
+            mvn arthur:native-image arthur:docker -Pnative (for build docker image with binaries)
+            mvn arthur:native-image arthur:image -Pnative (for build OCI image)
+            -->
+            <groupId>org.apache.geronimo.arthur</groupId>
+            <artifactId>arthur-maven-plugin</artifactId>
+            <version>1.0.9</version>
+            <configuration>
+              <main>io.yupiik.fusion.framework.api.main.Launcher</main>
+              <usePackagedArtifact>true</usePackagedArtifact>
+              <graalVersion>${graalvm.version}</graalVersion>
+              <graalDownloadUrl>https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-${graalvm.version}/graalvm-community-jdk-${graalvm.version}_linux-x64_bin.tar.gz</graalDownloadUrl>
+              <buildStaticImage>false</buildStaticImage>
+              <useLDD>true</useLDD>
+              <includeNatives>false</includeNatives>
+              <fallbackMode>no</fallbackMode>
+              <enableAllSecurityServices>false</enableAllSecurityServices>
+              <scanningExcludedArtifacts>*</scanningExcludedArtifacts>
+              <customOptions>
+                <customOption>-Djava.util.logging.manager=io.yupiik.logging.jul.YupiikLogManager</customOption>
+                <customOption>-Djava.net.preferIPv4Stack=true</customOption>
+                <customOption>-Duser.language=en</customOption>
+                <customOption>-Duser.country=US</customOption>
+                <customOption>-Dfile.encoding=UTF-8</customOption>
+                <customOption>-H:+UnlockExperimentalVMOptions</customOption>
+                <customOption>-H:+SharedArenaSupport</customOption>
+                <customOption>--initialize-at-build-time=io.yupiik.logging.jul.YupiikLogManager</customOption>
+              </customOptions>
+              <resources>
+                <resource>
+                  <pattern>dev/tamboui/tui/bindings/*\.properties</pattern>
+                </resource>
+              </resources>
+              <!-- image configuration -->
+              <to>${image.name}</to>
+              <creationTimestamp>-1</creationTimestamp>
+              <labels>
+                <org.opencontainers.image.created>${maven.build.timestamp}</org.opencontainers.image.created>
+                <org.opencontainers.image.authors>Yupiik</org.opencontainers.image.authors>
+                <org.opencontainers.image.vendor>Yupiik</org.opencontainers.image.vendor>
+                <org.opencontainers.image.title>${project.artifactId}</org.opencontainers.image.title>
+                <org.opencontainers.image.description>${project.description}</org.opencontainers.image.description>
+                <org.opencontainers.image.version>${project.version}</org.opencontainers.image.version>
+              </labels>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

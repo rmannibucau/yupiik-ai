@@ -26,6 +26,9 @@ dependency-reduced-pom.xml
 # structural code graph local cache — regenerable, not committed.
 /.yca/
 
+# spotless incremental index, kept outside target so `mvn clean` does not force a full re-check.
+/.mvn/.spotless/
+
 # bench local scripts
 scripts
 

@@ -117,4 +117,6 @@ Memory hygiene is built in:
   non-streaming request with an SSE body despite `"stream": false`: yca
   detects that content-type and reconstructs the completion from the frames,
   so background calls (memory extraction, compaction, todo seeding) keep
-  working on such gateways.
+  working on such gateways. The reconstructed usage carries the same
+  `output_tokens_details.thinking_tokens` reasoning breakdown the streaming
+  path does.

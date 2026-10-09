@@ -310,6 +310,36 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void providerReasoningConfigFullyOverridesTheVariantExtras() throws Exception {
+        // an explicitly configured reasoning shape (thinking/output_config) must win verbatim over the
+        // selected variant extras: the variant must not fill in missing sub-keys (e.g. a 'display')
+        final var cfg = configuration(
+                Map.of(
+                        "yca.provider.providers.0.providerSpecificOptions",
+                        "{\"thinking\":{\"type\":\"adaptive\"},\"output_config\":{\"effort\":\"max\"}}",
+                        "yca.provider.providers.0.tuning.variants.length",
+                        "1",
+                        "yca.provider.providers.0.tuning.variants.0.name",
+                        "adaptive-high",
+                        "yca.provider.providers.0.tuning.variants.0.extra",
+                        "{\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"high\"}}"));
+        client.close();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        final var settings = ChatSettings.EMPTY.withVariant("adaptive-high");
+        assertEquals(
+                "hello there",
+                client.chat(request().withSettings(settings), () -> false)
+                        .message()
+                        .content());
+        final var body = bodies.get(bodies.size() - 1);
+        assertTrue(body.contains("\"type\":\"adaptive\""), body);
+        assertTrue(body.contains("\"output_config\""), body);
+        assertTrue(body.contains("\"effort\":\"max\""), "the user effort must win over the variant's high: " + body);
+        assertFalse(body.contains("\"display\":\"summarized\""), "the variant's display must not leak in: " + body);
+    }
+
+    @Test
     void modelsListsIds() throws Exception {
         assertEquals(List.of("model-a", "model-b"), client.models().ids());
     }

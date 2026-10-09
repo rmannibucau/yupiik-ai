@@ -186,6 +186,46 @@ class AnthropicDialectTest {
     }
 
     @Test
+    void nonStreamingChatSurfacesTheThinkingTokensBreakdown(final JsonMapper mapper) throws Exception {
+        // Anthropic-compatible gateways (eg. Azure AI Gateway) report the hidden thinking tokens in
+        // output_tokens_details.thinking_tokens; they must reach the neutral usage.reasoningTokens
+        server.createContext(
+                "/v1/messages",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                                + "\"content\":[{\"type\":\"thinking\",\"thinking\":\"hidden\"},{\"type\":\"text\",\"text\":\"answer\"}],"
+                                + "\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                                + "\"usage\":{\"input_tokens\":5,\"output_tokens\":8,\"output_tokens_details\":{\"thinking_tokens\":6}}}"));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals("answer", response.text());
+        assertEquals(6L, response.usage().reasoning(), "thinking_tokens must surface as reasoning tokens");
+        assertEquals(8L, response.usage().completion());
+        assertEquals(13L, response.usage().total());
+    }
+
+    @Test
+    void nonStreamingChatWithoutDetailsReportsZeroReasoning(final JsonMapper mapper) throws Exception {
+        server.createContext(
+                "/v1/messages",
+                exchange -> respond(
+                        exchange,
+                        200,
+                        "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                                + "\"content\":[{\"type\":\"text\",\"text\":\"hello\"}],\"stop_reason\":\"end_turn\","
+                                + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}"));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmResponse response =
+                dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(0L, response.usage().reasoning(), "no breakdown means no reasoning tokens");
+    }
+
+    @Test
     void promptCacheCanBeDisabledViaExtensions(final JsonMapper mapper) throws Exception {
         server.createContext("/v1/messages", exchange -> {
             reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
@@ -411,6 +451,50 @@ class AnthropicDialectTest {
                         new LlmStreamEvent.ToolCallDelta(1, null, null, "{\"command\":"),
                         new LlmStreamEvent.ToolCallDelta(1, null, null, "\"ls\"}"),
                         new LlmStreamEvent.End("tool_calls", new Usage(5L, 3L, 8L))),
+                events);
+    }
+
+    @Test
+    void streamEmitsThinkingDeltasAndSurfacesThinkingTokens(final JsonMapper mapper) throws Exception {
+        // adaptive/enabled thinking streams thinking_delta frames (hidden chain-of-thought) and the
+        // message_delta usage reports the reasoning breakdown via output_tokens_details.thinking_tokens
+        final var sse = String.join(
+                "\n",
+                "event: message_start",
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}",
+                "",
+                "event: content_block_start",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"let me think\"}}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}",
+                "",
+                "event: content_block_stop",
+                "data: {\"type\":\"content_block_stop\",\"index\":0}",
+                "",
+                "event: content_block_delta",
+                "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}",
+                "",
+                "event: message_delta",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"input_tokens\":5,\"output_tokens\":8,\"output_tokens_details\":{\"thinking_tokens\":6}}}",
+                "",
+                "event: message_stop",
+                "data: {\"type\":\"message_stop\"}",
+                "");
+        server.createContext("/v1/messages", exchange -> respondSse(exchange, sse));
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        assertEquals(
+                List.of(
+                        new LlmStreamEvent.ReasoningDelta("let me think"),
+                        new LlmStreamEvent.TextDelta("answer"),
+                        new LlmStreamEvent.End("stop", new Usage(5L, 8L, 13L, null, null, 6L, null))),
                 events);
     }
 

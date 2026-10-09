@@ -700,7 +700,31 @@ public final class AnthropicDialect extends AbstractDialect {
                 in + out,
                 usage.cacheReadInputTokens(),
                 usage.cacheCreationInputTokens(),
-                null,
+                thinkingTokens(usage),
                 UsageExtensions.generationTimeMs(usage.others(), out));
+    }
+
+    /**
+     * The Anthropic reasoning breakdown: {@code output_tokens_details.thinking_tokens} of the usage
+     * payload. Anthropic-compatible gateways (eg. Azure AI Gateway) report the hidden chain-of-thought
+     * tokens this way when adaptive/enabled thinking is on; those are already counted in
+     * {@code output_tokens}. Returns null when the breakdown is absent, mirroring the OpenAI dialect
+     * which reads {@code output_tokens_details.reasoning_tokens}.
+     *
+     * @param usage the wire usage payload.
+     * @return the thinking token count reported by the provider, or {@code null} when absent.
+     */
+    private static Long thinkingTokens(final AnthropicMessagesResponse.AnthropicUsage usage) {
+        if (usage == null || usage.others() == null) {
+            return null;
+        }
+        final var details = usage.others().get("output_tokens_details");
+        if (details instanceof Map<?, ?> map) {
+            final var tokens = map.get("thinking_tokens");
+            if (tokens instanceof Number n) {
+                return n.longValue();
+            }
+        }
+        return null;
     }
 }

@@ -807,7 +807,10 @@ public class ChatClient implements AutoCloseable {
         deepMergePutIfAbsent(others, tuningOptions);
         final var variant = selectedVariant(provider, model, request);
         if (variant != null && variant.extra() != null && variant.extra().startsWith("{")) {
-            deepMergePutIfAbsent(others, parseRaw(variant.extra()));
+            // A reasoning config carried by providerSpecificOptions (provider- or model-level) fully
+            // overrides the selected variant's one: the variant's thinking/output_config extras must not
+            // fill in missing sub-keys of an explicitly configured reasoning shape (explicit config wins).
+            deepMergePutIfAbsent(others, withoutUserReasoningConfig(parseRaw(variant.extra()), others));
         }
 
         final var temperature = resolveSampling(
@@ -1216,6 +1219,46 @@ public class ChatClient implements AutoCloseable {
                 target.put(entry.getKey(), entry.getValue());
             }
         }
+    }
+
+    /**
+     * Reasoning-config keys for which an explicitly configured value (provider- or model-level
+     * {@code providerSpecificOptions}) fully overrides the selected variant extras. When the variant
+     * extras (eg. the implicit anthropic adaptive-thinking shape) and an explicit reasoning config both
+     * target these keys, the explicit one wins verbatim: the variant must not fill in missing sub-keys
+     * (such as a {@code display}) of an explicitly configured object.
+     */
+    private static final java.util.Set<String> REASONING_CONFIG_KEYS = java.util.Set.of("thinking", "output_config");
+
+    /**
+     * The variant extras without the reasoning-config keys the user already supplied in {@code merged}.
+     * This enforces the "explicit provider config overrides the variant reasoning shape" rule: keys the
+     * user configured are left to the user's value (full replacement), everything else from the variant
+     * still applies.
+     *
+     * @param variant map parsed from a variant {@code extra} payload.
+     * @param merged the request extras already merged with the provider/tuning options, may be empty.
+     * @return a shallow copy of {@code variant} without its reasoning-config keys when {@code merged}
+     *         already carries them, otherwise {@code variant} unchanged.
+     */
+    private static Map<String, Object> withoutUserReasoningConfig(
+            final Map<String, Object> variant, final Map<String, Object> merged) {
+        if (variant == null || variant.isEmpty()) {
+            return variant;
+        }
+        boolean override = false;
+        for (final var key : REASONING_CONFIG_KEYS) {
+            if (merged.containsKey(key)) {
+                override = true;
+                break;
+            }
+        }
+        if (!override) {
+            return variant;
+        }
+        final var filtered = new HashMap<>(variant);
+        REASONING_CONFIG_KEYS.forEach(filtered::remove);
+        return filtered;
     }
 
     /**

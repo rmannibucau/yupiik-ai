@@ -244,6 +244,67 @@ class AnthropicMessagesClientTest {
     }
 
     @Test
+    void azureAiGatewayAnthropicSendsTheReasoningConfigAndSurfacesThinkingTokens() throws Exception {
+        // Azure AI Gateway serves the Anthropic messages API over a Bearer-gated /messages endpoint:
+        // the reasoning shape (thinking/output_config) is configured through providerSpecificOptions
+        // and the provider reports the hidden thinking tokens via output_tokens_details.thinking_tokens.
+        server.createContext("/anthropic/v1/messages", exchange -> {
+            final var authz = exchange.getRequestHeaders().getFirst("authorization");
+            reqHeaders.set("authz=" + authz);
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            final var body =
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-5-5\","
+                            + "\"content\":[{\"type\":\"thinking\",\"thinking\":\"hidden\"},{\"type\":\"text\",\"text\":\"answer\"}],"
+                            + "\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                            + "\"usage\":{\"input_tokens\":57,\"output_tokens\":631,\"output_tokens_details\":{\"thinking_tokens\":360}}}";
+            final var bytes = body.getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.start();
+        final var configuration = TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry("yca.provider.providers.0.baseUrl", base()),
+                Map.entry("yca.provider.providers.0.apiKey", "sk-test"),
+                Map.entry("yca.provider.providers.0.model", "claude-sonnet-5-5"),
+                Map.entry("yca.provider.providers.0.api", "anthropic"),
+                Map.entry("yca.provider.providers.0.contextWindow", "1000000"),
+                Map.entry("yca.provider.providers.0.timeoutSeconds", "30"),
+                Map.entry(
+                        "yca.provider.providers.0.providerSpecificOptions",
+                        "{\"thinking\":{\"type\":\"adaptive\",\"display\":\"summarized\"},\"output_config\":{\"effort\":\"max\"}}"),
+                Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
+                Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
+                Map.entry("yca.llm.maxConcurrent", "1")));
+        client = new ChatClient(configuration, mapper, new ProviderManager(configuration, mapper), Clock.systemUTC());
+        assertEquals(ApiFlavor.ANTHROPIC, client.flavor());
+        final var result = client.chat(new ChatCompletionRequest(
+                "claude-sonnet-5-5",
+                List.of(new Message("user", "hi", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+        assertEquals("answer", result.message().content());
+        assertEquals(360, result.usage().reasoningTokens(), "thinking_tokens must reach the neutral usage");
+        assertEquals(631, result.usage().completionTokens());
+        assertEquals(688, result.usage().totalTokens());
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"type\":\"adaptive\""), body);
+        assertTrue(body.contains("\"display\":\"summarized\""), body);
+        assertTrue(body.contains("\"effort\":\"max\""), body);
+        assertTrue(body.contains("\"output_config\""), body);
+    }
+
+    @Test
     void streamEmitsTextAndFinishDeltas() throws Exception {
         server.createContext("/anthropic/v1/messages", exchange -> {
             final var sse = String.join(

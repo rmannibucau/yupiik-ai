@@ -344,7 +344,7 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
             final var completion = number(map.get("output_tokens"));
             final Long reasoning = map.get("output_tokens_details") instanceof Map<?, ?> details
                             && details.get("reasoning_tokens") instanceof Number n
-                    ? n.longValue()
+                    ? Long.valueOf(n.longValue())
                     : map.get("reasoning_tokens") instanceof Number n ? n.longValue() : null;
             return new Usage(
                     number(map.get("input_tokens")),

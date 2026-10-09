@@ -29,6 +29,12 @@ mapped to `none`, `any` (for `required`/`any`) or `auto` (default), wrapped as
 Responses normalize Anthropic `content` blocks (text + `tool_use`) and
 `stop_reason` (`max_tokens` to `length`, `tool_use` to `tool_calls`, else
 `stop`) and usage (`input_tokens` + `output_tokens`) into the neutral model.
+When the provider reports a reasoning breakdown, the Anthropic thinking spend -
+`usage.output_tokens_details.thinking_tokens` (what Azure AI Gateway and other
+gateways emit for extended/adaptive thinking) - is surfaced into the neutral
+`Usage.reasoningTokens`, mirroring how the OpenAI dialect reads
+`output_tokens_details.reasoning_tokens`. The same breakdown is carried by the
+non-streaming, streaming and SSE-reconstruction paths.
 
 == Streaming
 

@@ -22,7 +22,11 @@ model, `model.compact`, code graph enrichment).
 `yca.provider.defaultProvider` selects the active entry (blank falls back to the
 first, then to the implicit `default` provider). A provider's optional
 `providerSpecificOptions` JSON object is merged into every API call payload for
-it. For single-provider setups, the flat `yca.provider.*` scalars build the
+it (eg. `{"reasoning_effort":"high"}` for OpenAI, or an Anthropic extended-thinking
+shape such as `{"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"max"}}`
+on an Anthropic-compatible gateway like Azure AI Gateway; an explicitly configured
+reasoning shape fully overrides the implicit/variant-derived one). For
+single-provider setups, the flat `yca.provider.*` scalars build the
  implicit `default` provider.
 
 TIP: how yca shapes the request payload per provider/model - reasoning effort,
