@@ -148,7 +148,10 @@ public record CodingAgentConfiguration(
         @Property(
                 documentation =
                         "java.util.logging settings: root level, record decoration and whether the runtime takes over System.out/System.err so nothing can corrupt the interactive prompt.")
-        LoggingConfiguration logging) {
+        LoggingConfiguration logging,
+
+        @Property(documentation = "External-program hook callbacks bound to events (see the hooks reference).")
+        HooksConfiguration hooks) {
 
     /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
     public boolean isResumeAlias(final String input) {

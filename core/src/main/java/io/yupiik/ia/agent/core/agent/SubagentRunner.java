@@ -27,11 +27,11 @@ import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.context.SubagentUsageTracker;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -40,11 +40,13 @@ import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
 import java.util.function.BooleanSupplier;
 
 @ApplicationScoped
@@ -63,7 +65,8 @@ public class SubagentRunner {
     protected final TodoPromptResolver todoPromptResolver;
     protected final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
     protected final Clock clock;
-    protected final VirtualThreadExecutor executor;
+    protected final PrecisionDurationMarkerProvider precisionDurationMarker;
+    protected final ExecutorService executor;
     protected final SubagentRegistry subagentRegistry;
 
     public SubagentRunner(
@@ -81,8 +84,9 @@ public class SubagentRunner {
             final TodoPromptResolver todoPromptResolver,
             final MavenRepositoryKnowledgeService mavenRepositoryKnowledge,
             final Clock clock,
-            final VirtualThreadExecutor executor,
-            final SubagentRegistry subagentRegistry) {
+            final ExecutorService executor,
+            final SubagentRegistry subagentRegistry,
+            final PrecisionDurationMarkerProvider precisionDurationMarker) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -99,6 +103,7 @@ public class SubagentRunner {
         this.clock = clock;
         this.executor = executor;
         this.subagentRegistry = subagentRegistry;
+        this.precisionDurationMarker = precisionDurationMarker;
     }
 
     protected SubagentRunner() {
@@ -118,6 +123,7 @@ public class SubagentRunner {
         this.clock = null;
         this.executor = null;
         this.subagentRegistry = null;
+        this.precisionDurationMarker = null;
     }
 
     public void runAsync(
@@ -189,7 +195,7 @@ public class SubagentRunner {
         final var subagentStatusReporter = new StatusReporter();
         final var subagentPermissions = parentContext != null && parentContext.permissions() != null
                 ? parentContext.permissions()
-                : new PermissionService(configuration);
+                : new PermissionService(configuration, emitter);
         final var subagentSystemPromptBuilder = new SystemPromptBuilder(
                 configuration,
                 memoryStore,
@@ -232,11 +238,28 @@ public class SubagentRunner {
                 state.parentSessionId(),
                 state.id(),
                 subagentName,
-                parentContext == null ? null : parentContext.feedback());
+                parentContext == null ? null : parentContext.feedback(),
+                precisionDurationMarker);
         // the sub-agent inherits its parent tab's provider/model/variant/sampling selection so a
-        // child spawned from tab B runs on B's provider, not the process default
-        agentLoop.updateChatSettings(
-                agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings()));
+        // child spawned from tab B runs on B's provider, not the process default. An explicit
+        // model (spawn_subagent model=/defaultSubagentModel) overrides the selection: resolve the
+        // reference to a concrete (provider, model) pair via the provider manager machinery.
+        final var baseSettings =
+                agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings());
+        ChatSettings subagentSettings = baseSettings;
+        final var requested = state.model();
+        if (requested != null && !requested.isBlank()) {
+            subagentSettings = routeSubagentModel(providerManager, requested, baseSettings);
+        } else {
+            final var provider = parentContext == null || parentContext.settings() == null
+                    ? null
+                    : providerManager.provider(parentContext.settings().providerId());
+            final var defaultModel = provider == null ? null : provider.defaultSubagentModel();
+            if (defaultModel != null && !defaultModel.isBlank()) {
+                subagentSettings = routeSubagentModel(providerManager, defaultModel, baseSettings);
+            }
+        }
+        agentLoop.updateChatSettings(subagentSettings);
 
         final var fullConversation = new StringBuilder();
         fullConversation
@@ -291,5 +314,44 @@ public class SubagentRunner {
                 .filter(java.util.Objects::nonNull)
                 .distinct()
                 .toList();
+    }
+
+    /**
+     * Routes a model reference to sub-agent chat settings: {@code $provider/model} selects that
+     * provider explicitly; a bare name is pinned (via {@link ProviderManager#toRoutedReference})
+     * to whichever configured provider declares it, else resolved against the parent's provider.
+     * The parent's variant/sampling are preserved unless the routed model overrides them; passing
+     * {@code ChatSettings.EMPTY} as base keeps the process defaults for the routed provider.
+     */
+    private ChatSettings routeSubagentModel(final ProviderManager pm, final String reference, final ChatSettings base) {
+        final var ref = reference.strip();
+        if (ref.startsWith("$")) {
+            final var resolved = pm.resolve(ref);
+            final var provider = resolved.provider();
+            final var model = resolved.model() == null || resolved.model().isBlank()
+                    ? (provider == null || provider.model() == null ? "" : provider.model())
+                    : resolved.model();
+            final var providerId =
+                    provider == null || provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
+            return ChatSettings.EMPTY
+                    .withProviderId(providerId)
+                    .withModel(model)
+                    .inheritFrom(base);
+        }
+        // bare name: pin to the declaring provider when identifiable, else resolve against base
+        final var routable = ref.startsWith("$") ? ref : pm.toRoutedReference(ref);
+        if (routable.startsWith("$")) {
+            final var resolved = pm.resolve(routable);
+            final var provider = resolved.provider();
+            final var providerId =
+                    provider == null || provider.id() == null || provider.id().isBlank() ? "default" : provider.id();
+            final var model = resolved.model() == null || resolved.model().isBlank() ? ref : resolved.model();
+            return ChatSettings.EMPTY
+                    .withProviderId(providerId)
+                    .withModel(model)
+                    .inheritFrom(base);
+        }
+        // not pinned to any configured provider: keep the parent's provider, switch the model
+        return base.withModel(ref);
     }
 }

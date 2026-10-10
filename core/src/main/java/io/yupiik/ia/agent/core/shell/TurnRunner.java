@@ -21,12 +21,12 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 
@@ -42,13 +42,13 @@ import java.util.function.Supplier;
 @ApplicationScoped
 public class TurnRunner {
     private final MavenRepositoryKnowledgeService mavenKnowledgeService;
-    private final VirtualThreadExecutor executor;
+    private final ExecutorService executor;
     private final AgentSessionService agentSessionService;
     private final SubagentRegistry subagentRegistry;
 
     public TurnRunner(
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final AgentSessionService agentSessionService,
             final SubagentRegistry subagentRegistry) {
         this.mavenKnowledgeService = mavenKnowledgeService;
@@ -59,7 +59,7 @@ public class TurnRunner {
 
     public TurnRunner(
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final AgentSessionService agentSessionService) {
         this(mavenKnowledgeService, executor, agentSessionService, null);
     }

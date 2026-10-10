@@ -125,20 +125,24 @@ remain the enforcement gate. Set it to a blank string to omit the sentence.
 ----
 {
   "permissions": {
-    "mode": "ask",
+    "mode": "ask",                                     <1>
     "bash": {
       "readOnlyPromptHints": "Plan-mode bash is limited to read-only command families (git status, git diff, git log, git show, ls, cat, grep, head, tail, ...); commands that mutate repository state such as git add are denied.",
       "rules": [
         {
-          "matcher": { "commandStart": { "options": ["docker", "run"] } },
-          "plan": "ask",
-          "default": "all"
+          "matcher": { "commandStart": { "options": ["docker", "run"] } },  <2>
+          "plan": "ask",                                                    <3>
+          "default": "all"                                                  <4>
         }
       ]
     }
   }
 }
 ----
+<.> `mode` is the default permission mode for the whole `bash` tool.
+<.> `matcher` selects which commands the rule applies to - here any command starting with `docker run`.
+<.> `plan` is the decision when the agent is in `plan` mode.
+<.> `default` is the decision for every other mode (`build`, ...).
 
 With this rule, `docker run` prompts in `plan` mode but runs silently in
 `build` mode.

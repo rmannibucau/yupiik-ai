@@ -30,10 +30,6 @@ public class CodeCheckGraphTool implements EmbeddedTool {
         this.codeGraph = codeGraph;
     }
 
-    protected CodeCheckGraphTool() {
-        this.codeGraph = null;
-    }
-
     @Override
     public String name() {
         return "code_check_graph";

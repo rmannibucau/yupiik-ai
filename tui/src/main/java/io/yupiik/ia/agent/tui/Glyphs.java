@@ -73,15 +73,10 @@ public final class Glyphs {
         return ascii ? "|" : "│";
     }
 
-    /** Turn header mark, role-neutral: the role is carried by the label color. */
-    public String turnMark() {
-        return ascii ? "*" : "▌";
-    }
-
     /**
      * Turn header mark carrying the role by glyph shape rather than color, for mono
      * terminals ({@code NO_COLOR}) where every style collapses to the default and
-     * {@link #turnMark()} alone would make both roles look identical.
+     * a single neutral mark alone would make both roles look identical.
      *
      * @param user {@code true} for a user turn
      */
@@ -107,10 +102,5 @@ public final class Glyphs {
     /** "N more" continuation marker. */
     public String more() {
         return ascii ? "-> " : "⤷ ";
-    }
-
-    /** Ellipsis. */
-    public String ellipsis() {
-        return ascii ? "..." : "…";
     }
 }

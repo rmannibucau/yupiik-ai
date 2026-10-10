@@ -21,13 +21,13 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeServiceTest.StubLlm;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -47,7 +47,7 @@ class MavenKnowledgeContentToolTest {
         classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
 
         final var config = config(m2.toString(), proj.toString());
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         final var tool = new MavenKnowledgeContentTool(service);
         try {

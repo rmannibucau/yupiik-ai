@@ -100,4 +100,26 @@ class SubagentUsageTrackerTest {
             executor.shutdownNow();
         }
     }
+
+    @Test
+    void optimizationCountersAccumulateOnTheSubagentAndMergeIntoTheParent() {
+        final var parent = new UsageTracker(null, null, null, Clock.systemUTC());
+        final var subagent = new SubagentUsageTracker(parent, "sub-opt");
+
+        // records land on the subagent, not the parent, before the merge
+        subagent.recordOptimization(10_000, 1_000);
+        subagent.recordOptimization(20_000, 2_000);
+        assertEquals(2, subagent.optimizedOutputs());
+        assertEquals(30_000, subagent.optimizedCharsBefore());
+        assertEquals(3_000, subagent.optimizedCharsAfter());
+        assertEquals(27_000, subagent.optimizedCharsSaved());
+        assertEquals(0, parent.optimizedOutputs(), "before the merge the parent must not be touched");
+
+        subagent.mergeToParent();
+
+        assertEquals(2, parent.optimizedOutputs());
+        assertEquals(30_000, parent.optimizedCharsBefore());
+        assertEquals(3_000, parent.optimizedCharsAfter());
+        assertEquals(27_000, parent.optimizedCharsSaved());
+    }
 }

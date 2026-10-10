@@ -256,7 +256,8 @@ class McpManagerTest {
                 base.slashcommands(),
                 base.prompt(),
                 base.labels(),
-                base.logging());
+                base.logging(),
+                base.hooks());
     }
 
     private static void respond(

@@ -44,7 +44,6 @@ import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -73,6 +72,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -80,6 +81,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -87,6 +89,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class AgentLoopTest {
+    private static final java.util.concurrent.ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
     @TempDir
     Path storageHome;
 
@@ -2221,7 +2225,7 @@ class AgentLoopTest {
                         null,
                         registryOf(tool),
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run(
                         "do it",
                         null,
@@ -2823,7 +2827,7 @@ class AgentLoopTest {
                         null,
                         barrierRegistry(barrier, "slow_read_a", "slow_read_b"),
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run("do it", null, "s1", null, () -> false);
 
         assertEquals("all done", result);
@@ -2862,7 +2866,7 @@ class AgentLoopTest {
                         null,
                         barrierRegistry(barrier, "slow_read_a", "slow_read_b"),
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run("do it", null, "s1", null, () -> false);
 
         final var tools =
@@ -2941,7 +2945,7 @@ class AgentLoopTest {
                         null,
                         registry,
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run("do it", null, "s1", null, () -> false);
 
         assertEquals("all done", result);
@@ -3034,7 +3038,7 @@ class AgentLoopTest {
                         null,
                         registry,
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run("do it", null, "s1", null, () -> false);
 
         assertEquals("gave up looping", result);
@@ -3095,7 +3099,7 @@ class AgentLoopTest {
                         null,
                         fileToolsRegistry(),
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run("edit the file", null, "s1", null, () -> false);
 
         assertEquals("written", result);
@@ -3161,7 +3165,7 @@ class AgentLoopTest {
                         null,
                         fileToolsRegistry(),
                         directExecutions(),
-                        new VirtualThreadExecutor())
+                        EXECUTOR)
                 .run("rewrite it", null, "s1", history, () -> false);
 
         assertEquals("written", result);
@@ -3478,7 +3482,7 @@ class AgentLoopTest {
                         return tool.execute(args, context);
                     }
                 },
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 null);
 
         final var first = Thread.ofVirtual().start(() -> {
@@ -3631,7 +3635,7 @@ class AgentLoopTest {
                         return tool.execute(args, context);
                     }
                 },
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 null);
         final var future = Thread.ofVirtual().start(() -> {
             try {
@@ -3758,7 +3762,7 @@ class AgentLoopTest {
                         return tool.execute(args, context);
                     }
                 },
-                new VirtualThreadExecutor());
+                EXECUTOR);
 
         final var answer = loop.run("hello", null, "s1", null, Cancellations.NEVER);
 
@@ -4346,7 +4350,7 @@ class AgentLoopTest {
             final ContextView contextView,
             final ToolRegistry registry,
             final ToolExecutionService executions,
-            final VirtualThreadExecutor executor) {
+            final ExecutorService executor) {
         return loop(
                 client,
                 todoStore,
@@ -4369,7 +4373,7 @@ class AgentLoopTest {
             final ContextView contextView,
             final ToolRegistry registry,
             final ToolExecutionService executions,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final SystemPromptBuilder promptBuilder) {
         events.clear();
         final var resolvedRegistry = registry == null
@@ -4441,7 +4445,9 @@ class AgentLoopTest {
                     @Override
                     public <T> void emit(final T event) {
                         synchronized (events) {
-                            events.add((AgentEvent) event);
+                            if (event instanceof AgentEvent agentEvent) {
+                                events.add(agentEvent);
+                            }
                         }
                     }
                 },
@@ -4621,5 +4627,10 @@ class AgentLoopTest {
         final Method m = AgentLoop.class.getDeclaredMethod("unknownToolDiagnostic", String.class);
         m.setAccessible(true);
         return (String) m.invoke(null, name);
+    }
+
+    @AfterAll
+    static void closeExecutor() {
+        EXECUTOR.shutdownNow();
     }
 }

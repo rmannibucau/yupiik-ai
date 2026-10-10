@@ -25,6 +25,13 @@ import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.TokenEstimator;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.events.HookResult;
+import io.yupiik.ia.agent.core.events.ModelSwitchedEvent;
+import io.yupiik.ia.agent.core.events.ModelSwitchingEvent;
+import io.yupiik.ia.agent.core.events.SessionEndedEvent;
+import io.yupiik.ia.agent.core.events.ToolUsePreEvent;
+import io.yupiik.ia.agent.core.events.UserPromptSubmitEvent;
+import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -35,7 +42,6 @@ import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -46,6 +52,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.LlmHttpFailureException;
@@ -67,6 +74,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -171,9 +179,10 @@ public class AgentLoop {
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
     private final Clock clock;
+    private final PrecisionDurationMarkerProvider precisionDurationMarker;
     private final SnapshotStore snapshotStore;
     private final TodoStore todoStore;
-    private final VirtualThreadExecutor executor;
+    private final ExecutorService executor;
     private final UserFeedbackService userFeedbackService;
     private final String subagentId;
     private final String subagentName;
@@ -190,6 +199,8 @@ public class AgentLoop {
      * the run argument. Event helpers tag with this value.
      */
     private volatile String currentSessionId;
+    /** Set when the loop/session is closed so {@link #close()} fires the SessionEnded hook only once. */
+    private volatile boolean closed;
     /** Effective agent of the current turn (set at {@code doRun} start), used for identity capture. */
     private volatile String currentAgentName;
     /**
@@ -317,7 +328,7 @@ public class AgentLoop {
             final Clock clock,
             final SnapshotStore snapshotStore,
             final TodoStore todoStore,
-            final VirtualThreadExecutor executor) {
+            final ExecutorService executor) {
         this(
                 chatClient,
                 toolRegistry,
@@ -343,7 +354,8 @@ public class AgentLoop {
                 null,
                 null,
                 null,
-                null);
+                null,
+                new PrecisionDurationMarkerProvider());
     }
 
     AgentLoop(
@@ -367,7 +379,7 @@ public class AgentLoop {
             final Clock clock,
             final SnapshotStore snapshotStore,
             final TodoStore todoStore,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final String subagentId,
             final String subagentName) {
         this(
@@ -395,7 +407,8 @@ public class AgentLoop {
                 null,
                 subagentId,
                 subagentName,
-                null);
+                null,
+                new PrecisionDurationMarkerProvider());
     }
 
     /**
@@ -426,11 +439,12 @@ public class AgentLoop {
             final Clock clock,
             final SnapshotStore snapshotStore,
             final TodoStore todoStore,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final String sessionId,
             final String subagentId,
             final String subagentName,
-            final UserFeedbackService userFeedbackService) {
+            final UserFeedbackService userFeedbackService,
+            final PrecisionDurationMarkerProvider precisionDurationMarker) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -449,6 +463,7 @@ public class AgentLoop {
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
         this.clock = clock;
+        this.precisionDurationMarker = precisionDurationMarker;
         this.snapshotStore = snapshotStore;
         this.todoStore = todoStore;
         this.executor = executor;
@@ -477,6 +492,7 @@ public class AgentLoop {
         this.providerManager = null;
         this.agentProvider = null;
         this.clock = null;
+        this.precisionDurationMarker = null;
         this.snapshotStore = null;
         this.todoStore = null;
         this.executor = null;
@@ -497,7 +513,53 @@ public class AgentLoop {
 
     /** Applies a new selection value (mid-turn changes take effect from the next round/tool call). */
     public void updateChatSettings(final ChatSettings value) {
-        this.chatSettings = value == null ? ChatSettings.EMPTY : value;
+        final var alt = value == null ? ChatSettings.EMPTY : value;
+        final var current = chatSettings;
+        // the model-switch hook is emitted before the swap so a forbid vetoes the switch (the turn keeps the old model)
+        if (emitter != null) {
+            final var hookResult = new HookResult();
+            emitter.emit(new ModelSwitchingEvent(
+                    new EventContextBuilder(configuration)
+                            .build(permissionService, current, currentSessionId, subagentId, subagentName, null),
+                    current == null || current.model() == null ? null : current.model(),
+                    alt.model(),
+                    alt.variant(),
+                    hookResult));
+            if (hookResult.forbidden()) {
+                emit(AgentEvent.Notice.warn(
+                        "Model switch rejected" + (hookResult.reason() == null ? "" : ": " + hookResult.reason()),
+                        currentSessionId));
+                return;
+            }
+        }
+        this.chatSettings = alt;
+        if (emitter != null) {
+            emitter.emit(new ModelSwitchedEvent(
+                    new EventContextBuilder(configuration)
+                            .build(permissionService, alt, currentSessionId, subagentId, subagentName, null),
+                    current == null || current.model() == null ? null : current.model(),
+                    alt.model(),
+                    alt.variant()));
+        }
+    }
+
+    /**
+     * Releases the session and fires the {@code yca.hooks.SessionEnded} hook once. Idempotent: the hook fires for the
+     * first call only (a TUI may dispose a tab and later re-close, or the CLI and process shutdown may overlap).
+     */
+    public void close() {
+        if (closed) {
+            return;
+        }
+        closed = true;
+        if (emitter != null) {
+            final var id = currentSessionId != null ? currentSessionId : this.sessionId;
+            emitter.emit(new SessionEndedEvent(
+                    new EventContextBuilder(configuration)
+                            .build(permissionService, chatSettings(), id, subagentId, subagentName, null),
+                    id,
+                    null));
+        }
     }
 
     /**
@@ -679,7 +741,7 @@ public class AgentLoop {
                 }
             }
         }
-        if (userMessage != null) {
+        if (userMessage != null && acceptInitialPrompt(userMessage, sessionId)) {
             messages.add(Message.user(userMessage));
             sessionStore.append(
                     sessionId,
@@ -979,7 +1041,7 @@ public class AgentLoop {
         turnLlmReportedMs = 0L;
         thinkingActive = false;
         thinkingStartNanos = 0;
-        turnStartNanos = System.nanoTime();
+        turnStartNanos = precisionDurationMarker.now();
         lastTurnEndedWithContent = false;
         // A "window" is one bounded run of the round loop. Every todo auto-continuation starts a fresh
         // window with a new maxIterations budget - yca.todos.maxContinues bounds the number of windows -
@@ -1077,7 +1139,7 @@ public class AgentLoop {
                 final long llmStartNanos;
                 final long pausedBeforeMs = turnLlmPausedMs;
                 try {
-                    llmStartNanos = System.nanoTime();
+                    llmStartNanos = precisionDurationMarker.now();
                     assistant = streamWithRetry(request, usage, finishReason, cancelled);
                 } catch (final ContextWindowExceededException e) {
                     if (!retryOnOverflow || overflowRetried) {
@@ -1112,7 +1174,11 @@ public class AgentLoop {
                 usageTracker.record(usage[0]);
                 // throughput: time spent generating, idle time excluded. A request refused because the
                 // context window is too small contributes nothing (it is a preflight, not a generation).
-                recordThroughput(assistant, usage[0], (System.nanoTime() - llmStartNanos) / 1_000_000, pausedBeforeMs);
+                recordThroughput(
+                        assistant,
+                        usage[0],
+                        (precisionDurationMarker.now() - llmStartNanos) / 1_000_000,
+                        pausedBeforeMs);
                 // anchor the hybrid usage on the real prompt tokens of the request we just sent: the
                 // estimate at the same moment calibrates later deltas until the next observation
                 usageTracker.anchor(usage[0].promptTokens(), usageTracker.estimateContext(messages, toolsTokens));
@@ -1423,9 +1489,9 @@ public class AgentLoop {
     }
 
     private void emitTurnMetrics(final String content, final long turnStartNanos) {
-        final var turnDurationMs = (System.nanoTime() - turnStartNanos) / 1_000_000;
+        final var turnDurationMs = (precisionDurationMarker.now() - turnStartNanos) / 1_000_000;
         if (thinkingActive) {
-            turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
+            turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
         }
         emit(turnMetrics(turnLlmCalls, turnThinkingMs, turnToolSumMs, turnToolWallMs, turnToolsRun, turnDurationMs));
         if (content != null) {
@@ -2032,14 +2098,14 @@ public class AgentLoop {
      * @return {@code false} when the current thread was interrupted (caller aborts the retry).
      */
     private boolean interruptibleSleep(final long millis) {
-        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(millis);
+        final var deadline = precisionDurationMarker.now() + TimeUnit.MILLISECONDS.toNanos(millis);
         while (true) {
-            final var remaining = deadline - System.nanoTime();
+            final var remaining = deadline - precisionDurationMarker.now();
             if (remaining <= 0) {
                 return true;
             }
             try {
-                Thread.sleep(Math.min(100, Math.max(1, remaining / 1_000_000)));
+                Thread.sleep(Math.clamp(remaining / 1_000_000, 1, 100));
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return false;
@@ -2381,7 +2447,7 @@ public class AgentLoop {
                 if (end - i > 1 && executor != null && parallelReadonlyEnabled()) {
                     // tool events (started/finished) are emitted from the worker threads as they
                     // happen: bridges tolerate that, results order is still enforced below
-                    final var batchStartNanos = System.nanoTime();
+                    final var batchStartNanos = precisionDurationMarker.now();
                     final var futures = new ArrayList<Future<ToolOutcome>>(end - i);
                     for (var j = i; j < end; j++) {
                         final var call = calls.get(j);
@@ -2399,7 +2465,7 @@ public class AgentLoop {
                                 sessionId, messages, awaitTool(future), staleReads, roundInformative, roundCoverage);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
-                    final var batchWallMs = (System.nanoTime() - batchStartNanos) / 1_000_000;
+                    final var batchWallMs = (precisionDurationMarker.now() - batchStartNanos) / 1_000_000;
                     turnToolWallMs += batchWallMs;
                 } else {
                     for (var j = i; j < end; j++) {
@@ -2690,16 +2756,13 @@ public class AgentLoop {
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         emit(toolStarted(name, argsJson, ordinal));
-        final PermissionService.Decision decision =
-                permissionService.check(name, tool.category(), args, tool.readonly());
-        if (!decision.allowed()) {
-            final var denial =
-                    "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason());
+        final var gateDenial = gateTool(name, tool, args, call.id());
+        if (gateDenial != null) {
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, denial, false));
-            return new ToolOutcome(call.id(), name, denial, false, false);
+            emit(toolFinished(name, gateDenial, false));
+            return new ToolOutcome(call.id(), name, gateDenial, false, false);
         }
-        final var toolStartNanos = System.nanoTime();
+        final var toolStartNanos = precisionDurationMarker.now();
         final ToolResult result;
         try {
             result = toolExecutionService.execute(tool, args, toolContext(cancelled, callCancel::get));
@@ -2707,7 +2770,7 @@ public class AgentLoop {
             unregisterRunningTool(ordinal);
             // the turn keeps running after a per-call cancel: only the tool result is marked
         }
-        final var toolDurationMs = (System.nanoTime() - toolStartNanos) / 1_000_000;
+        final var toolDurationMs = (precisionDurationMarker.now() - toolStartNanos) / 1_000_000;
         emit(toolFinished(name, result.output(), result.success()));
         return new ToolOutcome(
                 call.id(),
@@ -2719,6 +2782,45 @@ public class AgentLoop {
                 toolDurationMs,
                 true,
                 coverageKeys(name, args));
+    }
+
+    /**
+     * Runs the unified pre-tool gate for a tool call: the event is emitted synchronously (so the built-in
+     * {@link ToolUsePermissionObserver} runs the session's permission rules and the {@link ToolUseCallbackObserver}
+     * runs the configured {@code yca.hooks.ToolUsePreEvent} callbacks, in that order). Returns the denial reason
+     * when the call must be blocked, or {@code null} to let it run. This is the single authoritative denial point
+     * for every tool, bash included.
+     */
+    private String gateTool(
+            final String name, final EmbeddedTool tool, final Map<String, Object> args, final String toolUseId) {
+        final var result = new HookResult();
+        final var workdir = args.get("workdir") instanceof final String w && !w.isBlank() ? w : null;
+        final var context = new EventContextBuilder(configuration)
+                .build(permissionService, chatSettings(), currentSessionId, subagentId, subagentName, workdir);
+        emitter.emit(new ToolUsePreEvent(
+                context, name, args, toolUseId, result, permissionService, tool.category(), tool.readonly()));
+        if (!result.forbidden()) {
+            return null;
+        }
+        return "Permission denied by user" + (result.reason() == null ? "" : ": " + result.reason());
+    }
+
+    /**
+     * Gates the initial user prompt of a turn through the {@code yca.hooks.UserPromptSubmit} callbacks. Returns
+     * {@code false} when a callback forbids it (the prompt is dropped and the turn does not run); {@code true}
+     * otherwise. Queued mid-turn prompts are not gated here so forbidding one cannot kill the running turn.
+     */
+    private boolean acceptInitialPrompt(final String userMessage, final String sessionId) {
+        final var result = new HookResult();
+        final var context = new EventContextBuilder(configuration)
+                .build(permissionService, chatSettings(), sessionId, subagentId, subagentName, null);
+        emitter.emit(new UserPromptSubmitEvent(context, userMessage, "user", result));
+        if (result.forbidden()) {
+            emit(AgentEvent.Notice.warn(
+                    "Prompt rejected" + (result.reason() == null ? "" : ": " + result.reason()), currentSessionId));
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -2850,14 +2952,14 @@ public class AgentLoop {
             final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage, final String[] finishReason) {
         if (delta instanceof TextDelta(final String text)) {
             if (thinkingActive) {
-                turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
+                turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
                 thinkingActive = false;
             }
             emit(textDelta(text));
         } else if (delta instanceof ReasoningDelta(final String text)) {
             if (!thinkingActive) {
                 thinkingActive = true;
-                thinkingStartNanos = System.nanoTime();
+                thinkingStartNanos = precisionDurationMarker.now();
             }
             // record that this request produced reasoning: later, a truncation or an empty
             // completion after reasoning means the output budget was spent thinking, and a
@@ -2866,7 +2968,7 @@ public class AgentLoop {
             emit(thinkingDelta(text));
         } else if (delta instanceof End(final String reason, final Usage upper)) {
             if (thinkingActive) {
-                turnThinkingMs += (System.nanoTime() - thinkingStartNanos) / 1_000_000;
+                turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
                 thinkingActive = false;
             }
             if (reason != null) {

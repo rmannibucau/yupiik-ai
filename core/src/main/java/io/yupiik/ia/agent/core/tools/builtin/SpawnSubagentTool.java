@@ -15,7 +15,7 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
@@ -83,6 +83,10 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 Map.of(
                         "task", Schemas.str("The task description for the sub-agent to execute."),
                         "name", Schemas.str("Optional name for the sub-agent (for display/logging)."),
+                        "model",
+                                Schemas.str("Optional model (or $provider/model) routing this sub-agent to a specific "
+                                        + "model/provider instead of inheriting the parent session's selection or the "
+                                        + "provider's defaultSubagentModel. The explicit model always wins."),
                         "max_turns",
                                 Schemas.intProp(
                                         "Maximum turns for the sub-agent (optional, defaults to global maxIterations)."),
@@ -117,10 +121,11 @@ public class SpawnSubagentTool implements EmbeddedTool {
             return ToolResult.error("task is required");
         }
         final var name = arg(args, "name");
+        final var model = arg(args, "model");
         final var maxTurnsObj = args.get("max_turns");
         final Integer maxTurns = maxTurnsObj instanceof Number n ? n.intValue() : null;
 
-        final var stateOpt = subagentRegistry.start(null, task, name);
+        final var stateOpt = subagentRegistry.start(null, task, name, model);
         if (stateOpt.isEmpty()) {
             return ToolResult.error("Cannot start sub-agent: maximum concurrent sub-agents reached ("
                     + subagentRegistry.maxConcurrent() + ").");

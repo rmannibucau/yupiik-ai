@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
+import io.yupiik.ia.agent.core.tools.ToolArgs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.Map;
@@ -71,11 +72,11 @@ public class MavenKnowledgeContentTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
-        final var gav = ReadFileTool.arg(args, "gav");
+        final var gav = ToolArgs.arg(args, "gav");
         if (gav == null) {
             return ToolResult.error("gav is required (groupId:artifactId:version)");
         }
-        final var file = ReadFileTool.arg(args, "file");
+        final var file = ToolArgs.arg(args, "file");
         try {
             return ToolResult.ok(service.knowledge(gav, file));
         } catch (final RuntimeException e) {

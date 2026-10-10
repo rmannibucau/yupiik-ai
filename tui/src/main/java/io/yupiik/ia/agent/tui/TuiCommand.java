@@ -70,7 +70,6 @@ import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.question.FeedbackGate;
 import io.yupiik.ia.agent.core.question.Question;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.BusyLabels;
@@ -113,6 +112,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -163,7 +163,7 @@ public class TuiCommand implements Runnable {
     private final AutoLogConfigurer autoLogConfigurer;
     private final McpManager mcpManager;
     private final ProcessService processes;
-    private final VirtualThreadExecutor executor;
+    private final ExecutorService executor;
     private final ProviderManager providerManager;
     private final AgentProvider agentProvider;
     private final AgentSessionService agentSessionService;
@@ -274,7 +274,7 @@ public class TuiCommand implements Runnable {
             final AutoLogConfigurer autoLogConfigurer,
             final McpManager mcpManager,
             final ProcessService processes,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
             final AgentSessionService agentSessionService,
@@ -802,6 +802,7 @@ public class TuiCommand implements Runnable {
         if (runtime != null) {
             runtime.permissions().setGate(null);
             runtime.feedback().setGate(null);
+            runtime.close();
         }
         if (state.sessionId != null && sessionStore.isEmpty(state.sessionId)) {
             sessionStore.delete(state.sessionId);
@@ -3648,7 +3649,7 @@ public class TuiCommand implements Runnable {
                         case FAILED -> Color.hex(palette.error());
                     };
             text.add(Line.from(
-                    Span.styled("● ", Style.EMPTY.fg(dotColor)),
+                    Span.styled(glyphs.dot() + " ", Style.EMPTY.fg(dotColor)),
                     Span.styled(ellipsize(status.name(), width - 2), value)));
         }
         text.add(Line.empty());
@@ -4850,12 +4851,12 @@ public class TuiCommand implements Runnable {
      * bar) and tool cards (status-colored borders).
      */
     private Span outputBar() {
-        return Span.styled("┃ ", palette.bold(palette.accent()));
+        return Span.styled(glyphs.bar() + " ", palette.bold(palette.accent()));
     }
 
     /** Bold primary bar prefixing user ("You") turns. */
     private Span userBar() {
-        return Span.styled("┃ ", palette.bold(palette.primary()));
+        return Span.styled(glyphs.bar() + " ", palette.bold(palette.primary()));
     }
 
     /**
@@ -4863,7 +4864,7 @@ public class TuiCommand implements Runnable {
      * clearly visible info hue (mono: plain) so the thought panel reads as one block.
      */
     private Span thoughtBar() {
-        return Span.styled("│ ", thoughtBarStyle);
+        return Span.styled(glyphs.thinBar() + " ", thoughtBarStyle);
     }
 
     /**
@@ -5326,6 +5327,13 @@ public class TuiCommand implements Runnable {
             parts.add(
                     Span.styled(" · session: " + state.session.runtime().usage().requests() + " LLM calls  ", muted));
         }
+        final var usage_ = state.session.runtime().usage();
+        if (metrics.showSessionTotals() && usage_ != null && usage_.optimizedOutputs() > 0) {
+            parts.add(Span.styled(
+                    " · optimized " + usage_.optimizedOutputs() + " (~" + usage_.optimizedCharsSaved()
+                            + " chars saved)  ",
+                    muted));
+        }
         // the status strip reserves a right edge for the clickable "?" shortcuts affordance
         final var helpText = "  [Alt+?] ";
         final var helpW = Math.min(helpText.length(), Math.max(1, rect.width()));
@@ -5714,6 +5722,11 @@ public class TuiCommand implements Runnable {
         final var rows = new ArrayList<Line>();
         if (detail) {
             final var captured = subagentRegistry.transcriptOf(state.subagentsOverlay);
+            subagentRegistry
+                    .get(state.subagentsOverlay)
+                    .map(SubagentRegistry.SubagentState::model)
+                    .filter(m -> m != null && !m.isBlank())
+                    .ifPresent(m -> rows.add(Line.from(Span.styled("model: " + m, muted))));
             final var md = captured.markdown("|", "");
             if (md.isBlank()) {
                 rows.add(Line.from(Span.styled("*still starting...*", muted)));
@@ -5749,9 +5762,11 @@ public class TuiCommand implements Runnable {
             for (final var sub : list) {
                 final var label = sub.name() != null ? sub.name() : sub.id();
                 final var status = sub.isDone() ? (sub.isCancelled() ? "cancelled" : "completed") : "running";
+                final var model = sub.model() == null || sub.model().isBlank() ? "" : "  [" + sub.model() + "]";
                 rows.add(Line.from(
                         Span.styled(label, accent),
                         Span.styled("  [" + status + "]", sub.isDone() ? muted : accent),
+                        Span.styled(model, muted),
                         Span.styled("  " + TuiInputSupport.firstLine(summarize(sub)), muted)));
             }
             rows.add(Line.empty());

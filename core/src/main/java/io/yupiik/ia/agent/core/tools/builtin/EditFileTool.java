@@ -17,8 +17,8 @@ package io.yupiik.ia.agent.core.tools.builtin;
 
 import static io.yupiik.ia.agent.core.tools.Schemas.bool;
 import static io.yupiik.ia.agent.core.tools.Schemas.str;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optBool;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.optBool;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;

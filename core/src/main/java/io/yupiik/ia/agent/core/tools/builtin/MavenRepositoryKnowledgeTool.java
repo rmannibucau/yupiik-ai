@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
+import io.yupiik.ia.agent.core.tools.ToolArgs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -38,10 +39,6 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
 
     public MavenRepositoryKnowledgeTool(final MavenRepositoryKnowledgeService service) {
         this.service = service;
-    }
-
-    protected MavenRepositoryKnowledgeTool() {
-        this.service = null;
     }
 
     @Override
@@ -84,12 +81,12 @@ public class MavenRepositoryKnowledgeTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
-        final var op = ReadFileTool.arg(args, "operation");
+        final var op = ToolArgs.arg(args, "operation");
         final Object rawGavs = args.get("gavs");
         final List<String> gavs = rawGavs instanceof List<?> list
                 ? list.stream().map(String::valueOf).toList()
                 : List.of();
-        final var force = ReadFileTool.optBool(args, "force", false);
+        final var force = ToolArgs.optBool(args, "force", false);
         if (op == null) {
             return ToolResult.error("operation is required (index)");
         }

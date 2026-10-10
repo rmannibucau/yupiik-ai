@@ -22,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.lifecycle.Start;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import java.io.IOException;
@@ -33,6 +32,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -54,7 +54,7 @@ public class MavenRepositoryKnowledgeServiceTest {
 
         final var config = config(m2.toString(), proj.toString());
         final var progress = new CopyOnWriteArrayList<String>();
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         try {
             final var ack = service.refresh(null, progress::add, null);
@@ -87,7 +87,7 @@ public class MavenRepositoryKnowledgeServiceTest {
     void disabledWithoutBuildFileKeepsQuiet() {
         final var m2 = tmp.resolve("m2");
         final var plain = tmp.resolve("plain");
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(
                 config(m2.toString(), plain.toString()), new StubLlm(), executor, null);
         try {
@@ -107,7 +107,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         classesOnly(m2, "g.com", "artifact-b", "2.0", "g.com.b.Main");
 
         final var config = config(m2.toString(), proj.toString());
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         try {
             assertTrue(
@@ -140,7 +140,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         classesOnly(m2, "g.com", "artifact-other", "3.0", "g.com.other.Main");
 
         final var config = config(m2.toString(), proj.toString());
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         try {
             final var ack = service.refresh(null, null, null);
@@ -169,7 +169,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         classesOnly(m2, "g.com", "artifact-b", "2.0", "g.com.b.Main");
 
         final var config = config(m2.toString(), proj.toString());
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         try {
             service.refresh(null, null, null);
@@ -196,7 +196,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
 
         final var config = config(m2.toString(), proj.toString());
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         try {
             service.refresh(null, null, null);
@@ -228,7 +228,7 @@ public class MavenRepositoryKnowledgeServiceTest {
         classesOnly(m2, "g.com", "artifact-a", "1.0", "g.com.a.Main");
 
         final var config = config(m2.toString(), proj.toString());
-        final var executor = new VirtualThreadExecutor();
+        final var executor = Executors.newVirtualThreadPerTaskExecutor();
         final var service = new MavenRepositoryKnowledgeService(config, new StubLlm(), executor, null);
         try {
             service.refresh(null, null, null);

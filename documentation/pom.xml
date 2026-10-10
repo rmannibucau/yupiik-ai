@@ -128,6 +128,12 @@ if uppercased, dot/hyphens replaced by underscores and leading hyphens/dots remo
             <preAction>
               <type>io.yupiik.ia.agent.documentation.CodingAgentDocumentationGenerator</type>
             </preAction>
+            <preAction>
+              <type>io.yupiik.ia.agent.documentation.EventsDocumentationGenerator</type>
+            </preAction>
+            <preAction>
+              <type>io.yupiik.ia.agent.documentation.EscapeGeneratedHandlebarsGenerator</type>
+            </preAction>
           </preActions>
         </configuration>
         <dependencies>

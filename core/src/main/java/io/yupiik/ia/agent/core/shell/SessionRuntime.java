@@ -114,4 +114,9 @@ public final class SessionRuntime {
     public void updateChatSettings(final ChatSettings value) {
         loop.updateChatSettings(value);
     }
+
+    /** Releases the session: fires the {@code yca.hooks.SessionEnded} hook once (idempotent like the loop). */
+    public void close() {
+        loop.close();
+    }
 }

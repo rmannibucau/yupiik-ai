@@ -15,8 +15,12 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import io.yupiik.ia.agent.core.events.EventContext;
+import io.yupiik.ia.agent.core.events.TodoUpdatedEvent;
+import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -33,8 +37,17 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class WriteTodoTool implements EmbeddedTool {
 
-    public WriteTodoTool() {
-        // no session state: the todo store and permissions are passed per call in the ToolContext
+    private final Emitter emitter;
+    private final EventContextBuilder contextBuilder;
+
+    public WriteTodoTool(final Emitter emitter, final EventContextBuilder contextBuilder) {
+        this.emitter = emitter;
+        this.contextBuilder = contextBuilder;
+    }
+
+    protected WriteTodoTool() { // no-arg ctor for container-less grading/tests
+        this.emitter = null;
+        this.contextBuilder = null;
     }
 
     @Override
@@ -98,6 +111,7 @@ public class WriteTodoTool implements EmbeddedTool {
         if (store == null) {
             return ToolResult.error("write_todo requires an active session todo list.");
         }
+        final var before = store.all();
         if (!(args.get("todos") instanceof List<?> raw)) {
             return ToolResult.error(
                     "todos must be a non empty array of {content, status} (got " + typeName(args.get("todos")) + ")");
@@ -114,6 +128,7 @@ public class WriteTodoTool implements EmbeddedTool {
         if (perms != null && perms.mode() == AgentMode.PLAN) {
             final var normalized = normalizePlanStatuses(store, todos);
             store.replace(todos);
+            emitTodoUpdated(store, before, context);
             final var note = normalized.isEmpty()
                     ? ""
                     : " (plan mode: '" + String.join("', '", normalized)
@@ -121,6 +136,7 @@ public class WriteTodoTool implements EmbeddedTool {
             return ToolResult.ok("Todo list updated" + note + ":\n" + store.render());
         }
         store.replace(todos);
+        emitTodoUpdated(store, before, context);
         return ToolResult.ok("Todo list updated:\n" + store.render());
     }
 
@@ -154,5 +170,32 @@ public class WriteTodoTool implements EmbeddedTool {
 
     private static String typeName(final Object o) {
         return o == null ? "null" : o.getClass().getSimpleName();
+    }
+
+    private void emitTodoUpdated(final TodoStore store, final List<TodoItem> before, final ToolContext context) {
+        if (emitter == null) {
+            return;
+        }
+        final EventContext eventContext;
+        if (contextBuilder == null) {
+            eventContext = new EventContext(
+                    context == null ? null : context.sessionId(),
+                    context == null ? null : context.subagentId(),
+                    context == null ? null : context.subagentName(),
+                    null,
+                    null,
+                    null,
+                    null,
+                    null);
+        } else {
+            eventContext = contextBuilder.build(
+                    null,
+                    null,
+                    context == null ? null : context.sessionId(),
+                    context == null ? null : context.subagentId(),
+                    context == null ? null : context.subagentName(),
+                    null);
+        }
+        emitter.emit(new TodoUpdatedEvent(eventContext, before, store.all()));
     }
 }

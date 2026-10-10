@@ -50,6 +50,10 @@ public class UsageTracker {
     private final AtomicLong auxiliaryPromptTokens = new AtomicLong();
     private final AtomicLong auxiliaryCompletionTokens = new AtomicLong();
     private final AtomicLong auxiliaryRequests = new AtomicLong();
+    // rtk-style output-optimization counters: how many good tool outputs were trimmed and by how much.
+    private final AtomicLong optimizedOutputs = new AtomicLong();
+    private final AtomicLong optimizedCharsBefore = new AtomicLong();
+    private final AtomicLong optimizedCharsAfter = new AtomicLong();
     protected final Clock clock;
     private final AtomicLong contextWindowResolutions = new AtomicLong();
     private final AtomicLong autoContextWindowResolutions = new AtomicLong();
@@ -118,6 +122,58 @@ public class UsageTracker {
         auxiliaryPromptTokens.addAndGet(usage.promptTokens());
         auxiliaryCompletionTokens.addAndGet(usage.completionTokens());
         auxiliaryRequests.incrementAndGet();
+    }
+
+    /**
+     * Records one accepted tool-output optimization (rtk style): a meaningful character reduction
+     * applied to a bash/tool result before it reaches the model. Only called for reductions that
+     * actually replaced the original output ({@code after} is smaller than {@code before}). Later
+     * the chars can be priced as estimated tokens (~4 chars/token) for the session saved-token line.
+     *
+     * @param beforeChars the original tool output length in characters.
+     * @param afterChars  the optimized output length in characters.
+     */
+    public void recordOptimization(final long beforeChars, final long afterChars) {
+        optimizedOutputs.incrementAndGet();
+        optimizedCharsBefore.addAndGet(beforeChars);
+        optimizedCharsAfter.addAndGet(afterChars);
+    }
+
+    /** Number of tool outputs that were actually optimized (accepted reductions). */
+    public long optimizedOutputs() {
+        return optimizedOutputs.get();
+    }
+
+    /** Total characters of the original tool outputs that were optimized. */
+    public long optimizedCharsBefore() {
+        return optimizedCharsBefore.get();
+    }
+
+    /** Total characters of the optimized tool outputs. */
+    public long optimizedCharsAfter() {
+        return optimizedCharsAfter.get();
+    }
+
+    /** Total characters saved by output optimization (before minus after). */
+    public long optimizedCharsSaved() {
+        return Math.max(0, optimizedCharsBefore.get() - optimizedCharsAfter.get());
+    }
+
+    /**
+     * Merges aggregated optimization counters as-is (used by {@code SubagentUsageTracker} to fold its
+     * pre-aggregated totals into the parent without recounting each output as a single one).
+     *
+     * @param outputs the number of optimized outputs already counted by the caller.
+     * @param before  the caller's total optimized-input characters.
+     * @param after   the caller's total optimized-output characters.
+     */
+    public void mergeOptimizationCounters(final long outputs, final long before, final long after) {
+        if (outputs <= 0) {
+            return;
+        }
+        optimizedOutputs.addAndGet(outputs);
+        optimizedCharsBefore.addAndGet(before);
+        optimizedCharsAfter.addAndGet(after);
     }
 
     /**
@@ -220,6 +276,9 @@ public class UsageTracker {
         auxiliaryPromptTokens.set(0);
         auxiliaryCompletionTokens.set(0);
         auxiliaryRequests.set(0);
+        optimizedOutputs.set(0);
+        optimizedCharsBefore.set(0);
+        optimizedCharsAfter.set(0);
         anchor = null;
     }
 

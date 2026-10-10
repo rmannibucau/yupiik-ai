@@ -45,7 +45,6 @@ import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
@@ -66,6 +65,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -362,10 +362,10 @@ class TuiCommandHeadlessTest {
             final var tabManager = tabManagerInstance.instance();
             final var tuiSlashCommands = slashCommandsInstance.instance();
             // a fresh executor per run: TuiCommand.run() shuts the executor down when the TUI
-            // quits, and the container-managed VirtualThreadExecutor bean is also used by the
+            // quits, and the container-managed ExecutorService bean is also used by the
             // agent beans (TurnRunner, ChatClient...). Passing a dedicated one lets every test
             // reuse the shared @BeforeAll container without poisoning the other tests.
-            final var runExecutor = new VirtualThreadExecutor();
+            final var runExecutor = Executors.newVirtualThreadPerTaskExecutor();
             return new TuiCommand(
                     conf,
                     d.tuiConfiguration(),
@@ -404,6 +404,8 @@ class TuiCommandHeadlessTest {
                             d.executor(),
                             new ToolCallMarkupStripper(),
                             new ToolCallMarkupParser(),
+                            null,
+                            null,
                             null,
                             null,
                             null,

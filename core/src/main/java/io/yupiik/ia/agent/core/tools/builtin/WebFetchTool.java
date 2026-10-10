@@ -15,8 +15,8 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
@@ -47,11 +47,6 @@ public class WebFetchTool implements EmbeddedTool {
     public WebFetchTool(final ExtendedHttpClient client, final HtmlLightParser htmlParser) {
         this.client = client;
         this.htmlParser = htmlParser;
-    }
-
-    protected WebFetchTool() {
-        this.client = null;
-        this.htmlParser = null;
     }
 
     @Override

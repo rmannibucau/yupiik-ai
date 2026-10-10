@@ -48,7 +48,6 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -78,6 +77,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
@@ -988,14 +988,16 @@ class TuiCommandRenderTest {
                 new AutoLogConfigurer(configuration),
                 mcpManager,
                 new ProcessService(),
-                new VirtualThreadExecutor(),
+                Executors.newVirtualThreadPerTaskExecutor(),
                 providerManager,
                 new AgentProvider(configuration),
                 agentSessionService,
-                new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
+                new MavenRepositoryKnowledgeService(
+                        configuration, null, Executors.newVirtualThreadPerTaskExecutor(), null),
                 new TurnRunner(
-                        new MavenRepositoryKnowledgeService(configuration, null, new VirtualThreadExecutor(), null),
-                        new VirtualThreadExecutor(),
+                        new MavenRepositoryKnowledgeService(
+                                configuration, null, Executors.newVirtualThreadPerTaskExecutor(), null),
+                        Executors.newVirtualThreadPerTaskExecutor(),
                         agentSessionService),
                 new ThinkTagSplitter(),
                 factory,
@@ -1008,9 +1010,11 @@ class TuiCommandRenderTest {
                         chatClient,
                         sessionStore,
                         configuration,
-                        new VirtualThreadExecutor(),
+                        Executors.newVirtualThreadPerTaskExecutor(),
                         new ToolCallMarkupStripper(),
                         new ToolCallMarkupParser(),
+                        null,
+                        null,
                         null,
                         null,
                         null,

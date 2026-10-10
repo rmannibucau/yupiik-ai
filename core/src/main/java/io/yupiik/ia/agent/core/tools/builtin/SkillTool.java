@@ -15,7 +15,7 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -35,10 +35,6 @@ public class SkillTool implements EmbeddedTool {
 
     public SkillTool(final CodingAgentConfiguration configuration) {
         this.configuration = configuration;
-    }
-
-    protected SkillTool() {
-        this.configuration = null;
     }
 
     @Override

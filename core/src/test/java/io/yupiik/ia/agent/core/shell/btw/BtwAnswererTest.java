@@ -28,7 +28,6 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -51,6 +50,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -79,6 +79,7 @@ class BtwAnswererTest {
 
     private HttpServer server;
     private java.util.concurrent.ExecutorService serverExecutor;
+    private java.util.concurrent.ExecutorService btwExecutor;
     private InMemorySessionStore sessionStore;
     private UsageTracker usageTracker;
     private BtwAnswerer answerer;
@@ -114,6 +115,9 @@ class BtwAnswererTest {
         if (serverExecutor != null) {
             serverExecutor.shutdownNow();
         }
+        if (btwExecutor != null) {
+            btwExecutor.shutdownNow();
+        }
     }
 
     private BtwAnswerer answerer(final Map<String, String> extra) {
@@ -121,18 +125,21 @@ class BtwAnswererTest {
         final var providerManager = new ProviderManager(configuration, mapper);
         final var client = new ChatClient(configuration, mapper, providerManager, Clock.systemUTC());
         clients.add(client);
+        btwExecutor = Executors.newVirtualThreadPerTaskExecutor();
         return new BtwAnswerer(
                 client,
                 sessionStore,
                 configuration,
-                new VirtualThreadExecutor(),
+                btwExecutor,
                 new ToolCallMarkupStripper(),
                 new ToolCallMarkupParser(),
                 toolRegistry,
                 new ToolExecutionService(configuration, NOOP, List.of()),
                 mapper,
                 providerManager,
-                Clock.systemUTC());
+                Clock.systemUTC(),
+                NOOP,
+                null);
     }
 
     /**

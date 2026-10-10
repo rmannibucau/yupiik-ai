@@ -15,8 +15,10 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
@@ -32,6 +34,7 @@ import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.ToolContext;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.nio.file.Path;
 import java.util.HashMap;
@@ -87,7 +90,23 @@ class SpawnSubagentToolTest {
 
     private SubagentRunner mockRunner(final SubagentRegistry registry) {
         return new SubagentRunner(
-                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, registry) {
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                registry,
+                new PrecisionDurationMarkerProvider()) {
             @Override
             public void runAsync(
                     final SubagentRegistry.SubagentState state,
@@ -196,7 +215,23 @@ class SpawnSubagentToolTest {
         final var forwarded = new java.util.concurrent.atomic.AtomicReference<BooleanSupplier>();
         final var runner =
                 new SubagentRunner(
-                        null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, reg) {
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        reg,
+                        new PrecisionDurationMarkerProvider()) {
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,
@@ -235,5 +270,92 @@ class SpawnSubagentToolTest {
         final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
         assertFalse(result.success(), result.output());
         assertTrue(result.output().contains("maximum concurrent sub-agents reached"));
+    }
+
+    @Test
+    void forwardsExplicitModelToTheSubagentState() {
+        final var cfg = config(Map.of());
+        final var reg = registry(cfg);
+        final var captured = new java.util.concurrent.atomic.AtomicReference<String>();
+        final var runner =
+                new SubagentRunner(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        reg,
+                        new PrecisionDurationMarkerProvider()) {
+                    @Override
+                    public void runAsync(
+                            final SubagentRegistry.SubagentState state,
+                            final SessionStore sessionStore,
+                            final SnapshotStore snapshotStore,
+                            final TodoStore todoStore,
+                            final ToolContext parentContext,
+                            final BooleanSupplier cancelled) {
+                        captured.set(state.model());
+                        reg.complete(
+                                state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
+                    }
+                };
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var result =
+                tool.execute(Map.of("task", "do work", "model", "$local/deepseek-v4-flash"), context(noopTodoStore()));
+        assertTrue(result.success(), result.output());
+        assertEquals("$local/deepseek-v4-flash", captured.get(), "the explicit model must reach the subagent state");
+    }
+
+    @Test
+    void leavesModelNullWhenNotRequested() {
+        final var cfg = config(Map.of());
+        final var reg = registry(cfg);
+        final var captured = new java.util.concurrent.atomic.AtomicReference<String>();
+        final var runner =
+                new SubagentRunner(
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        reg,
+                        new PrecisionDurationMarkerProvider()) {
+                    @Override
+                    public void runAsync(
+                            final SubagentRegistry.SubagentState state,
+                            final SessionStore sessionStore,
+                            final SnapshotStore snapshotStore,
+                            final TodoStore todoStore,
+                            final ToolContext parentContext,
+                            final BooleanSupplier cancelled) {
+                        captured.set(state.model());
+                        reg.complete(
+                                state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
+                    }
+                };
+        final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
+        final var result = tool.execute(Map.of("task", "do work"), context(noopTodoStore()));
+        assertTrue(result.success(), result.output());
+        assertNull(captured.get(), "no explicit model means inherit (null on the state)");
     }
 }

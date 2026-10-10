@@ -21,7 +21,6 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.KnowledgeFactory;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
@@ -43,6 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -59,7 +59,7 @@ public class MavenRepositoryKnowledgeService {
 
     private final CodingAgentConfiguration configuration;
     private final KnowledgeLlm llm;
-    private final VirtualThreadExecutor executor;
+    private final ExecutorService executor;
     private final ExtendedHttpClient httpClient;
     private final AtomicReference<List<String>> sessionSkillBlocks = new AtomicReference<>(List.of());
     private final AtomicBoolean sessionSkillsRequested = new AtomicBoolean();
@@ -74,7 +74,7 @@ public class MavenRepositoryKnowledgeService {
     public MavenRepositoryKnowledgeService(
             final CodingAgentConfiguration configuration,
             final KnowledgeLlm llm,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final ExtendedHttpClient httpClient) {
         this.configuration = configuration;
         this.llm = llm;

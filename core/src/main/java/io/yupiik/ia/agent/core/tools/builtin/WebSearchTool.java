@@ -15,8 +15,8 @@
  */
 package io.yupiik.ia.agent.core.tools.builtin;
 
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.arg;
-import static io.yupiik.ia.agent.core.tools.builtin.ReadFileTool.optInt;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;

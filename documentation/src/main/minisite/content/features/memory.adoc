@@ -56,8 +56,13 @@ conversation into at most 3 durable facts:
 
 [source,json]
 ----
-{"facts": [{"text": "...", "scope": "global" | "project"}]}
+{
+  "facts": [
+    { "text": "...", "scope": "global" | "project" }  <1>
+  ]
+}
 ----
+<.> Each fact pairs free text with a target scope (`global` or `project`); memory is stored per scope.
 
 Extraction is:
 

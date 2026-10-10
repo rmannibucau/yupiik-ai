@@ -244,6 +244,24 @@ public class CompactionCoordinator {
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
         java.util.Objects.requireNonNull(cancelled, "cancelled");
+        // blockable hook gate: a forbid vetoes the compaction before any real work
+        if (emitter != null) {
+            final var hook = new io.yupiik.ia.agent.core.events.HookResult();
+            emitter.emit(new io.yupiik.ia.agent.core.events.CompactionStartingEvent(
+                    new io.yupiik.ia.agent.core.events.EventContext(
+                            sessionId,
+                            null,
+                            null,
+                            configuration.resolveProjectDir().toString(),
+                            null,
+                            null,
+                            null,
+                            null),
+                    hook));
+            if (hook.forbidden()) {
+                return new CompactionResult(messages, Mode.NONE, "compaction vetoed by hook");
+            }
+        }
         final var p = configuration.pruning();
         final var keepFloor =
                 Math.max(2, keepLastOverride > 0 ? keepLastOverride : force ? p.keepRecent() / 2 : p.keepRecent());

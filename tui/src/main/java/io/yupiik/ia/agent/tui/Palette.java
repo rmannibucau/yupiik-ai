@@ -95,10 +95,6 @@ public record Palette(
     }
 
     /** @return the main text style. */
-    public Style textStyle() {
-        return style(text);
-    }
-
     /** @return the muted (secondary) text style. */
     public Style muted() {
         return style(textMuted);

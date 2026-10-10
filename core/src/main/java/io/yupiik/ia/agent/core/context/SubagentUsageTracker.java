@@ -30,6 +30,9 @@ public class SubagentUsageTracker extends UsageTracker {
     private final AtomicLong reasoningTokens = new AtomicLong();
     private final AtomicLong cacheReadTokens = new AtomicLong();
     private final AtomicLong requests = new AtomicLong();
+    private final AtomicLong optimizedOutputs = new AtomicLong();
+    private final AtomicLong optimizedCharsBefore = new AtomicLong();
+    private final AtomicLong optimizedCharsAfter = new AtomicLong();
     private volatile Anchor anchor;
 
     public SubagentUsageTracker(final UsageTracker parent, final String subagentId) {
@@ -62,6 +65,13 @@ public class SubagentUsageTracker extends UsageTracker {
         reasoningTokens.addAndGet(usage.reasoningTokens());
         cacheReadTokens.addAndGet(usage.cacheReadTokens());
         requests.incrementAndGet();
+    }
+
+    @Override
+    public void recordOptimization(final long beforeChars, final long afterChars) {
+        optimizedOutputs.incrementAndGet();
+        optimizedCharsBefore.addAndGet(beforeChars);
+        optimizedCharsAfter.addAndGet(afterChars);
     }
 
     @Override
@@ -145,12 +155,35 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
+    public long optimizedOutputs() {
+        return optimizedOutputs.get();
+    }
+
+    @Override
+    public long optimizedCharsBefore() {
+        return optimizedCharsBefore.get();
+    }
+
+    @Override
+    public long optimizedCharsAfter() {
+        return optimizedCharsAfter.get();
+    }
+
+    @Override
+    public long optimizedCharsSaved() {
+        return Math.max(0, optimizedCharsBefore.get() - optimizedCharsAfter.get());
+    }
+
+    @Override
     public void reset() {
         promptTokens.set(0);
         completionTokens.set(0);
         reasoningTokens.set(0);
         cacheReadTokens.set(0);
         requests.set(0);
+        optimizedOutputs.set(0);
+        optimizedCharsBefore.set(0);
+        optimizedCharsAfter.set(0);
         anchor = null;
     }
 
@@ -203,6 +236,10 @@ public class SubagentUsageTracker extends UsageTracker {
                     0,
                     (int) reasoningTokens.get(),
                     0));
+            if (optimizedOutputs.get() > 0) {
+                parent.mergeOptimizationCounters(
+                        optimizedOutputs.get(), optimizedCharsBefore.get(), optimizedCharsAfter.get());
+            }
         }
     }
 

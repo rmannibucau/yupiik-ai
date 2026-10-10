@@ -26,25 +26,29 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
 class TurnRunnerTest {
+    private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
     @Test
     void runsThePromptThroughBeginAndEndTurn() {
         final var loop = new RecordingLoop();
         final var frontend = new RecordingFrontend();
         final var session = new ShellSession();
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSessionService());
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(
                         loop,
@@ -68,7 +72,7 @@ class TurnRunnerTest {
     void nullPromptResumesInsteadOfRunning() {
         final var loop = new RecordingLoop();
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSessionService());
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
 
         runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, null, List::of, () -> false))
                 .toCompletableFuture()
@@ -84,7 +88,7 @@ class TurnRunnerTest {
         final var session = new ShellSession();
         final var seenBusy = new AtomicBoolean(false);
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), session, null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSessionService());
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService());
         loop.onRun = () -> seenBusy.set(session.busy());
 
         runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "go", List::of, () -> false))
@@ -99,7 +103,7 @@ class TurnRunnerTest {
     void declinedConfirmSkipsTheTurnAndReturnsFalse() throws Exception {
         final var loop = new RecordingLoop();
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(false), new ShellSession(), null);
-        final var runner = new TurnRunner(indexing(3), new VirtualThreadExecutor(), agentSessionService());
+        final var runner = new TurnRunner(indexing(3), EXECUTOR, agentSessionService());
 
         final var ran = runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "hi", List::of, () -> false))
                 .toCompletableFuture()
@@ -117,7 +121,7 @@ class TurnRunnerTest {
         final var session = new ShellSession();
         final var agentSession = new RecordingAgentSessionService();
         final var env = new ShellEnv(frontend, new FixedIo(true), session, null);
-        final var runner = new TurnRunner(noIndexing(), new VirtualThreadExecutor(), agentSession);
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSession);
         session.pendingMode("build");
 
         runner.submit(new TurnRunner.TurnRequest(loop, env, "s1", null, "go", List::of, () -> false))
@@ -138,8 +142,7 @@ class TurnRunnerTest {
         final var interrupted = new AtomicBoolean(false);
         final var loop = new RecordingLoop();
         loop.onRun = () -> interrupted.set(true);
-        final var runner = new TurnRunner(
-                noIndexing(), new VirtualThreadExecutor(), agentSessionService(), recordingRegistry(latched));
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), recordingRegistry(latched));
 
         runner.submit(new TurnRunner.TurnRequest(
                         loop,
@@ -160,8 +163,7 @@ class TurnRunnerTest {
         final var env = new ShellEnv(new RecordingFrontend(), new FixedIo(true), new ShellSession(), null);
         final var latched = new AtomicReference<String>();
         final var interrupted = new AtomicBoolean(false);
-        final var runner = new TurnRunner(
-                noIndexing(), new VirtualThreadExecutor(), agentSessionService(), recordingRegistry(latched));
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), recordingRegistry(latched));
 
         runner.submit(new TurnRunner.TurnRequest(
                         new RecordingLoop(),
@@ -341,5 +343,10 @@ class TurnRunnerTest {
             this.resumedSession.set(sessionId);
             return null;
         }
+    }
+
+    @AfterAll
+    static void closeExecutor() {
+        EXECUTOR.shutdownNow();
     }
 }

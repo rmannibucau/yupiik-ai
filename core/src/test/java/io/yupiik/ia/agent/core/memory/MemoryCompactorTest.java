@@ -99,7 +99,9 @@ class MemoryCompactorTest {
                 new io.yupiik.fusion.framework.api.event.Emitter() {
                     @Override
                     public <T> void emit(final T event) {
-                        events.add((AgentEvent) event);
+                        if (event instanceof AgentEvent agentEvent) {
+                            events.add(agentEvent);
+                        }
                     }
                 },
                 sessionId);

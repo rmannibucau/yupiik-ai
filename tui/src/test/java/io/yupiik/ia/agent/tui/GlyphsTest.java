@@ -33,8 +33,6 @@ class GlyphsTest {
     void turnHeaderGlyphsHaveAsciiFallbacks() {
         final var unicode = Glyphs.of("unicode");
         final var ascii = Glyphs.of("ascii");
-        assertEquals("\u258c", unicode.turnMark());
-        assertEquals("*", ascii.turnMark());
         assertEquals("\u2500", unicode.rule());
         assertEquals("-", ascii.rule());
     }

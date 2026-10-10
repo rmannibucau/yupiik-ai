@@ -124,6 +124,19 @@ public final class MetricsFormat {
                 sb.append(" · reasoning ").append(usage.reasoningTokens()).append(" tok");
             }
         }
+        if (usage != null && usage.optimizedOutputs() > 0) {
+            final var saved = usage.optimizedCharsSaved();
+            sb.append(" · optimized ").append(usage.optimizedOutputs()).append(" outputs");
+            if (full) {
+                sb.append(" ~")
+                        .append(saved)
+                        .append(" chars (")
+                        .append(Math.max(1, saved / 4))
+                        .append(" tok est)");
+            } else {
+                sb.append(" ~").append(saved).append(" chars saved");
+            }
+        }
         return sb.toString();
     }
 }

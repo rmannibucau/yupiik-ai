@@ -8,7 +8,7 @@ By default the built-in template is used:
 
 [source,handlebars]
 ----
-[{{#if (eq mode "plan")}}{{lookup colors "accent"}}{{else}}{{lookup colors "success"}}{{/if}}{{{mode}}}{{lookup colors "reset"}}@{{lookup colors "model"}}{{{modelName}}}{{lookup colors "reset"}}]{{#if permission}} ({{#if (eq permission "auto")}}{{lookup colors "warning"}}{{else}}{{lookup colors "status"}}{{/if}}{{{permission}}}{{lookup colors "reset"}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}} {{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}{{{model.contextPercentage}}}%{{lookup colors "reset"}}> 
+[{$yupiik.minisite.openbracket$}{#if (eq mode "plan")}}{$yupiik.minisite.openbracket$}{lookup colors "accent"}}{$yupiik.minisite.openbracket$}{else}}{$yupiik.minisite.openbracket$}{lookup colors "success"}}{$yupiik.minisite.openbracket$}{/if}}{$yupiik.minisite.openbracket$}{{mode}}}{$yupiik.minisite.openbracket$}{lookup colors "reset"}}@{$yupiik.minisite.openbracket$}{lookup colors "model"}}{$yupiik.minisite.openbracket$}{{modelName}}}{$yupiik.minisite.openbracket$}{lookup colors "reset"}}]{$yupiik.minisite.openbracket$}{#if permission}} ({$yupiik.minisite.openbracket$}{#if (eq permission "auto")}}{$yupiik.minisite.openbracket$}{lookup colors "warning"}}{$yupiik.minisite.openbracket$}{else}}{$yupiik.minisite.openbracket$}{lookup colors "status"}}{$yupiik.minisite.openbracket$}{/if}}{$yupiik.minisite.openbracket$}{{permission}}}{$yupiik.minisite.openbracket$}{lookup colors "reset"}}){$yupiik.minisite.openbracket$}{/if}}{$yupiik.minisite.openbracket$}{#if agent}} [{$yupiik.minisite.openbracket$}{{agent}}}]{$yupiik.minisite.openbracket$}{/if}} {$yupiik.minisite.openbracket$}{#if (lte model.contextPercentage 30)}}{$yupiik.minisite.openbracket$}{lookup colors "dim"}}{$yupiik.minisite.openbracket$}{else if (lte model.contextPercentage 70)}}{$yupiik.minisite.openbracket$}{lookup colors "warning"}}{$yupiik.minisite.openbracket$}{else}}{$yupiik.minisite.openbracket$}{lookup colors "error"}}{$yupiik.minisite.openbracket$}{/if}}{$yupiik.minisite.openbracket$}{{model.contextPercentage}}}%{$yupiik.minisite.openbracket$}{lookup colors "reset"}}> 
 ----
 
 which renders, for a build in `yolo` mode with a `reviewer` agent and the context
@@ -25,7 +25,7 @@ uncolored, one column after the `>`.
 
 Colors and thresholds are expressed directly in the template, so you can tune
 them without touching any code.
-Every colored segment is closed with `{{lookup colors "reset"}}` so the following
+Every colored segment is closed with `{$yupiik.minisite.openbracket$}{lookup colors "reset"}}` so the following
 characters fall back to the default color; when color is disabled the lookup
 renders empty.
 The optional agent badge only appears when a custom agent is active and the
@@ -94,7 +94,7 @@ heuristic only).
 
 |`configuration`
 |map
-|The whole yca configuration as a map, so any configured value is reachable, e.g. `{{{configuration.provider.providers.0.contextWindow}}}`.
+|The whole yca configuration as a map, so any configured value is reachable, e.g. `{$yupiik.minisite.openbracket$}{{configuration.provider.providers.0.contextWindow}}}`.
 |===
 
 == Helpers
@@ -102,9 +102,9 @@ heuristic only).
 Helpers are plain Handlebars functions usable in the template.
 Literal string arguments use double quotes (single quotes are not treated as
 quoting).
-Sub-expressions compose helpers, e.g. `{{#if (lte model.contextPercentage 30)}}`,
-and `{{else}}` / `{{else if ...}}` chains work in block helpers.
-`{{value}}` escapes the value while `{{{value}}}` renders it raw - use triple
+Sub-expressions compose helpers, e.g. `{$yupiik.minisite.openbracket$}{#if (lte model.contextPercentage 30)}}`,
+and `{$yupiik.minisite.openbracket$}{else}}` / `{$yupiik.minisite.openbracket$}{else if ...}}` chains work in block helpers.
+`{$yupiik.minisite.openbracket$}{value}}` escapes the value while `{$yupiik.minisite.openbracket$}{{value}}}` renders it raw - use triple
 braces for values containing ANSI escape sequences like mode, model name or
 palette colors.
 
@@ -112,7 +112,7 @@ The standard helpers shipped by the engine are the following:
 
 include::content/_partials/generated/prompt-helpers.adoc[]
 
-`{{lookup colors "name"}}` pulls the ANSI prefix named `name` from the `colors`
+`{$yupiik.minisite.openbracket$}{lookup colors "name"}}` pulls the ANSI prefix named `name` from the `colors`
 palette and renders empty when the entry is missing, letting the value degrade
 to plain text.
 Recognized palette names:
@@ -140,18 +140,18 @@ When ANSI color is disabled (`--color off`, `NO_COLOR`, or `TERM=dumb`), the
 
 == Conditionals
 
-Built-in block helpers drop empty segments: `{{#if ...}}` is falsy for null,
+Built-in block helpers drop empty segments: `{$yupiik.minisite.openbracket$}{#if ...}}` is falsy for null,
 blank, or empty values.
 
 [source,handlebars]
 ----
-{{#if permission}} ({{{permission}}}){{/if}}{{#if agent}} [{{{agent}}}]{{/if}}
+{$yupiik.minisite.openbracket$}{#if permission}} ({$yupiik.minisite.openbracket$}{{permission}}}){$yupiik.minisite.openbracket$}{/if}}{$yupiik.minisite.openbracket$}{#if agent}} [{$yupiik.minisite.openbracket$}{{agent}}}]{$yupiik.minisite.openbracket$}{/if}}
 ----
 
-`{{else}}` and `{{else if ...}}` cover the fallback branches, as used by the
+`{$yupiik.minisite.openbracket$}{else}}` and `{$yupiik.minisite.openbracket$}{else if ...}}` cover the fallback branches, as used by the
 context thresholds of the built-in template:
 
 [source,handlebars]
 ----
-{{#if (lte model.contextPercentage 30)}}{{lookup colors "dim"}}{{else if (lte model.contextPercentage 70)}}{{lookup colors "warning"}}{{else}}{{lookup colors "error"}}{{/if}}
+{$yupiik.minisite.openbracket$}{#if (lte model.contextPercentage 30)}}{$yupiik.minisite.openbracket$}{lookup colors "dim"}}{$yupiik.minisite.openbracket$}{else if (lte model.contextPercentage 70)}}{$yupiik.minisite.openbracket$}{lookup colors "warning"}}{$yupiik.minisite.openbracket$}{else}}{$yupiik.minisite.openbracket$}{lookup colors "error"}}{$yupiik.minisite.openbracket$}{/if}}
 ----

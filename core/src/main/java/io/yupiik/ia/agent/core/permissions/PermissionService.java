@@ -15,10 +15,16 @@
  */
 package io.yupiik.ia.agent.core.permissions;
 
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.BashPermissionsConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
+import io.yupiik.ia.agent.core.events.EventContext;
+import io.yupiik.ia.agent.core.events.HookResult;
+import io.yupiik.ia.agent.core.events.PermissionDeniedEvent;
+import io.yupiik.ia.agent.core.events.PermissionRequestedEvent;
+import io.yupiik.ia.agent.core.events.PermissionsChangedEvent;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -29,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class PermissionService {
     private final CodingAgentConfiguration configuration;
+    private final Emitter emitter;
     private volatile ApprovalGate gate;
     private final Set<String> sessionGrants = ConcurrentHashMap.newKeySet();
     private volatile AgentMode mode;
@@ -36,11 +43,18 @@ public class PermissionService {
     private volatile RulesCache rulesCache;
 
     public PermissionService(final CodingAgentConfiguration configuration) {
+        this(configuration, null);
+    }
+
+    public PermissionService(
+            final CodingAgentConfiguration configuration, final io.yupiik.fusion.framework.api.event.Emitter emitter) {
         this.configuration = configuration;
+        this.emitter = emitter;
     }
 
     protected PermissionService() {
         this.configuration = null;
+        this.emitter = null;
     }
 
     public void setGate(final ApprovalGate gate) {
@@ -74,7 +88,9 @@ public class PermissionService {
     }
 
     public void setMode(final AgentMode mode) {
+        final var from = this.mode;
         this.mode = mode;
+        emitPermissionsChanged("agent", from == null ? null : from.name(), mode == null ? null : mode.name());
     }
 
     public AgentMode mode() {
@@ -93,7 +109,10 @@ public class PermissionService {
      * sync with behaviour. A {@code null} resets to the configured default.
      */
     public void setPermissionMode(final PermissionMode permissionMode) {
+        final var from = this.permissionMode;
         this.permissionMode = permissionMode;
+        emitPermissionsChanged(
+                "permission", from == null ? null : from.name(), permissionMode == null ? null : permissionMode.name());
     }
 
     /** The effective permission mode: the runtime override when set, otherwise the configured default (ASK). */
@@ -104,6 +123,13 @@ public class PermissionService {
         }
         final var permissions = configuration.permissions();
         return permissions != null && permissions.mode() != null ? permissions.mode() : PermissionMode.ASK;
+    }
+
+    /** Observe-only notification of a permission or agent mode change. */
+    private void emitPermissionsChanged(final String kind, final String from, final String to) {
+        if (emitter != null) {
+            emitter.emit(new PermissionsChangedEvent(context(), kind, from, to));
+        }
     }
 
     public record Decision(boolean allowed, String reason) {
@@ -193,17 +219,46 @@ public class PermissionService {
         if (g == null) {
             final var base =
                     "permission denied: mode is 'ask' (the default) and this run has no interactive approval wired - use the TUI, or set yca.permissions.mode=yolo/auto_edit to allow unattended writes";
-            return Decision.deny(bashCause(asked) == null ? base : base + " (" + bashCause(asked) + ')');
+            final var reason = bashCause(asked) == null ? base : base + " (" + bashCause(asked) + ')';
+            emitDenied(toolName, args, reason);
+            return Decision.deny(reason);
         }
-        final var result = g.approve(describe(toolName, args), detail(toolName, args, asked), toolName, args);
+        final var detail = detail(toolName, args, asked);
+        // blockable hook gate: a forbid denies before the interactive modal is shown
+        if (emitter != null) {
+            final var hook = new HookResult();
+            emitter.emit(new PermissionRequestedEvent(context(), toolName, args, detail, hook));
+            if (hook.forbidden()) {
+                final var reason = hook.reason() == null ? "forbidden by hook" : hook.reason();
+                emitDenied(toolName, args, reason);
+                return Decision.deny(reason);
+            }
+        }
+        final var result = g.approve(describe(toolName, args), detail, toolName, args);
         return switch (result) {
             case ALLOW_ONCE -> Decision.allow();
             case ALLOW_SESSION -> {
                 grantSession(toolName, args);
                 yield Decision.allow();
             }
-            default -> Decision.deny("refused by the user" + (bashCause(asked) == null ? "" : ": " + bashCause(asked)));
+            default -> {
+                final var reason = "refused by the user" + (bashCause(asked) == null ? "" : ": " + bashCause(asked));
+                emitDenied(toolName, args, reason);
+                yield Decision.deny(reason);
+            }
         };
+    }
+
+    /** Observe-only notification of a denied permission request. */
+    private void emitDenied(final String toolName, final Map<String, Object> args, final String reason) {
+        if (emitter != null) {
+            emitter.emit(new PermissionDeniedEvent(context(), toolName, args, reason));
+        }
+    }
+
+    /** Shared, per-process event context: no session, cwd and current modes only. */
+    private EventContext context() {
+        return new EventContext(null, null, null, projectDir(), permissionMode().name(), mode().name(), null, null);
     }
 
     /**

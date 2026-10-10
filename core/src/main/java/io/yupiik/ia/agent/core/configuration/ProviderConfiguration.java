@@ -117,6 +117,12 @@ public record ProviderConfiguration(
         PromptConfiguration prompt,
 
         @Property(
+                defaultValue = "\"\"",
+                documentation =
+                        "Default model used for sub-agents spawned from this provider when the spawn request carries no explicit `model` param (same $provider/model or bare resolution as the background compact/prune/memory models). Blank (the default) keeps today's behavior: the sub-agent inherits the parent session's provider/model. A non-blank value is that provider's own model when bare, or the explicitly routed model for a $provider/model reference. The explicit `model` param of spawn_subagent always wins over this default.")
+        String defaultSubagentModel,
+
+        @Property(
                 documentation =
                         "Per-provider overrides of the global yca.model.* background models (same compact/prune/memory shape). "
                                 + "Resolution per background call (compaction summarizer, memory writes): a non-blank, non-\"inherit\" "
@@ -126,7 +132,7 @@ public record ProviderConfiguration(
                                 + "own default model, ie. no dedicated background model for this provider.")
         ModelConfiguration backgroundModelOverrides) {
 
-    /** Constructor accepting the fields before {@code backgroundModelOverrides} (it defaults to null). */
+    /** Constructor accepting the fields before {@code defaultSubagentModel} (both it and {@code backgroundModelOverrides} default to null). */
     public ProviderConfiguration(
             final String id,
             final String baseUrl,
@@ -163,6 +169,7 @@ public record ProviderConfiguration(
                 dynamicHeaders,
                 color,
                 prompt,
+                null,
                 null);
     }
 

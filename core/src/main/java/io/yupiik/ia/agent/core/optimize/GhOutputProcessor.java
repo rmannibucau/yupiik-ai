@@ -83,7 +83,7 @@ public class GhOutputProcessor implements OutputProcessor {
 
     private Stream<String> processPrIssue(final String command, final List<String> all) {
         // list/status shapes: "123  title  branch  state" or a status line "checks: ..."
-        final var verb = thirdToken(command);
+        final var verb = Optimizers.thirdToken(command);
         if ("list".equals(verb)) {
             final var seen = new LinkedHashSet<String>();
             for (final var raw : all) {
@@ -121,7 +121,7 @@ public class GhOutputProcessor implements OutputProcessor {
     }
 
     private Stream<String> processRun(final String command, final List<String> all) {
-        final var verb = thirdToken(command);
+        final var verb = Optimizers.thirdToken(command);
         if ("view".equals(verb)) {
             final var out = new ArrayList<String>();
             for (final var raw : all) {
@@ -147,22 +147,6 @@ public class GhOutputProcessor implements OutputProcessor {
             }
         }
         return out.stream();
-    }
-
-    /** The token right after {@code gh <sub>}: {@code gh pr view} -> {@code view}, {@code gh run list} -> {@code list}. */
-    private static String thirdToken(final String command) {
-        final var tokens = command.strip().split("\\s+");
-        int found = 0;
-        for (var i = 1; i < tokens.length; i++) {
-            if (tokens[i].startsWith("-")) {
-                continue;
-            }
-            found++;
-            if (found == 2) {
-                return tokens[i];
-            }
-        }
-        return "";
     }
 
     private static String subCommand(final String command) {

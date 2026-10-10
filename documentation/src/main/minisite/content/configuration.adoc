@@ -66,7 +66,7 @@ default stripped) stdout:
 {
   "provider": {
     "dynamicHeaders": {
-      "authorization": "Bearer {{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
+      "authorization": "Bearer {$yupiik.minisite.openbracket$}{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
     }
   }
 }
@@ -182,6 +182,23 @@ existing regular file (for example
 An agent is selected on `run` with `--agent <name>`, in the TUI with
 `/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt with
 `@<name> `.
+
+== Sub-agent model routing
+
+A sub-agent spawned with `spawn_subagent model=<reference>` runs on the model
+(and provider) named by the reference: `$<provider>/<model>` routes to that
+provider explicitly, a bare name is pinned to whichever configured provider
+declares it (falling back to the parent session's provider). Without an explicit
+`model`, the spawning provider's `defaultSubagentModel` applies when set
+(blank keeps the historic behavior: the sub-agent inherits the parent session's
+provider/model). Resolution reuses the same `$provider/model` machinery as the
+background `compact`/`prune`/`memory` models, so a sub-agent can be pinned to a
+cheaper model or a different provider - including specialists routed away from
+the parent's frontier model, that report no tool output on their own provider.
+
+The resolved model of a running/recently-completed sub-agent is surfaced in the
+`/subagents` overlay (list rows and the detail transcript) when a reference was
+requested.
 
 == Prompt template
 

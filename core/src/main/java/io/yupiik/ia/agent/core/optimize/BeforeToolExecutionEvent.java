@@ -15,6 +15,18 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
+import io.yupiik.ia.agent.core.events.EventContext;
 import java.util.Map;
 
-public record BeforeToolExecutionEvent(String tool, Map<String, Object> args) {}
+/**
+ * Fired just before a tool call executes. Carries the session coordinates (from {@link
+ * io.yupiik.ia.agent.core.tools.ToolContext}) so observers - including the trailing hook triggers - can build an
+ * {@link EventContext} and attribute the call to the right session/subagent.
+ */
+public record BeforeToolExecutionEvent(
+        String tool, Map<String, Object> args, String sessionId, String subagentId, String subagentName) {
+
+    public BeforeToolExecutionEvent(final String tool, final Map<String, Object> args) {
+        this(tool, args, null, null, null);
+    }
+}

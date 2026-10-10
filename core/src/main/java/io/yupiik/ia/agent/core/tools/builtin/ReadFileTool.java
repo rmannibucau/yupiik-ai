@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.core.tools.builtin;
 
 import static io.yupiik.ia.agent.core.tools.Schemas.str;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -173,26 +175,5 @@ public class ReadFileTool implements EmbeddedTool {
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot read " + path + ": " + e.getMessage());
         }
-    }
-
-    static String arg(final Map<String, Object> args, final String key) {
-        return args.get(key) == null ? null : args.get(key).toString();
-    }
-
-    static long optInt(final Map<String, Object> args, final String key, final long dflt) {
-        final var v = args.get(key);
-        if (v instanceof Number n) {
-            return n.longValue();
-        }
-        try {
-            return v == null ? dflt : Long.parseLong(v.toString());
-        } catch (final NumberFormatException e) {
-            return dflt;
-        }
-    }
-
-    static boolean optBool(final Map<String, Object> args, final String key, final boolean dflt) {
-        final var v = args.get(key);
-        return v instanceof Boolean b ? b : v != null && Boolean.parseBoolean(v.toString());
     }
 }

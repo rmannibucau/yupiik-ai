@@ -27,7 +27,7 @@ for fast symbol lookups.
 
 The `cli` and `tui` prompts and the transcript speaker labels are Handlebars
 templates (`yca.prompt.template`, `yca.labels.*`); both engines expose the
-`systemProperty` helper (`{{systemProperty "user.name" "You"}}`: 1 argument =
+`systemProperty` helper (`{$yupiik.minisite.openbracket$}{systemProperty "user.name" "You"}}`: 1 argument =
 key rendered empty when absent, 2 arguments add the default). Speaker labels
 are UI-only: the LLM keeps its hardcoded `user`/`assistant` roles.
 

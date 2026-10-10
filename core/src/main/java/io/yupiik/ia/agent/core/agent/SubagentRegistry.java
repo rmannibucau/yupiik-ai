@@ -92,6 +92,17 @@ public class SubagentRegistry {
     }
 
     public Optional<SubagentState> start(final String parentSessionId, final String task, final String name) {
+        return start(parentSessionId, task, name, null);
+    }
+
+    /**
+     * Starts a sub-agent, optionally with a requested model/reference.
+     *
+     * @param model the raw model reference from {@code spawn_subagent model=} ($provider/model or bare), or {@code null}
+     *     when the caller did not request one (the provider {@code defaultSubagentModel} or parent inheritance applies).
+     */
+    public Optional<SubagentState> start(
+            final String parentSessionId, final String task, final String name, final String model) {
         if (!enabled()) {
             return Optional.empty();
         }
@@ -100,7 +111,13 @@ public class SubagentRegistry {
         }
         activeCount.incrementAndGet();
         final var id = UUID.randomUUID().toString();
-        final var state = new SubagentState(id, parentSessionId, task, name, System.currentTimeMillis());
+        final var state = new SubagentState(
+                id,
+                parentSessionId,
+                task,
+                name,
+                System.currentTimeMillis(),
+                model == null || model.isBlank() ? null : model);
         subagents.put(id, state);
         return Optional.of(state);
     }
@@ -242,6 +259,7 @@ public class SubagentRegistry {
         private final String parentSessionId;
         private final String task;
         private final String name;
+        private final String model;
         private final long startedAt;
         private volatile SubagentResult result;
         private volatile boolean cancelled;
@@ -249,7 +267,7 @@ public class SubagentRegistry {
         private volatile long completedAt;
 
         public SubagentState(final String id, final String parentSessionId, final String task, final long startedAt) {
-            this(id, parentSessionId, task, null, startedAt);
+            this(id, parentSessionId, task, null, startedAt, null);
         }
 
         public SubagentState(
@@ -258,10 +276,21 @@ public class SubagentRegistry {
                 final String task,
                 final String name,
                 final long startedAt) {
+            this(id, parentSessionId, task, name, startedAt, null);
+        }
+
+        public SubagentState(
+                final String id,
+                final String parentSessionId,
+                final String task,
+                final String name,
+                final long startedAt,
+                final String model) {
             this.id = id;
             this.parentSessionId = parentSessionId;
             this.task = task;
             this.name = name;
+            this.model = model;
             this.startedAt = startedAt;
         }
 
@@ -279,6 +308,11 @@ public class SubagentRegistry {
 
         public String name() {
             return name;
+        }
+
+        /** The raw model reference requested via {@code spawn_subagent model=}, or {@code null} when none was requested. */
+        public String model() {
+            return model;
         }
 
         public long startedAt() {

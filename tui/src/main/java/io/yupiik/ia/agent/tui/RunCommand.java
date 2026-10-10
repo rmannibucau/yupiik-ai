@@ -210,6 +210,7 @@ public class RunCommand implements Runnable {
         } finally {
             System.out.flush();
             shellRegistry.unregister(shellEnv);
+            runtime.close();
             // headless run end: persist the pending memory delta now, before the JVM exits
             try {
                 runtime.loop().forceExtractNow(sessionStore.load(sessionId), runtime.chatSettings());

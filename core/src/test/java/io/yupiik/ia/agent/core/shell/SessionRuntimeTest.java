@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -78,6 +79,7 @@ class SessionRuntimeTest {
                 mapper,
                 null,
                 Clock.systemUTC(),
+                new PrecisionDurationMarkerProvider(),
                 null);
     }
 

@@ -30,7 +30,6 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -41,7 +40,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -49,6 +51,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class MemoryExtractorTest {
+    private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     @TempDir
     Path home;
@@ -108,11 +111,13 @@ class MemoryExtractorTest {
                 null, // provider manager: the global memory model chain applies
                 store,
                 null, // mapper unused by the fallback path
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
-                        events.add((AgentEvent) event);
+                        if (event instanceof AgentEvent agentEvent) {
+                            events.add(agentEvent);
+                        }
                         done.countDown();
                     }
                 },
@@ -177,11 +182,13 @@ class MemoryExtractorTest {
                 null, // provider manager: the global memory model chain applies
                 store,
                 mapper,
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
-                        events.add((AgentEvent) event);
+                        if (event instanceof AgentEvent agentEvent) {
+                            events.add(agentEvent);
+                        }
                         done.countDown();
                     }
                 },
@@ -238,7 +245,7 @@ class MemoryExtractorTest {
                 null,
                 store,
                 mapper,
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
@@ -289,7 +296,7 @@ class MemoryExtractorTest {
                 null,
                 store,
                 mapper,
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
@@ -315,7 +322,7 @@ class MemoryExtractorTest {
                 null,
                 store,
                 mapper,
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
@@ -365,11 +372,13 @@ class MemoryExtractorTest {
                 null,
                 store,
                 mapper,
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
-                        events.add((AgentEvent) event);
+                        if (event instanceof AgentEvent agentEvent) {
+                            events.add(agentEvent);
+                        }
                     }
                 },
                 Clock.systemUTC(),
@@ -408,7 +417,7 @@ class MemoryExtractorTest {
                 null,
                 store,
                 mapper,
-                new VirtualThreadExecutor(),
+                EXECUTOR,
                 new Emitter() {
                     @Override
                     public <T> void emit(final T event) {
@@ -489,5 +498,10 @@ class MemoryExtractorTest {
             // user-old got dropped only because assistants were exhausted or would exceed alone
             assertTrue(!assistantAFound && !assistantBFound, "assistants must go before any user: " + excerpt);
         }
+    }
+
+    @AfterAll
+    static void closeExecutor() {
+        EXECUTOR.shutdownNow();
     }
 }

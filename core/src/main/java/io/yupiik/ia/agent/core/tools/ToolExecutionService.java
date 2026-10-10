@@ -76,7 +76,8 @@ public class ToolExecutionService {
         final var optimize = configuration.optimize();
         final var optimizeThis = optimize.enabled() && !optimize.isDisabled(List.of(tool.name()));
         if (optimizeThis) {
-            emitter.emit(new BeforeToolExecutionEvent(tool.name(), args));
+            emitter.emit(new BeforeToolExecutionEvent(
+                    tool.name(), args, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
         }
         final var startNanos = System.nanoTime();
         ToolResult result;
@@ -91,7 +92,8 @@ public class ToolExecutionService {
             output = optimizeOutput(tool, args, output, ctx);
         }
         if (optimizeThis) {
-            emitter.emit(new AfterToolExecutionEvent(tool.name(), result.success(), output));
+            emitter.emit(new AfterToolExecutionEvent(
+                    tool.name(), result.success(), output, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
         }
         emitter.emit(new AgentEvent.ToolTimingEvent(
                 tool.name(), durationMs, durationMs, false, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
@@ -122,6 +124,9 @@ public class ToolExecutionService {
                         if (reporter != null) {
                             reporter.report("output optimized by " + processor.displayName() + " (" + output.length()
                                     + " -> " + processed.length() + " chars)");
+                        }
+                        if (context.usage() != null) {
+                            context.usage().recordOptimization(output.length(), processed.length());
                         }
                         return processed;
                     }

@@ -30,6 +30,8 @@ import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.events.EventContext;
+import io.yupiik.ia.agent.core.events.SessionStartedEvent;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
@@ -37,14 +39,15 @@ import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Creates one {@link SessionRuntime} per session (one TUI tab, the CLI session):
@@ -69,7 +72,8 @@ public class SessionRuntimeFactory {
     private final JsonMapper mapper;
     private final Emitter emitter;
     private final Clock clock;
-    private final VirtualThreadExecutor executor;
+    private final PrecisionDurationMarkerProvider precisionDurationMarker;
+    private final ExecutorService executor;
 
     public SessionRuntimeFactory(
             final ChatClient chatClient,
@@ -88,7 +92,8 @@ public class SessionRuntimeFactory {
             final JsonMapper mapper,
             final Emitter emitter,
             final Clock clock,
-            final VirtualThreadExecutor executor) {
+            final PrecisionDurationMarkerProvider precisionDurationMarker,
+            final ExecutorService executor) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -105,6 +110,7 @@ public class SessionRuntimeFactory {
         this.mapper = mapper;
         this.emitter = emitter;
         this.clock = clock;
+        this.precisionDurationMarker = precisionDurationMarker;
         this.executor = executor;
     }
 
@@ -114,7 +120,7 @@ public class SessionRuntimeFactory {
      * @param sessionId  the initial chat session id owned by the runtime
      */
     public SessionRuntime create(final String sessionKey, final String sessionId) {
-        final var permissions = new PermissionService(configuration);
+        final var permissions = new PermissionService(configuration, emitter);
         final var feedback = new UserFeedbackService();
         final var usage = new UsageTracker(providerManager, chatClient, contextWindowCache, clock);
         final var todos = new TodoStore(configuration, mapper, sessionKey);
@@ -172,7 +178,15 @@ public class SessionRuntimeFactory {
                 sessionId,
                 null,
                 null,
-                feedback);
+                feedback,
+                precisionDurationMarker);
+        if (emitter != null) {
+            emitter.emit(new SessionStartedEvent(
+                    new EventContext(
+                            null, null, null, configuration.resolveProjectDir().toString(), null, null, null, null),
+                    sessionId,
+                    sessionKey));
+        }
         return new SessionRuntime(
                 loop, permissions, feedback, usage, todos, status, contextManager, systemPromptBuilder);
     }
@@ -201,5 +215,6 @@ public class SessionRuntimeFactory {
         this.emitter = null;
         this.clock = null;
         this.executor = null;
+        this.precisionDurationMarker = null;
     }
 }

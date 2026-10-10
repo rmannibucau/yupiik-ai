@@ -22,7 +22,6 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.SessionLifecycle;
@@ -30,6 +29,7 @@ import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.style.ModelStyleService;
 import io.yupiik.ia.agent.core.todo.PlanFileService;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.util.concurrent.ExecutorService;
 
 /**
  * Test-only bean aggregating every {@link TuiCommand} dependency so tests do a
@@ -48,7 +48,7 @@ public record TuiDeps(
         ModelStyleService modelStyleService,
         MemoryStore memoryStore,
         McpManager mcpManager,
-        VirtualThreadExecutor executor,
+        ExecutorService executor,
         StructuralCodeGraph structuralCodeGraph,
         ProviderManager providerManager,
         AgentProvider agentProvider,

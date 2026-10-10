@@ -71,13 +71,6 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         this.processes = processes;
     }
 
-    protected YcaKnowledgeLlm() {
-        this.chatClient = null;
-        this.mapper = null;
-        this.configuration = null;
-        this.processes = null;
-    }
-
     /** Binds one index run to the requesting session's provider/model; pass null to fall back to process default. */
     public void withSettings(final ChatSettings settings) {
         this.runSettings = settings;

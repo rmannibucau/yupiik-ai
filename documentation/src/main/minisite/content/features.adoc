@@ -3,7 +3,7 @@
 :minisite-index-title: Features
 :minisite-index-description: What yca does out of the box: interactive UI, tools, context management, sessions and more.
 :minisite-index-icon: layer-group
-:minisite-keywords: features, tools, sessions, context, mcp, agents, permissions
+:minisite-keywords: features, tools, sessions, context, mcp, agents, permissions, hooks
 :minisite-breadcrumb: Home[index.html] > Features
 
 yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
@@ -146,6 +146,22 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
           ask, auto_edit and yolo modes with allow/deny glob lists.
         </div>
         <a title="Permission modes" class="card-link-mask" href="features/permissions.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card card-body h-100 category-default">
+      <div class="card-body">
+        <h4 class="card-title">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-link"></i>
+          </span>
+          <span class="card-title-text">Hooks &amp; events</span>
+        </h4>
+        <div class="card-text">
+          External-program callbacks bound to events (pre-tool, prompt submit, ...).
+        </div>
+        <a title="Hooks & events" class="card-link-mask" href="features/hooks.html"></a>
       </div>
     </div>
   </div>

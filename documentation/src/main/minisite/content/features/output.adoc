@@ -98,3 +98,31 @@ The read-only bash families of `yca.permissions.bash.rules` are the same
 commands the processors compact (`ls`, `find`, `grep`, `rg`, `git diff/log/show`,
 `gh pr view`, `kubectl get`, `docker ps`, ...), so the plan mode sees both the
 same pre-approved commands and the same compacted shapes.
+
+## Saved-token counter
+
+Every accepted reduction is counted per session: `/metrics` (and the TUI status
+bar when session totals are shown) reports `optimized N outputs ~X chars (~Y tok
+est) saved`. The token figure is an estimate at ~4 chars/token (the same
+heuristic yca uses for context estimation), not a provider-billed value, so
+treat it as an upper bound on the savings from output compaction.
+
+## Output style
+
+yca does not ship a built-in "terse answer" or caveman-style output-verbosity
+knob. The measured savings from such prompt-level rules are marginal (the
+auto-scout24 ecosystem's own numbers put a caveman-style skill at ~3% output
+tokens against a plain "answer concisely", with prompt overhead that can make it
+net-negative), and the same gentler effect is already available for free by
+putting an `## Output style` block in `AGENTS.md` (or a `CLAUDE.md`), which yca
+loads into the system prompt:
+
+```md
+## Output style
+- No preamble, no trailing recap of what you just did.
+- Reply in unified diff form; no full-file rewrites unless asked.
+- For research questions, answer in 10 lines or fewer unless I ask for depth.
+```
+
+The bulk of token savings in a real session lives on the *input* side -- the
+compact output processors above -- not in the agent's own prose.

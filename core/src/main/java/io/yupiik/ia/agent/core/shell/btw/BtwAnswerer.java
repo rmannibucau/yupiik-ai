@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.shell.btw;
 
+import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
@@ -23,6 +24,10 @@ import io.yupiik.ia.agent.core.configuration.BtwConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.events.EventContext;
+import io.yupiik.ia.agent.core.events.HookResult;
+import io.yupiik.ia.agent.core.events.ToolUsePreEvent;
+import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -33,7 +38,6 @@ import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -50,6 +54,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.ExecutorService;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -79,7 +84,7 @@ public class BtwAnswerer {
     private final ChatClient chatClient;
     private final SessionStore sessionStore;
     private final CodingAgentConfiguration configuration;
-    private final VirtualThreadExecutor executor;
+    private final ExecutorService executor;
     private final ToolCallMarkupStripper toolCallMarkup;
     private final ToolCallMarkupParser toolCallMarkupParser;
     private final ToolRegistry toolRegistry;
@@ -87,6 +92,8 @@ public class BtwAnswerer {
     private final JsonMapper mapper;
     private final ProviderManager providerManager;
     private final Clock clock;
+    private final Emitter emitter;
+    private final EventContextBuilder eventContextBuilder;
     private final Deque<BtwExchange> exchanges = new ConcurrentLinkedDeque<>();
     private volatile ChatClient dedicatedClient;
     private volatile ChatSettings dedicatedSettings;
@@ -95,14 +102,16 @@ public class BtwAnswerer {
             final ChatClient chatClient,
             final SessionStore sessionStore,
             final CodingAgentConfiguration configuration,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final ToolCallMarkupStripper toolCallMarkup,
             final ToolCallMarkupParser toolCallMarkupParser,
             final ToolRegistry toolRegistry,
             final ToolExecutionService toolExecutionService,
             final JsonMapper mapper,
             final ProviderManager providerManager,
-            final Clock clock) {
+            final Clock clock,
+            final Emitter emitter,
+            final EventContextBuilder eventContextBuilder) {
         this.chatClient = chatClient;
         this.sessionStore = sessionStore;
         this.configuration = configuration;
@@ -114,6 +123,8 @@ public class BtwAnswerer {
         this.mapper = mapper;
         this.providerManager = providerManager;
         this.clock = clock;
+        this.emitter = emitter;
+        this.eventContextBuilder = eventContextBuilder;
     }
 
     public record BtwExchange(String question, String answer) {}
@@ -169,7 +180,7 @@ public class BtwAnswerer {
         final var target = client(model);
         // /btw never inherits the session permission mode: plan-mode rules only, and the caller's
         // approval gate (the tabs share it, so an approval pops above the btw modal) decides the rest.
-        final var permissions = new PermissionService(configuration);
+        final var permissions = new PermissionService(configuration, emitter);
         permissions.setMode(AgentMode.PLAN);
         permissions.setPermissionMode(PermissionMode.ASK);
         permissions.setGate(sessionGate);
@@ -258,11 +269,27 @@ public class BtwAnswerer {
         } catch (final RuntimeException invalid) {
             return new ToolOutcome(call.id(), "(invalid arguments: " + invalid.getMessage() + ")", false);
         }
-        final var decision = permissions.check(name, tool.category(), args, tool.readonly());
-        if (!decision.allowed()) {
+        final var inline = permissions.check(name, tool.category(), args, tool.readonly());
+        if (!inline.allowed()) {
             return new ToolOutcome(
                     call.id(),
-                    "Permission denied by user" + (decision.reason() == null ? "" : ": " + decision.reason()),
+                    "Permission denied by user" + (inline.reason() == null ? "" : ": " + inline.reason()),
+                    false);
+        }
+        // the built-in plan-mode check is authoritative inline (so a /btw denial is never dependent on the global
+        // observer wiring); the ToolUsePreEvent is still emitted so configured yca.hooks.ToolUsePreEvent callbacks
+        // run for allowed calls. The built-in observer re-checking the same permissionService is a harmless fast path.
+        final var toolUseResult = new HookResult();
+        final var workdir = args.get("workdir") instanceof final String w && !w.isBlank() ? w : null;
+        final var eventContext = eventContextBuilder == null
+                ? new EventContext(sessionId, null, null, null, null, null, null, null)
+                : eventContextBuilder.build(permissions, target.settings(), sessionId, null, null, workdir);
+        emitter.emit(new ToolUsePreEvent(
+                eventContext, name, args, call.id(), toolUseResult, permissions, tool.category(), tool.readonly()));
+        if (toolUseResult.forbidden()) {
+            return new ToolOutcome(
+                    call.id(),
+                    "Permission denied by user" + (toolUseResult.reason() == null ? "" : ": " + toolUseResult.reason()),
                     false);
         }
         final var context = new ToolContext(

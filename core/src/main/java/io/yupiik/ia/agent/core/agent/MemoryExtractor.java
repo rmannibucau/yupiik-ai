@@ -25,13 +25,13 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
@@ -113,7 +113,7 @@ public class MemoryExtractor {
     private final ProviderManager providerManager;
     private final MemoryStore memoryStore;
     private final JsonMapper mapper;
-    private final VirtualThreadExecutor executor;
+    private final ExecutorService executor;
     private final AtomicInteger consecutiveFailures = new AtomicInteger();
     private final Emitter emitter;
     private final Clock clock;
@@ -129,7 +129,7 @@ public class MemoryExtractor {
             final ProviderManager providerManager,
             final MemoryStore memoryStore,
             final JsonMapper mapper,
-            final VirtualThreadExecutor executor,
+            final ExecutorService executor,
             final Emitter emitter,
             final Clock clock,
             final UsageTracker usageTracker,

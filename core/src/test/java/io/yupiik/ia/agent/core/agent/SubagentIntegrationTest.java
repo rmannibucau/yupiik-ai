@@ -33,7 +33,6 @@ import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
-import io.yupiik.ia.agent.core.runtime.VirtualThreadExecutor;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
@@ -46,6 +45,7 @@ import io.yupiik.ia.agent.core.tools.ToolExecutionService;
 import io.yupiik.ia.agent.core.tools.ToolRegistry;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.CheckSubagentsTool;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
@@ -61,10 +61,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -72,6 +75,8 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class SubagentIntegrationTest {
+    private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+
     @TempDir
     Path storageHome;
 
@@ -459,7 +464,8 @@ class SubagentIntegrationTest {
                     delegate.mavenRepositoryKnowledge,
                     delegate.clock,
                     delegate.executor,
-                    delegate.subagentRegistry);
+                    delegate.subagentRegistry,
+                    delegate.precisionDurationMarker);
         }
 
         @Override
@@ -553,7 +559,9 @@ class SubagentIntegrationTest {
                     @Override
                     public <T> void emit(final T event) {
                         synchronized (events) {
-                            events.add((AgentEvent) event);
+                            if (event instanceof AgentEvent agentEvent) {
+                                events.add(agentEvent);
+                            }
                         }
                     }
                 },
@@ -577,8 +585,9 @@ class SubagentIntegrationTest {
                 new TodoPromptResolver(),
                 null,
                 Clock.systemUTC(),
-                new VirtualThreadExecutor(),
-                reg);
+                EXECUTOR,
+                reg,
+                new PrecisionDurationMarkerProvider());
         return new TestSubagentRunner(baseRunner);
     }
 
@@ -831,5 +840,10 @@ class SubagentIntegrationTest {
         final var collect = checkTool.execute(Map.of("action", "collect", "subagent_id", state.id()));
         assertTrue(collect.success(), collect.output());
         assertTrue(collect.output().contains("direct collect"));
+    }
+
+    @AfterAll
+    static void closeExecutor() {
+        EXECUTOR.shutdownNow();
     }
 }

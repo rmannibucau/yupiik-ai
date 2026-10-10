@@ -13,29 +13,20 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package io.yupiik.ia.agent.core.runtime;
+package io.yupiik.ia.agent.core.wiring;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
-import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 
+/**
+ * Injectable, monotonic nanosecond source used to mark the start/end of elapsed durations and to compute deadlines.
+ * <p>
+ * Kept apart from the wall-clock {@link java.time.Clock} (used for absolute timestamps): durations must stay monotonic
+ * and independent of system time adjustments, so this provider exposes only {@link #now()} delegating to
+ * {@code System.nanoTime()}. Being a Fusion bean it can be overridden in tests (e.g. with a fixed or stepped value).
+ */
 @ApplicationScoped
-public class VirtualThreadExecutor {
-    private final ExecutorService delegate = Executors.newVirtualThreadPerTaskExecutor();
-
-    public void execute(final Runnable task) {
-        delegate.execute(task);
-    }
-
-    public <T> Future<T> submit(final Callable<T> task) {
-        return delegate.submit(task);
-    }
-
-    @Destroy
-    public void shutdown() {
-        delegate.shutdown();
+public class PrecisionDurationMarkerProvider {
+    public long now() {
+        return System.nanoTime();
     }
 }
