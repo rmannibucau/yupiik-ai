@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -78,7 +79,7 @@ class CliPromptTemplateTest {
     }
 
     private static List<PromptHandlebarsHelper> helpers() {
-        return List.of(new TimePromptHelper(), new FormatDatePromptHelper());
+        return List.of(new TimePromptHelper(), new FormatDatePromptHelper(Clock.systemDefaultZone()));
     }
 
     private static CodingAgentConfiguration config(final String template) {

@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.cli;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import java.time.Clock;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -26,20 +27,29 @@ import java.util.concurrent.ConcurrentMap;
  * Registers the {@code {{formatDate}}} helper: renders the current date/time in the
  * JVM default timezone (the end-user local time), {@code {{formatDate}}} using the default
  * {@code HH:mm:ss} pattern or {@code {{formatDate "yyyy-MM-dd HH:mm:ss"}}} with any java.time
- * pattern. Display-only: the rendering deliberately uses {@link Clock#systemDefaultZone()} and is
- * independent of the internal UTC {@code Clock} bean used by sessions/compaction/the LLM payload.
- * Formatters are cached per pattern (created once per JVM, never recompiled per render).
+ * pattern. Display-only: the timezone is forced to {@link Clock#systemDefaultZone()} regardless of
+ * the injected {@link Clock} (DI injects the internal UTC {@code Clock} bean used by
+ * sessions/compaction/the LLM payload, whose timezone must not leak into end-user timestamps).
+ * Tests inject a fixed {@link Clock} so the rendered value is deterministic. The injected clock's
+ * instant is kept as-is (it reads the same hardware clock), only its zone is re-based on the JVM
+ * default. Formatters are cached per pattern (created once per JVM, never recompiled per render).
  */
 @ApplicationScoped
 public class FormatDatePromptHelper implements PromptHandlebarsHelper {
     private static final String DEFAULT_PATTERN = "HH:mm:ss";
 
-    private final Clock clock = Clock.systemDefaultZone();
+    private final Clock clock;
     private final ConcurrentMap<String, DateTimeFormatter> formatters = new ConcurrentHashMap<>();
 
-    public FormatDatePromptHelper() {
-        // DI instantiates the helper directly (no parameterized constructor) and tests
-        // construct it explicitly; the rendering always uses the JVM default zone.
+    /**
+     * DI instantiates the helper with the app-wide {@link Clock} bean (Fusion resolves it
+     * automatically); the instance's timezone is re-based on the JVM default zone so display always
+     * reads as end-user local time. A {@code null} clock (never produced by DI, only a manual
+     * caller) falls back to {@link Clock#systemDefaultZone()} so production cannot render in a
+     * foreign zone by accident.
+     */
+    public FormatDatePromptHelper(final Clock clock) {
+        this.clock = clock == null ? Clock.systemDefaultZone() : clock.withZone(ZoneId.systemDefault());
     }
 
     @Override

@@ -377,7 +377,7 @@ class TuiCommandHeadlessTest {
                     d.chatClient(),
                     d.modelStyleService(),
                     new SpeakerLabels(
-                            List.of(new FormatDatePromptHelper()),
+                            List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())),
                             d.configuration(),
                             d.chatClient(),
                             d.providerManager()),

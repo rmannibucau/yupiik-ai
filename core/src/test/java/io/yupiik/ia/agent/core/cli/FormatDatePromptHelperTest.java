@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -38,7 +39,7 @@ class FormatDatePromptHelperTest {
         final var functions = new LinkedHashMap<
                 String,
                 java.util.function.Function<io.yupiik.fusion.framework.handlebars.helper.HelperContext, Object>>();
-        functions.put("formatDate", new FormatDatePromptHelper()::apply);
+        functions.put("formatDate", new FormatDatePromptHelper(Clock.systemDefaultZone())::apply);
         return new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(
                         new HandlebarsCompiler.Settings().helpers(functions), template))

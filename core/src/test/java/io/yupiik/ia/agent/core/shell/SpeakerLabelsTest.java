@@ -86,7 +86,7 @@ class SpeakerLabelsTest {
 
     private SpeakerLabels labels(final CodingAgentConfiguration configuration) {
         return new SpeakerLabels(
-                List.of(new FormatDatePromptHelper()),
+                List.of(new FormatDatePromptHelper(Clock.systemDefaultZone())),
                 configuration,
                 chatClient(configuration),
                 providerManager(configuration));

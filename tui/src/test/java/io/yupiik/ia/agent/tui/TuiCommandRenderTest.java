@@ -70,8 +70,6 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -175,7 +173,13 @@ class TuiCommandRenderTest {
                 return run(prompt, agentName, sessionId, history, cancelled);
             }
         };
-        final var command = command(shellRegistry, agentLoop);
+        final var command = command(
+                shellRegistry,
+                agentLoop,
+                false,
+                newUsageTracker(),
+                new TodoStore(configuration(), formatMapper),
+                new MutableClock(0));
         uiThread = new Thread(command, "tui-render-test");
         uiThread.setDaemon(true);
         uiThread.start();
@@ -191,10 +195,12 @@ class TuiCommandRenderTest {
         // a labelled turn opens with a role-colored label and a rule running to the panel
         // edge; this is what keeps the user/assistant boundary readable while scrolling.
         // the default user label is the OS user name ("You" when unavailable) and the
-        // stamp is the current local time (formatDate renders in the JVM default zone)
+        // stamp is pinned to a fixed clock (MutableClock epoch 0, UTC) so the header is
+        // deterministic: "[00:00:00]" instead of a real wall-clock second that could tick
+        // between the render and the assertion and make the exact-match headers flaky.
         final var userName = System.getProperty("user.name");
         final var userLabel = userName == null || userName.isBlank() ? "You" : userName;
-        final var stamp = "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] ";
+        final var stamp = "[00:00:00] ";
         assertTrue(
                 anyRowContaining(stamp + userLabel + " \u2500"),
                 "the user turn header and rule should be rendered:\n" + backend.text());
@@ -981,7 +987,7 @@ class TuiCommandRenderTest {
                 chatClient,
                 new io.yupiik.ia.agent.core.style.ModelStyleService(configuration, chatClient),
                 new SpeakerLabels(
-                        List.of(new FormatDatePromptHelper()),
+                        List.of(new FormatDatePromptHelper(clock)),
                         configuration,
                         chatClient,
                         new ProviderManager(configuration, formatMapper)),
