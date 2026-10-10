@@ -157,7 +157,7 @@
             -->
             <groupId>org.apache.geronimo.arthur</groupId>
             <artifactId>arthur-maven-plugin</artifactId>
-            <version>1.0.9</version>
+            <version>1.0.10-SNAPSHOT</version>
             <configuration>
               <main>io.yupiik.fusion.framework.api.main.Launcher</main>
               <usePackagedArtifact>true</usePackagedArtifact>
