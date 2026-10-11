@@ -1,5 +1,9 @@
 = Todo and plan guidance
 :minisite-breadcrumb: Home[index.html] > Features > Todo and plan guidance
+:minisite-nav-prev-link: agents.html
+:minisite-nav-prev-label: Custom agents
+:minisite-nav-next-link: iteration-guards.html
+:minisite-nav-next-label: Iteration guards
 
 The `write_todo` tool is the single way the model records and updates the todo
 list, replacing it entirely on each call. yca treats todos the way opencode does:

@@ -1,6 +1,6 @@
 = llm-client-anthropic
-:minisite-nav-prev-link: llm-client.html
-:minisite-nav-prev-label: LLM client
+:minisite-nav-prev-link: llm-client-openai.html
+:minisite-nav-prev-label: llm-client-openai
 :minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-anthropic
 :minisite-keywords: llm, anthropic, messages, dialect
 

@@ -194,12 +194,16 @@ final class LlmWire {
         // MidStreamFailureException so the caller can retry the whole request, while a failure
         // before any fragment is left untouched for the resilience layer
         final var delivered = new boolean[] {false};
+        // the subscription is captured so the bounded-wait loop below can cancel it on a no-frame
+        // interrupt (an abandon path that does not go through onNext)
+        final var subscriptionHolder = new java.util.concurrent.atomic.AtomicReference<Flow.Subscription>();
         publisher.subscribe(new Flow.Subscriber<>() {
             private Flow.Subscription subscription;
 
             @Override
             public void onSubscribe(final Flow.Subscription s) {
                 this.subscription = s;
+                subscriptionHolder.set(s);
                 s.request(Long.MAX_VALUE);
             }
 
@@ -280,6 +284,13 @@ final class LlmWire {
                     done.get(100, TimeUnit.MILLISECONDS);
                 } catch (final TimeoutException e) {
                     if (cancelled.getAsBoolean()) {
+                        // abandon the stream explicitly: completing done() alone would leave the
+                        // subscription live, so the wrapper's permit release (which hooks cancel())
+                        // never fires and the concurrency slot leaks. Cancel first, like onNext does.
+                        final var sub = subscriptionHolder.get();
+                        if (sub != null) {
+                            sub.cancel();
+                        }
                         done.complete(new Message("assistant", visibleText(text), null, toNull(toolCalls), null, null));
                     }
                     // keep waiting for the next frame (or the completion above)

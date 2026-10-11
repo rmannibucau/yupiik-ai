@@ -1,5 +1,9 @@
 = Reliability
 :minisite-breadcrumb: Home[index.html] > Features > Reliability
+:minisite-nav-prev-link: provider-tuning.html
+:minisite-nav-prev-label: Provider tuning
+:minisite-nav-next-link: prefix-cache.html
+:minisite-nav-next-label: Provider prefix cache
 
 Model calls are protected against transient failures: yca applies rate
 limiting, automatic retries and concurrency limits so bursts and API hiccups do

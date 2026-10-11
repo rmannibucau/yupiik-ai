@@ -16,8 +16,14 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 class LlmWireTest {
@@ -54,5 +60,46 @@ class LlmWireTest {
                 stripped.contains("think"), "inline thinking must be removed: " + stripped);
         org.junit.jupiter.api.Assertions.assertTrue(stripped.contains("let me check the pom"), stripped);
         org.junit.jupiter.api.Assertions.assertTrue(stripped.contains("so I edit it"), stripped);
+    }
+
+    /**
+     * An interrupt pressed while the provider delivers no further frame (silent generation / a long
+     * single chunk) must abandon the stream through the bounded-wait path: {@code pump} must cancel
+     * the subscription before returning a partial result, so the caller's concurrency permit release
+     * (which hooks {@code cancel()}) fires instead of silently leaking the slot.
+     */
+    @Test
+    void pumpAbortsAndCancelsSubscriptionOnNoFrameInterrupt() throws Exception {
+        final var cancelled = new AtomicBoolean(false);
+        final var subscriptionCancelled = new AtomicBoolean(false);
+        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> silent =
+                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                    @Override
+                    public void request(final long n) {
+                        // never emit a frame, never complete: only the bounded-wait abort path ends it
+                    }
+
+                    @Override
+                    public void cancel() {
+                        subscriptionCancelled.set(true);
+                    }
+                });
+
+        final var result = CompletableFuture.supplyAsync(() -> {
+            try {
+                return LlmWire.pump(silent, event -> {}, cancelled::get);
+            } catch (final Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        // let the first bounded-wait timeout elapse with cancellation still off
+        Thread.sleep(250);
+        assertFalse(result.isDone(), "with no cancel the silent stream must keep waiting");
+        // now interrupt: the no-frame abort path must cancel the subscription and end the pump
+        cancelled.set(true);
+        final var message = result.get(5, TimeUnit.SECONDS);
+        assertNotNull(message, "pump must return a partial message on interrupt");
+        assertTrue(subscriptionCancelled.get(), "the no-frame abort must cancel the subscription");
     }
 }

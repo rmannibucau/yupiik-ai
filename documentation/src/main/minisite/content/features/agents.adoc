@@ -1,5 +1,9 @@
 = Custom agents
 :minisite-breadcrumb: Home[index.html] > Features > Custom agents
+:minisite-nav-prev-link: hooks.html
+:minisite-nav-prev-label: Hooks & events
+:minisite-nav-next-link: todo-guidance.html
+:minisite-nav-next-label: Todo and plan guidance
 
 `yca.agents` defines named agents. Each is mostly a prompt whose instructions
 are injected on top of the base system prompt (rules, tools, environment,
@@ -7,5 +11,38 @@ project context, skills and memory stay untouched).
 
 An agent is selected on `run` with `--agent <name>`, in the TUI with
 `/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt
-with `@<name> `. See xref:../configuration.adoc[Configuration] for the
-`yca.agents` format.
+with `@<name> `.
+
+== Defining agents
+
+`yca.agents` is a list of named prompts. The `prompt` is inline text, or a file
+path whose content is loaded when it expands to an existing regular file (for
+example `prompt=~/.yupiik/coding-agent/agents/reviewer.md`).
+
+.Example configuration.json
+[source,json]
+----
+{
+  "agents": [
+    { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md" },
+    { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them." }
+  ]
+}
+----
+
+== Sub-agent model routing
+
+A sub-agent spawned with `spawn_subagent model=<reference>` runs on the model
+(and provider) named by the reference: `$<provider>/<model>` routes to that
+provider explicitly, a bare name is pinned to whichever configured provider
+declares it (falling back to the parent session's provider). Without an explicit
+`model`, the spawning provider's `defaultSubagentModel` applies when set
+(blank keeps the historic behavior: the sub-agent inherits the parent session's
+provider/model). Resolution reuses the same `$provider/model` machinery as the
+background `compact`/`prune`/`memory` models, so a sub-agent can be pinned to a
+cheaper model or a different provider - including specialists routed away from
+the parent's frontier model, that report no tool output on their own provider.
+
+The resolved model of a running/recently-completed sub-agent is surfaced in the
+`/subagents` overlay (list rows and the detail transcript) when a reference was
+requested.

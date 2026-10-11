@@ -56,6 +56,10 @@ class CompletionEngineTest {
     private static SlashRegistry registry() {
         final SlashCommandSet set = () -> List.of(
                 spec("/model", MODEL_COMPLETION, SlashGroup.CONFIG),
+                spec(
+                        "/variant",
+                        (arg, token, env) -> ArgCompletion.fuzzyResult("variant", env.variants(), token),
+                        SlashGroup.CONFIG),
                 spec("/provider", ArgCompletion.from("provider", ArgCompletion.Env::providers), SlashGroup.CONFIG),
                 spec("/agent", ArgCompletion.from("agent", ArgCompletion.Env::agents), SlashGroup.CONFIG),
                 spec("/resume", ArgCompletion.from("session", ArgCompletion.Env::sessions), SlashGroup.SESSION),
@@ -139,6 +143,12 @@ class CompletionEngineTest {
             public List<String> variants(final String model) {
                 return "fast".equals(model) ? List.of("default", "deep") : List.of("default", "fast");
             }
+
+            @Override
+            public List<String> variants() {
+                // the "current model"'s variants, as consumed by /variant
+                return List.of("default", "fast", "deep");
+            }
         };
     }
 
@@ -186,6 +196,19 @@ class CompletionEngineTest {
         final var forGpt5 = engine().suggest("/model gpt-5 f", 14);
         assertTrue(forGpt5.items().contains("fast"), "gpt-5 typed model keeps its own variants");
         assertFalse(forGpt5.items().contains("deep"));
+    }
+
+    @Test
+    void completesVariantForCurrentModel() {
+        // /variant is contextual to the current model: it completes the env's
+        // current-model variants (variants()) regardless of any typed model
+        final var s = engine().suggest("/variant d", 10);
+        assertTrue(s.items().contains("default"));
+        assertTrue(s.items().contains("deep"));
+        assertEquals("variant", s.label());
+        final var fast = engine().suggest("/variant f", 10);
+        assertTrue(fast.items().contains("fast"));
+        assertFalse(fast.items().contains("deep"));
     }
 
     @Test

@@ -2640,6 +2640,30 @@ class AgentLoopTest {
     }
 
     @Test
+    void staleReadsAppendANoteInsteadOfRewritingPriorReads() {
+        // After a write_file invalidates an earlier read of the same path, the prior
+        // read message must stay byte-identical (append-only, so the provider prompt-prefix
+        // cache survives); the caller folds the stale paths into the write tool's own result
+        // message, so NO extra message enters the conversation at all.
+        final var staleReads = new AgentLoop.StaleReads(Map.of("r1", Path.of("/a.txt")));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.tool("r1", "original read content of /a.txt"));
+        // appendToolResult appends the write result AFTER computing the stale paths, so onLanded
+        // runs against the conversation WITHOUT the write result message.
+        final var write = new AgentLoop.ToolOutcome("w1", "write_file", "written", true, true, List.of("/a.txt"), 10L);
+
+        final var stalePaths = staleReads.onLanded(messages, write);
+
+        // the prior read message is NOT rewritten (append-only => provider prefix cache survives)
+        assertEquals(List.of(Path.of("/a.txt")), stalePaths, "the stale path must be reported");
+        assertEquals(
+                "original read content of /a.txt",
+                String.valueOf(messages.get(0).content()));
+        // no message is appended by onLanded itself (the note rides in the write result)
+        assertEquals(1, messages.size(), "onLanded must not append messages: the note rides in the write tool result");
+    }
+
+    @Test
     void softNudgeIsSuppressedWhenThresholdIsZero() {
         final var loop = loop(
                 scriptedToolClient(new ArrayList<>(), List.of()),
@@ -3110,13 +3134,33 @@ class AgentLoopTest {
         assertTrue(
                 String.valueOf(beforeWrite.content()).startsWith("old content"),
                 "the read result must be intact before the write lands");
-        final var afterWrite = requests.get(2).stream()
+        // the write does NOT rewrite the prior read (append-only => prompt-prefix cache
+        // survives); instead a compact system note is appended telling the model to re-read.
+        final var afterWrite = requests.get(requests.size() - 1);
+        final var readAfterWrite = afterWrite.stream()
                 .filter(m -> "tool".equals(m.role()) && "t1".equals(m.toolCallId()))
                 .findFirst()
                 .orElseThrow();
         assertTrue(
-                String.valueOf(afterWrite.content()).contains("stale read cleared"),
-                "the read result must be invalidated after the write: " + afterWrite.content());
+                String.valueOf(readAfterWrite.content()).startsWith("old content"),
+                "the prior read result must be kept intact (append-only), not rewritten: " + readAfterWrite.content());
+        // the stale note rides INSIDE the write tool's own result (new content that round, zero
+        // prefix-cache cost); no extra message (user/system) is injected mid-conversation.
+        assertTrue(
+                afterWrite.stream()
+                        .filter(m -> "tool".equals(m.role()) && "t1".equals(m.toolCallId()))
+                        .noneMatch(m -> String.valueOf(m.content()).contains("stale read cleared")),
+                "the read result itself must not gain the note");
+        final var writeResult = afterWrite.stream()
+                .filter(m -> "tool".equals(m.role()) && "t2".equals(m.toolCallId()))
+                .filter(m -> String.valueOf(m.content()).contains("stale read cleared"))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("the write tool result must carry the stale-read note"));
+        assertTrue(
+                String.valueOf(writeResult.content()).contains("/tmp/opencode/"), "the note must name the stale path");
+        assertTrue(
+                afterWrite.stream().skip(1).noneMatch(m -> "system".equals(m.role())),
+                "no system message may appear mid-conversation (breaks the provider prefix cache)");
     }
 
     @Test
@@ -3169,13 +3213,23 @@ class AgentLoopTest {
                 .run("rewrite it", null, "s1", history, () -> false);
 
         assertEquals("written", result);
-        final var previousRead = requests.get(1).stream()
+        final var afterWriteRequest = requests.get(requests.size() - 1);
+        final var previousRead = afterWriteRequest.stream()
                 .filter(m -> "tool".equals(m.role()) && "h1".equals(m.toolCallId()))
                 .findFirst()
                 .orElseThrow();
         assertTrue(
-                String.valueOf(previousRead.content()).contains("stale read cleared"),
-                "reads from previous turns must be invalidated too: " + previousRead.content());
+                String.valueOf(previousRead.content()).startsWith("old content"),
+                "reads from previous turns must be kept intact (append-only): " + previousRead.content());
+        assertTrue(
+                afterWriteRequest.stream()
+                        .filter(m -> "tool".equals(m.role()))
+                        .anyMatch(m -> String.valueOf(m.content()).contains("stale read cleared")
+                                && String.valueOf(m.content()).contains(file)),
+                "reads from previous turns must be invalidated too: the stale note rides in the write tool result");
+        assertTrue(
+                afterWriteRequest.stream().skip(1).noneMatch(m -> "system".equals(m.role())),
+                "no system message may appear mid-conversation (breaks the provider prefix cache)");
     }
 
     /** A registry serving {@code read_file} (READ/readonly) and {@code write_file} (EDIT) fakes. */

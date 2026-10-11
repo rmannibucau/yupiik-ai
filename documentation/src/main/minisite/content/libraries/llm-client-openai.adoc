@@ -1,6 +1,8 @@
 = llm-client-openai
-:minisite-nav-prev-link: llm-client.html
-:minisite-nav-prev-label: LLM client
+:minisite-nav-prev-link: llm-client-api.html
+:minisite-nav-prev-label: llm-client-api
+:minisite-nav-next-link: llm-client-anthropic.html
+:minisite-nav-next-label: llm-client-anthropic
 :minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-openai
 :minisite-keywords: llm, openai, chat completions, responses, dialect
 

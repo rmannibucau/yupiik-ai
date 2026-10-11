@@ -60,6 +60,24 @@
   background: var(--background, #fff); color: currentColor; font: inherit;
 }
 .config-no-match { display: block; font-style: italic; opacity: .8; margin-top: .5em; }
+/* mermaid diagrams: the renderer emits a bare <pre class="mermaid"> (roles are
+   dropped by visitMermaid), so center diagrams and let them take the full
+   available width via a global rule on the pre and its svg. */
+pre.mermaid {
+  background: transparent;
+  text-align: center;
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: .75rem 0;
+  overflow-x: auto;
+}
+pre.mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
 </style>
 <script>
 (function () {
@@ -98,6 +116,37 @@
     });
   };
   input.addEventListener('input', apply);
+})();
+</script>
+<script>
+// Mermaid diagrams ([mermaid] blocks render to <pre class="mermaid">). The
+// asciidoc renderer only injects its mermaid CDN auto-run script when it emits
+// a full document; the minisite renders body-only (noheader=true ->
+// contentOnly=true), so beforeBodyEnd() is skipped and we must load and run
+// mermaid ourselves here.
+(function () {
+  if (!document.querySelector('pre.mermaid')) { return; } // no diagram on this page
+  function runMermaid() {
+    if (!window.mermaid) { return; }
+    try {
+      var theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'default';
+      mermaid.initialize({ startOnLoad: false, theme: theme, securityLevel: 'loose' });
+      var blocks = document.querySelectorAll('pre.mermaid');
+      Array.prototype.forEach.call(blocks, function (el) { el.removeAttribute('data-processed'); });
+      mermaid.run({ nodes: Array.prototype.slice.call(blocks) }).catch(function (e) { console.warn('mermaid render error', e); });
+    } catch (e) { console.warn('mermaid init error', e); }
+  }
+  function loadMermaid() {
+    if (window.mermaid) { runMermaid(); return; }
+    var s = document.createElement('script');
+    s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+    s.onload = runMermaid;
+    s.onerror = function () { console.warn('could not load mermaid'); };
+    document.head.appendChild(s);
+  }
+  loadMermaid();
+  var toggle = document.getElementById('theme-toggle');
+  if (toggle) { toggle.addEventListener('click', function () { setTimeout(runMermaid, 0); }); }
 })();
 </script>
 ]]></customScripts>

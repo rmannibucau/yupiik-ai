@@ -32,6 +32,7 @@ public final class TuiInputSupport {
             "/resume",
             "/compact",
             "/model",
+            "/variant",
             "/provider",
             "/mode",
             "/memory",

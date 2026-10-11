@@ -96,6 +96,11 @@ public class SlashCommandCompleter implements Completer {
             }
 
             @Override
+            public List<String> variants() {
+                return variantsOf(chatClient, chatClient == null ? null : chatClient.model());
+            }
+
+            @Override
             public List<String> paths(final String token) {
                 return CompletionEngine.pathCandidates(token);
             }

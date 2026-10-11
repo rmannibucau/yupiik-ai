@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 import dev.tamboui.tui.TuiConfig;
 import dev.tamboui.tui.TuiRunner;
@@ -140,6 +141,172 @@ class TuiCommandRenderTest {
             uiThread.join(TIMEOUT_MS);
         }
         llm.close();
+    }
+
+    @Test
+    void shiftEnterInsertsNewlineInsteadOfSubmitting() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var received = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                received.set(prompt);
+                shellRegistry.onEvent(
+                        new AgentEvent.TurnDone("done:" + prompt.lines().count(), sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-shift-enter-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("line one"));
+        awaitText("line one");
+        // Shift+Enter inserts a hard newline and keeps the prompt editable
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER, KeyModifiers.SHIFT));
+        tuiRef.get().dispatch(new PasteEvent("line two"));
+        awaitText("line two");
+        assertFalse(awaitSubmitted(received), "Shift+Enter must not submit the prompt");
+
+        // plain Enter still submits, and the newline survived in the single prompt
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("done:2");
+        org.junit.jupiter.api.Assertions.assertEquals("line one\nline two", received.get());
+
+        quit();
+    }
+
+    @Test
+    void altEnterInsertsNewlineInsteadOfSubmitting() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var received = new AtomicReference<String>();
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                received.set(prompt);
+                shellRegistry.onEvent(
+                        new AgentEvent.TurnDone("done:" + prompt.lines().count(), sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-alt-enter-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("a"));
+        awaitText("a");
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER, KeyModifiers.ALT));
+        tuiRef.get().dispatch(new PasteEvent("b"));
+        awaitText("b");
+        assertFalse(awaitSubmitted(received), "Alt+Enter must not submit the prompt");
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("done:2");
+        org.junit.jupiter.api.Assertions.assertEquals("a\nb", received.get());
+
+        quit();
+    }
+
+    @Test
+    void longPromptKeepsTheTypedLineVisible() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-long-prompt-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a prompt far taller than the input block (capped ~8 rows): without the
+        // follow fix the bottom lines (where the caret lives) were clipped out of view
+        final var lines = java.util.stream.IntStream.range(0, 15)
+                .mapToObj(i -> "prompt line " + i)
+                .collect(Collectors.joining("\n"));
+        tuiRef.get().dispatch(new PasteEvent(lines));
+        // the very last line contains the caret and must stay visible
+        awaitText("prompt line 13");
+        awaitText("prompt line 14");
+
+        quit();
+    }
+
+    @Test
+    void wheelOverLongPromptScrollsTheInputInsteadOfTheTranscript() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-wheel-input-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // content far taller than the input block (capped ~8 rows)
+        final var lines = java.util.stream.IntStream.range(0, 20)
+                .mapToObj(i -> "long input line " + i)
+                .collect(Collectors.joining("\n"));
+        tuiRef.get().dispatch(new PasteEvent(lines));
+        awaitText("long input line 19"); // bottom (follow anchored to the caret)
+
+        // scroll up *over the input*: the transcript must not move, the input must page up
+        final var inputY = HeadlessBackend.HEIGHT - 8; // above the calling/status strips: inside the input block
+        tuiRef.get().dispatch(MouseEvent.scrollUp(HeadlessBackend.WIDTH / 2, inputY));
+        // a single wheel notch moves 3 rows: anchor 12 -> 9, so lines 9..16 remain, 19 is clipped
+        awaitText("long input line 12");
+        awaitTextGone("long input line 19");
+        assertFalse(
+                backend.text().contains("long input line 7"),
+                "wheel up over the input scrolled the input, not the transcript:\n" + backend.text());
+        assertFalse(
+                backend.text().contains("long input line 8"),
+                "wheel up should keep the input scrolled to its new top:\n" + backend.text());
+
+        quit();
+    }
+
+    private static boolean awaitSubmitted(final AtomicReference<String> received) throws InterruptedException {
+        final var deadline = System.nanoTime() + Duration.ofMillis(300).toNanos();
+        while (received.get() == null && System.nanoTime() < deadline) {
+            Thread.sleep(10);
+        }
+        return received.get() != null;
     }
 
     private static String sid(final ShellRegistry registry) {
@@ -1135,6 +1302,79 @@ class TuiCommandRenderTest {
         awaitTextWithin("thinking... (5s)", TIMEOUT_MS);
 
         quit();
+    }
+
+    @Test
+    void busyLabelShowsOnlyOnTheCallLineNotOnTheStatusStrip() throws Exception {
+        // regression: while busy the same busy label (calling <tool> / thinking (Ns) / working...)
+        // used to be rendered on the call line AND repeated as the leading segment of the always-
+        // visible status strip directly below it. The label now lives only on the call line
+        // (renderCalling); the status strip starts directly with mode/model and must not duplicate it.
+        final var shellRegistry = testRegistry();
+        final var turnStarted = new CountDownLatch(1);
+        final var releaseTurn = new CountDownLatch(1);
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                try {
+                    turnStarted.countDown();
+                    releaseTurn.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop, true, newUsageTracker());
+        uiThread = new Thread(command, "tui-status-bar-dedup-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // start a parked turn so the agent is busy, then fire a tool start to drive the call line
+        tuiRef.get().dispatch(new PasteEvent("first"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        assertTrue(
+                turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"mvn test\"}", sid(shellRegistry)));
+
+        // the status strip is the bottom row; the call line is the row directly above it
+        final var stripRow = HeadlessBackend.HEIGHT - 1;
+        final var callRow = HeadlessBackend.HEIGHT - 2;
+        awaitText("calling mvn test");
+        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        while (System.nanoTime() < deadline) {
+            final var lines = backend.text().split("\n");
+            if (lines[callRow].contains("calling mvn test")) {
+                assertFalse(
+                        lines[stripRow].contains("calling mvn test"),
+                        "the always-visible status strip must not repeat the busy label shown on the call line:\n"
+                                + backend.text());
+                releaseTurn.countDown();
+                quit();
+                return;
+            }
+            assertTrue(backend.awaitFrame(1_000), "no frame while waiting for the busy call line:\n" + backend.text());
+        }
+        releaseTurn.countDown();
+        fail("the call line never showed the calling label:\n" + backend.text());
     }
 
     @Test

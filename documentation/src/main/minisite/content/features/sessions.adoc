@@ -1,8 +1,26 @@
 = Sessions and memory
 :minisite-breadcrumb: Home[index.html] > Features > Sessions and memory
+:minisite-nav-prev-link: memory.html
+:minisite-nav-prev-label: Memory
+:minisite-nav-next-link: output.html
+:minisite-nav-next-label: Output optimization
 
 Sessions are recorded as JSONL transcripts that can be resumed later. Each
 session keeps a todo list and advances it as the work progresses.
+
+[mermaid]
+....
+graph LR
+    P["user prompt"] --> L["agent turn loop"]
+    L --> T["tool calls"]
+    T -->|result| L
+    L -->|non-blank reply| H["end-of-turn hook"]
+    H --> M["memory extraction (async, idle)"]
+    L --> X["turn completes"]
+    X --> P
+    L -.context full.-> C["prune / compact"]
+    C --> L
+....
 
 Every shell can be launched directly on an existing session: `run --session
 <id>`, `cli --session <id>` and `tui --session <id>` (or `--context <file>` to
@@ -29,7 +47,11 @@ link:../configuration.html#_providers[Providers]) and that provider's default
 model, so two tabs start on the same default and diverge as soon as one of them
 picks another provider/model. Switching the provider of a session resets its
 model/variant/sampling selection (those are provider-scoped); `/model default`
-restores the provider default. Every LLM call a session triggers - turns,
+restores the provider default. The variant of the active model is selected per
+session with `/variant`, which is contextual to the current model: `/variant`
+lists the current model's variants (plus the implicit `default`) to pick from,
+and `/variant <name>` (or `/variant default`) switches the variant directly
+without touching the model. Every LLM call a session triggers - turns,
 sub-agents, compaction, memory extraction, plan seeding, indexing it asks for -
 uses that session's provider/model, resolved lazily at call time. The only
 process-default path left is genuinely session-less startup work (the

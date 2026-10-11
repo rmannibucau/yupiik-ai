@@ -1,5 +1,9 @@
 = Compact binary code graph index
 :minisite-breadcrumb: Home[index.html] > Features > Compact binary code graph index
+:minisite-nav-prev-link: code-graph.html
+:minisite-nav-prev-label: Structural code graph
+:minisite-nav-next-link: maven-knowledge.html
+:minisite-nav-next-label: Maven repository knowledge
 :minisite-keywords: code graph, index, binary, memory-map, performance
 
 Both the structural code graph (project sources) and the maven repository

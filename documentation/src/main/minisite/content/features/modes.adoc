@@ -1,5 +1,7 @@
 = Plan and build modes
 :minisite-breadcrumb: Home[index.html] > Features > Plan and build modes
+:minisite-nav-next-link: permissions.html
+:minisite-nav-next-label: Permission modes
 
 yca access modes shape how the agent works:
 

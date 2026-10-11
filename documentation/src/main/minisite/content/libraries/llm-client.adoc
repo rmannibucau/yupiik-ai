@@ -1,6 +1,8 @@
 = LLM client
-:minisite-nav-prev-link: ../index.html
+:minisite-nav-prev-link: ../libraries.html
 :minisite-nav-prev-label: Libraries
+:minisite-nav-next-link: llm-client-api.html
+:minisite-nav-next-label: llm-client-api
 :minisite-breadcrumb: Home[index.html] > Libraries > LLM client
 
 The LLM client (parent `io.yupiik.llm:llm-client`) is a shared, provider-agnostic

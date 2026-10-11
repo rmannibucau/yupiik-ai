@@ -5,6 +5,8 @@
 :minisite-index-icon: book
 :minisite-keywords: libraries, llm, mcp, client
 :minisite-breadcrumb: Home[index.html] > Libraries
+:minisite-nav-next-link: libraries/llm-client.html
+:minisite-nav-next-label: LLM client
 
 The yca project ships a few reusable libraries you can consume from your own
 applications and MCP servers.

@@ -1,6 +1,8 @@
 = llm-client-api
 :minisite-nav-prev-link: llm-client.html
 :minisite-nav-prev-label: LLM client
+:minisite-nav-next-link: llm-client-openai.html
+:minisite-nav-next-label: llm-client-openai
 :minisite-breadcrumb: Home[index.html] > Libraries > LLM client > llm-client-api
 :minisite-keywords: llm, client, api, dialect, resilience
 

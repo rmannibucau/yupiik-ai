@@ -1,5 +1,9 @@
 = MCP support
 :minisite-breadcrumb: Home[index.html] > Features > MCP support
+:minisite-nav-prev-link: tools.html
+:minisite-nav-prev-label: Built-in tools
+:minisite-nav-next-link: context.html
+:minisite-nav-next-label: Context management
 
 Built-in yca tools are exposed as a local MCP server, so any MCP-compatible
 client can reuse them.

@@ -1,5 +1,7 @@
 = Maven repository knowledge
 :minisite-breadcrumb: Home[index.html] > Features > Maven repository knowledge
+:minisite-nav-prev-link: code-graph-index.html
+:minisite-nav-prev-label: Compact binary code graph index
 :minisite-keywords: maven, knowledge, index, skill, local repository
 
 Maven repository knowledge indexes the *local Maven repository* so coding agents

@@ -1,5 +1,9 @@
 = Structural code graph
 :minisite-breadcrumb: Home[index.html] > Features > Structural code graph
+:minisite-nav-prev-link: health.html
+:minisite-nav-prev-label: MCP server health
+:minisite-nav-next-link: code-graph-index.html
+:minisite-nav-next-label: Compact binary code graph index
 :minisite-keywords: code graph, structural, code trace, call graph
 
 The structural code graph gives the agent a precise, symbol-level map of the
@@ -31,6 +35,16 @@ per-source-file Markdown doc tree under the graph store
 With `yca.structuralCodeGraph.enrich` the graph can optionally be enriched, for
 example using a model, so the generated docs carry more useful context for the
 agent.
+
+For example `src/main/java/acme/Order.java` produces
+`<storeDir>/docs/src/main/java/acme/Order.java.md`. Symbols and relations are
+exposed as plain text, so they can be searched by simply grepping the docs
+directory (for instance with the built-in `grep` tool and
+`path=<storeDir>/docs`) instead of reading the graph store. `index.bin`
+remains the source of truth for call-graph tracing (`code_trace_calls`) and for
+the incremental fingerprint re-indexing. See
+xref:code-graph-index.adoc[Compact binary code graph index] for the on-disk
+format and the memory-mapped dependency-jar sidecars.
 
 == Mapping from the agent
 

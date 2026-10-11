@@ -1,5 +1,9 @@
 = Hooks & events
 :minisite-breadcrumb: Home[index.html] > Features > Hooks & events
+:minisite-nav-prev-link: prefix-cache.html
+:minisite-nav-prev-label: Provider prefix cache
+:minisite-nav-next-link: agents.html
+:minisite-nav-next-label: Custom agents
 
 yca can run external programs at defined points of a coding session, called *hooks*. A hook receives the event
 payload (a JSON `@JsonModel` on stdin) and may reply with a JSON decision on stdout. Hooks give you policing,

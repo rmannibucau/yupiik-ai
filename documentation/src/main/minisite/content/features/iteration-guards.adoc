@@ -1,4 +1,9 @@
 = Iteration guards: exploration plateaus and window caps
+:minisite-breadcrumb: Home[index.html] > Features > Iteration guards
+:minisite-nav-prev-link: todo-guidance.html
+:minisite-nav-prev-label: Todo and plan guidance
+:minisite-nav-next-link: prompt.html
+:minisite-nav-next-label: Prompt templates
 
 The agent loop bounds how long a single turn can run and stops models that spin
 without making progress. Two guards cooperate:

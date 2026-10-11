@@ -1,0 +1,108 @@
+= Documentation authoring
+:minisite-breadcrumb: Home[index.html] > Documentation authoring
+
+This page records the conventions for the yca minisite so content stays
+consistent, never duplicated, and easy to navigate. Source lives under
+`documentation/src/main/minisite/content/` (hand-written) and is built by the
+`yupiik-tools` `minisite` goal into `documentation/target/minisite/site/`.
+
+## Generated vs. hand-written
+
+Some content is **generated** at build time by the pre-actions declared in
+`documentation/pom.xml` and lands in `content/_partials/generated/`
+(`documentation.core.adoc`, `documentation.tui.adoc`, `embedded-tools.adoc`,
+`slash-commands.adoc`, `events.adoc`, `prompt-helpers.adoc`, and the JSON
+schema). It also generates `content/cli/*.adoc` (the command reference pages)
+via the fusion `CliDocumentationGenerator`.
+
+IMPORTANT: never hand-edit generated files. Edit the `@Property`/`@JsonModel`
+annotations, the `EmbeddedTool` descriptions, the event classes or the generator
+itself, then re-run the doc build so the partials regenerate. Hand-written pages
+`include::` the generated partials (e.g. `configuration.adoc` includes
+`documentation.core.adoc`, `tools.adoc` includes `embedded-tools.adoc`,
+`features/hooks.adoc` includes `events.adoc`) - a partial is the single source
+of its content and is included from exactly one "view" page.
+
+## Navigation (prev / next footer)
+
+Every content page may declare footer links via document attributes (only shown
+when at least one is set):
+
+[cols="1,2",opts=headers]
+|===
+|Attribute
+|Meaning
+|`:minisite-nav-prev-link`
+|Relative href of the previous page in the reading order (e.g. `modes.html`).
+|`:minisite-nav-prev-label`
+|Link text shown for the previous page.
+|`:minisite-nav-next-link`
+|Relative href of the next page.
+|`:minisite-nav-next-label`
+|Link text shown for the next page.
+|===
+
+Links are relative to the page's own directory; to reach a sibling use the plain
+file name, to leave the folder use `../<file>.html`. The value is a `.html` href,
+not `.adoc`. One reading order should chain every page in a folder: give the
+first page a `prev` to its section hub and the last page only a `prev` (no
+`next`).
+
+## Index / home tiles
+
+The generated `index.html` shows a tile per page carrying a `:minisite-index:`
+attribute; the tile title/description/icon come from
+`:minisite-index-title:`, `:minisite-index-description:` and
+`:minisite-index-icon:`.
+
+- Only the **top-level landing pages** carry `:minisite-index:` (currently
+  Features=50, Configuration=100, CLI=150, Libraries=1000). The sort value is
+  an integer.
+- Keep the tile budget to **at most 6-8 tiles**; the home index must stay
+  readable. Deeper pages (e.g. `features/*`, `libraries/*`) must NOT carry
+  `:minisite-index:` - they are reached from the parent tile's description/cards
+  and the footer nav, not from the home index.
+- Section hub pages (if any) live in a sub-folder and are linked from the parent
+  tile description.
+
+The breadcrumb (`:minisite-breadcrumb:`) and the generated per-page footer/left
+navigation are driven by the same attributes.
+
+## Mermaid diagrams
+
+Mermaid is **natively supported** by the `asciidoc-java` renderer used for the
+doc build (`preferYupiikAsciidoc=true`). Author a diagram as a bare block:
+
+[source]
+----
+[mermaid]
+....
+graph LR
+    A[Prompt] --> B[Turn loop]
+    B --> C[Tools]
+....
+----
+
+- Only the bare `[mermaid]` block form works. `[source,mermaid]` is NOT a
+  diagram - the renderer treats it as an ordinary code block (it sets the
+  `language` key, not the `mermaid` style).
+- The renderer emits `<pre class="mermaid">` but does **not** self-inject the
+  mermaid CDN script here: it only does that when rendering a full document,
+  and the minisite renders body-only (`noheader=true` skips `beforeBodyEnd`).
+  So the mermaid loader and run happen via the pom's `customScripts` block
+  (JS injection), which loads mermaid from jsDelivr, follows the site's light/
+  dark `data-theme`, and re-renders on the theme toggle.
+- Per-block roles are **discarded** by the renderer, so centering and width are
+  handled globally by the `pre.mermaid` / `pre.mermaid svg` rules in the pom's
+  `customScripts` block. Diagrams are centered and take the full available width
+  automatically.
+
+## Page structure conventions
+
+- one `.adoc` per topic, titled with `=`, followed by the `:minisite-breadcrumb:`
+  and the nav attributes (before the first blank line).
+- prefer prose over overwhelming option dumps: keep generated references on the
+  `configuration.adoc` / `tools.adoc` pages and summarize behavior on the
+  `features/*` pages with cross-references.
+- avoid duplicating long content: if a subject is fully covered on a dedicated
+  page, reference it and keep only the config-key specifics inline.

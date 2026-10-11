@@ -1,5 +1,9 @@
 = Interactive UI and headless mode
 :minisite-breadcrumb: Home[index.html] > Features > Interactive UI and headless mode
+:minisite-nav-prev-link: permissions.html
+:minisite-nav-prev-label: Permission modes
+:minisite-nav-next-link: streaming.html
+:minisite-nav-next-label: Streaming output and reasoning
 
 yca can be driven through two interactive frontends or in a single-shot headless
 mode.

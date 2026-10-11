@@ -1,5 +1,9 @@
 = Permission modes
 :minisite-breadcrumb: Home[index.html] > Features > Permission modes
+:minisite-nav-prev-link: modes.html
+:minisite-nav-prev-label: Plan and build modes
+:minisite-nav-next-link: ui.html
+:minisite-nav-next-label: Interactive UI and headless mode
 
 yca gates tool calls behind configurable permission modes:
 
@@ -13,6 +17,30 @@ against every segment of a compound command, and a command is only allowed when
 all its segments pass. Deny entries win over everything else.
 Plan mode additionally hides the file-mutating tools (`edit_file`, `write_file`,
 `apply_patch`) from the tool list the model sees, so plan turns cannot build.
+
+Every tool call is resolved through the same gate - mode first, then the
+allow/deny lists and the read-only bash rules, with deny winning everywhere
+(`yolo` included):
+
+[mermaid]
+....
+graph TD
+    C[Tool call] --> M{Mode}
+    M -->|read-only tool| O[allowed silently]
+    M -->|yolo| D{Deny list / bash deny?}
+    D -->|yes| DENY[blocked]
+    D -->|no| O[allowed silently]
+    M -->|auto_edit| E{"file edit\nbash command?"}
+    E -->|file edit| A{Allow list?}
+    E -->|bash| R{"Bash read-only rules?\nall segments match"}
+    M -->|ask| G[prompt user]
+    A -->|yes| O
+    A -->|no| G
+    R -->|yes| O
+    R -->|no| D
+    G -->|allow| O
+    G -->|deny| DENY
+....
 
 == Modes at a glance
 

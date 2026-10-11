@@ -33,7 +33,7 @@ public final class KeymapCatalog {
         return List.of(
                 // input line
                 new Binding("Enter", "send prompt", "Input", true),
-                new Binding("Shift+Enter", "newline", "Input", false),
+                new Binding("Shift+Enter", "newline (Alt+Enter works everywhere)", "Input", false),
                 new Binding("Tab", "complete", "Input", false),
                 new Binding("Up/Down", "history / move", "Input", false),
                 new Binding("Ctrl+R", "search history", "Input", true),

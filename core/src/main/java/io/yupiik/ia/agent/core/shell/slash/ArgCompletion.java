@@ -85,6 +85,16 @@ public interface ArgCompletion {
             return List.of();
         }
 
+        /**
+         * The named variants of the shell's current model, for commands that are
+         * contextual to the active model (e.g. {@code /variant}) rather than to a
+         * model being typed. Defaults to empty; the shell resolves the active
+         * model's variants.
+         */
+        default List<String> variants() {
+            return List.of();
+        }
+
         /** Filesystem paths for the given token; the walk is owned by the shell. */
         default List<String> paths(final String token) {
             return List.of();

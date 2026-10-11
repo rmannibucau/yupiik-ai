@@ -1,5 +1,9 @@
 = Streaming output and reasoning
 :minisite-breadcrumb: Home[index.html] > Features > Streaming output and reasoning
+:minisite-nav-prev-link: ui.html
+:minisite-nav-prev-label: Interactive UI and headless mode
+:minisite-nav-next-link: tools.html
+:minisite-nav-next-label: Built-in tools
 
 yca streams model output token by token instead of waiting for the full response.
 Reasoning/thinking deltas are surfaced separately from the final answer.

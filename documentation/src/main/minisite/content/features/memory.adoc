@@ -1,5 +1,9 @@
 = Memory
 :minisite-breadcrumb: Home[index.html] > Features > Memory
+:minisite-nav-prev-link: context.html
+:minisite-nav-prev-label: Context management
+:minisite-nav-next-link: sessions.html
+:minisite-nav-next-label: Sessions and memory
 
 yca keeps a durable, cross-session memory so preferences and project decisions
 survive individual conversations. This page explains how memory is *written*,

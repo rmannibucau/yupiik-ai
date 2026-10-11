@@ -1,5 +1,9 @@
 = Output optimization
 :minisite-breadcrumb: Home[index.html] > Features > Output optimization
+:minisite-nav-prev-link: sessions.html
+:minisite-nav-prev-label: Sessions and memory
+:minisite-nav-next-link: provider-tuning.html
+:minisite-nav-next-label: Provider tuning
 
 Tool-heavy workflows can drown the model in verbose output. yca compacts the
 output of common commands (maven, gradle, git, gh, npm, prettier, ls/find/grep,

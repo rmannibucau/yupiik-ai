@@ -1,5 +1,9 @@
 = Prompt templates
 :minisite-breadcrumb: Home[index.html] > Features > Prompt templates
+:minisite-nav-prev-link: iteration-guards.html
+:minisite-nav-prev-label: Iteration guards
+:minisite-nav-next-link: health.html
+:minisite-nav-next-label: MCP server health
 
 The interactive CLI prompt is rendered from a Handlebars template controlled by
 `yca.prompt.template` (see xref:../configuration.adoc[Configuration]).

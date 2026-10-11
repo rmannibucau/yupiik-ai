@@ -710,7 +710,21 @@ public final class LlmClientResilienceWrapper {
             delegate.subscribe(new Flow.Subscriber<>() {
                 @Override
                 public void onSubscribe(final Flow.Subscription subscription) {
-                    subscriber.onSubscribe(subscription);
+                    // a cancelled stream never delivers onError/onComplete upstream (the caller
+                    // abandons it by calling cancel() mid-stream), so the permit would leak:
+                    // cancel() releases it exactly once, like the terminal callbacks below.
+                    subscriber.onSubscribe(new Flow.Subscription() {
+                        @Override
+                        public void request(final long n) {
+                            subscription.request(n);
+                        }
+
+                        @Override
+                        public void cancel() {
+                            release();
+                            subscription.cancel();
+                        }
+                    });
                 }
 
                 @Override

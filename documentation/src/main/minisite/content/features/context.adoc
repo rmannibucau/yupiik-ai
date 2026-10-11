@@ -1,9 +1,30 @@
 = Context management
 :minisite-breadcrumb: Home[index.html] > Features > Context management
+:minisite-nav-prev-link: mcp.html
+:minisite-nav-prev-label: MCP support
+:minisite-nav-next-link: memory.html
+:minisite-nav-next-label: Memory
 
 As a conversation grows, context usage is tracked with live gauges.
 When usage crosses configured thresholds, yca prunes or compacts the
 conversation to stay within the active model's window.
+
+The default thresholds carve the usable window into bands, so the model always
+sees its usage relative to the automatic actions that will fire:
+
+[mermaid]
+....
+graph LR
+    W["Usable window\n(context window - output headroom)"]
+    subgraph Bands
+        N["0 - 55%\nnudge band"] --> P["55 - 65%\nsoft nudge"]
+        P --> R["65 - 80%\nprune fires"]
+        R --> C["80% +\ncompaction fires / overflow"]
+    end
+    W --> Bands
+    C -->|compact| S["Summary + verbatim tail"]
+    S --> W
+....
 
 == Usage tracking: real tokens first
 

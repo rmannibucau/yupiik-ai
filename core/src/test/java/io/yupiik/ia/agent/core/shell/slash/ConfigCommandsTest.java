@@ -20,15 +20,20 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.configuration.MetricsConfiguration;
 import io.yupiik.ia.agent.core.configuration.MetricsDisplayMode;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.context.UsageTracker;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SessionRuntime;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
 import io.yupiik.ia.agent.core.shell.ShellSession;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ConfigCommandsTest {
@@ -51,6 +56,46 @@ class ConfigCommandsTest {
 
     private static ShellSession sessionWithUsage(final UsageTracker usage) {
         return new ShellSession().runtime(new SessionRuntime(null, null, null, usage, null, null, null, null));
+    }
+
+    /** A session whose per-tab selection is backed by a minimal agent loop (geometry-free). */
+    private static ShellSession sessionWithLoop() {
+        return new ShellSession()
+                .runtime(new SessionRuntime(new AgentLoop() {}, null, null, null, null, null, null, null));
+    }
+
+    /** A ChatClient stub exposing a fixed model and variant set for the /variant command. */
+    private static ChatClient variantClient() {
+        return new ChatClient() {
+            @Override
+            public String model(final ChatSettings settings) {
+                return "test-model";
+            }
+
+            @Override
+            public List<ModelVariantConfiguration> variants(final ChatSettings settings, final String model) {
+                return List.of(
+                        new ModelVariantConfiguration("fast", null, null, null, null, null, null),
+                        new ModelVariantConfiguration("balanced", null, null, null, null, null, null));
+            }
+
+            @Override
+            public List<ModelVariantConfiguration> variants(final ChatSettings settings) {
+                return variants(settings, model(settings));
+            }
+        };
+    }
+
+    private ShellOutcome runVariant(final String arg, final ShellSession session) {
+        final var cmd = new ConfigCommands(null, variantClient(), null, null)
+                .commands().stream()
+                        .filter(c -> c.spec().name().equals("/variant"))
+                        .findFirst()
+                        .orElseThrow();
+        return cmd.action()
+                .apply(arg, new ShellEnv(null, null, session, new ConversationTranscript()))
+                .toCompletableFuture()
+                .join();
     }
 
     @Test
@@ -126,5 +171,32 @@ class ConfigCommandsTest {
         final var outcome = run("bogus", session(), new ConversationTranscript());
         assertEquals(
                 "usage: /metrics [show|hide|compact|full|session on|off]", ((ShellOutcome.Status) outcome).message());
+    }
+
+    @Test
+    void variantArgSetsTheVariantOfTheCurrentModel() {
+        final var session = sessionWithLoop();
+        final var outcome = runVariant("fast", session);
+        assertEquals("fast", session.chatSettings().variant(), "the named variant is selected");
+        assertTrue(((ShellOutcome.Status) outcome).message().contains("[variant fast]"));
+    }
+
+    @Test
+    void variantDefaultClearsTheSelectionAndSampling() {
+        final var session = sessionWithLoop();
+        session.runtime().updateChatSettings(session.chatSettings().withVariant("fast"));
+        final var outcome = runVariant("default", session);
+        assertEquals(null, session.chatSettings().variant(), "default clears the forced variant");
+        assertEquals(null, session.chatSettings().sampling());
+        assertTrue(((ShellOutcome.Status) outcome).message().contains("[variant default]"));
+    }
+
+    @Test
+    void variantStatusReportsModelAndActiveVariant() {
+        final var session = sessionWithLoop();
+        final var outcome = runVariant("balanced", session);
+        final var message = ((ShellOutcome.Status) outcome).message();
+        assertTrue(message.contains("model: test-model"), message);
+        assertTrue(message.contains("[variant balanced]"), message);
     }
 }

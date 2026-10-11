@@ -25,12 +25,13 @@ import org.junit.jupiter.api.Test;
 class TuiInputSupportTest {
     @Test
     void slashCommandsAreComplete() {
-        assertEquals(24, TuiInputSupport.SLASH_COMMANDS.size());
+        assertEquals(25, TuiInputSupport.SLASH_COMMANDS.size());
         assertEquals("/help", TuiInputSupport.SLASH_COMMANDS.get(0));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/quit"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/exit"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/thinking"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/tool-output"));
+        assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/variant"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/session-id"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/session-flush"));
         assertTrue(TuiInputSupport.SLASH_COMMANDS.contains("/session-housekeeping"));

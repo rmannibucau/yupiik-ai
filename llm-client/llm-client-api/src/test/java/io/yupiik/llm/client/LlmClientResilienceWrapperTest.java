@@ -133,6 +133,92 @@ class LlmClientResilienceWrapperTest {
     }
 
     @Test
+    void cancelledStreamReleasesItsConcurrencyPermit() throws Exception {
+        // a stream that never emits and never completes on its own: the permit is only ever
+        // released when the subscriber cancels it (an Esc-interrupt), exercising the cancel()
+        // release and proving the concurrency slot is reclaimed rather than leaked.
+        final Dialect holdOpen = new Dialect() {
+            @Override
+            public String name() {
+                return "hold-open";
+            }
+
+            @Override
+            public CompletionStage<LlmResponse> chat(final LlmRequest request) {
+                return chat(request, null);
+            }
+
+            @Override
+            public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
+                return CompletableFuture.completedFuture(response());
+            }
+
+            @Override
+            public CompletionStage<Flow.Publisher<LlmStreamEvent>> stream(
+                    final LlmRequest request, final BooleanSupplier cancelled) {
+                return CompletableFuture.completedFuture(subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                    @Override
+                    public void request(final long n) {
+                        // intentionally deliver nothing
+                    }
+
+                    @Override
+                    public void cancel() {
+                        // the source aborts; only the wrapper's cancel-release frees the permit
+                    }
+                }));
+            }
+
+            @Override
+            public CompletionStage<io.yupiik.llm.client.model.LlmModels> models() {
+                return CompletableFuture.completedFuture(new io.yupiik.llm.client.model.LlmModels(List.of()));
+            }
+
+            @Override
+            public CompletionStage<StreamAttempt> streamRaw(final LlmRequest request, final BooleanSupplier cancelled) {
+                return CompletableFuture.<StreamAttempt>failedFuture(new UnsupportedOperationException());
+            }
+
+            @Override
+            public CompletionStage<HttpResponse<byte[]>> postRaw(final LlmRequest request) {
+                return CompletableFuture.failedFuture(new UnsupportedOperationException());
+            }
+        };
+        // cap = 1: if the cancelled stream leaked its permit, the next request blocks forever
+        final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 1));
+        final var subscribed = new java.util.concurrent.CountDownLatch(1);
+        final var heldSubscription = new java.util.concurrent.atomic.AtomicReference<Flow.Subscription>();
+        wrapper.stream(holdOpen, null, () -> false)
+                .toCompletableFuture()
+                .thenAccept(publisher -> publisher.subscribe(new Flow.Subscriber<>() {
+                    @Override
+                    public void onSubscribe(final Flow.Subscription subscription) {
+                        heldSubscription.set(subscription);
+                        subscribed.countDown();
+                    }
+
+                    @Override
+                    public void onNext(final LlmStreamEvent item) {}
+
+                    @Override
+                    public void onError(final Throwable throwable) {}
+
+                    @Override
+                    public void onComplete() {}
+                }));
+        assertTrue(subscribed.await(5, TimeUnit.SECONDS), "stream must have subscribed");
+        // cancel mid-stream, before any terminal signal -> this is the permit-release path under test
+        heldSubscription.get().cancel();
+        // the permit must be back: with cap=1 a leaked permit would hang the next request
+        assertEquals(
+                "ok",
+                wrapper.chat(holdOpen, null, () -> false)
+                        .toCompletableFuture()
+                        .get(5, TimeUnit.SECONDS)
+                        .text());
+    }
+
+    @Test
     void retryAfterIsHonoredAndSurfacedInThePauseReason() {
         final var dial = new ScriptedDialect(new IOException("LLM request failed (429): {\"error\":{}} retry-after=2"));
         final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();

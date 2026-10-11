@@ -65,9 +65,11 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -2360,7 +2362,7 @@ public class AgentLoop {
      * {@code paths} carries the file paths a read or write tool touched, for stale-read invalidation.
      * {@code durationMs} is the individual tool execution time, used for per-turn metrics.
      */
-    private record ToolOutcome(
+    record ToolOutcome(
             String callId,
             String name,
             String output,
@@ -2514,22 +2516,31 @@ public class AgentLoop {
 
     /**
      * Tracks which {@code read_file} results sit in the conversation and by which path, so a later
-     * successful write to the same path can replace them with a short marker instead of letting the
-     * model reason over superseded file snapshots until prune/compaction eventually drops them.
-     * All mutation happens on the loop thread (worker threads only produce outcomes), so no
-     * synchronization is needed.
+     * successful write to the same path can flag them as superseded instead of letting the model
+     * reason over stale file snapshots until prune/compaction eventually drops them. The flag rides
+     * inside the write tool's own result message (brand-new content that turn), so nothing is ever
+     * rewritten and no extra message is injected mid-conversation. All mutation happens on the loop
+     * thread (worker threads only produce outcomes), so no synchronization is needed.
      */
-    private static final class StaleReads {
+    static final class StaleReads {
         private final Map<String, Path> readByCallId;
 
         StaleReads(final Map<String, Path> readByCallId) {
             this.readByCallId = new LinkedHashMap<>(readByCallId);
         }
 
-        /** Returns how many older read results were invalidated by this outcome (0 when none). */
-        int onLanded(final List<Message> messages, final ToolOutcome outcome) {
+        /**
+         * Records a {@code read_file} (by call id), or computes which earlier read paths a
+         * successful write invalidated. Never mutates {@code messages}: the caller folds the
+         * returned paths into the write tool's own result message, which is appended right after
+         * this call (zero prefix-cache cost — that message is new content this round anyway).
+         *
+         * @param messages conversation so far, WITHOUT the write result message (not yet appended)
+         * @return the stale paths a successful write superseded, sorted; empty otherwise
+         */
+        List<Path> onLanded(final List<Message> messages, final ToolOutcome outcome) {
             if (outcome.paths().isEmpty()) {
-                return 0;
+                return List.of();
             }
             final var touched = new ArrayList<Path>(outcome.paths().size());
             for (final var raw : outcome.paths()) {
@@ -2541,15 +2552,14 @@ public class AgentLoop {
                         readByCallId.put(outcome.callId(), path);
                     }
                 }
-                return 0;
+                return List.of();
             }
             if (!FILE_WRITE_TOOLS.contains(outcome.name()) || !outcome.success()) {
-                return 0;
+                return List.of();
             }
             final var written = Set.copyOf(touched);
-            var invalidated = 0;
-            for (var i = 0; i < messages.size() - 1; i++) { // last message is the write result itself
-                final var message = messages.get(i);
+            final var stale = new LinkedHashSet<Path>();
+            for (final var message : messages) {
                 if (!"tool".equals(message.role())) {
                     continue;
                 }
@@ -2558,12 +2568,16 @@ public class AgentLoop {
                     continue;
                 }
                 if (String.valueOf(message.content()).contains(STALE_READ_MARKER)) {
-                    continue; // already invalidated
+                    continue; // already noted
                 }
-                messages.set(i, Message.tool(message.toolCallId(), STALE_READ_MARKER));
-                invalidated++;
+                stale.add(read);
             }
-            return invalidated;
+            if (stale.isEmpty()) {
+                return List.of();
+            }
+            final var paths = new ArrayList<>(stale);
+            paths.sort(Comparator.naturalOrder());
+            return paths;
         }
     }
 
@@ -2888,7 +2902,11 @@ public class AgentLoop {
             final boolean[] roundInformative,
             final java.util.Set<String> roundCoverage) {
         final var raw = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
-        final var output = capIngestionOutput(raw);
+        // Stale-read invalidation rides INSIDE this tool result (new content this round, so the
+        // provider prefix cache is untouched — no extra message is injected mid-conversation).
+        // Computed before the message is appended: onLanded scans messages WITHOUT this result.
+        final var stalePaths = staleReads.onLanded(messages, outcome);
+        final var output = capIngestionOutput(stalePaths.isEmpty() ? raw : raw + staleNote(stalePaths));
         messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
         // a round is informative when at least one result is new (same call, different output) or
         // a write succeeded: used by the no-progress termination (P2). Refused doom-loop calls are
@@ -2923,12 +2941,18 @@ public class AgentLoop {
                             outcome.name(),
                             outcome.success() ? null : Map.of("is_error", true)));
         }
-        final var invalidated = staleReads.onLanded(messages, outcome);
-        if (invalidated > 0) {
-            emit(status("invalidated " + invalidated + " stale read(s) of modified files"));
+        if (!stalePaths.isEmpty()) {
+            emit(status("invalidated " + stalePaths.size() + " stale read(s) of modified files"));
         }
         turnToolsRun++;
         turnToolSumMs += outcome.durationMs();
+    }
+
+    /** Compact stale-read suffix appended to a successful write tool's own result message. */
+    private static String staleNote(final List<Path> paths) {
+        return "\n[stale read cleared: "
+                + String.join(", ", paths.stream().map(Path::toString).toList())
+                + " changed after an earlier read, so that read's content is stale; re-read it to get the current content]";
     }
 
     /** Head+tail ingestion cap applied to tool outputs before they enter the conversation. */

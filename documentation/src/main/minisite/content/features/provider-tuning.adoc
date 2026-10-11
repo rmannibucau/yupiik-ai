@@ -1,5 +1,9 @@
 = Provider tuning
 :minisite-breadcrumb: Home[index.html] > Features > Provider tuning
+:minisite-nav-prev-link: output.html
+:minisite-nav-prev-label: Output optimization
+:minisite-nav-next-link: reliability.html
+:minisite-nav-next-label: Reliability
 
 How yca shapes the LLM request payload per provider and per model: reasoning
 effort, output budget, sampling and the per-family implicit defaults. Includes

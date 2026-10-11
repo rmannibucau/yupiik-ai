@@ -5,6 +5,8 @@
 :minisite-index-icon: sliders-h
 :minisite-keywords: configuration, provider, mcp, permissions, code graph, structural
 :minisite-breadcrumb: Home[index.html] > Configuration
+:minisite-nav-next-link: features/modes.html
+:minisite-nav-next-label: Plan and build modes
 
 Configuration is resolved from, highest priority first:
 
@@ -109,96 +111,31 @@ include::content/_partials/generated/documentation.core.adoc[]
 
 When `yca.structuralCodeGraph.docs` is enabled (default), the agent writes a
 per-source-file markdown doc tree under the graph store (`yca.structuralCodeGraph.storeDir`),
-mirroring the project source layout. With `yca.structuralCodeGraph.enrich`, each
-doc also gains an asynchronous, serialized LLM `## Summary` section.
-
-For example `src/main/java/acme/Order.java` produces
-`<storeDir>/docs/src/main/java/acme/Order.java.md`. Symbols and relations are
-exposed as plain text, so they can be searched by simply grepping the docs
-directory (for instance with the built-in `grep` tool and
-`path=<storeDir>/docs`) instead of reading the graph store. `index.bin`
-remains the source of truth for call-graph tracing (`code_trace_calls`) and for
-the incremental fingerprint re-indexing. See
-xref:features/code-graph-index.adoc[Compact binary code graph index] for the
-on-disk format and the memory-mapped dependency-jar sidecars.
+mirroring the project source layout, with optional LLM enrichment
+(`yca.structuralCodeGraph.enrich`). The layout, the plain-text symbol search and
+the `index.bin` role are described in
+xref:features/code-graph.adoc[Structural code graph], with the on-disk format in
+xref:features/code-graph-index.adoc[Compact binary code graph index].
 
 == Memory extraction
 
 Durable knowledge (user preferences, project decisions, long-lived facts) is
 extracted from each session's conversation into the shared memory files with a
 dedicated LLM call (the `yca.model.memory` model, falling back to `compact`).
-Extraction is deliberately cheap and deterministic:
 
-- the end-of-turn hook runs asynchronously as soon as a turn ends, while the
-  app is already idle waiting for the next user input - the memory LLM latency
-  never blocks anything and is invisible to the user. It only fires when the
-  turn ended on a real (non-blank) model reply (empty completions, hard stops
-  and failures leave nothing durable to mine), and only when at least
-  `yca.memory.extractMinChars` characters of *new* (not yet extracted)
-  user/assistant text accumulated. Chit-chat below the threshold is skipped:
-  it would only produce an empty facts array while still costing a call.
-- the excerpt fed to the model contains only user and assistant text
-  messages: tool results, tool-call frames, the system prompt, compaction/
-  prune digests and the volatile session-state tail are excluded (they carry
-  no durable signal). It is chronological, capped at the newest 20 messages
-  then ~12KB; when the cap binds, assistant messages are dropped oldest-first
-  before any user message, so the user's own words are never sacrificed while
-  an assistant message can still be shed.
-- a per-session watermark records how far extraction got. Because the
-  end-of-turn hook already covered the delta while the app was idle, a clean
-  session stop (tab close, headless run end) never needs to extract anything:
-  quitting is never blocked on the memory call, and the delta is extracted at
-  most once until new messages appear. A killed process loses at most the
-  conversation tail that arrived after the last end-of-turn hook (the user
-  typed `exit` within a few seconds of the turn ending); memory
-  deduplication makes re-extraction on resume harmless. There is no startup
-  recovery.
-- sub-agents never run extraction: their task execution is exactly the
-  transient state the extractor drops, and durable facts surface through the
-  parent session's loop anyway.
-
-See the `yca.memory.*` entries in the generated list below for the tunables.
+The extraction pipeline - when it runs, what it selects, the per-session
+watermark, how failures degrade, and why session close never blocks on it - is
+described in xref:features/memory.adoc[Memory] and covered in depth in
+xref:features/sessions.adoc[Sessions and memory]. See the `yca.memory.*`
+entries in the generated list below for the tunables.
 
 == Custom agents
 
-`yca.agents` defines named custom agents. Each agent is mainly a prompt whose
-instructions are injected on top of the base system prompt (rules, tools,
-environment, project context, skills and memory are kept untouched). The `prompt`
-is inline text, or a file path whose content is loaded when it expands to an
-existing regular file (for example
-`prompt=~/.yupiik/coding-agent/agents/reviewer.md`).
-
-.Example configuration.json
-[source,json]
-----
-{
-  "agents": [
-    { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md" },
-    { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them." }
-  ]
-}
-----
-
-An agent is selected on `run` with `--agent <name>`, in the TUI with
-`/agent <name>` (persistent until `/new`), or per-turn by prefixing a prompt with
-`@<name> `.
-
-== Sub-agent model routing
-
-A sub-agent spawned with `spawn_subagent model=<reference>` runs on the model
-(and provider) named by the reference: `$<provider>/<model>` routes to that
-provider explicitly, a bare name is pinned to whichever configured provider
-declares it (falling back to the parent session's provider). Without an explicit
-`model`, the spawning provider's `defaultSubagentModel` applies when set
-(blank keeps the historic behavior: the sub-agent inherits the parent session's
-provider/model). Resolution reuses the same `$provider/model` machinery as the
-background `compact`/`prune`/`memory` models, so a sub-agent can be pinned to a
-cheaper model or a different provider - including specialists routed away from
-the parent's frontier model, that report no tool output on their own provider.
-
-The resolved model of a running/recently-completed sub-agent is surfaced in the
-`/subagents` overlay (list rows and the detail transcript) when a reference was
-requested.
+`yca.agents` defines named agents selected with `--agent <name>`, `/agent <name>`
+or an `@<name> ` prompt prefix. Defining agents, the `yca.agents` JSON shape and
+the sub-agent model routing (`spawn_subagent model=<reference>`) are documented
+in xref:features/agents.adoc[Custom agents], with the `yca.agents` model
+reference in the generated list below.
 
 == Prompt template
 

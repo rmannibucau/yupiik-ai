@@ -69,22 +69,6 @@ public class ConfigCommands implements SlashCommandSet {
         return List.copyOf(out);
     }
 
-    /** /model completion: the first argument completes model names, the next ones the variants of the typed model. */
-    private static final ArgCompletion MODEL_COMPLETION = (arg, token, env) -> {
-        if (arg == null || arg.isBlank()) {
-            return ArgCompletion.fuzzyResult("model", env.models(), token);
-        }
-        return ArgCompletion.fuzzyResult("variant", env.variants(arg.strip().split("\\s+")[0]), token);
-    };
-
-    /** /metrics completion: a "session" argument expects on|off, the other forms are a closed set. */
-    private static final ArgCompletion METRICS_COMPLETION = (arg, token, env) -> {
-        if ("session".equals(ArgCompletion.previousToken(arg))) {
-            return ArgCompletion.fuzzyResult("option", List.of("on", "off"), token);
-        }
-        return ArgCompletion.fuzzyResult("option", List.of("show", "hide", "compact", "full", "session"), token);
-    };
-
     public ConfigCommands(
             final AgentSessionService agentSessionService,
             final ChatClient chatClient,
@@ -109,8 +93,22 @@ public class ConfigCommands implements SlashCommandSet {
                                 "[name] [variant] [temperature] [topK] [topP] | [temp=..] [top_k=..] [top_p=..]",
                                 "show or switch the model, optionally a named variant and in-memory sampling overrides",
                                 SlashGroup.CONFIG),
-                        MODEL_COMPLETION,
+                        (arg, token, env) -> {
+                            if (arg == null || arg.isBlank()) {
+                                return ArgCompletion.fuzzyResult("model", env.models(), token);
+                            }
+                            return ArgCompletion.fuzzyResult(
+                                    "variant", env.variants(arg.strip().split("\\s+")[0]), token);
+                        },
                         this::model),
+                SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/variant",
+                                "[name]",
+                                "show the current model's variants or switch the variant",
+                                SlashGroup.CONFIG),
+                        (arg, token, env) -> ArgCompletion.fuzzyResult("variant", env.variants(), token),
+                        this::variant),
                 SlashCommand.of(
                         new SlashCommandSpec("/provider", "[id]", "show or switch the provider", SlashGroup.CONFIG),
                         ArgCompletion.from("provider", ArgCompletion.Env::providers),
@@ -150,7 +148,13 @@ public class ConfigCommands implements SlashCommandSet {
                                 "[show|hide|compact|full|session on|off]",
                                 "show or hide the metrics display, switch its density, or report the current values",
                                 SlashGroup.CONFIG),
-                        METRICS_COMPLETION,
+                        (arg, token, env) -> {
+                            if ("session".equals(ArgCompletion.previousToken(arg))) {
+                                return ArgCompletion.fuzzyResult("option", List.of("on", "off"), token);
+                            }
+                            return ArgCompletion.fuzzyResult(
+                                    "option", List.of("show", "hide", "compact", "full", "session"), token);
+                        },
                         SlashAction.sync(this::metrics)));
     }
 
@@ -276,6 +280,66 @@ public class ConfigCommands implements SlashCommandSet {
                         .setModel(model, settings)
                         .withVariant(variant)
                         .withSampling(upserts.isEmpty() ? null : parseSampling(upserts)));
+        return ShellOutcome.status(modelStatus(model, env));
+    }
+
+    /**
+     * Switch the variant of the current model only - the model keeps its active
+     * selection, so unlike {@code /model} the picker (or the non-interactive
+     * argument) never asks for a model. Contextual to the session's current model:
+     * the available options are its variants plus the implicit {@code default}.
+     */
+    private CompletionStage<ShellOutcome> variant(final String arg, final ShellEnv env) {
+        if (arg.isBlank()) {
+            return variantPicker(env);
+        }
+        return CompletableFuture.completedStage(applyVariantArg(arg, env));
+    }
+
+    /**
+     * Ask for the variant (or the implicit {@code default}) of the current model. The
+     * "default" entry clears any forced variant and resets the in-memory sampling
+     * overrides so the implicit tuner defaults are proposed again; a named variant
+     * clears the sampling overrides so the variant's own tuning governs. When the
+     * model exposes no variant beyond the implicit default (one option or fewer) the
+     * step is skipped and just the current status is reported.
+     */
+    private CompletionStage<ShellOutcome> variantPicker(final ShellEnv env) {
+        final var settings = env.session().chatSettings();
+        final var model = chatClient.model(settings);
+        final var options = new ArrayList<String>();
+        options.add("default");
+        chatClient.variants(settings, model).forEach(v -> options.add(v.name()));
+        if (options.size() <= 1) {
+            return CompletableFuture.completedStage(ShellOutcome.status(modelStatus(model, env)));
+        }
+        return env.io().pick("variant", options).thenApply(selected -> {
+            if (selected.isEmpty()) {
+                return ShellOutcome.status("variant picker cancelled");
+            }
+            final var updated = "default".equals(selected.get())
+                    ? settings.withVariant(null).withSampling(null)
+                    : settings.withVariant(selected.get()).withSampling(null);
+            env.session().runtime().updateChatSettings(updated);
+            return ShellOutcome.status(modelStatus(model, env));
+        });
+    }
+
+    /**
+     * Apply the non-interactive form: {@code /variant [name]} or {@code /variant default}.
+     * {@code default} (or a blank/absent name) clears any forced variant and the
+     * in-memory sampling overrides so the implicit tuner defaults apply; any other
+     * name selects that variant of the current model and clears the sampling
+     * overrides so the variant's own tuning governs.
+     */
+    private ShellOutcome applyVariantArg(final String arg, final ShellEnv env) {
+        final var settings = env.session().chatSettings();
+        final var model = chatClient.model(settings);
+        final var name = arg.strip();
+        final var updated = "default".equalsIgnoreCase(name)
+                ? settings.withVariant(null).withSampling(null)
+                : settings.withVariant(name).withSampling(null);
+        env.session().runtime().updateChatSettings(updated);
         return ShellOutcome.status(modelStatus(model, env));
     }
 

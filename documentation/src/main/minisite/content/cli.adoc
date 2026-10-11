@@ -5,6 +5,8 @@
 :minisite-index-icon: terminal
 :minisite-keywords: cli, tui, run, commands
 :minisite-breadcrumb: Home[index.html] > CLI
+:minisite-nav-next-link: cli/index.html
+:minisite-nav-next-label: All commands
 
 yca splits its CLI into two interactive frontends and automation-oriented
 commands. The `cli` and `tui` commands each start a session in front of the same

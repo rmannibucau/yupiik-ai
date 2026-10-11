@@ -391,6 +391,15 @@ public class TuiCommand implements Runnable {
             }
 
             @Override
+            public List<String> variants() {
+                final var current = active();
+                return current == null
+                        ? List.of()
+                        : completionCache.variants(
+                                chatClient == null ? null : chatClient.model(current.session.chatSettings()));
+            }
+
+            @Override
             public List<String> paths(final String token) {
                 return CompletionEngine.pathCandidates(token);
             }
@@ -1349,7 +1358,13 @@ public class TuiCommand implements Runnable {
                     var output = current.output();
                     final var cap = state.toolOutputs.maxOutputChars();
                     if (output.length() < cap) {
-                        output += stream.fragment();
+                        // BashTool streams line-by-line without the trailing \n (readLine strips it),
+                        // so put the EOL back or the live running-tool modal glues every line into a
+                        // single run until ToolFinished replaces the accumulation. The guard (mirroring
+                        // AnsiShellFrontend/ConversationTranscript) stays idempotent if a producer ever
+                        // emits a fragment that already carries its line ending.
+                        final var fragment = stream.fragment();
+                        output += (fragment.endsWith("\n") || fragment.endsWith("\r")) ? fragment : fragment + "\n";
                         if (current.output().length() >= cap - 65536) {
                             output = output.substring(output.length() - 65536) + "\n... older output truncated";
                         }
@@ -1930,6 +1945,14 @@ public class TuiCommand implements Runnable {
         }
         if (key.isKey(KeyCode.DOWN)) {
             handleLineOrHistory(state, false);
+            return true;
+        }
+        if (key.isKey(KeyCode.ENTER) && (key.hasShift() || key.hasAlt())) {
+            // Shift+Enter (when the terminal reports the modifier) or the portable
+            // Alt+Enter: insert a hard newline instead of submitting. Plain Enter
+            // (no modifier) still submits through the isConfirm() branch below.
+            beforeEdit(state);
+            state.input.insert("\n");
             return true;
         }
         if (key.isConfirm() && !key.hasShift() && !key.hasAlt()) {
@@ -2854,6 +2877,12 @@ public class TuiCommand implements Runnable {
             approval.detailScroll(scrollService.apply(approval.detailScroll(), delta));
         } else if (state.btw != null) {
             state.btw = withBtwScroll(state.btw, delta);
+        } else if (state.inputZone != null
+                && state.inputZone.contains(wheel.x(), wheel.y())
+                && visualRows(state.input, state.inputZone.width()) > state.inputZone.height()) {
+            // wheel over the prompt input scrolls the input itself when its content spills
+            // past the (capped) input height, instead of falling through to the transcript
+            inputScrollBy(state, delta, state.inputZone.width(), state.inputZone.height());
         } else {
             scrollTranscript(state, delta);
         }
@@ -2960,6 +2989,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void moveCursor(final UiState state, final boolean up) {
+        inputArmFollow(state);
         if (up) {
             state.input.moveCursorUp();
         } else {
@@ -2973,6 +3003,7 @@ public class TuiCommand implements Runnable {
      * the agent is streaming).
      */
     private void moveCursorVisual(final UiState state, final boolean up) {
+        inputArmFollow(state);
         final var inner = state.inputZone;
         if (inner == null || inner.width() <= 0) {
             moveCursor(state, up);
@@ -2998,6 +3029,7 @@ public class TuiCommand implements Runnable {
         state.undoStack.push(state.input.text());
         state.yankArmed = false;
         state.lastYankLen = 0;
+        inputArmFollow(state);
     }
 
     private void deleteWordBackward(final UiState state) {
@@ -4970,10 +5002,10 @@ public class TuiCommand implements Runnable {
             }
         }
         final var visible = inner.height();
-        final var maxScroll = Math.max(0, visual.size() - visible);
-        final var baseScroll = Math.clamp(state.input.scrollRow(), 0, maxScroll);
-        // keep the cursor row within the viewport
-        final var scroll = Math.clamp(Math.min(baseScroll, cursor[0] - visible + 1), 0, maxScroll);
+        // keep the cursor row within the viewport: once the prompt grows past
+        // the input height (multi-line or soft-wrapped), scroll follows the caret
+        // so the line being edited is never clipped out of view (see inputFollowScroll)
+        final var scroll = inputFollowScroll(state, width, visible);
         frame.renderWidget(
                 Paragraph.builder()
                         .text(Text.from(visual.stream().skip(scroll).toList().toArray(Line[]::new)))
@@ -5078,6 +5110,69 @@ public class TuiCommand implements Runnable {
     }
 
     /**
+     * Resolves the vertical scroll offset to render for the prompt input.
+     * <p>
+     * In <em>follow</em> mode (the default) it keeps the caret's visual row inside
+     * the viewport regardless of how long the prompt grows, so the line being typed
+     * is never clipped out of view once the input exceeds its height (multi-line or
+     * soft-wrapped content). The effective scroll is stored back into
+     * {@code state.inputScroll} so a later manual scroll starts from a coherent
+     * position.
+     * <p>
+     * When {@code state.inputUserScrolled} is set (the user scrolled the input
+     * manually via the mouse wheel) the persisted anchor is returned verbatim - the
+     * caret may sit above the viewport, exactly like scrolling a chat transcript.
+     * The next edit or caret move re-arms follow mode.
+     * <p>
+     * Both {@link #renderInput(Rect, Frame, UiState)} and
+     * {@link #inputCaretAt(UiState, int, int)} resolve through here so the drawn
+     * content and the click mapping always use the same geometry.
+     */
+    private static int inputFollowScroll(final UiState state, final int width, final int visible) {
+        final var area = state.input;
+        final int maxScroll = Math.max(0, visualRows(area, width) - visible);
+        if (state.inputUserScrolled) {
+            return Math.clamp(state.inputScroll, 0, maxScroll);
+        }
+        final int caretVisual = visualRowOfCaret(area, width);
+        var scroll = Math.clamp(state.inputScroll, 0, maxScroll);
+        if (caretVisual >= 0) {
+            if (caretVisual < scroll) {
+                scroll = caretVisual;
+            } else if (caretVisual >= scroll + visible) {
+                scroll = caretVisual - visible + 1;
+            }
+        }
+        scroll = Math.clamp(scroll, 0, maxScroll);
+        state.inputScroll = scroll;
+        return scroll;
+    }
+
+    /**
+     * Re-arms follow mode for the prompt input after a manual scroll: called on any
+     * text edit ({@code beforeEdit}) and caret navigation so the caret is brought
+     * back into view the next time it is rendered.
+     */
+    private static void inputArmFollow(final UiState state) {
+        state.inputUserScrolled = false;
+    }
+
+    /**
+     * Scrolls the prompt input by {@code delta} visual rows (positive = down) and
+     * latches manual-scroll mode (used by the mouse wheel over the input). Reaching
+     * the very bottom turns follow mode back on so the caret re-appears, matching the
+     * transcript's behaviour.
+     */
+    private static void inputScrollBy(final UiState state, final int delta, final int width, final int visible) {
+        final int maxScroll = Math.max(0, visualRows(state.input, width) - visible);
+        if (maxScroll <= 0) {
+            return;
+        }
+        state.inputScroll = Math.clamp(state.inputScroll + delta, 0, maxScroll);
+        state.inputUserScrolled = !(delta > 0 && state.inputScroll >= maxScroll);
+    }
+
+    /**
      * Moves the caret to the given visual row, preserving the current display
      * column (clamped to the target fragment, like a GUI editor).
      */
@@ -5098,10 +5193,8 @@ public class TuiCommand implements Runnable {
         final var width = inner.width();
         final var grid = visualGrid(state.input, width);
         final var visible = inner.height();
-        final var maxScroll = Math.max(0, grid.size() - visible);
-        final var baseScroll = Math.clamp(state.input.scrollRow(), 0, maxScroll);
-        final var scroll =
-                Math.clamp(Math.min(baseScroll, visualRowOfCaret(state.input, width) - visible + 1), 0, maxScroll);
+        // same follow-last logic as renderInput so a click maps to the same geometry that is drawn
+        final var scroll = inputFollowScroll(state, width, visible);
         final var visualIndex = (my - inner.y()) + scroll;
         if (visualIndex >= grid.size()) {
             final var last = grid.get(grid.size() - 1);
@@ -5264,16 +5357,17 @@ public class TuiCommand implements Runnable {
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var parts = new java.util.ArrayList<Span>();
         final var busy = busyIndicator(state);
-        final String prefix;
-        final String status;
+        // While the agent is busy the busy label (calling <tool> / thinking (Ns) / working...)
+        // already lives on the call line directly above this strip (renderCalling), so the strip
+        // must not repeat it as its leading segment - it would duplicate the text on two adjacent
+        // rows. A leading space keeps the row padded so the mode/model segment starts at the same
+        // left edge as the idle status text. The idle (non-busy) status, e.g. "ready", stays here
+        // because renderCalling draws nothing then.
         if (busy == null) {
-            prefix = "";
-            status = state.model.status();
+            parts.add(Span.styled(" " + state.model.status() + "  ", Style.EMPTY.fg(statusColor)));
         } else {
-            prefix = spinnerPrefix(state, busy.getKey());
-            status = busy.getValue();
+            parts.add(Span.styled(" ", Style.EMPTY.fg(statusColor)));
         }
-        parts.add(Span.styled(" " + prefix + status + "  ", Style.EMPTY.fg(statusColor)));
         final var statusModel = chatClient.model(state.session.chatSettings());
         final var activeModel = ellipsize(statusModel, 40);
         final var activeVariant = chatClient.variant(state.session.chatSettings());
@@ -7666,6 +7760,17 @@ public class TuiCommand implements Runnable {
         private volatile String[][] screenGrid = new String[0][0];
         private volatile Rect copyZone;
         private volatile Rect inputZone;
+        /**
+         * Visual-row scroll anchor of the prompt input. In follow mode (the default,
+         * {@link #inputUserScrolled} is {@code false}) it is recomputed each frame to
+         * keep the caret row visible; when the user scrolls the input manually (mouse
+         * wheel over a long prompt) it holds the explicit offset and
+         * {@code inputUserScrolled} latches so the renderer stops auto-following until
+         * the next keystroke re-arms it.
+         */
+        private volatile int inputScroll;
+        /** Whether the user scrolled the prompt input manually (mouse wheel). */
+        private volatile boolean inputUserScrolled;
         /**
          * Content regions of the last rendered frame that a selection may be
          * confined to, in draw order (bottom to top). Read by the event thread
