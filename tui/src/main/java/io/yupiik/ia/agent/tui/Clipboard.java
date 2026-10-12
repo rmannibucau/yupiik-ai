@@ -30,6 +30,16 @@ import java.util.concurrent.TimeUnit;
  * sends OSC 52 which covers ssh/tmux where no system channel is reachable.
  */
 public final class Clipboard {
+    /**
+     * True when running in a GraalVM native image. GraalVM native-image does not
+     * ship java.awt, so {@link Toolkit} is unreachable there and invoking it aborts
+     * the process with a native failure (not a catchable exception). Native-image
+     * sets {@code org.graalvm.nativeimage.imagecode} to "runtime" at run time and
+     * leaves it absent in a JVM; reading that property touches no AWT class, so this
+     * constant is safe to evaluate in both a JVM and a native image.
+     */
+    private static final boolean NATIVE_IMAGE = System.getProperty("org.graalvm.nativeimage.imagecode") != null;
+
     private Clipboard() {}
 
     /**
@@ -44,11 +54,13 @@ public final class Clipboard {
         if (text == null || text.isEmpty()) {
             return null;
         }
-        try {
-            Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
-            return "system clipboard";
-        } catch (final Throwable ignore) {
-            // headless JVM, Wayland-only session, restricted desktop: try native tools
+        if (!NATIVE_IMAGE) {
+            try {
+                Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
+                return "system clipboard";
+            } catch (final Throwable ignore) {
+                // headless JVM, Wayland-only session, restricted desktop: try native tools
+            }
         }
         final var command = nativeCommand(System.getProperty("os.name", ""), System.getenv());
         if (command == null) {

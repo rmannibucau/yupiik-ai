@@ -131,6 +131,14 @@ import java.util.regex.Pattern;
 public class TuiCommand implements Runnable {
     private static final long DEFAULT_MAX_HISTORY_CHARACTERS = 10_000_000L;
     private static final String WELCOME = "# yca\n\nType a prompt and press Enter. `/help` lists the slash commands.";
+    /**
+     * The current directory the process was launched from, read once so the sidebar, path shortening and git
+     * lookups stay consistent. {@code user.dir} is the JVM bootstrap property holding the launcher's working
+     * directory (the OS cwd captured at exec, projected through the same filesystem root as
+     * {@code Path.of("").toAbsolutePath()}), so it is the contextual "where I ran yca" directory the TUI
+     * should surface. Read once to keep all three consumers on the same value.
+     */
+    private static final String WORKING_DIRECTORY = System.getProperty("user.dir");
 
     /**
      * Constant spinner placeholder handed to {@code ConversationTranscript.markdown()}
@@ -3654,7 +3662,8 @@ public class TuiCommand implements Runnable {
         text.add(Line.from(
                 Span.styled("flavor ", label),
                 Span.styled(ellipsize(chatClient.flavor().name().toLowerCase(Locale.ROOT), width - 7), value)));
-        text.add(Line.from(Span.styled("cwd ", label), Span.styled(ellipsize(workingDirectory(), width - 4), value)));
+        text.add(Line.from(
+                Span.styled("cwd ", label), Span.styled(ellipsizeLeading(workingDirectory(), width - 4), value)));
         if (branch != null) {
             text.add(Line.from(Span.styled("branch ", label), Span.styled(ellipsize(branch, width - 7), value)));
         }
@@ -4833,8 +4842,7 @@ public class TuiCommand implements Runnable {
     /** Converts an absolute path under the working directory into a cwd-relative one; passthrough otherwise. */
     private static String shortenToRelative(final String path) {
         try {
-            final var cwd =
-                    Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
+            final var cwd = Path.of(WORKING_DIRECTORY).toAbsolutePath().normalize();
             final var candidate = Path.of(path).toAbsolutePath().normalize();
             if (candidate.startsWith(cwd)) {
                 return cwd.relativize(candidate).toString();
@@ -7199,6 +7207,18 @@ public class TuiCommand implements Runnable {
         return max <= 3 ? text.substring(0, Math.max(0, max)) : text.substring(0, max - 3) + "...";
     }
 
+    /**
+     * Keeps the trailing characters when the text is too long, truncating the head with "{@code ...}".
+     * Used where the meaningful tail matters most (e.g. the cwd's deepest folder segments) instead of the
+     * {@link #ellipsize(String, int)} head-keeping behaviour.
+     */
+    private static String ellipsizeLeading(final String text, final int max) {
+        if (text == null || text.length() <= max) {
+            return text == null ? "" : text;
+        }
+        return max <= 3 ? text.substring(text.length() - max) : "..." + text.substring(text.length() - max + 3);
+    }
+
     private static String formatTokens(final long value) {
         if (value < 1_000) {
             return String.valueOf(value);
@@ -7242,7 +7262,7 @@ public class TuiCommand implements Runnable {
     }
 
     private String workingDirectory() {
-        final var dir = Path.of(System.getProperty("user.dir")).toAbsolutePath();
+        final var dir = Path.of(WORKING_DIRECTORY).toAbsolutePath();
         final var home = Path.of(System.getProperty("user.home")).toAbsolutePath();
         return dir.startsWith(home) ? "~/" + home.relativize(dir) : dir.toString();
     }
@@ -7263,7 +7283,7 @@ public class TuiCommand implements Runnable {
             return cachedGitBranch;
         }
         try {
-            final var head = GitBranchPoller.resolveHead(System.getProperty("user.dir"));
+            final var head = GitBranchPoller.resolveHead(WORKING_DIRECTORY);
             final var branch = head != null && Files.isRegularFile(head)
                     ? GitBranchPoller.branchOf(Files.readString(head).strip())
                     : null;
