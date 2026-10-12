@@ -28,8 +28,8 @@ configurable through `yca.labels`:
 [source,json]
 ----
 "labels": {
-  "userTemplate": "[{$yupiik.minisite.openbracket$}{formatDate \"HH:mm:ss\"}}] {$yupiik.minisite.openbracket$}{systemProperty \"user.name\" \"You\"}}",      <1>
-  "assistantTemplate": "[{$yupiik.minisite.openbracket$}{formatDate \"HH:mm:ss\"}}] {$yupiik.minisite.openbracket$}{model.provider}}::{$yupiik.minisite.openbracket$}{model.name}}"  <2>
+  "userTemplate": "[{{formatDate \"HH:mm:ss\"}}] {{systemProperty \"user.name\" \"You\"}}",      <1>
+  "assistantTemplate": "[{{formatDate \"HH:mm:ss\"}}] {{model.provider}}::{{model.name}}"  <2>
 }
 ----
 <.> Header template rendered for user turns.
@@ -42,13 +42,13 @@ Both are Handlebars templates. The context keys are `userName`
 `model` (`name`, `provider`), `provider`, `agent` (the active custom agent or
 empty), `mode` (`plan`/`build`), `sessionId` and `configuration` (the whole yca
 configuration map). The `systemProperty` helper reads a system property with an
-optional default: 1 argument ({`{$yupiik.minisite.openbracket$}{systemProperty "user.name"}}`}) renders the
+optional default: 1 argument ({`{{systemProperty "user.name"}}`}) renders the
 value or nothing when the key is absent, 2 arguments
-(`{$yupiik.minisite.openbracket$}{systemProperty "user.name" "You"}}`) add the fallback. A template rendering
+(`{{systemProperty "user.name" "You"}}`) add the fallback. A template rendering
 blank falls back to `You`/`Assistant`.
 
 The `formatDate` helper renders the current time from the injected clock:
-`{$yupiik.minisite.openbracket$}{formatDate}}` uses `HH:mm:ss`, `{$yupiik.minisite.openbracket$}{formatDate "yyyy-MM-dd HH:mm:ss"}}` accepts
+`{{formatDate}}` uses `HH:mm:ss`, `{{formatDate "yyyy-MM-dd HH:mm:ss"}}` accepts
 any `java.time` pattern; remove it from the template to disable the timestamp.
 
 [IMPORTANT]

@@ -68,7 +68,7 @@ default stripped) stdout:
 {
   "provider": {
     "dynamicHeaders": {
-      "authorization": "Bearer {$yupiik.minisite.openbracket$}{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
+      "authorization": "Bearer {{exec \"exec_options=ttl=3600,strip=true\" \"MY_ENV=foo\" \"MY_OTHER_ENV=bar\" \"somebin\" \"somearg\" \"someotherarg\"}}"
     }
   }
 }
