@@ -39,7 +39,18 @@ public record CompactionDoneEvent(EventContext eventContext, String kind, String
                 Fires after context compaction completed. Config key `yca.hooks.CompactionDone`.
 
                 Input payload (`CompactionDoneEvent.Payload`): `eventContext`, `kind`, `mode`.
-                Observe-only; output `context` is cosmetic.""";
+                Observe-only; output `context` is cosmetic.
+
+                The `mode` is one of `NONE` (nothing was done), `SUMMARY` (the LLM summarizer
+                produced the reduced context), `TRUNCATE` (the summarizer failed and a
+                deterministic local truncation ran), `CLEARED` (old tool outputs were cleared
+                locally, no LLM call) or `SHRUNK` (old verbose tool outputs were spliced to
+                their head and tail, no LLM call).
+
+                The `kind` is `compact`, `compact-retry` or `round-compact` (LLM compaction),
+                `prune` or `round-prune` (local tool-output pruning), `tool` (per-tool output
+                reduction), or `dedup`, `supersede`, `purge-errors` (the zero-LLM context
+                strategies, always reported with `mode` `CLEARED`).""";
     }
 
     @JsonModel

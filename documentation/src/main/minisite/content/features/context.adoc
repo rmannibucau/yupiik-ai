@@ -100,6 +100,22 @@ When nothing qualifies, pruning is a no-op.
 Because pruning is local, `model.prune` is no longer used (the key is
 accepted but ignored).
 
+Alongside the volume-based rungs above, three zero-LLM strategies shrink
+specific history without calling the summarizer (all report the `CLEARED`
+outcome label, see xref:#outcome-labels[Outcome labels below]):
+
+- `yca.pruning.deduplicateToolCalls` (default `true`) drops identical tool
+  calls (same tool, same normalized arguments), keeping only the latest.
+- `yca.pruning.supersedeOverwrittenWrites` (default `false`) replaces the
+  input of write operations (`write_file`/`edit_file`/`apply_patch`) that a
+  later read of the same file overwrote.
+- `yca.pruning.purgeFailedToolInputs` (default `true`) removes the (often
+  large) input of failed tool calls after `yca.pruning.purgeFailedToolInputsTurns`
+  turns (default `4`), keeping the error message.
+
+State-bearing tools (`write_file`, `edit_file`, `apply_patch`, `todo_*`,
+`memory_write`) are never deduplicated, superseded or input-purged.
+
 == Compaction: structured summary plus verbatim tail
 
 Compaction (default trigger: 80% of the usable window, or a provider context
@@ -157,6 +173,23 @@ local truncation (`yca.pruning.toolOutputMaxChars` caps old message content)
 and reports the fallback honestly instead of a fake success. Old tail
 messages that still overflow after compaction are spliced to their head and
 tail (`yca.compaction.overflowSpliceChars`, default `500`).
+
+[#outcome-labels]
+Every in-loop prune/compact records _how_ the context was reduced as an
+outcome label (the `mode` field of the `AgentEvent.Compacted` event and of
+`CompactionDoneEvent`):
+
+- `NONE` - nothing needed to be (or could be) done.
+- `SUMMARY` - the LLM summarizer produced the reduced context.
+- `TRUNCATE` - the summarizer failed and a deterministic local truncation ran.
+- `CLEARED` - old tool outputs were cleared locally (no LLM call).
+- `SHRUNK` - old verbose tool outputs were spliced locally, keeping their head
+  and tail (no LLM call).
+
+The zero-LLM strategies that run alongside pruning (`yca.pruning.*`) - dedup
+of identical tool calls, superseding of overwritten writes and purging of
+failed-tool inputs - always report `CLEARED`, since none of them invokes the
+summarizer.
 
 The digest is delivered to the model as a user message wrapped in
 `<compacted-context>` followed by explicit guidance: it must treat the

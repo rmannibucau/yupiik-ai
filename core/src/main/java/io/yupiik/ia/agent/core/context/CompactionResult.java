@@ -31,6 +31,7 @@ import java.util.List;
 public record CompactionResult(List<Message> messages, Mode mode, String error) {
 
     public enum Mode {
+        // ensure to sync doc in documentation/src/main/minisite/content/features/context.adoc
         /** Nothing needed to be (or could be) done. */
         NONE,
         /** The LLM summarizer produced the reduced context. */

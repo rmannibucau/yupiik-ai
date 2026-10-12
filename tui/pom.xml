@@ -157,7 +157,7 @@
             -->
             <groupId>org.apache.geronimo.arthur</groupId>
             <artifactId>arthur-maven-plugin</artifactId>
-            <version>1.0.10-SNAPSHOT</version>
+            <version>1.0.10</version>
             <configuration>
               <main>io.yupiik.fusion.framework.api.main.Launcher</main>
               <usePackagedArtifact>true</usePackagedArtifact>
@@ -175,6 +175,7 @@
                 <customOption>-Duser.language=en</customOption>
                 <customOption>-Duser.country=US</customOption>
                 <customOption>-Dfile.encoding=UTF-8</customOption>
+                <customOption>--enable-native-access=ALL-UNNAMED</customOption>
                 <customOption>-H:+UnlockExperimentalVMOptions</customOption>
                 <customOption>-H:+SharedArenaSupport</customOption>
                 <customOption>--initialize-at-build-time=io.yupiik.logging.jul.YupiikLogManager</customOption>
