@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 
 /**
  * Central registry of the configured OpenAI compatible providers and their model references.
@@ -230,9 +231,7 @@ public class ProviderManager {
      * when identifiable.
      */
     private String resolveBackground(
-            final ChatSettings settings,
-            final String global,
-            final java.util.function.Function<ModelConfiguration, String> field) {
+            final ChatSettings settings, final String global, final Function<ModelConfiguration, String> field) {
         final var override = settings == null ? null : settings.providerId();
         final var provider = provider(override == null || override.isBlank() ? currentProviderId() : override);
         final var overrides = provider == null ? null : provider.backgroundModelOverrides();
@@ -381,6 +380,26 @@ public class ProviderManager {
         final var tuning = providerTuning(provider);
         return tuning != null && tuning.plateauRounds() != null && tuning.plateauRounds() > 0
                 ? tuning.plateauRounds()
+                : 0;
+    }
+
+    /**
+     * Resolve the effective doom-loop success threshold for a model of a provider: the
+     * {@code behavior.repeatSuccessThreshold} of the first matching model entry when > 0, else the
+     * provider-level {@code tuning.repeatSuccessThreshold} when > 0, else 0 so the caller applies the
+     * global {@code yca.tools.repeatSuccessThreshold} default (0 at that level disables the guard).
+     */
+    public int repeatSuccessThreshold(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().repeatSuccessThreshold() != null) {
+            final var threshold = entry.behavior().repeatSuccessThreshold();
+            if (threshold > 0) {
+                return threshold;
+            }
+        }
+        final var tuning = providerTuning(provider);
+        return tuning != null && tuning.repeatSuccessThreshold() != null && tuning.repeatSuccessThreshold() > 0
+                ? tuning.repeatSuccessThreshold()
                 : 0;
     }
 

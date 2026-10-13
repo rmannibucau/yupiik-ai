@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.context;
 
 import io.yupiik.ia.agent.core.llm.Usage;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -98,8 +99,7 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
-    public int effectiveContext(
-            final java.util.List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
+    public int effectiveContext(final List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
         final var current = anchor;
         final var estimate = estimateContext(messages, extraToolTokens);
         if (current == null || estimate <= current.estimateAtAnchor()) {
@@ -188,13 +188,12 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
-    public int estimateContext(final java.util.List<io.yupiik.ia.agent.core.llm.Message> messages) {
+    public int estimateContext(final List<io.yupiik.ia.agent.core.llm.Message> messages) {
         return parent.estimateContext(messages);
     }
 
     @Override
-    public int estimateContext(
-            final java.util.List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
+    public int estimateContext(final List<io.yupiik.ia.agent.core.llm.Message> messages, final int extraToolTokens) {
         return parent.estimateContext(messages, extraToolTokens);
     }
 

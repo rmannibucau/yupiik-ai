@@ -20,7 +20,9 @@ import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHead;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 @ApplicationScoped
@@ -124,10 +126,10 @@ public class GradleOutputProcessor implements OutputProcessor {
         if (lastTask != null) {
             out.add("Last task: " + lastTask);
         }
-        final var passing = new java.util.LinkedHashSet<String>();
+        final var passing = new LinkedHashSet<String>();
         for (final var raw : all) {
             final var line = Optimizers.stripAnsi(raw);
-            final var m = java.util.regex.Pattern.compile("> Task (:[^ ]+)").matcher(line);
+            final var m = Pattern.compile("> Task (:[^ ]+)").matcher(line);
             if (m.find()
                     && !line.contains("FAILED")
                     && !line.contains("FROM-CACHE")

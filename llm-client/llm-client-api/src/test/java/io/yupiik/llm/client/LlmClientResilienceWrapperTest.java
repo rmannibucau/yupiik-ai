@@ -29,14 +29,23 @@ import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.StreamAttempt;
 import java.io.IOException;
 import java.net.http.HttpResponse;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 
@@ -89,9 +98,9 @@ class LlmClientResilienceWrapperTest {
 
     @Test
     void concurrencyLimitEmitsAPauseWhileBlocked() throws Exception {
-        final var firstStarted = new java.util.concurrent.CountDownLatch(1);
-        final var releaseFirst = new java.util.concurrent.CountDownLatch(1);
-        final var count = new java.util.concurrent.atomic.AtomicInteger();
+        final var firstStarted = new CountDownLatch(1);
+        final var releaseFirst = new CountDownLatch(1);
+        final var count = new AtomicInteger();
         final var dial = new ScriptedDialect() {
             @Override
             public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
@@ -109,8 +118,8 @@ class LlmClientResilienceWrapperTest {
                 return CompletableFuture.completedFuture(response());
             }
         };
-        final var pauseSeen = new java.util.concurrent.CountDownLatch(1);
-        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var pauseSeen = new CountDownLatch(1);
+        final var pauses = new CopyOnWriteArrayList<PauseEvent>();
         final var wrapper = new LlmClientResilienceWrapper(config(1, 0, 1), pause -> {
             pauses.add(pause);
             if (pause.reason() != null && pause.reason().contains("concurrency limit reached")) {
@@ -186,8 +195,8 @@ class LlmClientResilienceWrapperTest {
         };
         // cap = 1: if the cancelled stream leaked its permit, the next request blocks forever
         final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 1));
-        final var subscribed = new java.util.concurrent.CountDownLatch(1);
-        final var heldSubscription = new java.util.concurrent.atomic.AtomicReference<Flow.Subscription>();
+        final var subscribed = new CountDownLatch(1);
+        final var heldSubscription = new AtomicReference<Flow.Subscription>();
         wrapper.stream(holdOpen, null, () -> false)
                 .toCompletableFuture()
                 .thenAccept(publisher -> publisher.subscribe(new Flow.Subscriber<>() {
@@ -221,7 +230,7 @@ class LlmClientResilienceWrapperTest {
     @Test
     void retryAfterIsHonoredAndSurfacedInThePauseReason() {
         final var dial = new ScriptedDialect(new IOException("LLM request failed (429): {\"error\":{}} retry-after=2"));
-        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var pauses = new CopyOnWriteArrayList<PauseEvent>();
         final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4, 0.0001d), pauses::add);
 
         final var response =
@@ -240,7 +249,7 @@ class LlmClientResilienceWrapperTest {
         final var dial = new ScriptedDialect(
                 new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
                         + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
-        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var pauses = new CopyOnWriteArrayList<PauseEvent>();
         final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4, 0.0001d), pauses::add);
 
         assertEquals(
@@ -268,7 +277,7 @@ class LlmClientResilienceWrapperTest {
         final var dial = new ScriptedDialect(
                 new IOException("LLM request failed (429): {\"error\":{\"code\":\"concurrency_limit_exceeded\","
                         + "\"message\":\"Too many concurrent requests\",\"limit\":2}}"));
-        final var pauses = new java.util.concurrent.CopyOnWriteArrayList<PauseEvent>();
+        final var pauses = new CopyOnWriteArrayList<PauseEvent>();
         final var wrapper = new LlmClientResilienceWrapper(config(2, 0, 4, 0.0001d), pauses::add);
 
         assertEquals(
@@ -316,7 +325,7 @@ class LlmClientResilienceWrapperTest {
         final var dial400 = new ScriptedDialect(typed400);
         final var wrapper400 = new LlmClientResilienceWrapper(config(3, 0, 4), null);
         assertThrows(
-                java.util.concurrent.CompletionException.class,
+                CompletionException.class,
                 () -> wrapper400
                         .chat(dial400, null, () -> false)
                         .toCompletableFuture()
@@ -330,7 +339,7 @@ class LlmClientResilienceWrapperTest {
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
 
         final var failure = assertThrows(
-                java.util.concurrent.CompletionException.class,
+                CompletionException.class,
                 () -> wrapper.chat(dial, null, () -> false)
                         .toCompletableFuture()
                         .join());
@@ -351,7 +360,7 @@ class LlmClientResilienceWrapperTest {
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
 
         final var failure = assertThrows(
-                java.util.concurrent.CompletionException.class,
+                CompletionException.class,
                 () -> wrapper.chat(dial, null, () -> false)
                         .toCompletableFuture()
                         .join());
@@ -399,7 +408,7 @@ class LlmClientResilienceWrapperTest {
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
 
         final var failure = assertThrows(
-                java.util.concurrent.CompletionException.class,
+                CompletionException.class,
                 () -> wrapper.stream(dial, null, () -> false)
                         .toCompletableFuture()
                         .join());
@@ -417,7 +426,7 @@ class LlmClientResilienceWrapperTest {
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
 
         final var failure = assertThrows(
-                java.util.concurrent.CompletionException.class,
+                CompletionException.class,
                 () -> wrapper.stream(dial, null, () -> false)
                         .toCompletableFuture()
                         .join());
@@ -435,7 +444,7 @@ class LlmClientResilienceWrapperTest {
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
 
         final var failure = assertThrows(
-                java.util.concurrent.CompletionException.class,
+                CompletionException.class,
                 () -> wrapper.stream(dial, null, () -> false)
                         .toCompletableFuture()
                         .join());
@@ -447,15 +456,14 @@ class LlmClientResilienceWrapperTest {
     @Test
     void cancelDuringRetryBackoffAbortsTheWaitWithoutReRequesting() throws Exception {
         final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30")); // 30s retry-after
-        try (final var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1)) {
+        try (final var scheduler = Executors.newScheduledThreadPool(1)) {
             final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
-            final var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+            final var cancelled = new AtomicBoolean();
             final var future = wrapper.chat(dial, null, cancelled::get);
             // flip the probe far before the 30s wait elapses: the scheduler poll ends the wait early
             cancelled.set(true);
             final var failure = assertThrows(
-                    java.util.concurrent.ExecutionException.class,
-                    () -> future.toCompletableFuture().get(2, TimeUnit.SECONDS));
+                    ExecutionException.class, () -> future.toCompletableFuture().get(2, TimeUnit.SECONDS));
             assertTrue(
                     failure.getCause() instanceof IOException
                             && "Cancelled".equals(failure.getCause().getMessage()),
@@ -467,14 +475,13 @@ class LlmClientResilienceWrapperTest {
     @Test
     void cancelDuringStreamSetupBackoffAbortsTheWaitWithoutReRequesting() throws Exception {
         final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
-        try (final var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1)) {
+        try (final var scheduler = Executors.newScheduledThreadPool(1)) {
             final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
-            final var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+            final var cancelled = new AtomicBoolean();
             final var future = wrapper.stream(dial, null, cancelled::get);
             cancelled.set(true);
             final var failure = assertThrows(
-                    java.util.concurrent.ExecutionException.class,
-                    () -> future.toCompletableFuture().get(2, TimeUnit.SECONDS));
+                    ExecutionException.class, () -> future.toCompletableFuture().get(2, TimeUnit.SECONDS));
             assertTrue(
                     failure.getCause() instanceof IOException
                             && "Cancelled".equals(failure.getCause().getMessage()),
@@ -486,11 +493,11 @@ class LlmClientResilienceWrapperTest {
     @Test
     void cancelAlreadySetWhenFailureLandsSkipsTheWait() throws Exception {
         final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
-        try (final var scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1)) {
+        try (final var scheduler = Executors.newScheduledThreadPool(1)) {
             final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null, scheduler);
-            final var cancelled = new java.util.concurrent.atomic.AtomicBoolean(true);
+            final var cancelled = new AtomicBoolean(true);
             final var failure = assertThrows(
-                    java.util.concurrent.ExecutionException.class,
+                    ExecutionException.class,
                     () -> wrapper.chat(dial, null, cancelled::get)
                             .toCompletableFuture()
                             .get(2, TimeUnit.SECONDS));
@@ -509,9 +516,9 @@ class LlmClientResilienceWrapperTest {
         // retry-after (30s) before the post-wait check could see it
         final var dial = new ScriptedDialect(new LlmHttpFailureException(429, "boom", "30"));
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
-        final var cancelled = new java.util.concurrent.atomic.AtomicBoolean(true);
+        final var cancelled = new AtomicBoolean(true);
         final var failure = assertThrows(
-                java.util.concurrent.ExecutionException.class,
+                ExecutionException.class,
                 () -> wrapper.chat(dial, null, cancelled::get)
                         .toCompletableFuture()
                         .get(2, TimeUnit.SECONDS));
@@ -565,8 +572,8 @@ class LlmClientResilienceWrapperTest {
                 return failed(failures[call]);
             }
             // success: an SSE stream of a single "ok" fragment then end
-            final var buffers = java.nio.ByteBuffer.wrap("data: {\"id\":\"1\",\"model\":\"m\",\"choices\":[]}\n\n"
-                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            final var buffers = ByteBuffer.wrap(
+                    "data: {\"id\":\"1\",\"model\":\"m\",\"choices\":[]}\n\n".getBytes(StandardCharsets.UTF_8));
             return CompletableFuture.completedFuture(io.yupiik.llm.client.spi.Streams.toEvents(
                     subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
                         @Override

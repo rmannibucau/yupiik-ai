@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.cli;
 
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
+import java.util.function.Function;
 
 /**
  * A callable helper made available to the CLI prompt handlebars template. Each {@code @ApplicationScoped} bean
@@ -45,7 +46,7 @@ public interface PromptHandlebarsHelper {
      * {@code {{systemProperty "user.name" "You"}}}). Registered alongside the bean helpers so it is available
      * to every template compiled with this SPI (CLI prompt line and speaker labels).
      */
-    static java.util.function.Function<HelperContext, Object> systemProperty() {
+    static Function<HelperContext, Object> systemProperty() {
         return context -> {
             if (context.args().size() < 1 || context.args().size() > 2) {
                 throw new IllegalArgumentException("systemProperty expects 1 or 2 arguments (key [default])");

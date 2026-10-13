@@ -135,25 +135,25 @@ class ThinkTagSplitterTest {
     }
 
     @Test
-    void flushRestoresTheHeldBackInlineCodeTail() {
+    void inlineCodeTailStreamsImmediatelyAndFlushAddsNothing() {
         final var parser = splitter.create();
         final var visible = new StringBuilder();
-        // a single inline-code backtick is not a fence: it is held back while a possible
-        // fence continuation is awaited, and flush() must hand it back to the caller
+        // a single inline-code backtick followed by more text cannot open a fence: it must
+        // stream immediately instead of sitting in the carry window until flush() (regression:
+        // the old code truncated the live tail at the closing backtick, losing characters
+        // mid-line in the TUI)
         for (final var segment : parser.feed("je commence par le code de `AgentLoop.java` :")) {
-            append(segment, visible, new StringBuilder(), new StringBuilder());
-        }
-        assertEquals(
-                "je commence par le code de `AgentLoop.java",
-                visible.toString(),
-                "the tail after the held-back backtick stays buffered until flush()");
-        for (final var segment : parser.flush()) {
             append(segment, visible, new StringBuilder(), new StringBuilder());
         }
         assertEquals(
                 "je commence par le code de `AgentLoop.java` :",
                 visible.toString(),
-                "flush() must restore the whole inline code including its closing backtick");
+                "the inline-code tail must stream immediately, complete, mid-stream");
+        final var afterFlush = new StringBuilder();
+        for (final var segment : parser.flush()) {
+            append(segment, afterFlush, new StringBuilder(), new StringBuilder());
+        }
+        assertEquals("", afterFlush.toString(), "nothing is held back after the tail streamed");
     }
 
     private static void append(

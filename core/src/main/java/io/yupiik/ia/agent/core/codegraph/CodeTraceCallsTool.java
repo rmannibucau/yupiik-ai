@@ -20,11 +20,14 @@ import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Deque;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -89,6 +92,11 @@ public class CodeTraceCallsTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
         final var symbol = arg(args, "symbol");
         if (symbol == null || symbol.isBlank()) {
             return ToolResult.error("symbol is required");
@@ -97,12 +105,11 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         final var edgeTypes = parseEdgeTypes(arg(args, "edgeTypes"));
         final var depth = optInt(args, "depth", 0);
         final var max = Math.clamp(optInt(args, "max", 80), 1, 500);
-        codeGraph.ensureRefreshedReady();
-        final var idx = codeGraph.queryIndex();
+        final var idx = codeGraph.queryIndex(ctx == null ? null : ctx.projectDir());
         if (idx == null || idx.symbolCount() == 0) {
             return ToolResult.ok("Structural code graph is empty.");
         }
-        final var dir = direction == null ? "both" : direction.toLowerCase(java.util.Locale.ROOT);
+        final var dir = direction == null ? "both" : direction.toLowerCase(Locale.ROOT);
         final var targetOrd = resolveOrd(symbol, idx);
         if (targetOrd < 0) {
             return ToolResult.error("Symbol not found: " + symbol + ". List candidate symbols with the code_find_code "
@@ -116,7 +123,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                 final var ctSb = new StringBuilder();
                 ctSb.append(symbol)
                         .append(" is a ")
-                        .append(targetSymbol.kind().name().toLowerCase(java.util.Locale.ROOT))
+                        .append(targetSymbol.kind().name().toLowerCase(Locale.ROOT))
                         .append(", not an interface, so nothing implements it directly");
                 if (suggestion != null) {
                     ctSb.append("; ").append(suggestion).append('\n');
@@ -132,7 +139,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
 
         final var sb = new StringBuilder();
         var count = 0;
-        final var visited = new java.util.HashSet<Integer>();
+        final var visited = new HashSet<Integer>();
         final Deque<int[]> queue = new ArrayDeque<>(); // {ordinal, level}
         queue.add(new int[] {targetOrd, 0});
         visited.add(targetOrd);
@@ -146,7 +153,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                         .append("- ")
                         .append(sym.fqn())
                         .append(" (")
-                        .append(sym.kind().name().toLowerCase(java.util.Locale.ROOT))
+                        .append(sym.kind().name().toLowerCase(Locale.ROOT))
                         .append(")")
                         .append(" [")
                         .append(sym.file())
@@ -169,7 +176,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
                 if (neighbors.length == 0) {
                     neighbors = in;
                 } else if (in.length > 0) {
-                    neighbors = java.util.Arrays.copyOf(neighbors, neighbors.length + in.length);
+                    neighbors = Arrays.copyOf(neighbors, neighbors.length + in.length);
                     System.arraycopy(in, 0, neighbors, neighbors.length - in.length, in.length);
                 }
             }
@@ -196,7 +203,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
 
     private String edgeTypesLabel(final Set<GraphModel.EdgeType> edgeTypes) {
         return edgeTypes.stream()
-                .map(t -> t.name().toLowerCase(java.util.Locale.ROOT))
+                .map(t -> t.name().toLowerCase(Locale.ROOT))
                 .sorted()
                 .reduce((a, b) -> a + ", " + b)
                 .orElse("-");
@@ -211,7 +218,7 @@ public class CodeTraceCallsTool implements EmbeddedTool {
             if (token.isBlank()) {
                 continue;
             }
-            final var t = token.trim().toUpperCase(java.util.Locale.ROOT);
+            final var t = token.trim().toUpperCase(Locale.ROOT);
             if ("ALL".equals(t)) {
                 return EnumSet.allOf(GraphModel.EdgeType.class);
             }

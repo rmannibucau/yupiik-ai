@@ -19,9 +19,11 @@ import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -31,6 +33,16 @@ import java.util.Map;
 
 @ApplicationScoped
 public class ListDirTool implements EmbeddedTool {
+
+    private final CodingAgentConfiguration configuration;
+
+    public ListDirTool(final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
+    protected ListDirTool() {
+        this.configuration = null;
+    }
 
     @Override
     public String name() {
@@ -56,7 +68,14 @@ public class ListDirTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
-        final var path = Path.of(arg(args, "path") == null ? "." : arg(args, "path"));
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var path = context.resolvePath(
+                arg(args, "path") == null ? "." : arg(args, "path"),
+                configuration == null ? null : configuration.resolveProjectDir());
         final var depth = (int) Math.min(3, Math.max(1, optInt(args, "depth", 1)));
         if (!Files.isDirectory(path)) {
             return ToolResult.error("Not a directory: " + path);

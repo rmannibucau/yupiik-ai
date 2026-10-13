@@ -30,6 +30,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.BooleanSupplier;
 import java.util.logging.Logger;
@@ -130,8 +131,8 @@ public class CompactionCoordinator {
      */
     public CompactionResult prune(final List<Message> messages) {
         final var p = configuration.pruning();
-        final var system = messages.get(0).role().equals("system") ? messages.get(0) : null;
-        final var from = system == null ? 0 : 1;
+        final var leadingSystem = leadingSystemMessages(messages);
+        final var from = leadingSystem.size();
         var boundary = splitBoundary(messages, from, Math.max(2, p.keepRecent()), false);
         if (boundary <= from) {
             return new CompactionResult(messages, Mode.NONE, "");
@@ -243,7 +244,7 @@ public class CompactionCoordinator {
             final int keepLastOverride,
             final BooleanSupplier cancelled,
             final ChatSettings settings) {
-        java.util.Objects.requireNonNull(cancelled, "cancelled");
+        Objects.requireNonNull(cancelled, "cancelled");
         // blockable hook gate: a forbid vetoes the compaction before any real work
         if (emitter != null) {
             final var hook = new io.yupiik.ia.agent.core.events.HookResult();
@@ -265,8 +266,8 @@ public class CompactionCoordinator {
         final var p = configuration.pruning();
         final var keepFloor =
                 Math.max(2, keepLastOverride > 0 ? keepLastOverride : force ? p.keepRecent() / 2 : p.keepRecent());
-        final var system = messages.get(0).role().equals("system") ? messages.get(0) : null;
-        final var from = system == null ? 0 : 1;
+        final var leadingSystem = leadingSystemMessages(messages);
+        final var from = leadingSystem.size();
         final var boundary = splitBoundary(messages, from, keepFloor, force);
         if (boundary <= from) {
             return new CompactionResult(messages, Mode.NONE, "");
@@ -305,9 +306,7 @@ public class CompactionCoordinator {
         }
         if (!outcome.summary().isBlank()) {
             List<Message> out = new ArrayList<>();
-            if (system != null) {
-                out.add(system);
-            }
+            out.addAll(leadingSystem);
             out.add(Message.user(
                     COMPACTED_MARKER + "\n" + outcome.summary() + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
             out.addAll(messages.subList(boundary, messages.size()));
@@ -316,7 +315,7 @@ public class CompactionCoordinator {
                 // the current task must survive compaction even when the tail budget did not cover it
                 out.add(Message.user(str(messages.get(lastUser).content())));
             }
-            final var digestIndex = system == null ? 0 : 1;
+            final var digestIndex = leadingSystem.size();
             out = ensureUnderWindow(out, force, digestIndex);
             if (halvings == 0
                     && configuration.compaction().summarizerChunkChars() == 0
@@ -763,11 +762,19 @@ public class CompactionCoordinator {
      */
     private record Outcome(String summary, String error, int calls, boolean sizeError) {}
 
+    /** The consecutive leading {@code system}-role entries: the web project marker (if any) and the compaction marker. */
+    private static List<Message> leadingSystemMessages(final List<Message> messages) {
+        var i = 0;
+        while (i < messages.size() && "system".equals(messages.get(i).role())) {
+            i++;
+        }
+        return messages.subList(0, i);
+    }
+
     private List<Message> localTruncate(final List<Message> messages, final int from, final int to) {
         final var out = new ArrayList<Message>();
-        if (messages.get(0).role().equals("system")) {
-            out.add(messages.get(0));
-        }
+        // keep every leading structural marker (compaction marker + web project marker) verbatim
+        out.addAll(leadingSystemMessages(messages));
         final var cap = configuration.pruning().toolOutputMaxChars();
         for (final var m : messages.subList(from, to)) {
             final var content = m.content() instanceof String s ? s : String.valueOf(m.content());

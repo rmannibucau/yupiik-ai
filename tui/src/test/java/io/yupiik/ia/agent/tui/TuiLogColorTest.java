@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import java.util.logging.Level;
 import org.junit.jupiter.api.Test;
 
@@ -121,7 +122,7 @@ class TuiLogColorTest {
                         "unicode",
                         "auto",
                         "auto",
-                        java.util.List.of(),
+                        List.of(),
                         null,
                         null,
                         true,

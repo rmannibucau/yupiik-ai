@@ -55,11 +55,49 @@ class StdioMcpClientTest {
         script.toFile().setExecutable(true);
 
         final var client =
-                new StdioMcpClient("test", List.of("/bin/sh", script.toString()), List.of(), mapper, service);
+                new StdioMcpClient("test", List.of("/bin/sh", script.toString()), List.of(), null, mapper, service);
         client.initialize();
         assertEquals(1, service.trackedCount(), "the MCP server must be tracked");
 
         client.close();
         assertEquals(0, service.trackedCount(), "close() must dispose the spawned server through ProcessService");
+    }
+
+    @Test
+    void honorsConfiguredWorkingDir(@TempDir final Path tmp, final JsonMapper mapper) throws Exception {
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        final var service = new ProcessService();
+
+        final var workdir = tmp.resolve("server-cwd");
+        Files.createDirectories(workdir);
+        // the fake server drops its cwd (pwd) into a sentinel file so the test can assert where it ran,
+        // then answers initialize and idles (TERM trapped so close() reaps through ProcessService).
+        final var script = tmp.resolve("mcp-server-cwd.sh");
+        Files.writeString(
+                script,
+                "#!/bin/sh\n"
+                        + "pwd > \"" + tmp.resolve("started-in").toAbsolutePath() + "\"\n"
+                        + "read line\n"
+                        + "id=$(printf '%s' \"$line\" | sed -n 's/.*\"id\":\\([0-9][0-9]*\\).*/\\1/p')\n"
+                        + "printf '{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"protocolVersion\":\"2025-06-18\","
+                        + "\"capabilities\":{},\"serverInfo\":{\"name\":\"x\",\"version\":\"1\"}}}\\n' \"$id\"\n"
+                        + "trap '' TERM\n"
+                        + "while :; do sleep 1; done\n");
+        script.toFile().setExecutable(true);
+
+        final var client = new StdioMcpClient(
+                "test", List.of("/bin/sh", script.toString()), List.of(), workdir.toString(), mapper, service);
+        try {
+            client.initialize();
+        } finally {
+            client.close();
+        }
+        final var startedIn = Files.readString(tmp.resolve("started-in")).strip();
+        assertEquals(expectedCwd(workdir), startedIn, "the MCP server must run in the configured dir");
+    }
+
+    /** Normalizes the expected path the same way the client does before handing it to the child. */
+    private static String expectedCwd(final Path dir) {
+        return dir.toAbsolutePath().normalize().toString();
     }
 }

@@ -28,6 +28,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -163,6 +164,9 @@ public class CallbackRunner {
             throws InterruptedException {
         final var pb = new ProcessBuilder(hook.command());
         pb.redirectErrorStream(false);
+        if (hook.dir() != null && !hook.dir().isBlank()) {
+            pb.directory(Path.of(hook.dir()).toAbsolutePath().normalize().toFile());
+        }
         final Process process;
         try {
             process = pb.start();

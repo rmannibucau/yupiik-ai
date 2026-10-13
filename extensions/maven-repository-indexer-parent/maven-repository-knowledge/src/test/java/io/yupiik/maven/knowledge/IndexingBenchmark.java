@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
@@ -241,8 +242,8 @@ class IndexingBenchmark {
         return out;
     }
 
-    private static final java.util.regex.Pattern COORD = java.util.regex.Pattern.compile(
-            "<groupId>\\s*([^<]+?)\\s*</groupId>\\s*<artifactId>\\s*([^<]+?)\\s*</artifactId>");
+    private static final Pattern COORD =
+            Pattern.compile("<groupId>\\s*([^<]+?)\\s*</groupId>\\s*<artifactId>\\s*([^<]+?)\\s*</artifactId>");
 
     private static void collectCoordinates(final Path pom, final Set<String> into) {
         final String text;

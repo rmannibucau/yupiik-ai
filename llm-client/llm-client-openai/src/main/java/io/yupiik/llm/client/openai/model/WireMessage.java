@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmToolCall;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -56,7 +57,7 @@ public record WireMessage(
         if (extensions == null || extensions.isEmpty()) {
             others = null;
         } else if (extensions.containsKey("volatileTail")) {
-            final var filtered = new java.util.LinkedHashMap<String, Object>();
+            final var filtered = new LinkedHashMap<String, Object>();
             extensions.forEach((k, v) -> {
                 if (!"volatileTail".equals(k)) {
                     filtered.put(k, v);

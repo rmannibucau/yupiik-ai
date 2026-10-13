@@ -65,6 +65,17 @@ public record ModelTuningConfiguration(
         PlateauFeedbackMode plateauFeedback,
 
         @Property(
+                documentation =
+                        "Doom-loop success threshold override for this model: the maximum number of identical tool calls "
+                                + "(same tool + same normalized arguments) whose result succeeded and carried no new "
+                                + "information (identical output, ignoring embedded dates/timestamps) before the next one "
+                                + "is refused with a strategy-change directive. A failing call is never counted (it is a "
+                                + "legitimate retry), and an interleaved failure or productive round resets the streak. "
+                                + "Unset or zero/negative keeps the provider tuning, then the global yca.tools.repeatSuccessThreshold"
+                                + " default (3). Zero at the global level disables the guard entirely.")
+        Integer repeatSuccessThreshold,
+
+        @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Named tuning presets (variants) selectable at runtime via the /model command. Unset defers to the provider-level variants, then to the implicit per-family scheme.")

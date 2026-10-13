@@ -36,9 +36,16 @@ import java.util.Set;
  * (eg. {@code sed -i}) make the segment fall back to the normal ask/gate flow.</p>
  *
  * <p>Command substitutions {@code $( ... )} are verified recursively instead of being blanket-denied:
- * the substituted command is evaluated with the same engine, so read-only substitutions
- * (eg. {@code $(find . -name '*.java')}) are auto-allowed while any side effect gates the whole command.
- * Shell control keywords ({@code for}, {@code if}, {@code while}, {@code do}, {@code done}...) are syntax,
+ * the substituted command is evaluated with the same engine, so a read-only substitution
+ * (eg. {@code $(find . -name '*.java')}) is auto-allowed - glued into surrounding text
+ * (eg. {@code echo "file: $(ls)!"}) the same as standalone - while any side effect gates the whole command.
+ * The substitution gate evaluates the inner command against the <em>effective</em> rules: the built-in
+ * read-only families ({@link CommandPermissionConfiguration#defaultRules()}) union the rules compiled into
+ * this instance (the configured {@code yca.permissions.bash.rules} plus any session/override rules), so a
+ * custom rule family the user added - even with a higher privilege - is honored inside {@code $( ... )}
+ * exactly like at the top level, and the read-only baseline stays available whatever the configuration.</p>
+ *
+ * <p>Shell control keywords ({@code for}, {@code if}, {@code while}, {@code do}, {@code done}...) are syntax,
  * not commands: they are skipped so {@code for f in $(find .); do echo $f; done} works, but every real
  * command in a loop body, condition or branch is still evaluated segment by segment.</p>
  */
@@ -65,24 +72,16 @@ public final class BashRules {
     }
 
     public static Compiled compile(final BashPermissionsConfiguration configuration) {
-        if (configuration == null
-                || configuration.rules() == null
-                || configuration.rules().isEmpty()) {
-            return new Compiled(List.of());
-        }
-        final var rules = new ArrayList<CompiledRule>();
-        for (final CommandPermissionConfiguration rule : configuration.rules()) {
-            if (rule == null || rule.matcher() == null || rule.matcher().commandStart() == null) {
-                continue;
-            }
-            final var commandStart = rule.matcher().commandStart().normalizedOptions();
-            if (commandStart.isEmpty()) {
-                continue;
-            }
-            rules.add(new CompiledRule(
-                    commandStart, compileExcludes(rule.matcher().excludeOptions()), rule.plan(), rule.defaultMode()));
-        }
-        return new Compiled(rules);
+        return compile(configuration == null ? null : configuration.rules());
+    }
+
+    /**
+     * Compiles a raw rule list (configured rules, session overrides, or a mix) into a {@link Compiled}
+     * evaluator. Built-in read-only families are not injected here: they are only added by
+     * {@link Compiled}'s substitution verifier, so the top-level gate reflects exactly the rules passed.
+     */
+    public static Compiled compile(final List<CommandPermissionConfiguration> rules) {
+        return new Compiled(rules == null || rules.isEmpty() ? List.of() : Compiled.rawCompile(rules));
     }
 
     private static Excludes compileExcludes(final List<CommandOptionsConfiguration> excludeOptions) {
@@ -124,9 +123,78 @@ public final class BashRules {
         private static final int MAX_SUBSTITUTION_DEPTH = 32;
 
         private final List<CompiledRule> rules;
+        /**
+         * Evaluator used to verify the inner command of every {@code $( ... )} substitution: the
+         * built-in read-only families unioned with this instance's rules. Built per instance (no
+         * static compilation cache) so the substitution gate follows whatever effective rules were
+         * compiled here (configured + session overrides) on top of the read-only baseline.
+         */
+        private final Compiled substitutionRules;
+
+        /**
+         * The built-in read-only families as compiled rules. This is a <em>config</em> cache (the default
+         * rule list never changes), not a compilation cache: the per-instance union is what gets compiled.
+         */
+        private static final List<CompiledRule> DEFAULT_RULE_LIST = defaultRuleList();
+
+        private static List<CompiledRule> defaultRuleList() {
+            // built through a plain instance so the default config itself has no substitution re-union
+            return new Compiled(rawCompile(CommandPermissionConfiguration.defaultRules()), null).rules;
+        }
 
         private Compiled(final List<CompiledRule> rules) {
+            this(rules, unionWithDefaults(rules));
+        }
+
+        /**
+         * Plain constructor used for the union instance (and the internal default instance): the rules
+         * already include the read-only baseline, so its own substitution verifier is itself.
+         */
+        private Compiled(final List<CompiledRule> rules, final Compiled substitutionRules) {
             this.rules = rules;
+            this.substitutionRules = substitutionRules == null ? this : substitutionRules;
+        }
+
+        /** Compiles {@code CommandPermissionConfiguration}s into {@code CompiledRule}s without building a {@code Compiled}. */
+        private static List<CompiledRule> rawCompile(final List<CommandPermissionConfiguration> configuration) {
+            final var compiledRules = new ArrayList<CompiledRule>();
+            if (configuration != null) {
+                for (final CommandPermissionConfiguration rule : configuration) {
+                    if (rule == null || rule.matcher() == null || rule.matcher().commandStart() == null) {
+                        continue;
+                    }
+                    final var commandStart = rule.matcher().commandStart().normalizedOptions();
+                    if (commandStart.isEmpty()) {
+                        continue;
+                    }
+                    compiledRules.add(new CompiledRule(
+                            commandStart,
+                            compileExcludes(rule.matcher().excludeOptions()),
+                            rule.plan(),
+                            rule.defaultMode()));
+                }
+            }
+            return List.copyOf(compiledRules);
+        }
+
+        /**
+         * Compiles the substitution verifier for the given rules: {@code defaultRules ∪ rules}, deduplicated
+         * (a configuration already using the defaults must not duplicate them). The union instance is built
+         * with the plain constructor so it never re-unions itself.
+         */
+        private static Compiled unionWithDefaults(final List<CompiledRule> rules) {
+            final var defaults = DEFAULT_RULE_LIST;
+            if (rules.isEmpty()) {
+                return new Compiled(defaults, null);
+            }
+            final var merged = new ArrayList<CompiledRule>(defaults.size() + rules.size());
+            merged.addAll(defaults);
+            for (final var rule : rules) {
+                if (!merged.contains(rule)) {
+                    merged.add(rule);
+                }
+            }
+            return new Compiled(List.copyOf(merged), null);
         }
 
         /**
@@ -244,7 +312,9 @@ public final class BashRules {
          * the target is the last non-flag, non-redirected path-like token of the segment. Commands
          * with no matching rule, pure env assignments, {@code cd} and shell wrappers yield no key
          * (they are never plateau signals). The tokenizer (quote aware, operator segmentation) is the
-         * same one used for permission evaluation.
+         * same one used for permission evaluation. Note this reflects the rules compiled into this
+         * instance: a session/override rule (eg. an approved family) also produces coverage keys, so
+         * exploration commands approved for the session contribute to plateau detection like configured ones.
          */
         public List<String> coverageKeys(final String command) {
             if (command == null || command.isBlank()) {
@@ -397,9 +467,17 @@ public final class BashRules {
         }
 
         /**
-         * Fails the segment unless every $() placeholder in the tokens evaluates to a read-only command.
-         * Glued placeholders (eg. {@code echo "a $(ls) b"}) cannot be proven harmless and fall back to
-         * the gate, as do unbalanced or out-of-range placeholders.
+         * Fails the segment unless every $() placeholder in the tokens evaluates to an allowed command.
+         * Placeholders are verified recursively with the same engine whether they stand alone
+         * ({@code echo $(ls)}) or are glued into surrounding text ({@code echo "a $(ls) b"}): shell
+         * interpolation of a substitution output is identical in both shapes, so gluing adds no side
+         * effect beyond the inner command itself - a glued {@code echo "a $(rm -rf /) b"} still recurses
+         * into {@code rm} and stays gated. The inner command is evaluated against
+         * {@link #substitutionRules}: the built-in read-only families union the rules compiled into this
+         * instance (configured rules + session/override rules), so a custom rule family the user added is
+         * honored inside {@code $( ... )} the same way as at the top level, while the read-only baseline
+         * stays available whatever the configuration. Only unbalanced or out-of-range (malformed)
+         * placeholders fall back to the gate, since they cannot be mapped to a verifiable inner command.
          */
         private SegmentDecision verifyPlaceholders(
                 final List<Token> tokens, final AgentMode agentMode, final MaskedCommand masked, final int depth) {
@@ -408,20 +486,59 @@ public final class BashRules {
                 if (ref.kind() == PlaceholderKind.NONE) {
                     continue;
                 }
-                if (ref.kind() == PlaceholderKind.GLUED
-                        || ref.index() < 0
-                        || ref.index() >= masked.substitutions().size()) {
-                    return new SegmentDecision(false, null, Cause.REDIRECT_OR_SUBSTITUTION);
-                }
-                final var inner = evaluateDeep(agentMode, masked.substitutions().get(ref.index()), depth + 1);
-                if (!inner.allowed()) {
-                    return new SegmentDecision(
-                            false,
-                            null,
-                            inner.deniedCause() != null ? inner.deniedCause() : Cause.REDIRECT_OR_SUBSTITUTION);
+                for (final var index : tokenPlaceholderIndices(token.text(), masked)) {
+                    if (index < 0) {
+                        return new SegmentDecision(false, null, Cause.REDIRECT_OR_SUBSTITUTION);
+                    }
+                    final var inner = substitutionRules.evaluateDeep(
+                            agentMode, masked.substitutions().get(index), depth + 1);
+                    if (!inner.allowed()) {
+                        return new SegmentDecision(
+                                false,
+                                null,
+                                inner.deniedCause() != null ? inner.deniedCause() : Cause.REDIRECT_OR_SUBSTITUTION);
+                    }
                 }
             }
             return new SegmentDecision(true, null, null);
+        }
+
+        /**
+         * The substitution indices referenced by a token, in scan order. A {@code PURE} placeholder is a
+         * single index; a {@code GLUED} token may reference several (eg. {@code "x$(a)y$(b)z"}). Returns an
+         * empty list for {@code NONE}, and throws-free fails closed on a malformed or out-of-range reference
+         * by returning a single {@code -1}, which callers treat as unverifiable (gated).
+         */
+        private static List<Integer> tokenPlaceholderIndices(final String token, final MaskedCommand masked) {
+            final var ref = placeholderRef(token);
+            final int count = masked.substitutions().size();
+            if (ref.kind() == PlaceholderKind.NONE) {
+                return List.of();
+            }
+            if (ref.kind() == PlaceholderKind.PURE) {
+                return ref.index() < 0 || ref.index() >= count ? List.of(-1) : List.of(ref.index());
+            }
+            final var indices = new ArrayList<Integer>(1);
+            for (var i = 0; ; ) {
+                final var at = token.indexOf(SUBSTITUTION_PREFIX, i);
+                if (at < 0) {
+                    break;
+                }
+                var end = at + SUBSTITUTION_PREFIX.length();
+                while (end < token.length() && token.charAt(end) >= '0' && token.charAt(end) <= '9') {
+                    end++;
+                }
+                if (end == at + SUBSTITUTION_PREFIX.length()) {
+                    return List.of(-1); // dangling prefix, not a numeric placeholder: unverifiable
+                }
+                final var index = Integer.parseInt(token.substring(at + SUBSTITUTION_PREFIX.length(), end));
+                if (index < 0 || index >= count) {
+                    return List.of(-1); // out of range: unverifiable
+                }
+                indices.add(index);
+                i = end;
+            }
+            return indices.isEmpty() ? List.of(-1) : indices;
         }
 
         private static int structuralPrefixLength(final List<Token> tokens) {
@@ -980,7 +1097,8 @@ public final class BashRules {
         /**
          * Classifies a token relative to the substitution placeholders: {@code PURE} when the whole token
          * (the value part for env assignments) is a placeholder, {@code GLUED} when a placeholder is mixed
-         * with other literal text (fail closed), {@code NONE} otherwise.
+         * with other literal text (verified recursively by {@link #verifyPlaceholders(List, AgentMode, MaskedCommand, int)}),
+         * {@code NONE} otherwise.
          */
         private static PlaceholderRef placeholderRef(final String token) {
             var candidate = token;

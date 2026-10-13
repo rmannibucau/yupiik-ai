@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -91,7 +92,7 @@ class JsOutputProcessorTest {
     @Test
     void capsEntriesAtMaxEntries() {
         final var processor = new JsOutputProcessor(TestConfigs.codingAgent(Map.of("yca.optimize.maxEntries", "3")));
-        final var lines = new java.util.ArrayList<String>();
+        final var lines = new ArrayList<String>();
         for (var i = 0; i < 10; i++) {
             lines.add("src/f" + i + ".ts(1,1): error TS1000: e" + i);
         }

@@ -1,0 +1,370 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.web;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.fusion.httpserver.jre.JreHttpServer;
+import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.ToolCall;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+/** End-to-end tests of the SSE session stream: snapshot seeding and per-session fan-out. */
+@ExtendWith(TestWebJsonMapper.class)
+class SseExchangeHandlerTest {
+
+    private static HttpClient client;
+
+    private JreHttpServer server;
+
+    @BeforeAll
+    static void warm() {
+        client = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5))
+                .build();
+    }
+
+    @AfterEach
+    void stop() {
+        if (server != null) {
+            server.close();
+        }
+    }
+
+    private JreHttpServer start(final SseBroker broker) {
+        final var instance = new JreHttpServer(
+                new JreHttpServerConfiguration(null, 0, true),
+                List.of(new SseExchangeHandler(
+                        broker,
+                        id -> List.of(
+                                new WebEventDto("user", id, null, null, "hello", Map.of()),
+                                new WebEventDto("text-delta", id, null, null, "world", Map.of())))));
+        instance.start();
+        server = instance;
+        return instance;
+    }
+
+    private static String url(final JreHttpServer s, final String path) {
+        return "http://127.0.0.1:" + s.port() + path;
+    }
+
+    private static Queue<String> stream(final String url) {
+        final var lines = new ConcurrentLinkedQueue<String>();
+        final var reader = new Thread(
+                () -> {
+                    try {
+                        final var resp = client.send(
+                                HttpRequest.newBuilder(URI.create(url)).GET().build(),
+                                HttpResponse.BodyHandlers.ofLines());
+                        try (final var body = resp.body()) {
+                            body.forEach(l -> {
+                                if (!l.isBlank()) {
+                                    lines.add(l);
+                                }
+                            });
+                        }
+                    } catch (final Exception e) {
+                        lines.add("!error:" + e);
+                    }
+                },
+                "sse-test-reader");
+        reader.setDaemon(true);
+        reader.start();
+        return lines;
+    }
+
+    @Test
+    void snapshotFrameIsSentImmediatelyOnConnect(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        final var s = start(broker);
+        final var frames = stream(url(s, "/api/stream?session=s1"));
+
+        await(() -> framesPeek(frames).contains("event: snapshot"), 3, TimeUnit.SECONDS);
+        // the snapshot must be the very first event, and carry the replayed events payload
+        final var firstEvent = firstEvent(frames);
+        assertEquals("event: snapshot", firstEvent);
+        assertTrue(
+                framesPeek(frames).stream().anyMatch(l -> l.startsWith("data:") && l.contains("\"events\"")),
+                "snapshot should carry an events array, got: " + framesPeek(frames));
+    }
+
+    @Test
+    void agentFramesAreFanOutPerSessionAndFollowTheSnapshot(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        final var s = start(broker);
+        final var sessionA = stream(url(s, "/api/stream?session=A"));
+        final var sessionA2 = stream(url(s, "/api/stream?session=A"));
+        final var sessionB = stream(url(s, "/api/stream?session=B"));
+
+        await(
+                () -> firstEvent(sessionA) != null && firstEvent(sessionA2) != null && firstEvent(sessionB) != null,
+                3,
+                TimeUnit.SECONDS);
+
+        // push one agent event to each session after the consumer is subscribed
+        broker.pushAgentEvent("A", new AgentEvent.Status("running", "A", null, null));
+        broker.pushAgentEvent("B", new AgentEvent.Status("boosted", "B", null, null));
+
+        await(() -> framesPeek(sessionA).stream().anyMatch(l -> l.contains("running")), 3, TimeUnit.SECONDS);
+        await(() -> framesPeek(sessionB).stream().anyMatch(l -> l.contains("boosted")), 3, TimeUnit.SECONDS);
+        // session A's two tabs both see their own event, and neither sees B's event
+        assertTrue(
+                framesPeek(sessionA).stream().anyMatch(l -> l.contains("\"sessionId\":\"A\"")),
+                "session A should receive its own event, got: " + framesPeek(sessionA));
+        assertTrue(
+                framesPeek(sessionA2).stream().anyMatch(l -> l.contains("\"sessionId\":\"A\"")),
+                "second A tab should also receive the A event, got: " + framesPeek(sessionA2));
+        assertTrue(
+                framesPeek(sessionB).stream().anyMatch(l -> l.contains("\"sessionId\":\"B\"")),
+                "session B should receive its own event, got: " + framesPeek(sessionB));
+        assertTrue(
+                framesPeek(sessionA).stream().noneMatch(l -> l.contains("\"sessionId\":\"B\"")),
+                "session A must not receive B's event, got: " + framesPeek(sessionA));
+    }
+
+    @Test
+    void concurrentPushesDoNotDropTheConnection(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        final var s = start(broker);
+        // a real SSE connection driven by JreHttpServer's demand-gated subscriber
+        final var tab = stream(url(s, "/api/stream?session=c1"));
+        await(() -> firstEvent(tab) != null, 3, TimeUnit.SECONDS);
+
+        // hammer the connection with concurrent pushes from several threads, mixing live agent
+        // events with the keep-alive ping (broadcastAll) - exactly the situation that used to race
+        // on exchange.getResponseBody() (two threads writing/flushing the same stream -> IOException
+        // -> the SSE connection dropped and the browser "refreshed"/reconnected on idle).
+        final int threads = 8, per = 100;
+        final var start = new CountDownLatch(1);
+        final var pushers = new Thread[threads];
+        for (int t = 0; t < threads; t++) {
+            final int ft = t;
+            pushers[t] = new Thread(
+                    () -> {
+                        try {
+                            start.await();
+                        } catch (final InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                        for (int i = 0; i < per; i++) {
+                            // every 10th push is the keep-alive ping broadcast, the rest a live event
+                            if ((ft + i) % 10 == 0) {
+                                broker.broadcastAll(SseBroker.pingFrame());
+                            } else {
+                                broker.pushAgentEvent(
+                                        "c1", new AgentEvent.Status("evt-" + ft + "-" + i, "c1", null, null));
+                            }
+                        }
+                    },
+                    "push-" + t);
+            pushers[t].start();
+        }
+        start.countDown();
+        for (final Thread p : pushers) {
+            p.join();
+        }
+        // give the serialized drain a moment to flush the tail frames before closing
+        Thread.sleep(300);
+
+        final var agentFrames = framesPeek(tab).stream()
+                .filter(l -> l.startsWith("event: agent"))
+                .count();
+        final int floor = threads * per / 2; // robust lower bound regardless of interleaving
+        s.close();
+        assertTrue(
+                agentFrames >= floor,
+                "connection must survive concurrent push and deliver most frames, got " + agentFrames
+                        + " agent frames");
+    }
+
+    @Test
+    void slowConsumerNeverBlocksTheEmitterAndNeverLosesStructuralFrames(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        final var s = start(broker);
+        final var tab = stream(url(s, "/api/stream?session=slow"));
+        await(() -> firstEvent(tab) != null, 3, TimeUnit.SECONDS);
+
+        // burst well above the 1024-frame connection queue while the reader is still catching up:
+        // 1100 droppable status frames - these may be trimmed on overflow, and above all must not
+        // block the emit thread (the bug class where a slow browser froze the whole turn).
+        final var burstStart = System.nanoTime();
+        for (int i = 0; i < 1100; i++) {
+            broker.pushAgentEvent("slow", new AgentEvent.Status("fill-" + i, "slow", null, null));
+        }
+        final var burstNanos = System.nanoTime() - burstStart;
+        // each push is a plain enqueue: 1100 pushes must complete far faster than any socket write
+        // (generous bound - the sync-drain implementation would block here and blow this)
+        assertTrue(
+                burstNanos < TimeUnit.SECONDS.toNanos(5),
+                "1100 pushes took " + TimeUnit.NANOSECONDS.toMillis(burstNanos) + "ms - the emitter was blocked");
+
+        // a structural pair pushed AFTER the burst must always be delivered (never dropped):
+        // the finished frame is what flips a tool card out of "working", so losing it is the bug.
+        broker.pushAgentEvent("slow", new AgentEvent.ToolStarted("read_file", "{}", 1, "slow", null, null));
+        broker.pushAgentEvent("slow", new AgentEvent.ToolFinished("read_file", "done", true, "slow", null, null));
+
+        await(() -> framesPeek(tab).stream().anyMatch(l -> l.contains("read_file")), 5, TimeUnit.SECONDS);
+        assertTrue(
+                framesPeek(tab).stream().anyMatch(l -> l.contains("\"tool-finished\"") && l.contains("read_file")),
+                "structural tool-finished frame must survive the burst, got: " + framesPeek(tab));
+    }
+
+    @Test
+    void missingSessionParamReturns400(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        final var s = start(broker);
+        final var resp = client.send(
+                HttpRequest.newBuilder(URI.create(url(s, "/api/stream"))).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(400, resp.statusCode());
+    }
+
+    @Test
+    void replayMapsPersistedMessages() {
+        final var messages = List.of(
+                Message.projectDir("/tmp/proj"),
+                Message.user("watch this"),
+                Message.assistant(
+                        "thinking\nresponse",
+                        List.of(new ToolCall(
+                                "call-1",
+                                "function",
+                                new ToolCall.FunctionCall("read_file", "{\"path\":\"src/Main.java\"}"),
+                                null))),
+                Message.toolResult("call-1", "final answer", "read_file"),
+                Message.user("ok"));
+
+        final var events = WebReplay.replay("sess", messages);
+        // project marker and any system notices are skipped; user/assistant/tool replay
+        assertEquals(5, events.size());
+        assertEquals("user", events.get(0).type());
+        assertEquals("watch this", events.get(0).message());
+        assertEquals("text-delta", events.get(1).type());
+        assertEquals("thinking\nresponse", events.get(1).message());
+        assertEquals("tool-started", events.get(2).type());
+        assertEquals("read_file", events.get(2).message());
+        assertEquals("tool-finished", events.get(3).type());
+        assertEquals("read_file", events.get(3).message());
+        assertEquals("final answer", ((Map<?, ?>) events.get(3).data()).get("output"));
+        assertEquals("user", events.get(4).type());
+        assertEquals("ok", events.get(4).message());
+    }
+
+    @Test
+    void replayDropsOrphanToolStartedWhenTheTurnWasInterrupted() {
+        // the agent persists the assistant message (with its tool_calls) BEFORE the tool runs; a turn
+        // cancelled between the two leaves a persisted read_file call with no tool result. Replaying it
+        // as a tool-started with no tool-finished would render a card stuck "working" forever, so the
+        // orphan started must be dropped entirely.
+        final var messages = List.of(
+                Message.projectDir("/tmp/proj"),
+                Message.user("read it"),
+                // assistant emitted read_file but the turn was cancelled before the tool result persisted
+                Message.assistant(
+                        "reading",
+                        List.of(new ToolCall(
+                                "call-orphan",
+                                "function",
+                                new ToolCall.FunctionCall("read_file", "{\"path\":\"src/Main.java\"}"),
+                                null))),
+                // no Message.toolResult for call-orphan
+                Message.user("never mind"));
+
+        final var events = WebReplay.replay("sess", messages);
+        // user + text-delta + user = 3; the orphan read_file must NOT add a tool-started (no card stuck)
+        assertEquals(3, events.size());
+        assertTrue(
+                events.stream().noneMatch(e -> "tool-started".equals(e.type())),
+                "orphan tool-started must be dropped so no card sticks 'working', got: " + events);
+        assertTrue(
+                events.stream().allMatch(e -> !"tool-finished".equals(e.type())),
+                "no tool-finished should be emitted without a matching result");
+    }
+
+    @Test
+    void replayKeepsStartedForACompletedCallAndSkipsTheOrphanAfterIt() {
+        // a completed read_file followed by an interrupted one: only the completed call is rendered.
+        final var messages = List.of(
+                Message.user("go"),
+                Message.assistant(
+                        "two calls",
+                        List.of(
+                                new ToolCall(
+                                        "call-a",
+                                        "function",
+                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"a\"}"),
+                                        null),
+                                new ToolCall(
+                                        "call-b",
+                                        "function",
+                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"b\"}"),
+                                        null))),
+                // only call-a has a result (call-b was interrupted)
+                Message.toolResult("call-a", "content-a", "read_file"),
+                Message.user("done"));
+
+        final var events = WebReplay.replay("sess", messages);
+        final var started =
+                events.stream().filter(e -> "tool-started".equals(e.type())).toList();
+        final var finished =
+                events.stream().filter(e -> "tool-finished".equals(e.type())).toList();
+        assertEquals(1, started.size(), "only the completed call should render a started card, got: " + started);
+        assertEquals(1, finished.size());
+        assertEquals("read_file", started.get(0).message());
+        assertEquals("read_file", finished.get(0).message());
+    }
+
+    /** First non-{@code data:} event header, or {@code null} until the first event line arrives. */
+    private static String firstEvent(final Queue<String> frames) {
+        return framesPeek(frames).stream()
+                .filter(l -> l.startsWith("event: "))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Snapshot of the queue (peek all) for assertions without consuming it. */
+    private static List<String> framesPeek(final Queue<String> frames) {
+        return List.copyOf(frames);
+    }
+
+    private static void await(
+            final java.util.function.BooleanSupplier condition, final long timeout, final TimeUnit unit)
+            throws InterruptedException {
+        final var deadline = System.nanoTime() + unit.toNanos(timeout);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            Thread.sleep(20);
+        }
+    }
+}

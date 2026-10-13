@@ -50,7 +50,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
     private final io.yupiik.fusion.http.server.api.Request request;
     private final JsonMapper mapper;
     private final String projectDir;
-    private final java.nio.file.Path dependencyCache;
+    private final Path dependencyCache;
     private final ProcessService processes;
     private final long timeoutSeconds;
 
@@ -59,7 +59,7 @@ public class MCPKnowledgeLlm implements KnowledgeLlm {
             final io.yupiik.fusion.http.server.api.Request request,
             final JsonMapper mapper,
             final String projectDir,
-            final java.nio.file.Path dependencyCache,
+            final Path dependencyCache,
             final ProcessService processes) {
         this.sessions = sessions;
         this.request = request;

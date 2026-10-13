@@ -15,8 +15,12 @@
  */
 package io.yupiik.ia.agent.core.events;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Locale;
 
 /**
@@ -45,7 +49,7 @@ public class CallbackFixtureMain {
         final var input = readAll();
         final var echoTarget = System.getProperty("fixture.echo");
         if (echoTarget != null && !echoTarget.isBlank()) {
-            java.nio.file.Files.writeString(java.nio.file.Path.of(echoTarget), input, StandardCharsets.UTF_8);
+            Files.writeString(Path.of(echoTarget), input, StandardCharsets.UTF_8);
         }
         final var mode = args.length == 0 ? "" : args[0].toLowerCase(Locale.ROOT);
         switch (mode) {
@@ -73,7 +77,7 @@ public class CallbackFixtureMain {
 
     private static String readAll() throws IOException {
         final var buffer = new StringBuilder();
-        final var reader = new java.io.BufferedReader(new java.io.InputStreamReader(System.in, StandardCharsets.UTF_8));
+        final var reader = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
         var line = reader.readLine();
         while (line != null) {
             buffer.append(line);

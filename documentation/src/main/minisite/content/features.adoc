@@ -3,7 +3,7 @@
 :minisite-index-title: Features
 :minisite-index-description: What yca does out of the box: interactive UI, tools, context management, sessions and more.
 :minisite-index-icon: layer-group
-:minisite-keywords: features, tools, sessions, context, mcp, agents, permissions, hooks
+:minisite-keywords: features, tools, sessions, context, mcp, agents, permissions, sandbox, hooks
 :minisite-breadcrumb: Home[index.html] > Features
 :minisite-nav-next-link: features/modes.html
 :minisite-nav-next-label: Plan and build modes
@@ -148,6 +148,22 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
           ask, auto_edit and yolo modes with allow/deny glob lists.
         </div>
         <a title="Permission modes" class="card-link-mask" href="features/permissions.html"></a>
+      </div>
+    </div>
+  </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h4 class="card-title mb-3">
+          <span class="theme-icon-holder card-icon-holder mr-2 category-default">
+            <i class="fas fa-shield-halved"></i>
+          </span>
+          <span class="card-title-text">External sandboxing</span>
+        </h4>
+        <div class="card-text">
+          Wrapping the whole yca process in nono or AgentFS for kernel-level isolation and copy-on-write.
+        </div>
+        <a title="External sandboxing" class="card-link-mask" href="features/sandboxes.html"></a>
       </div>
     </div>
   </div>

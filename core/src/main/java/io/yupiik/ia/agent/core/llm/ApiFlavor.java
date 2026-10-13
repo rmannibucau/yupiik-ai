@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.llm;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.Locale;
 
 @JsonModel
 public enum ApiFlavor {
@@ -38,7 +39,7 @@ public enum ApiFlavor {
         if (value == null || value.isBlank()) {
             return null;
         }
-        final var norm = value.strip().replace('-', '_').toUpperCase(java.util.Locale.ROOT);
+        final var norm = value.strip().replace('-', '_').toUpperCase(Locale.ROOT);
         for (final var v : values()) {
             if (v.name().equals(norm)) {
                 return v;

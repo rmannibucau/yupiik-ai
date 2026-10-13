@@ -89,7 +89,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class AgentLoopTest {
-    private static final java.util.concurrent.ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
+    private static final ExecutorService EXECUTOR = Executors.newVirtualThreadPerTaskExecutor();
 
     @TempDir
     Path storageHome;
@@ -239,7 +239,7 @@ class AgentLoopTest {
         final var requests = new ArrayList<List<Message>>();
         final var capturedSettings = new ArrayList<ChatSettings>();
         final var capturedModels = new ArrayList<String>();
-        final var loopRef = new java.util.concurrent.atomic.AtomicReference<AgentLoop>();
+        final var loopRef = new AtomicReference<AgentLoop>();
         final var replies = new ArrayDeque<>(
                 List.of(toolCallReply("t1", "noop"), new ScriptedReply("final answer", "stop", false)));
         final var client = new ChatClient() {
@@ -1183,20 +1183,40 @@ class AgentLoopTest {
     }
 
     /**
-     * P1: the doom-loop breaker normalizes the arguments (JSON keys sorted) so cosmetic spelling
-     * variants of the same call do not bypass it: {@code {"path":"a","offset":1}} and
-     * {@code {"offset":1,"path":"a"}} are the same signature.
+     * P1: the doom-loop breaker is per signature and the arguments are normalized (JSON keys sorted)
+     * so cosmetic spelling variants of the same call do not bypass it:
+     * {@code {"path":"a","offset":1}} and {@code {"offset":1,"path":"a"}} are the same signature, so
+     * alternating spellings across rounds still accumulate the streak and get refused.
      */
     @Test
-    void repeatedCallNormalizedArgsAreRefusedAfterTheThirdOccurrence() {
-        // three occurrences with different key orderings of the same semantic call
-        final var calls = List.of(
-                new ToolCall("t1", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\",\"offset\":1}"), 0),
-                new ToolCall("t2", "function", new ToolCall.FunctionCall("echo", "{\"offset\":1,\"path\":\"/a\"}"), 0),
-                new ToolCall(
-                        "t3", "function", new ToolCall.FunctionCall("echo", "{\"path\": \"/a\", \"offset\": 1}"), 0));
+    void repeatedCallNormalizedArgsAreRefusedAcrossSpellingVariants() {
         final var requests = new ArrayList<List<Message>>();
-        final var client = scriptedToolClient(requests, calls);
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                final var round = calls.incrementAndGet();
+                if (round <= 5) {
+                    // alternate the JSON key ordering: still the same normalized signature
+                    final String args;
+                    if (round == 1 || round == 3 || round == 5) {
+                        args = "{\"path\":\"/a\",\"offset\":1}";
+                    } else {
+                        args = "{\"offset\":1,\"path\":\"/a\"}";
+                    }
+                    return Message.assistant(
+                            null,
+                            List.of(new ToolCall("t" + round, "function", new ToolCall.FunctionCall("echo", args), 0)));
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("all done", null);
+            }
+        };
 
         loop(
                         client,
@@ -1205,35 +1225,48 @@ class AgentLoopTest {
                         noContextManager(),
                         noSessionStore(),
                         null,
-                        echoRegistry(),
+                        stateChangingRegistry(),
                         directExecutions(),
                         null)
                 .run("do it", null, "s1", null, () -> false);
 
-        // the third identical call must have been refused with the doom-loop diagnostic
-        final var refused = events.stream()
-                .filter(AgentEvent.ToolFinished.class::isInstance)
-                .map(AgentEvent.ToolFinished.class::cast)
-                .filter(t -> !t.success())
-                .toList();
         assertTrue(
-                refused.stream().anyMatch(t -> String.valueOf(t.output()).contains("times with the same arguments")),
-                "the normalized duplicate must be refused with the doom-loop guidance: " + refused);
+                hasDoomLoopNudge(requests),
+                "spelling variants of the same call must be refused (as a strategy nudge): " + requests);
     }
 
     /**
-     * P1: the count is per signature, not merely consecutive: read A, read B, read A, read A must
-     * refuse the third occurrence of read A even though a different call happened in between.
+     * P1: an interleaved call of a DIFFERENT signature does not reset a signature's success streak:
+     * read A, read B, read A, read A accumulates A's streak across B (B never touched A's state), so
+     * a fifth identical A is refused even though B happened in between.
      */
     @Test
-    void interleavedRepeatedCallsAreCountedPerSignature() {
-        final var calls = List.of(
-                new ToolCall("t1", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0),
-                new ToolCall("t2", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/b\"}"), 0),
-                new ToolCall("t3", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0),
-                new ToolCall("t4", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0));
+    void interleavedDifferentSignatureDoesNotResetSameSignatureStreak() {
         final var requests = new ArrayList<List<Message>>();
-        final var client = scriptedToolClient(requests, calls);
+        final var calls = new AtomicInteger();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled) {
+                requests.add(List.copyOf(request.messages()));
+                final var round = calls.incrementAndGet();
+                if (round <= 6) {
+                    final var target = (round == 2) ? "/b" : "/a"; // round 2 reads a DIFFERENT path
+                    return Message.assistant(
+                            null,
+                            List.of(new ToolCall(
+                                    "t" + round,
+                                    "function",
+                                    new ToolCall.FunctionCall("echo", "{\"path\":\"" + target + "\"}"),
+                                    0)));
+                }
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("all done", null);
+            }
+        };
 
         loop(
                         client,
@@ -1242,28 +1275,513 @@ class AgentLoopTest {
                         noContextManager(),
                         noSessionStore(),
                         null,
-                        echoRegistry(),
+                        stateChangingRegistry(),
                         directExecutions(),
                         null)
                 .run("do it", null, "s1", null, () -> false);
 
-        final var refused = events.stream()
-                .filter(AgentEvent.ToolFinished.class::isInstance)
-                .map(AgentEvent.ToolFinished.class::cast)
-                .filter(t -> !t.success())
-                .toList();
-        assertEquals(1, refused.size(), "only the third /a must be refused: " + refused);
         assertTrue(
-                String.valueOf(refused.getFirst().output()).contains("3 times"),
-                refused.getFirst().output());
+                hasDoomLoopNudge(requests),
+                "a different signature in between must not reset the same-signature streak: " + requests);
     }
 
     /**
-     * P1: a read-only call repeated fewer than three times is never refused - legitimate polling
-     * and exploration stay legal.
+     * P1: a genuinely FAILING call is a legitimate retry and is never refused by the doom-loop breaker.
+     * Repeated identical failing calls all execute; only the separate no-progress guard could stop the
+     * turn, never a doom-loop refusal.
      */
     @Test
-    void repeatedReadBelowThresholdIsNotRefused() {
+    void repeatedFailingCallsAreRetriedNotRefused() {
+        final var executions = new AtomicInteger();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 4; i++) {
+            replies.add(toolCallReply("t" + i, "fail"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "fail";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "always fails";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.READ;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                executions.incrementAndGet();
+                                return new ToolResult(false, "boom");
+                            }
+                        }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals(4, executions.get(), "every failing retry must actually run");
+        assertFalse(
+                hasDoomLoopNudge(requests),
+                "a failing call is a legitimate retry, never a doom-loop refusal: " + requests);
+    }
+
+    /**
+     * P1: a call that keeps succeeding with FRESH content (polling) is progress, not a loop: the
+     * same signature returning novel output each round resets the success streak, so it is never refused.
+     */
+    @Test
+    void sameCallReturningFreshContentIsNotRefused() {
+        final var counter = new AtomicInteger();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 6; i++) {
+            replies.add(toolCallReply("t" + i, "poll"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "poll";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "returns fresh content";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.READ;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                return ToolResult.ok("value#" + counter.incrementAndGet());
+                            }
+                        }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals(6, counter.get(), "every poll round must run");
+        assertFalse(hasDoomLoopNudge(requests), "polling a changing state is progress, not a doom loop: " + requests);
+    }
+
+    /**
+     * P1: outputs that differ only by an embedded timestamp/epoch are treated as identical for the
+     * doom-loop decision, so a command that re-runs every time but only differs in its log time is
+     * still a duplicate and gets refused.
+     */
+    @Test
+    void outputsDifferingOnlyInTimestampAreStillRefused() {
+        final var executions = new AtomicInteger();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 5; i++) {
+            replies.add(toolCallReply("t" + i, "dated"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "dated";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "output with a changing timestamp";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.EDIT;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                executions.incrementAndGet();
+                                // an ISO-8601 date+time that the date-aware comparison strips, so every
+                                // output differs only by its embedded timestamp
+                                return ToolResult.ok("status at 2026-10-%02d 12:34:56".formatted(executions.get()));
+                            }
+                        }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertTrue(
+                hasDoomLoopNudge(requests),
+                "outputs differing only by a timestamp must still be recognized as duplicates: " + requests);
+        assertEquals(3, executions.get(), "the fourth timestamp-only-diff call must be refused before it runs");
+    }
+
+    /**
+     * P1 + P6: build-tool durations maven/gradle emit (e.g. gradle "BUILD SUCCESSFUL in 3s", maven
+     * "Total time: 1.234 s") are stripped by the date-aware comparison, so a state-changing build
+     * command re-run that only changes its elapsed time is still a duplicate and gets refused.
+     */
+    @Test
+    void buildToolDurationOutputsAreStillRefused() {
+        final var executions = new AtomicInteger();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 5; i++) {
+            replies.add(toolCallReply("t" + i, "build"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "build";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "a build-like state-changing tool";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.BASH;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                executions.incrementAndGet();
+                                // only the elapsed duration differs between runs
+                                return ToolResult.ok("BUILD SUCCESSFUL in " + executions.get() + "s");
+                            }
+                        }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertTrue(
+                hasDoomLoopNudge(requests),
+                "outputs differing only by an elapsed duration must still be recognized as duplicates: " + requests);
+        assertEquals(3, executions.get(), "the fourth duration-only-diff call must be refused before it runs");
+    }
+
+    /**
+     * P6: the date-strip regex must NOT equate bare digit runs (versions, build ids, checksums, ports),
+     * so a state-changing call whose output carries genuinely different numbers is never a false duplicate.
+     */
+    @Test
+    void regexDoesNotStripBareDigitRuns() {
+        final var executions = new AtomicInteger();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 5; i++) {
+            replies.add(toolCallReply("t" + i, "versions", "{\"i\":" + i + "}"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "versions";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "returns incrementing version-like digits";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.EDIT;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                executions.incrementAndGet();
+                                // semantically different digits each run - must NOT be conflated
+                                return ToolResult.ok(
+                                        "com.mycorp:artifact:" + executions.get() + ".0.0 sha " + executions.get());
+                            }
+                        }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertFalse(
+                hasDoomLoopNudge(requests),
+                "bare digit runs (versions/checksums) must never be treated as identical: " + requests);
+        assertEquals(5, executions.get(), "all distinct-number outputs must run (never refused)");
+    }
+
+    /**
+     * P7: the turn-level output tombstone flags a call whose normalized output was already produced by a
+     * DIFFERENT tool/signature this turn as non-informative (it feeds the no-progress decision), but never
+     * produces a doom-loop refusal/nudge.
+     */
+    @Test
+    void sameOutputAcrossDifferentToolsIsTombstonedButNotRefused() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // alternate two DIFFERENT tools returning the SAME output: no exact-signature repeat (so no
+        // doom-loop refusal), but the tombstone makes round 2+ non-informative
+        for (var i = 0; i < 6; i++) {
+            replies.add(toolCallReply("t" + i, i % 2 == 0 ? "probe_a" : "probe_b"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(
+                                new EmbeddedTool() {
+                                    @Override
+                                    public String name() {
+                                        return "probe_a";
+                                    }
+
+                                    @Override
+                                    public String description() {
+                                        return "a";
+                                    }
+
+                                    @Override
+                                    public ToolCategory category() {
+                                        return ToolCategory.EDIT;
+                                    }
+
+                                    @Override
+                                    public Map<String, Object> schema() {
+                                        return Map.of();
+                                    }
+
+                                    @Override
+                                    public ToolResult execute(final Map<String, Object> args) {
+                                        return ToolResult.ok("shared result");
+                                    }
+                                },
+                                new EmbeddedTool() {
+                                    @Override
+                                    public String name() {
+                                        return "probe_b";
+                                    }
+
+                                    @Override
+                                    public String description() {
+                                        return "b";
+                                    }
+
+                                    @Override
+                                    public ToolCategory category() {
+                                        return ToolCategory.EDIT;
+                                    }
+
+                                    @Override
+                                    public Map<String, Object> schema() {
+                                        return Map.of();
+                                    }
+
+                                    @Override
+                                    public ToolResult execute(final Map<String, Object> args) {
+                                        return ToolResult.ok("shared result");
+                                    }
+                                }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        // no doom-loop refusal: the calls have different signatures; the tombstone only steers the
+        // no-progress guard, which stops the turn after repeated identical output
+        assertNull(result, "the repeated identical output across tools must trip the no-progress guard");
+        final var errors = events.stream()
+                .filter(AgentEvent.Error.class::isInstance)
+                .map(AgentEvent.Error.class::cast)
+                .toList();
+        assertTrue(errors.stream().anyMatch(e -> e.message().contains("No progress")), "expect a no-progress stop");
+    }
+
+    /**
+     * P1: a global repeatSuccessThreshold of 0 disables the doom-loop breaker entirely: even many
+     * identical-output calls are never refused (the no-progress guard remains the only backstop).
+     */
+    @Test
+    void repeatSuccessThresholdZeroDisablesTheGuard() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 6; i++) {
+            replies.add(toolCallReply("t" + i, "echo"));
+        }
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(true, Map.of("yca.tools.repeatSuccessThreshold", "0"));
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        stateChangingRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNull(result, "threshold 0 has no doom-loop guard, so only the no-progress guard stops the turn");
+        assertFalse(
+                hasDoomLoopNudge(requests),
+                "with the threshold at 0 the doom-loop breaker must never refuse/nudge: " + requests);
+    }
+
+    /**
+     * P1: the per-model behavior repeatSuccessThreshold override wins over the global default, so a
+     * small/flash model configured with a lower threshold is caught sooner.
+     */
+    @Test
+    void perModelBehaviorRepeatThresholdOverridesGlobal() {
+        final var executions = new AtomicInteger();
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 4; i++) {
+            replies.add(toolCallReply("t" + i, "echo"));
+        }
+        replies.add(new ScriptedReply("all done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.repeatSuccessThreshold", "1"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        registryOf(new EmbeddedTool() {
+                            @Override
+                            public String name() {
+                                return "echo";
+                            }
+
+                            @Override
+                            public String description() {
+                                return "echoes";
+                            }
+
+                            @Override
+                            public ToolCategory category() {
+                                return ToolCategory.EDIT;
+                            }
+
+                            @Override
+                            public Map<String, Object> schema() {
+                                return Map.of();
+                            }
+
+                            @Override
+                            public ToolResult execute(final Map<String, Object> args) {
+                                executions.incrementAndGet();
+                                return ToolResult.ok("done");
+                            }
+                        }),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals(
+                1,
+                executions.get(),
+                "behavior repeatSuccessThreshold=1 must refuse the second identical call (only the first runs)");
+        assertTrue(
+                hasDoomLoopNudge(requests),
+                "the per-model lower threshold must actually trigger a refusal (strategy nudge): " + requests);
+    }
+
+    /**
+     * P1: a (state-changing) call repeated fewer than three times is never refused - even the
+     * doom-loop breaker lets genuine short repeats through; only the configured threshold trips it.
+     */
+    @Test
+    void repeatedBelowThresholdIsNotRefused() {
         final var calls = List.of(
                 new ToolCall("t1", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0),
                 new ToolCall("t2", "function", new ToolCall.FunctionCall("echo", "{\"path\":\"/a\"}"), 0));
@@ -1277,7 +1795,7 @@ class AgentLoopTest {
                         noContextManager(),
                         noSessionStore(),
                         null,
-                        echoRegistry(),
+                        stateChangingRegistry(),
                         directExecutions(),
                         null)
                 .run("do it", null, "s1", null, () -> false);
@@ -1287,7 +1805,8 @@ class AgentLoopTest {
                 .map(AgentEvent.ToolFinished.class::cast)
                 .filter(t -> !t.success())
                 .toList();
-        assertTrue(refused.isEmpty(), "two identical reads must stay legal (polling): " + refused);
+        assertTrue(
+                refused.isEmpty(), "two identical state-changing calls must stay legal (below threshold): " + refused);
     }
 
     /**
@@ -2140,7 +2659,11 @@ class AgentLoopTest {
 
                     @Override
                     public ToolCategory category() {
-                        return ToolCategory.AGENT;
+                        // READ so these stand-in tools are exempt from the doom-loop guard: the
+                        // iteration/todo tests drive them repeatedly purely to exhaust the window budget,
+                        // not to exercise the repeat breaker. (Reads have no coverage key, so the plateau
+                        // guard never fires for them either.)
+                        return ToolCategory.READ;
                     }
 
                     @Override
@@ -2369,7 +2892,7 @@ class AgentLoopTest {
                     final boolean force,
                     final String focus,
                     final int keepLastOverride,
-                    final java.util.function.BooleanSupplier cancelled) {
+                    final BooleanSupplier cancelled) {
                 return compact(messages, force, focus, keepLastOverride, cancelled, ChatSettings.EMPTY);
             }
 
@@ -2379,7 +2902,7 @@ class AgentLoopTest {
                     final boolean force,
                     final String focus,
                     final int keepLastOverride,
-                    final java.util.function.BooleanSupplier cancelled,
+                    final BooleanSupplier cancelled,
                     final ChatSettings settings) {
                 return new CompactionResult(
                         List.of(
@@ -2473,7 +2996,7 @@ class AgentLoopTest {
                     final boolean force,
                     final String focus,
                     final int keepLast,
-                    final java.util.function.BooleanSupplier cancelled,
+                    final BooleanSupplier cancelled,
                     final ChatSettings settings) {
                 compactRuns.incrementAndGet();
                 return new CompactionResult(
@@ -2982,7 +3505,7 @@ class AgentLoopTest {
     }
 
     @Test
-    void thirdIdenticalConsecutiveToolCallIsRefusedWithGuidance() {
+    void repeatedIdenticalSuccessfulCallsAreRefusedWithGuidance() {
         final var executions = new AtomicInteger();
         final var requests = new ArrayList<List<Message>>();
         final var calls = new AtomicInteger();
@@ -2995,7 +3518,7 @@ class AgentLoopTest {
                     final BooleanSupplier cancelled) {
                 requests.add(List.copyOf(request.messages()));
                 final var round = calls.incrementAndGet();
-                if (round <= 3) {
+                if (round <= 5) {
                     return Message.assistant(
                             null,
                             List.of(new ToolCall(
@@ -3032,7 +3555,7 @@ class AgentLoopTest {
 
                     @Override
                     public ToolCategory category() {
-                        return ToolCategory.READ;
+                        return ToolCategory.EDIT;
                     }
 
                     @Override
@@ -3042,7 +3565,7 @@ class AgentLoopTest {
 
                     @Override
                     public boolean readonly() {
-                        return true;
+                        return false;
                     }
 
                     @Override
@@ -3066,14 +3589,22 @@ class AgentLoopTest {
                 .run("do it", null, "s1", null, () -> false);
 
         assertEquals("gave up looping", result);
-        assertEquals(2, executions.get(), "only the first two identical calls must execute");
-        // request 4 carries the accumulated history: its last tool message is the round-3 refusal
-        final var toolMessages =
-                requests.get(3).stream().filter(m -> "tool".equals(m.role())).toList();
-        final var refusal = toolMessages.get(toolMessages.size() - 1);
+        // threshold 3 means the first THREE identical-output successes run, then the fourth identical
+        // call is refused (never executed)
+        assertEquals(3, executions.get(), "only the first three identical calls must execute");
+        // the refusal is now surfaced to the model as a strategy nudge (not a failed tool result):
+        // a user-role message carrying the these-are-the-same-again guidance appears in the conversation
         assertTrue(
-                String.valueOf(refusal.content()).contains("3 times with the same arguments"),
-                "the refused call must explain the doom loop: " + refusal.content());
+                hasDoomLoopNudge(requests), "a doom-loop strategy nudge must be injected for the model: " + requests);
+        // the refused call carries the stable threshold count via its finished event (never escalated)
+        final var refusedEvent = events.stream()
+                .filter(AgentEvent.ToolFinished.class::isInstance)
+                .map(AgentEvent.ToolFinished.class::cast)
+                .filter(t -> !t.success())
+                .findFirst();
+        assertTrue(
+                refusedEvent.isPresent() && refusedEvent.get().output().contains("3 times"),
+                "the refusal must report the stable threshold count (3), not escalate: " + refusedEvent);
     }
 
     @Test
@@ -4293,6 +4824,45 @@ class AgentLoopTest {
                 return new ToolResult(true, "done");
             }
         });
+    }
+
+    /** A STATE-CHANGING (non-read) {@code echo}-like tool: subject to the doom-loop guard, unlike reads. */
+    private ToolRegistry stateChangingRegistry() {
+        return registryOf(new EmbeddedTool() {
+            @Override
+            public String name() {
+                return "echo";
+            }
+
+            @Override
+            public String description() {
+                return "state-changing echo";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.EDIT;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of("path", Map.of("type", "string"));
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                return new ToolResult(true, "done");
+            }
+        });
+    }
+
+    /** Whether a request sequence carries the injected doom-loop strategy nudge (refusal surfaced to the model). */
+    private boolean hasDoomLoopNudge(final List<List<Message>> requests) {
+        return requests.stream()
+                .flatMap(List::stream)
+                .anyMatch(m -> "user".equals(m.role())
+                        && m.content() != null
+                        && m.content().toString().contains("same already-known result"));
     }
 
     private ChatClient scriptedToolClient(final List<List<Message>> requests, final List<ToolCall> firstReplyCalls) {

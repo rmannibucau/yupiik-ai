@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.optimize.GenericOutputProcessor;
+import io.yupiik.ia.agent.core.optimize.MavenOutputProcessor;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import java.nio.file.Path;
@@ -165,5 +166,64 @@ class ToolExecutionServiceTest {
         final var result = service.execute(tool("bash", output), Map.of("command", "cat big.txt"), context(reports));
         assertEquals(output, result.output());
         assertTrue(reports.isEmpty());
+    }
+
+    @Test
+    void commandWrapperIsUnwrappedBeforeProcessorDispatch() {
+        // a `sudo timeout 120 mvn ...` command must engage the maven processor (head unwrapped to `mvn`)
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                Map.of("yca.storageHome", storageHome.toString()));
+        final var service = serviceWith(configuration, List.of(new MavenOutputProcessor()));
+        final var output = String.join(
+                "\n",
+                "[INFO] Scanning for projects...",
+                "[INFO] Building yca-core 1.0.0-SNAPSHOT",
+                "[INFO] Tests run: 4, Failures: 1, Errors: 0, Skipped: 0",
+                "[ERROR] cannot find symbol",
+                "[INFO] BUILD FAILURE");
+        final var reports = new ArrayList<String>();
+        final var result = service.execute(
+                tool("bash", output), Map.of("command", "sudo timeout 120 mvn package"), context(reports));
+        assertEquals(1, reports.size(), reports.toString());
+        assertTrue(reports.get(0).contains("output optimized by MavenOutputProcessor"), reports.toString());
+        // the maven processor collapsed the run: only the decisive lines survive, noise is gone
+        assertTrue(result.output().contains("[INFO] BUILD FAILURE"));
+        assertFalse(result.output().contains("Scanning for projects..."));
+    }
+
+    @Test
+    void commandWrapperUnwrappingCanBeDisabled() {
+        // without the wrapper stripping the head stays `sudo` and maven's supports() is false, so the
+        // output is left unoptimized (no processable command matches, no reduction is reported)
+        final var configuration = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                Map.of("yca.storageHome", storageHome.toString(), "yca.optimize.skipCommandWrapper", "false"));
+        final var service = serviceWith(configuration, List.of(new MavenOutputProcessor()));
+        final var output = String.join(
+                "\n",
+                "[INFO] Scanning for projects...",
+                "[INFO] Building yca-core 1.0.0-SNAPSHOT",
+                "[INFO] Tests run: 4, Failures: 1, Errors: 0, Skipped: 0",
+                "[ERROR] cannot find symbol",
+                "[INFO] BUILD FAILURE");
+        final var reports = new ArrayList<String>();
+        final var result = service.execute(
+                tool("bash", output), Map.of("command", "sudo timeout 120 mvn package"), context(reports));
+        // maven must not have been engaged (head stayed `sudo`), so nothing meaningful was optimized away
+        assertTrue(reports.isEmpty(), reports.toString());
+        assertTrue(result.output().contains("Scanning for projects..."));
+    }
+
+    private ToolExecutionService serviceWith(
+            final CodingAgentConfiguration configuration,
+            final List<io.yupiik.ia.agent.core.optimize.OutputProcessor> processors) {
+        return new ToolExecutionService(
+                configuration,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        // no-op
+                    }
+                },
+                processors);
     }
 }

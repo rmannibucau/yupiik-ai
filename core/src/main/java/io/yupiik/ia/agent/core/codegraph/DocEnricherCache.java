@@ -20,8 +20,10 @@ import io.yupiik.fusion.json.JsonMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -122,13 +124,9 @@ public class DocEnricherCache {
                     "enrichment.json." + ProcessHandle.current().pid() + ".tmp");
             Files.writeString(tmp, mapper.toString(new Data(files, symbols)), StandardCharsets.UTF_8);
             try {
-                Files.move(
-                        tmp,
-                        file,
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (final AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
             dirty = false;
         } catch (final IOException e) {

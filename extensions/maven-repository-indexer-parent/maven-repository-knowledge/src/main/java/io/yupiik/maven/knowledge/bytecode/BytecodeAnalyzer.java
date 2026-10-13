@@ -17,12 +17,14 @@ package io.yupiik.maven.knowledge.bytecode;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.lang.classfile.Annotation;
 import java.lang.classfile.ClassFile;
 import java.lang.classfile.ClassModel;
 import java.lang.classfile.MethodModel;
 import java.lang.constant.ClassDesc;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -80,7 +82,7 @@ public final class BytecodeAnalyzer {
         try (final var zip = new ZipFile(jarPath.toFile())) {
             final var entries = zip.stream()
                     .filter(BytecodeAnalyzer::isWorthParsing)
-                    .sorted(java.util.Comparator.comparing(ZipEntry::getName))
+                    .sorted(Comparator.comparing(ZipEntry::getName))
                     .toList();
             for (final var entry : entries) {
                 final var clazz = parse(zip, entry);
@@ -139,8 +141,8 @@ public final class BytecodeAnalyzer {
             final var annotations = new ArrayList<String>();
             try {
                 model.elementStream()
-                        .filter(java.lang.classfile.Annotation.class::isInstance)
-                        .map(java.lang.classfile.Annotation.class::cast)
+                        .filter(Annotation.class::isInstance)
+                        .map(Annotation.class::cast)
                         .forEach(a -> {
                             final var n = a.className().stringValue().replace('/', '.');
                             if (!n.startsWith("java.lang.annotation.")

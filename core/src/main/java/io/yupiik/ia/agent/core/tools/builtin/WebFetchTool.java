@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Locale;
@@ -184,7 +185,7 @@ public class WebFetchTool implements EmbeddedTool {
                 && !charset.isEmpty()
                 && !charset.equals(response.headers().firstValue("content-type").orElse(""))) {
             try {
-                return new String(response.body(), java.nio.charset.Charset.forName(charset));
+                return new String(response.body(), Charset.forName(charset));
             } catch (final RuntimeException e) {
                 // fall through
             }

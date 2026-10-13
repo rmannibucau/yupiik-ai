@@ -47,6 +47,7 @@ import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -106,8 +107,7 @@ public class HttpClientProducer {
         listeners.add(new SetUserAgent(DEFAULT_CHROME_UA));
         if (cfg.debug()) {
             listeners.add(new CurlLoggerListener(
-                    new CurlLoggerListener.Configuration(java.util.logging.Logger.getLogger("yca.http"))
-                            .setLogPayload(true)));
+                    new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true)));
         }
         return new ExtendedHttpClient(new ExtendedHttpClientConfiguration()
                 .setDelegate(builder.build())
@@ -308,7 +308,7 @@ public class HttpClientProducer {
 
     private record SetHeader(Map<String, String> headers) implements RequestListener<Void> {
         private SetHeader {
-            final var normalized = new java.util.LinkedHashMap<String, String>();
+            final var normalized = new LinkedHashMap<String, String>();
             for (final var e : headers.entrySet()) {
                 normalized.put(headerName(e.getKey()), e.getValue());
             }

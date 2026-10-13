@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.optimize;
 
 import static io.yupiik.ia.agent.core.optimize.Optimizers.matchesHeadToken;
+import static java.util.stream.Collectors.joining;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
@@ -189,9 +190,6 @@ public class JsonOutputProcessor implements OutputProcessor {
     }
 
     private static String compactLines(final String s) {
-        return s.lines()
-                .filter(l -> !l.isBlank())
-                .map(String::stripTrailing)
-                .collect(java.util.stream.Collectors.joining("\n"));
+        return s.lines().filter(l -> !l.isBlank()).map(String::stripTrailing).collect(joining("\n"));
     }
 }

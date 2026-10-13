@@ -15,11 +15,13 @@
  */
 package io.yupiik.llm.client;
 
+import java.io.IOException;
+
 /**
  * Thrown when a provider does not implement a dialect (HTTP 404/405/501), enabling a router to
  * react, e.g. to switch to a fallback client.
  */
-public final class DialectNotSupportedException extends java.io.IOException {
+public final class DialectNotSupportedException extends IOException {
 
     /**
      * Creates the exception for an unsupported dialect.

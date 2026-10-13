@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 
 class GitOutputProcessorTest {
@@ -151,9 +152,8 @@ class GitOutputProcessorTest {
 
     @Test
     void showRawFilePassesThroughWhole() {
-        final var lines = java.util.stream.IntStream.rangeClosed(1, 56)
-                .mapToObj(i -> "line " + i)
-                .toList();
+        final var lines =
+                IntStream.rangeClosed(1, 56).mapToObj(i -> "line " + i).toList();
         final var out = processor
                 .process("git show 2.17.0-rc1:core/src/main/java/Foo.java", lines.stream())
                 .toList();
@@ -163,9 +163,8 @@ class GitOutputProcessorTest {
     @Test
     void showBlobWindowedOverBudget() {
         // 56 lines x "line N" ~ 400 chars, well under the 8192 default: full passthrough
-        final var small = java.util.stream.IntStream.rangeClosed(1, 56)
-                .mapToObj(i -> "line " + i)
-                .toList();
+        final var small =
+                IntStream.rangeClosed(1, 56).mapToObj(i -> "line " + i).toList();
         assertEquals(
                 small, processor.process("git show v1:a.txt", small.stream()).toList());
 

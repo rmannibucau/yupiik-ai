@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.StringReader;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
@@ -143,7 +144,7 @@ class ToolCallArgumentsRepairerTest {
 
     private boolean isParseable(final String json) {
         try (final var reader = new StringReader(json)) {
-            mapper.read(java.util.Map.class, reader);
+            mapper.read(Map.class, reader);
             return true;
         } catch (final RuntimeException e) {
             return false;

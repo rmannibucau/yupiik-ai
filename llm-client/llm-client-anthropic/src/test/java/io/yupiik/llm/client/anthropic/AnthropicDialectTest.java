@@ -39,7 +39,10 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -97,7 +100,7 @@ class AnthropicDialectTest {
                 null,
                 null,
                 stream,
-                java.util.Map.of());
+                Map.of());
     }
 
     private static void respond(final com.sun.net.httpserver.HttpExchange exchange, final int status, final String body)
@@ -250,7 +253,7 @@ class AnthropicDialectTest {
                 null,
                 null,
                 false,
-                java.util.Map.of("promptCache", "false"));
+                Map.of("promptCache", "false"));
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         assertTrue(body.contains("\"system\":\"be concise\""), "plain string system expected:\n" + body);
@@ -281,7 +284,7 @@ class AnthropicDialectTest {
                                 null,
                                 null,
                                 null,
-                                java.util.Map.of("volatileTail", true))),
+                                Map.of("volatileTail", true))),
                 null,
                 null,
                 64,
@@ -291,7 +294,7 @@ class AnthropicDialectTest {
                 null,
                 null,
                 false,
-                java.util.Map.of("anthropicSplitBlocks", true));
+                Map.of("anthropicSplitBlocks", true));
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         // system breakpoint + stable prefix breakpoint, volatile tail block without one
@@ -326,7 +329,7 @@ class AnthropicDialectTest {
                                 null,
                                 null,
                                 null,
-                                java.util.Map.of("volatileTail", true))),
+                                Map.of("volatileTail", true))),
                 null,
                 null,
                 64,
@@ -368,7 +371,7 @@ class AnthropicDialectTest {
                                 null,
                                 null,
                                 null,
-                                java.util.Map.of("volatileTail", true))),
+                                Map.of("volatileTail", true))),
                 null,
                 null,
                 64,
@@ -378,7 +381,7 @@ class AnthropicDialectTest {
                 null,
                 null,
                 false,
-                java.util.Map.of("anthropicSplitBlocks", false));
+                Map.of("anthropicSplitBlocks", false));
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         final var body = reqBody.get();
         // only the system keeps a breakpoint; the tail rides inline as a plain string
@@ -669,11 +672,11 @@ class AnthropicDialectTest {
                 () -> "expected the contextual stream error but got: " + failure);
     }
 
-    private static <T> Optional<Throwable> failureOf(final java.util.concurrent.CompletableFuture<T> future) {
+    private static <T> Optional<Throwable> failureOf(final CompletableFuture<T> future) {
         try {
             future.join();
             return Optional.empty();
-        } catch (final java.util.concurrent.CompletionException e) {
+        } catch (final CompletionException e) {
             return Optional.of(e.getCause());
         }
     }

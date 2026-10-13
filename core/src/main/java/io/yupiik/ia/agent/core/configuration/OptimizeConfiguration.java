@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.optimize.Optimizers;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Tool output optimization settings (rtk style token reduction).
@@ -53,6 +54,17 @@ public record OptimizeConfiguration(
         int minReductionPercent,
 
         @Property(
+                defaultValue = "true",
+                documentation =
+                        "Strip a leading well-known command wrapper before detecting the command head for output "
+                                + "processors, so `timeout 120 mvn ...`, `sudo mvn ...`, `nohup git ...`, `env FOO=1 mvn ...`, "
+                                + "`command mvn ...` or `sh -c \"mvn ...\"` are all matched and optimized as the inner command "
+                                + "(e.g. `mvn ...`). Handled wrappers (chained and repeatable): sudo, nohup, timeout <seconds>, "
+                                + "env, command, and sh/bash/zsh/dash -c. A multi-command script (containing `;`, `&&` or `|`) "
+                                + "inside a -c string is left untouched for the generic fallback. Off disables the unwrapping.")
+        boolean skipCommandWrapper,
+
+        @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
                         "Processor or tool names to disable. Processors: mvn, mvnd, mvnw, gradle, gradlew, git, gh, npm, pnpm, prettier, generic. Matched loosely: './' and path prefixes are dropped, only the file name is kept, known extensions (.cmd, .exe, .sh) are ignored and comparison is case insensitive.")
@@ -80,7 +92,7 @@ public record OptimizeConfiguration(
      * @return true when the processor/command is disabled by the global {@code disabled} list
      *     (loose alias matching) or by its per-tool {@code enabled} flag in {@code toolOutputs}.
      */
-    public boolean isDisabled(final java.util.Collection<String> aliases) {
+    public boolean isDisabled(final Collection<String> aliases) {
         if (disabled != null && aliases.stream().anyMatch(a -> matches(disabled, a))) {
             return true;
         }
@@ -88,7 +100,7 @@ public record OptimizeConfiguration(
     }
 
     private boolean matches(final List<String> configured, final String alias) {
-        return configured.stream().anyMatch(c -> Optimizers.matchesAlias(c, java.util.Set.of(alias)));
+        return configured.stream().anyMatch(c -> Optimizers.matchesAlias(c, Set.of(alias)));
     }
 
     /** Per-tool enabled flag, default true when the tool entry is absent. */

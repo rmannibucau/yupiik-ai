@@ -23,6 +23,7 @@ import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Assumptions;
@@ -161,7 +162,7 @@ class MvnProjectDepsTest {
                 .name("mvn-resolve-interrupt-test")
                 .start(() -> result.set(MvnProjectDeps.resolve(project, 60_000, null, service)));
         // let the wrapper spawn and get tracked, then interrupt the resolution
-        final var deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+        final var deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (service.trackedCount() == 0 && System.nanoTime() < deadline) {
             Thread.sleep(10);
         }

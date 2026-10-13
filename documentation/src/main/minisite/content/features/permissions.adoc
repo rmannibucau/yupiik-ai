@@ -2,8 +2,8 @@
 :minisite-breadcrumb: Home[index.html] > Features > Permission modes
 :minisite-nav-prev-link: modes.html
 :minisite-nav-prev-label: Plan and build modes
-:minisite-nav-next-link: ui.html
-:minisite-nav-next-label: Interactive UI and headless mode
+:minisite-nav-next-link: sandboxes.html
+:minisite-nav-next-label: External sandboxing (nono, AgentFS)
 
 yca gates tool calls behind configurable permission modes:
 
@@ -107,8 +107,14 @@ view`/`gh pr checks`/`gh pr diff`/`gh pr list`, `gh issue view`/`gh issue list`,
 
 A command is silently allowed only when all its segments (`&&`, `||`, `;`,
 `|` and newlines split them) match rules resolving to `yolo`/`all`.
-Segments carrying redirections or substitutions (`>`, `<`, `$(...)`,
-backticks) always fall back to the gate. Shell control keywords (`for`,
+Redirections other than the tolerated `/dev/null` plumbing (`>`, `<`,
+non-`/dev/null` targets) and backticks always fall back to the gate.
+Command substitutions `$( ... )` are not blanket-gated: the substituted
+command is evaluated with the same engine, so a read-only substitution is
+auto-allowed - standalone (`echo $(ls)`) or glued into surrounding text
+(`echo "file: $(ls)!"`) - while a mutating inner command
+(`echo "a $(rm -rf /) b"`) makes the whole segment fall back to the gate.
+Shell control keywords (`for`,
 `while`, `if`, `do`, `done`, `fi`, ...) are syntax, not commands: they are
 stripped from every segment before evaluation, so a loop body like
 `do unzip -l $f 2>/dev/null` is evaluated (and reported, when denied) as

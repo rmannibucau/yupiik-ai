@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.ArrayList;
 import java.util.List;
 
 @JsonModel
@@ -136,7 +137,7 @@ public record StructuralCodeGraphConfiguration(
         if (ignoreGlobs == null || ignoreGlobs.isEmpty()) {
             return DEFAULT_IGNORE_GLOBS;
         }
-        final var merged = new java.util.ArrayList<>(DEFAULT_IGNORE_GLOBS);
+        final var merged = new ArrayList<>(DEFAULT_IGNORE_GLOBS);
         merged.addAll(ignoreGlobs);
         return merged;
     }

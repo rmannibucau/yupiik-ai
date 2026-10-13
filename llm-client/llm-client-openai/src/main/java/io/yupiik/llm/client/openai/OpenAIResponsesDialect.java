@@ -37,20 +37,23 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** OpenAI {@code /responses} reactive dialect mapping the neutral model to the Responses wire format. */
 public final class OpenAIResponsesDialect extends AbstractDialect {
 
-    private volatile java.util.function.Consumer<String> onRawLine;
+    private volatile Consumer<String> onRawLine;
     // Records the ids of tool calls whose arguments were already streamed incrementally via
     // response.function_call_arguments.delta, so the assembled arguments carried by the completion
     // events are only emitted as a fallback (when no delta was seen) and never double-appended.
-    private final java.util.Set<String> streamedArgIds = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> streamedArgIds = ConcurrentHashMap.newKeySet();
 
     /**
      * Creates the dialect.
@@ -70,7 +73,7 @@ public final class OpenAIResponsesDialect extends AbstractDialect {
      *
      * @param onRawLine the raw-line consumer or null.
      */
-    public void setOnRawLine(final java.util.function.Consumer<String> onRawLine) {
+    public void setOnRawLine(final Consumer<String> onRawLine) {
         this.onRawLine = onRawLine;
     }
 

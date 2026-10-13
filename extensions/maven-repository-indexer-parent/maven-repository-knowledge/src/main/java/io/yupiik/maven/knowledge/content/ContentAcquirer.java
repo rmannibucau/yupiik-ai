@@ -21,9 +21,15 @@ import io.yupiik.maven.knowledge.bytecode.ClassApiCodeGraphs;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -57,7 +63,7 @@ public class ContentAcquirer {
         if (!name.endsWith(".html")) {
             return false;
         }
-        final var lower = name.toLowerCase(java.util.Locale.ROOT);
+        final var lower = name.toLowerCase(Locale.ROOT);
         return !lower.endsWith("-summary.html")
                 && !lower.endsWith("index.html")
                 && !lower.contains("index-")
@@ -205,7 +211,7 @@ public class ContentAcquirer {
         if (artifact == null || !artifact.present()) {
             return List.of();
         }
-        final var results = new java.util.ArrayList<ContentPart>();
+        final var results = new ArrayList<ContentPart>();
         final var main = artifact.mainJar();
         if (main != null && Files.isRegularFile(main)) {
             // plugin/extension descriptors are folded into the index via moduleConfig(gav), not a sibling file
@@ -266,7 +272,7 @@ public class ContentAcquirer {
         if (content == null || content.isBlank()) {
             return List.of();
         }
-        final var parts = new java.util.ArrayList<ContentPart>();
+        final var parts = new ArrayList<ContentPart>();
         var index = 0;
         var i = 0;
         while (i < content.length()) {
@@ -283,11 +289,11 @@ public class ContentAcquirer {
      * and nested types included), so a consumer can read a single class's doc without pulling the whole jar.
      */
     private List<ContentPart> fromJavadocPages(final Path jar) {
-        final var parts = new java.util.ArrayList<ContentPart>();
+        final var parts = new ArrayList<ContentPart>();
         try (final var zip = new ZipFile(jar.toFile())) {
             final var pages = zip.stream()
                     .filter(e -> !e.isDirectory() && isClassPage(e.getName()))
-                    .sorted(java.util.Comparator.comparing(ZipEntry::getName))
+                    .sorted(Comparator.comparing(ZipEntry::getName))
                     .limit(config.maxJavadocPages())
                     .toList();
             for (final var entry : pages) {
@@ -357,7 +363,7 @@ public class ContentAcquirer {
                 return null;
             }
             try (final var in = zip.getInputStream(entry)) {
-                return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+                return new String(in.readAllBytes(), StandardCharsets.UTF_8);
             }
         } catch (final IOException e) {
             return null;
@@ -432,7 +438,7 @@ public class ContentAcquirer {
                 return null;
             }
             final var tag = html.substring(open + 1, gt);
-            final var lower = tag.toLowerCase(java.util.Locale.ROOT);
+            final var lower = tag.toLowerCase(Locale.ROOT);
             if (lower.matches(".*class\\s*=\\s*\"[^\"]*content[^\"]*\".*")) {
                 final var closeTag = findBlockEnd(html, open, gt, tag);
                 return closeTag < 0 ? html.substring(open) : html.substring(open, closeTag);
@@ -502,7 +508,7 @@ public class ContentAcquirer {
     }
 
     private static boolean isChromeOpening(final String opening) {
-        final var lower = opening.toLowerCase(java.util.Locale.ROOT);
+        final var lower = opening.toLowerCase(Locale.ROOT);
         for (final var tag : new String[] {"nav", "header", "footer", "script", "style"}) {
             final var name = parseTagName(lower);
             if (name.equals(tag)) {
@@ -516,7 +522,7 @@ public class ContentAcquirer {
 
     private static boolean isDocHost(final String url) {
         try {
-            final var host = java.net.URI.create(url).getHost();
+            final var host = URI.create(url).getHost();
             return host != null && GIT_HOSTS.stream().noneMatch(host::contains);
         } catch (final Exception e) {
             return false;
@@ -532,7 +538,7 @@ public class ContentAcquirer {
         final var sb = new StringBuilder();
         sb.append("Artifact: ").append(gav.coordinate()).append('\n');
         final int budget = config.maxContentBytes() > 0 ? config.maxContentBytes() : Integer.MAX_VALUE;
-        final var seen = new java.util.HashSet<String>();
+        final var seen = new HashSet<String>();
         try (final var zip = new ZipFile(jar.toFile())) {
             final var entries = zip.stream()
                     .filter(e -> !e.isDirectory())
@@ -631,7 +637,7 @@ public class ContentAcquirer {
         if (fileName.equals("module-info.java") || fileName.equals("package-info.java")) {
             return false;
         }
-        final var lower = name.toLowerCase(java.util.Locale.ROOT);
+        final var lower = name.toLowerCase(Locale.ROOT);
         return !lower.contains("/generated/")
                 && !lower.contains("/srcgen/")
                 && !lower.contains("target/generated")
@@ -645,7 +651,7 @@ public class ContentAcquirer {
         try (final var zip = new ZipFile(jar.toFile())) {
             final var pages = zip.stream()
                     .filter(e -> !e.isDirectory() && isClassPage(e.getName()))
-                    .sorted(java.util.Comparator.comparing(ZipEntry::getName))
+                    .sorted(Comparator.comparing(ZipEntry::getName))
                     .limit(config.maxJavadocPages())
                     .toList();
             for (final var entry : pages) {
@@ -751,8 +757,8 @@ public class ContentAcquirer {
             }
             final var raw = html.substring(open + 1, gt).strip();
             if (raw.equalsIgnoreCase(tag)
-                    || raw.toLowerCase(java.util.Locale.ROOT).startsWith(tag + " ")
-                    || raw.toLowerCase(java.util.Locale.ROOT).startsWith(tag + "\n")) {
+                    || raw.toLowerCase(Locale.ROOT).startsWith(tag + " ")
+                    || raw.toLowerCase(Locale.ROOT).startsWith(tag + "\n")) {
                 return open;
             }
             idx = gt + 1;
@@ -785,14 +791,14 @@ public class ContentAcquirer {
 
     private static String readAll(final ZipFile zip, final ZipEntry entry) throws IOException {
         try (final var in = zip.getInputStream(entry)) {
-            return new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
     }
 
     private static String readChunk(final ZipFile zip, final ZipEntry entry, final int cap) throws IOException {
         try (final var in = zip.getInputStream(entry)) {
             final var bytes = in.readNBytes(cap);
-            return new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+            return new String(bytes, StandardCharsets.UTF_8);
         }
     }
 }

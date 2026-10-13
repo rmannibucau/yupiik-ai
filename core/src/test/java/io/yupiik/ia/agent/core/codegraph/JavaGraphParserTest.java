@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -38,7 +39,7 @@ class JavaGraphParserTest {
     void parsesTypesMethodsAndCallEdges() throws IOException {
         final var parser = new JavaGraphParser();
         assertTrue(parser.available(), "expected a JDK with javac on the test environment");
-        assertEquals(java.util.Set.of("java"), parser.extensions());
+        assertEquals(Set.of("java"), parser.extensions());
         assertTrue(parser.jdkRequired());
 
         final var src = tempDir.resolve("A.java");

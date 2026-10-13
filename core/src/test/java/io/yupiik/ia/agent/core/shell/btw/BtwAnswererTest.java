@@ -50,6 +50,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.AfterEach;
@@ -78,8 +79,8 @@ class BtwAnswererTest {
     };
 
     private HttpServer server;
-    private java.util.concurrent.ExecutorService serverExecutor;
-    private java.util.concurrent.ExecutorService btwExecutor;
+    private ExecutorService serverExecutor;
+    private ExecutorService btwExecutor;
     private InMemorySessionStore sessionStore;
     private UsageTracker usageTracker;
     private BtwAnswerer answerer;
@@ -97,7 +98,7 @@ class BtwAnswererTest {
             bodies.add(body);
             respond(exchange, 200, response(body, bodies.size()), "application/json");
         });
-        serverExecutor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+        serverExecutor = Executors.newVirtualThreadPerTaskExecutor();
         server.setExecutor(serverExecutor);
         server.start();
         sessionStore = new InMemorySessionStore();

@@ -19,9 +19,11 @@ import static io.yupiik.ia.agent.core.tools.Schemas.str;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -31,6 +33,15 @@ import java.util.Map;
 
 @ApplicationScoped
 public class WriteFileTool implements EmbeddedTool {
+    private final CodingAgentConfiguration configuration;
+
+    public WriteFileTool(final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
+    protected WriteFileTool() {
+        this.configuration = null;
+    }
 
     @Override
     public String name() {
@@ -59,10 +70,20 @@ public class WriteFileTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
-        final var path = Path.of(arg(args, "path"));
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var raw = arg(args, "path");
+        final var path = context.resolvePath(raw, configuration == null ? null : configuration.resolveProjectDir());
         final var content = arg(args, "content");
         if (content == null) {
             return ToolResult.error("content is required");
+        }
+        final var guard = escapeGuard(context, raw, path);
+        if (guard != null) {
+            return ToolResult.error(guard);
         }
         try {
             if (path.getParent() != null) {
@@ -70,9 +91,41 @@ public class WriteFileTool implements EmbeddedTool {
             }
             Files.writeString(path, content);
             final var lines = content.isEmpty() ? 0 : content.split("\n", -1).length;
-            return ToolResult.ok("Wrote " + lines + " lines to " + path);
+            final var notice = reRoutedNotice(context, raw, path);
+            return ToolResult.ok(notice + "Wrote " + lines + " lines to " + path);
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot write " + path + ": " + e.getMessage());
         }
+    }
+
+    /**
+     * A relative path that normalizes outside the session root is refused instead of silently writing
+     * outside it: an absolute path survives any containment check because it is an explicit caller choice.
+     */
+    private static String escapeGuard(final ToolContext context, final String raw, final Path path) {
+        if (context.projectDir() == null || Path.of(raw).isAbsolute()) {
+            return null;
+        }
+        final var base = context.projectDir().toAbsolutePath().normalize();
+        if (!path.toAbsolutePath().normalize().startsWith(base)) {
+            return "path '" + raw + "' escapes the session project directory";
+        }
+        return null;
+    }
+
+    /**
+     * Surfaces that a relative write was resolved against a session project root that differs from the
+     * configured default, so a cross-root operation (the write landed in the session tree, not the
+     * process launch directory) is visible instead of silent. Unset or default roots produce no notice.
+     */
+    private String reRoutedNotice(final ToolContext context, final String raw, final Path path) {
+        if (!context.reRoutedToSessionRoot(raw) || configuration == null) {
+            return "";
+        }
+        final var configured =
+                configuration.resolveProjectDir().toAbsolutePath().normalize();
+        return context.projectDir().toAbsolutePath().normalize().equals(configured)
+                ? ""
+                : "target (session root " + context.projectDir() + "): " + path + "\n";
     }
 }

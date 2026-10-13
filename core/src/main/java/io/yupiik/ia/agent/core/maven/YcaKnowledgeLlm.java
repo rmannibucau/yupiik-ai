@@ -36,6 +36,7 @@ import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -239,7 +240,7 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
             final var parsed = mapper.read(SuggestRoot.class, new StringReader(raw));
             final var out = new ArrayList<Gav>();
             if (parsed.gavs() != null) {
-                final var wanted = new java.util.HashSet<>(parsed.gavs());
+                final var wanted = new HashSet<>(parsed.gavs());
                 for (final var gav : candidates) {
                     if (wanted.contains(gav.coordinate())) {
                         out.add(gav);

@@ -293,7 +293,19 @@ public class BtwAnswerer {
                     false);
         }
         final var context = new ToolContext(
-                sessionId, null, null, permissions, null, null, null, usage, null, cancelled, target.settings(), null);
+                sessionId,
+                null,
+                null,
+                permissions,
+                null,
+                null,
+                null,
+                usage,
+                null,
+                cancelled,
+                target.settings(),
+                null,
+                null);
         final var result = toolExecutionService.execute(tool, args, context);
         final var output = result.output() == null || result.output().isBlank() ? "(no output)" : result.output();
         return new ToolOutcome(call.id(), capIngestionOutput(output), result.success());

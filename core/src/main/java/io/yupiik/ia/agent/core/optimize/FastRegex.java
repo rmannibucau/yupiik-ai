@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.optimize;
 
 import java.util.Arrays;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -42,7 +43,7 @@ import java.util.regex.Pattern;
 public final class FastRegex {
 
     /** Fast predicate; never throws. */
-    private final java.util.function.Predicate<CharSequence> matcher;
+    private final Predicate<CharSequence> matcher;
 
     /**
      * @param regex the pattern, in the same syntax {@link Pattern#compile(String)} accepts.
@@ -56,7 +57,7 @@ public final class FastRegex {
         return matcher.test(line);
     }
 
-    private static java.util.function.Predicate<CharSequence> compile(final String regex) {
+    private static Predicate<CharSequence> compile(final String regex) {
         // Whole-line keyword alternation: `\b(A|B|C)\b` (and variants). This is the shape of the
         // include rule (WARNING|SEVERE|...) and of the `(INFO|FINE|...)` core of the excludes.
         final var keywords = keywordAlternation(regex);
@@ -199,7 +200,7 @@ public final class FastRegex {
     }
 
     /** Fallback: real {@link Pattern} guarded by a required-literal pre-check. */
-    private static java.util.function.Predicate<CharSequence> guarded(final String regex) {
+    private static Predicate<CharSequence> guarded(final String regex) {
         final Pattern compiled;
         try {
             compiled = Pattern.compile(regex);

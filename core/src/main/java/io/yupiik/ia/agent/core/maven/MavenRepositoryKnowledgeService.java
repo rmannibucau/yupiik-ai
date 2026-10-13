@@ -33,9 +33,13 @@ import io.yupiik.maven.knowledge.index.Indexer;
 import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import io.yupiik.maven.knowledge.write.KnowledgeWriter;
 import java.io.IOException;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -771,16 +775,16 @@ public class MavenRepositoryKnowledgeService {
 
     private WebFetch webFetch() {
         return (url, timeoutMs, maxBytes) -> {
-            final var uri = java.net.URI.create(url);
-            final var request = java.net.http.HttpRequest.newBuilder()
+            final var uri = URI.create(url);
+            final var request = HttpRequest.newBuilder()
                     .uri(uri)
-                    .timeout(java.time.Duration.ofMillis(timeoutMs))
+                    .timeout(Duration.ofMillis(timeoutMs))
                     .header("accept", "text/html,application/xhtml+xml,text/plain,application/json,*/*;q=0.8")
                     .GET()
                     .build();
-            final java.net.http.HttpResponse<byte[]> response;
+            final HttpResponse<byte[]> response;
             try {
-                response = httpClient.send(request, java.net.http.HttpResponse.BodyHandlers.ofByteArray());
+                response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IOException("Interrupted fetching " + url, e);

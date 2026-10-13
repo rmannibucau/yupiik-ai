@@ -22,6 +22,7 @@ import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import javax.xml.XMLConstants;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -256,7 +257,7 @@ public class ToolOutputFormat {
         return pretty(raw, this::doPrettyXml);
     }
 
-    private String pretty(final String raw, final java.util.function.UnaryOperator<String> printer) {
+    private String pretty(final String raw, final UnaryOperator<String> printer) {
         if (raw == null || raw.isBlank() || raw.length() > MAX_PRETTY_LENGTH) {
             return raw;
         }

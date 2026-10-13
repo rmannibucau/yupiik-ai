@@ -21,20 +21,31 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Clock;
+import java.util.LinkedHashMap;
 import java.util.Optional;
 
 /**
  * Daily cache of the context windows detected from the providers /v1/models endpoint.
  * Entries are keyed by provider id and model name, persisted as JSONL under the
  * {@code context-window} directory of the storage home and stay valid for a day.
+ *
+ * <p>The file holds at most one entry per (provider id, model) pair: {@link #put} is an
+ * upsert that replaces any prior entry for the same key, so the file self-heals from
+ * duplicate lines (legacy appends or a crash between the read and the rewrite) on the
+ * next write to a given key rather than growing one line per fetch.</p>
  */
 @ApplicationScoped
 public class ContextWindowCache {
     private static final long TTL_MILLIS = 24L * 60L * 60L * 1000L;
+    /** Bounded so a crashed writer holding the lock cannot stall readers or later writers forever. */
+    private static final long LOCK_TIMEOUT_MILLIS = 5_000L;
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
@@ -45,12 +56,6 @@ public class ContextWindowCache {
         this.configuration = configuration;
         this.mapper = mapper;
         this.clock = clock;
-    }
-
-    protected ContextWindowCache() {
-        this.configuration = null;
-        this.mapper = null;
-        this.clock = null;
     }
 
     @JsonModel
@@ -109,16 +114,78 @@ public class ContextWindowCache {
             final int window,
             final Integer maxTokens,
             final long fetchedAt) {
+        final var entry = new Entry(providerId, model, window, maxTokens, fetchedAt);
         try {
             Files.createDirectories(dir());
-            Files.writeString(
-                    file(),
-                    mapper.toString(new Entry(providerId, model, window, maxTokens, fetchedAt)) + "\n",
-                    StandardOpenOption.CREATE,
-                    StandardOpenOption.APPEND);
+            try (final var channel = FileChannel.open(lockFile(), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                    final FileLock ignored = lock(channel)) {
+                writeUpserted(entry);
+            }
         } catch (final IOException e) {
-            throw new UncheckedIOException(e);
+            throw new UncheckedIOException("Could not persist context window for " + providerId + "/" + model, e);
         }
+    }
+
+    /**
+     * Rewrites {@code windows.jsonl} keeping at most one entry per (provider id, model): the existing
+     * lines are loaded, the prior entry for the same key (when present) is dropped, the new entry is
+     * appended, and the whole file is replaced atomically so a crash never leaves it truncated. Entries
+     * that fail to parse are discarded, which also lets the file self-heal from legacy duplicate/partial
+     * lines. Runs under the {@link #lockFile()} exclusion so concurrent writers do not interleave.
+     */
+    private void writeUpserted(final Entry entry) throws IOException {
+        final var file = file();
+        final var byKey = new LinkedHashMap<Key, Entry>();
+        if (Files.isRegularFile(file)) {
+            for (final var line : Files.readAllLines(file)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                try {
+                    final var parsed = mapper.fromString(Entry.class, line);
+                    if (parsed.providerId() == null || parsed.model() == null) {
+                        continue;
+                    }
+                    byKey.put(new Key(parsed.providerId(), parsed.model()), parsed);
+                } catch (final RuntimeException e) {
+                    // ignore malformed/skippable legacy lines; they are dropped on the next write
+                }
+            }
+        }
+        byKey.put(new Key(entry.providerId(), entry.model()), entry);
+
+        final var tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        final var sb = new StringBuilder(byKey.size() * 96);
+        for (final var kept : byKey.values()) {
+            sb.append(mapper.toString(kept)).append('\n');
+        }
+        Files.writeString(tmp, sb, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        try {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (final IOException atomicMoveUnsupported) {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /** Bounded acquire of the exclusive file lock, so a transient contention just waits a little. */
+    private FileLock lock(final FileChannel channel) throws IOException {
+        final var deadline = System.currentTimeMillis() + LOCK_TIMEOUT_MILLIS;
+        FileLock lock = null;
+        while (lock == null) {
+            lock = channel.tryLock();
+            if (lock == null) {
+                if (System.currentTimeMillis() > deadline) {
+                    throw new IOException("Timed out waiting for the context-window cache lock");
+                }
+                try {
+                    Thread.sleep(50);
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting for the context-window cache lock", e);
+                }
+            }
+        }
+        return lock;
     }
 
     private boolean matches(final Entry entry, final String providerId, final String model) {
@@ -135,4 +202,11 @@ public class ContextWindowCache {
     private Path file() {
         return dir().resolve("windows.jsonl");
     }
+
+    private Path lockFile() {
+        return dir().resolve("windows.jsonl.lock");
+    }
+
+    /** Stable identity key for the (provider id, model) dedup dimension. */
+    private record Key(String providerId, String model) {}
 }

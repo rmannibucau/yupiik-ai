@@ -27,6 +27,7 @@ import io.yupiik.maven.knowledge.llm.KnowledgeLlm;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -240,7 +241,7 @@ public class MavenRepositoryKnowledgeServiceTest {
             assertTrue(first.contains("## Knowledge"), () -> "first read should succeed: " + first);
 
             Files.writeString(indexFile, "## Modified\nchanged content\n");
-            final var future = java.nio.file.attribute.FileTime.fromMillis(System.currentTimeMillis() + 2000);
+            final var future = FileTime.fromMillis(System.currentTimeMillis() + 2000);
             Files.setLastModifiedTime(indexFile, future);
 
             final var second = service.knowledge("g.com:artifact-a:1.0", null);

@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.core.mcp;
 
+import static java.util.stream.Collectors.toList;
+
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
@@ -34,7 +36,12 @@ import java.util.logging.Logger;
 
 @ApplicationScoped
 public class McpManager {
-    private static final Logger LOGGER = Logger.getLogger(McpManager.class.getName());
+    // Non-static: resolved per instance so it binds to the ACTIVE runtime LogManager/registry.
+    // In the GraalVM-native build the static form is initialized at image-build-time against the
+    // legacy logging registry, while at runtime yca uses -Djava.util.logging.manager=YupiikLogManager;
+    // those two registries each printed the same LogRecord -> identical-timestamp duplicated lines.
+    // A per-instance logger re-resolves lazily, so only the active runtime registry emits.
+    private final Logger logger = Logger.getLogger(McpManager.class.getName());
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
@@ -65,7 +72,22 @@ public class McpManager {
         this.processes = null;
     }
 
+    /**
+     * True once every configured server has been {@link #start() started} (or skipped because
+     * disabled) at least once. Guards against re-entrant starts: the GraalVM-native build can
+     * resolve the same {@code @ApplicationScoped} graph twice (two {@code ApplicationFusionContext}s
+     * or two containers), which would otherwise reconnect every MCP server and duplicate the
+     * "ready" startup logs. {@link #reset()} is the explicit re-start entry point and clears this
+     * flag so a manual reset still works after an automatic start.
+     */
+    private volatile boolean started;
+
     public void start() {
+        if (started) {
+            return;
+        }
+        // not set until every server (or its no-op disabled skip) has gone through startServer once,
+        // so a partial failure is retried on a subsequent start rather than silently skipped
         if (configuration.tools().builtin().enabled()) {
             startLocal();
         }
@@ -74,6 +96,7 @@ public class McpManager {
                 startServer(server);
             }
         }
+        started = true;
     }
 
     /**
@@ -82,6 +105,7 @@ public class McpManager {
      * initialized, and its tools are re-imported.
      */
     public void reset() {
+        started = false; // an explicit reset may re-run even after an automatic start (see start())
         if (configuration.tools().builtin().enabled()) {
             startLocal();
         }
@@ -90,6 +114,7 @@ public class McpManager {
                 startServer(server);
             }
         }
+        started = true;
     }
 
     /**
@@ -126,9 +151,7 @@ public class McpManager {
         final var builtin = configuration.tools().builtin();
         final var filtered = localTools == null
                 ? List.<EmbeddedTool>of()
-                : localTools.stream()
-                        .filter(t -> builtin.keeps(t.name()))
-                        .collect(java.util.stream.Collectors.toList());
+                : localTools.stream().filter(t -> builtin.keeps(t.name())).collect(toList());
         toolsByServer.put("yca", new ArrayList<>(filtered));
     }
 
@@ -144,12 +167,12 @@ public class McpManager {
                 imported.add(new McpEmbeddedTool(this, server.name(), tool));
             }
             toolsByServer.put(server.name(), imported);
-            LOGGER.info("MCP server " + server.name() + " ready, " + imported.size() + " tool(s)");
+            logger.info("MCP server " + server.name() + " ready, " + imported.size() + " tool(s)");
         } catch (final IOException | InterruptedException | RuntimeException e) {
             if (e instanceof InterruptedException) {
                 Thread.currentThread().interrupt();
             }
-            LOGGER.warning("MCP server " + server.name() + " failed: " + e.getMessage());
+            logger.warning("MCP server " + server.name() + " failed: " + e.getMessage());
         }
     }
 
@@ -171,7 +194,12 @@ public class McpManager {
                 command.addAll(server.args());
             }
             return new StdioMcpClient(
-                    server.name(), command, server.env() == null ? List.of() : server.env(), mapper, processes);
+                    server.name(),
+                    command,
+                    server.env() == null ? List.of() : server.env(),
+                    server.dir(),
+                    mapper,
+                    processes);
         }
         throw new IllegalArgumentException("MCP server " + server.name() + " has neither url nor command");
     }
@@ -182,7 +210,7 @@ public class McpManager {
             try {
                 previous.close();
             } catch (final RuntimeException e) {
-                LOGGER.warning("MCP server " + name + " close failed: " + e.getMessage());
+                logger.warning("MCP server " + name + " close failed: " + e.getMessage());
             }
         }
     }
@@ -269,7 +297,7 @@ public class McpManager {
         try {
             client.close();
         } catch (final RuntimeException e) {
-            LOGGER.warning("MCP client close failed: " + e.getMessage());
+            logger.warning("MCP client close failed: " + e.getMessage());
         }
     }
 }

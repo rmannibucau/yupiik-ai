@@ -63,12 +63,14 @@ class ProviderManagerTest {
                 Map.entry("yca.provider.providers.0.models.0.behavior.systemPromptMaxChars", "4000"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.plateauRounds", "4"),
                 Map.entry("yca.provider.providers.0.models.0.behavior.maxIterations", "80"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.repeatSuccessThreshold", "2"),
                 Map.entry("yca.provider.providers.0.models.1.model", "claude-sonnet-5"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.outputTokens", "2000"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.reasoningEffort", "high"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.systemPromptMaxChars", "9000"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.plateauRounds", "6"),
                 Map.entry("yca.provider.providers.0.models.1.behavior.maxIterations", "120"),
+                Map.entry("yca.provider.providers.0.models.1.behavior.repeatSuccessThreshold", "6"),
                 Map.entry("yca.provider.providers.0.models.2.model", "haiku"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.outputTokens", "-1"),
                 Map.entry("yca.provider.providers.0.models.2.behavior.reasoningEffort", ""),
@@ -176,6 +178,11 @@ class ProviderManagerTest {
         assertEquals(80, manager.maxIterationsOverride(provider, "claude-opus-4"));
         assertEquals(0, manager.maxIterationsOverride(provider, "haiku-4-5"));
         assertEquals(0, manager.maxIterationsOverride(provider, "gpt-5"));
+        // same cascade for the doom-loop success threshold
+        assertEquals(6, manager.repeatSuccessThreshold(provider, "claude-sonnet-5"));
+        assertEquals(2, manager.repeatSuccessThreshold(provider, "claude-opus-4"));
+        assertEquals(0, manager.repeatSuccessThreshold(provider, "haiku-4-5"));
+        assertEquals(0, manager.repeatSuccessThreshold(provider, "gpt-5"));
     }
 
     @Test

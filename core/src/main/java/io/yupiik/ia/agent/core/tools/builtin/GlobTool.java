@@ -18,10 +18,12 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.FileIgnore;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -39,6 +41,16 @@ public class GlobTool implements EmbeddedTool {
 
     private static final int MAX_RESULTS = 500;
     private static final List<String> SKIP_PARTS = List.of("/target/", "/.git/", "/node_modules/", "/build/", "/.yca/");
+
+    private final CodingAgentConfiguration configuration;
+
+    public GlobTool(final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
+    protected GlobTool() {
+        this.configuration = null;
+    }
 
     @Override
     public String name() {
@@ -68,8 +80,15 @@ public class GlobTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var pattern = arg(args, "pattern");
-        final var base = Path.of(arg(args, "path") == null ? "." : arg(args, "path"));
+        final var base = context.resolvePath(
+                arg(args, "path") == null ? "." : arg(args, "path"),
+                configuration == null ? null : configuration.resolveProjectDir());
         if (pattern == null || pattern.isBlank()) {
             return ToolResult.error("pattern is required");
         }

@@ -91,6 +91,9 @@ public class SessionLifecycle {
             permissions.setGate(null);
             permissions.setPermissionMode(null);
             permissions.setMode(null);
+            // drop the session's dynamic bash rule overrides with the runtime: the registry keeps
+            // only compiled caches, the overrides themselves die with the session
+            permissions.clearDynamicRules();
             runtime.feedback().setGate(null);
         }
         if (sessionId != null && sessionStore.isEmpty(sessionId)) {

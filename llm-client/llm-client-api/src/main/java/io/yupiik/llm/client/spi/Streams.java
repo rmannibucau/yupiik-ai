@@ -19,9 +19,11 @@ import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Flow;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -73,7 +75,7 @@ public final class Streams {
             final BooleanSupplier cancelled,
             final Function<SseParser.Event, List<LlmStreamEvent>> mapper,
             final Supplier<LlmStreamEvent> end,
-            final java.util.function.Consumer<String> onRawLine) {
+            final Consumer<String> onRawLine) {
         return subscriber -> source.subscribe(new Flow.Subscriber<>() {
             private final SseParser parser = new SseParser();
             // raw pending bytes: UTF-8 sequences split across network chunks stay here until the
@@ -122,7 +124,7 @@ public final class Streams {
                     while (capacity < needed) {
                         capacity = capacity <= 0 ? 1024 : capacity * 2;
                     }
-                    pending = java.util.Arrays.copyOf(pending, capacity);
+                    pending = Arrays.copyOf(pending, capacity);
                 }
                 src.get(pending, pendingLength, src.remaining());
                 pendingLength = needed;

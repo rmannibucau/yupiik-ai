@@ -18,9 +18,11 @@ package io.yupiik.maven.knowledge.llm;
 import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -28,6 +30,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 /**
@@ -172,7 +175,7 @@ public final class MvnProjectDeps {
         // read the merged stream on a daemon thread with a capped buffer: the main thread polls the
         // deadline (so a wedged mvn that never exits cannot hang the read) and disposes the whole tree
         // on interrupt/timeout instead of leaving an orphaned mvn behind.
-        final var output = new java.util.concurrent.atomic.AtomicReference<String>();
+        final var output = new AtomicReference<String>();
         final var reader = new Thread(
                 () -> {
                     try (final var in = process.getInputStream()) {
@@ -192,8 +195,7 @@ public final class MvnProjectDeps {
                 break;
             }
             try {
-                finished =
-                        process.waitFor(Math.min(100, Math.max(1, remainingNanos / 1_000_000)), TimeUnit.MILLISECONDS);
+                finished = process.waitFor(Math.clamp(remainingNanos / 1_000_000, 1, 100), TimeUnit.MILLISECONDS);
                 if (finished) {
                     break;
                 }
@@ -232,7 +234,7 @@ public final class MvnProjectDeps {
      * Reads the stream into a capped buffer while still draining it to the end, so a huge or
      * endless output cannot blow the heap nor block the child on a full pipe.
      */
-    private static String readCapped(final java.io.InputStream in, final int maxChars) throws IOException {
+    private static String readCapped(final InputStream in, final int maxChars) throws IOException {
         final var out = new StringBuilder(Math.min(maxChars, 4096));
         final byte[] buffer = new byte[8192];
         var overflow = false;
@@ -271,7 +273,7 @@ public final class MvnProjectDeps {
             if (lines.isEmpty() || !lines.get(0).equals("# fingerprint=" + fingerprint)) {
                 return null;
             }
-            final var out = new java.util.ArrayList<Gav>();
+            final var out = new ArrayList<Gav>();
             for (final var line : lines.subList(1, lines.size())) {
                 final var stripped = line.strip();
                 if (!stripped.isBlank()) {
@@ -338,15 +340,15 @@ public final class MvnProjectDeps {
 
     /** Small holder to avoid importing MessageDigest statics every call. */
     private static final class MessageDigestHolder {
-        private static final ThreadLocal<java.security.MessageDigest> MD = ThreadLocal.withInitial(() -> {
+        private static final ThreadLocal<MessageDigest> MD = ThreadLocal.withInitial(() -> {
             try {
-                return java.security.MessageDigest.getInstance("SHA-256");
+                return MessageDigest.getInstance("SHA-256");
             } catch (final Exception e) {
                 throw new IllegalStateException(e);
             }
         });
 
-        private static java.security.MessageDigest digest() {
+        private static MessageDigest digest() {
             final var md = MD.get();
             md.reset();
             return md;
@@ -354,7 +356,7 @@ public final class MvnProjectDeps {
     }
 
     static List<Gav> sorted(final Map<Gav, DependencyScope> byCoordinate) {
-        final var out = new java.util.ArrayList<>(byCoordinate.keySet());
+        final var out = new ArrayList<>(byCoordinate.keySet());
         out.sort(Comparator.comparingInt(g -> byCoordinate.get(g).order()));
         return List.copyOf(out);
     }

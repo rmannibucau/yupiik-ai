@@ -19,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
@@ -41,7 +42,7 @@ class SchedulerProducerTest {
         final var ses = new SchedulerProducer().ses(config);
         try {
             final var barrier = new CyclicBarrier(2);
-            final var futures = new java.util.ArrayList<Future<?>>();
+            final var futures = new ArrayList<Future<?>>();
             for (int i = 0; i < 2; i++) {
                 futures.add(ses.submit(() -> {
                     try {

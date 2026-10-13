@@ -193,9 +193,7 @@ class PlanTodoSeederTest {
 
         @Override
         public StructuredResult chatStructured(
-                final ChatCompletionRequest request,
-                final String schemaName,
-                final java.util.Map<String, Object> schema) {
+                final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
             return new StructuredResult(new ChatResult(Message.assistant(response, null), Usage.EMPTY), false);
         }
     }
@@ -208,9 +206,7 @@ class PlanTodoSeederTest {
 
         @Override
         public StructuredResult chatStructured(
-                final ChatCompletionRequest request,
-                final String schemaName,
-                final java.util.Map<String, Object> schema) {
+                final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema) {
             throw new IllegalStateException("boom");
         }
     }

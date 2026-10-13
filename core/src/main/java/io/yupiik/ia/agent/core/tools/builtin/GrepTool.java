@@ -20,10 +20,12 @@ import static io.yupiik.ia.agent.core.tools.ToolArgs.optBool;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.FileIgnore;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -43,6 +45,16 @@ import java.util.regex.Pattern;
 public class GrepTool implements EmbeddedTool {
 
     private static final List<String> SKIP_PARTS = List.of("/target/", "/.git/", "/node_modules/", "/build/", "/.yca/");
+
+    private final CodingAgentConfiguration configuration;
+
+    public GrepTool(final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
+    protected GrepTool() {
+        this.configuration = null;
+    }
 
     @Override
     public String name() {
@@ -76,12 +88,19 @@ public class GrepTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var pattern = arg(args, "pattern");
         if (pattern == null || pattern.isBlank()) {
             return ToolResult.error("pattern is required");
         }
         final var regex = Pattern.compile(pattern, optBool(args, "ignoreCase", false) ? Pattern.CASE_INSENSITIVE : 0);
-        final var base = Path.of(arg(args, "path") == null ? "." : arg(args, "path"));
+        final var base = context.resolvePath(
+                arg(args, "path") == null ? "." : arg(args, "path"),
+                configuration == null ? null : configuration.resolveProjectDir());
         final var include = arg(args, "include");
         final var includeMatcher =
                 include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);

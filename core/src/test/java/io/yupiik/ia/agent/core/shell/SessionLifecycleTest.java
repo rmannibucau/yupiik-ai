@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -34,6 +35,7 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -110,6 +112,13 @@ class SessionLifecycleTest {
         final FeedbackGate feedback = questions -> Map.of();
 
         final var runtime = newRuntime();
+        runtime.permissions()
+                .addDynamicRule(new io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration(
+                        new io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration(
+                                new io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration(List.of("mvn")),
+                                List.of()),
+                        PermissionMode.YOLO,
+                        null));
         lifecycle.installGates(approval, feedback, runtime);
         assertEquals(approval, runtime.permissions().gate());
 
@@ -121,5 +130,8 @@ class SessionLifecycleTest {
         lifecycle.release(sessionId, runtime);
         assertFalse(store.isEmpty(sessionId), "non-empty session must survive");
         assertNull(runtime.permissions().gate());
+        assertTrue(
+                runtime.permissions().dynamicRules().isEmpty(),
+                "session-scoped dynamic bash rules must be dropped when the session closes");
     }
 }

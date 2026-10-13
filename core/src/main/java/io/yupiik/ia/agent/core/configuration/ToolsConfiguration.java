@@ -48,6 +48,17 @@ public record ToolsConfiguration(
         int maxOutputChars,
 
         @Property(
+                defaultValue = "3",
+                documentation =
+                        "Doom-loop success threshold, for the models that do not set a per-model behavior or per-provider"
+                                + " tuning repeatSuccessThreshold: the maximum number of identical tool calls (same tool + same"
+                                + " normalized arguments) whose result succeeded AND carried no new information (identical"
+                                + " output, ignoring embedded dates/timestamps) before the next one is refused with a"
+                                + " strategy-change directive. A failing call is never counted (it is a legitimate retry), and an"
+                                + " interleaved failure or productive round resets the streak. 0 disables the guard entirely.")
+        int repeatSuccessThreshold,
+
+        @Property(
                 defaultValue = "false",
                 documentation =
                         "When enabled, the code_resolve tool also appends its short Maven artifact-knowledge note"

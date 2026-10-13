@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
+import java.util.Locale;
 
 /**
  * Assembles an {@link EventContext} from the live session state a producer holds at emission time.
@@ -69,7 +70,7 @@ public class EventContextBuilder {
             return null;
         }
         final var mode = permissions.permissionMode();
-        return mode == null ? null : mode.name().toLowerCase(java.util.Locale.ROOT);
+        return mode == null ? null : mode.name().toLowerCase(Locale.ROOT);
     }
 
     private static String agentMode(final PermissionService permissions) {
@@ -77,6 +78,6 @@ public class EventContextBuilder {
             return null;
         }
         final var mode = permissions.mode();
-        return mode == null ? null : mode.name().toLowerCase(java.util.Locale.ROOT);
+        return mode == null ? null : mode.name().toLowerCase(Locale.ROOT);
     }
 }

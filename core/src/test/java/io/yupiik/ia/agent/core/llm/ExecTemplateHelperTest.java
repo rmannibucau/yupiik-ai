@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
+import java.io.File;
 import java.util.Map;
 import java.util.function.Function;
 import org.junit.jupiter.api.Test;
@@ -54,7 +55,7 @@ class ExecTemplateHelperTest {
     @Test
     void ttlCachesAcrossRenders() throws Exception {
         final var marker = "exec-ttl-" + System.nanoTime() + ".tmp";
-        final var tf = java.io.File.createTempFile(marker, ".txt");
+        final var tf = File.createTempFile(marker, ".txt");
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
             final var template = compile("{{exec \"exec_options=ttl=60\" \"sh\" \"-c\" \"" + cmd + "\"}}");
@@ -68,7 +69,7 @@ class ExecTemplateHelperTest {
     @Test
     void ttlExpiryReSpawns() throws Exception {
         final var marker = "exec-ttl-exp-" + System.nanoTime() + ".tmp";
-        final var tf = java.io.File.createTempFile(marker, ".txt");
+        final var tf = File.createTempFile(marker, ".txt");
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
             final var template = compile("{{exec \"exec_options=ttl=1\" \"sh\" \"-c\" \"" + cmd + "\"}}");
@@ -83,7 +84,7 @@ class ExecTemplateHelperTest {
     @Test
     void ttlZeroDisablesCaching() throws Exception {
         final var marker = "exec-ttl-0-" + System.nanoTime() + ".tmp";
-        final var tf = java.io.File.createTempFile(marker, ".txt");
+        final var tf = File.createTempFile(marker, ".txt");
         try {
             final var cmd = "printf x >> " + tf.getAbsolutePath() + " && wc -c < " + tf.getAbsolutePath();
             final var template = compile("{{exec \"sh\" \"-c\" \"" + cmd + "\"}}");

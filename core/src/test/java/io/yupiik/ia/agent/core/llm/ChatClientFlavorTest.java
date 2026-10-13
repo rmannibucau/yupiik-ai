@@ -36,8 +36,10 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
@@ -111,7 +113,7 @@ class ChatClientFlavorTest {
     }
 
     private CodingAgentConfiguration configuration(final Map<String, String> extra) {
-        final var entries = new java.util.HashMap<String, String>();
+        final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
@@ -218,7 +220,7 @@ class ChatClientFlavorTest {
 
     @Test
     void chatStructuredWithNullOthersIgnoresMissingProviderOptions() throws Exception {
-        final var result = client.chatStructured(request(), "todo_steps", java.util.Map.of("type", "object"));
+        final var result = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
         assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
         assertTrue(result.structured());
         assertEquals("hello there", result.result().message().content());
@@ -227,7 +229,7 @@ class ChatClientFlavorTest {
     @Test
     void chatStructuredDegradesOnceOnSchemaRejectionAndRemembersItPerModel() throws Exception {
         stop();
-        final var structuredHits = new java.util.concurrent.atomic.AtomicInteger();
+        final var structuredHits = new AtomicInteger();
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
         server.createContext("/v1/chat/completions", exchange -> {
@@ -268,7 +270,7 @@ class ChatClientFlavorTest {
     @Test
     void chatStructuredSurfacesNonSchema400WithoutFallingBack() throws Exception {
         stop();
-        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        final var hits = new AtomicInteger();
         server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
         server.createContext("/v1/chat/completions", exchange -> {
@@ -631,10 +633,10 @@ class ChatClientFlavorTest {
     void inMemorySamplingOverrideSetsTemperatureTopPAndTopK() throws Exception {
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
-        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(java.util.Map.of(
-                ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.3d),
-                ChatClient.SamplingField.TOP_P, java.util.Optional.of(0.85d),
-                ChatClient.SamplingField.TOP_K, java.util.Optional.of(32d))));
+        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(Map.of(
+                ChatClient.SamplingField.TEMPERATURE, Optional.of(0.3d),
+                ChatClient.SamplingField.TOP_P, Optional.of(0.85d),
+                ChatClient.SamplingField.TOP_K, Optional.of(32d))));
 
         assertEquals(
                 "hello there",
@@ -656,8 +658,8 @@ class ChatClientFlavorTest {
         client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
         final var settings = ChatSettings.EMPTY
                 .withVariant("balanced")
-                .withSampling(ChatClient.SamplingOverride.of(
-                        java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.empty())));
+                .withSampling(
+                        ChatClient.SamplingOverride.of(Map.of(ChatClient.SamplingField.TEMPERATURE, Optional.empty())));
 
         assertEquals(
                 "hello there",
@@ -672,8 +674,8 @@ class ChatClientFlavorTest {
     void implicitVariantReflectsInlineSamplingOverrides() throws Exception {
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
-        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(
-                java.util.Map.of(ChatClient.SamplingField.TEMPERATURE, java.util.Optional.of(0.25d))));
+        final var settings = ChatSettings.EMPTY.withSampling(
+                ChatClient.SamplingOverride.of(Map.of(ChatClient.SamplingField.TEMPERATURE, Optional.of(0.25d))));
 
         final var implicit = client.implicitVariant(settings);
         // test-model has no implicit default; the explicit override surfaces through it
@@ -689,8 +691,8 @@ class ChatClientFlavorTest {
     void setModelClearsInMemorySamplingOverrides() throws Exception {
         client = new ChatClient(
                 configuration(), mapper, new ProviderManager(configuration(), mapper), Clock.systemUTC());
-        final var settings = ChatSettings.EMPTY.withSampling(ChatClient.SamplingOverride.of(
-                java.util.Map.of(ChatClient.SamplingField.TOP_K, java.util.Optional.of(16d))));
+        final var settings = ChatSettings.EMPTY.withSampling(
+                ChatClient.SamplingOverride.of(Map.of(ChatClient.SamplingField.TOP_K, Optional.of(16d))));
         assertNotNull(client.sampling(settings));
         assertNull(
                 client.sampling(settings.withModel("other-model")),

@@ -25,8 +25,10 @@ import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import org.junit.jupiter.api.Test;
 
 class SyntaxHighlighterTest {
@@ -410,8 +412,8 @@ class SyntaxHighlighterTest {
 
     @Test
     void highlightLinesIsThreadSafe() {
-        final var errors = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
-        final var threads = new java.util.ArrayList<Thread>();
+        final var errors = new ConcurrentLinkedQueue<Throwable>();
+        final var threads = new ArrayList<Thread>();
         for (var i = 0; i < 8; i++) {
             final var toggle = i % 2 == 0;
             threads.add(new Thread(() -> {

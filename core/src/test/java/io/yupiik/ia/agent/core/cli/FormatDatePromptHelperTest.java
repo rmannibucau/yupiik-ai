@@ -29,6 +29,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
@@ -37,8 +38,7 @@ class FormatDatePromptHelperTest {
 
     private static String render(final String template) {
         final var functions = new LinkedHashMap<
-                String,
-                java.util.function.Function<io.yupiik.fusion.framework.handlebars.helper.HelperContext, Object>>();
+                String, Function<io.yupiik.fusion.framework.handlebars.helper.HelperContext, Object>>();
         functions.put("formatDate", new FormatDatePromptHelper(Clock.systemDefaultZone())::apply);
         return new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(

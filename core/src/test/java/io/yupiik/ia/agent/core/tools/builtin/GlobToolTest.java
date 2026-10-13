@@ -57,6 +57,19 @@ class GlobToolTest {
         assertTrue(out.contains("results capped at 500"), out);
     }
 
+    @Test
+    void relativeBasePathResolvesAgainstSessionProjectDir(@TempDir final Path projectDir) throws IOException {
+        write(projectDir.resolve("src/Main.java"), "class Main {}\n");
+        write(projectDir.resolve("other/Ignored.java"), "ignored\n");
+        // relative "src" must be rooted on the session projectDir, not the JVM working directory
+        final var out = tool.execute(
+                        Map.of("pattern", "**/*.java", "path", "src"),
+                        io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir))
+                .output();
+        assertTrue(out.contains("Main.java"), out);
+        assertFalse(out.contains("Ignored.java"), out);
+    }
+
     private static void write(final Path file, final String content) throws IOException {
         Files.createDirectories(file.getParent());
         Files.writeString(file, content);

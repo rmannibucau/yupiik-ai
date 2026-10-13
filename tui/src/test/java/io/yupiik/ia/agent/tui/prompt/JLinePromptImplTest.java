@@ -36,6 +36,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
@@ -422,7 +423,7 @@ class JLinePromptImplTest {
                 (proxy, method, args) -> method.getName().equals("getTerminal") ? terminal : null);
     }
 
-    private LineReader reader(final java.util.function.Function<String, Object> onReadLine) {
+    private LineReader reader(final Function<String, Object> onReadLine) {
         return (LineReader) Proxy.newProxyInstance(
                 LineReader.class.getClassLoader(), new Class<?>[] {LineReader.class}, (proxy, method, args) -> {
                     if (method.getName().equals("readLine")) {

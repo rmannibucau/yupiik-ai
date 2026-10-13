@@ -45,6 +45,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.function.BooleanSupplier;
@@ -311,7 +312,7 @@ public class SubagentRunner {
                         return null;
                     }
                 })
-                .filter(java.util.Objects::nonNull)
+                .filter(Objects::nonNull)
                 .distinct()
                 .toList();
     }

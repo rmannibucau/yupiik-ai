@@ -67,10 +67,13 @@ import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
+import java.util.logging.Level;
 import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -322,7 +325,7 @@ class TuiCommandHeadlessTest {
 
     /** Awaits the first render cycle above {@code base}, bounded (no fixed sleeping). */
     private void awaitRenderCycle(final long base, final long timeoutMillis) throws InterruptedException {
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         while (renderCycles.get() == base) {
             if (System.nanoTime() > deadline) {
                 fail("no render cycle within " + timeoutMillis + "ms (heartbeat did not fire)");
@@ -447,7 +450,7 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitText(final String expected) throws InterruptedException {
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         var screen = backend.text();
         while (!screen.contains(expected)) {
             if (System.nanoTime() > deadline) {
@@ -461,7 +464,7 @@ class TuiCommandHeadlessTest {
     }
 
     private void awaitTextGone(final String expected) throws InterruptedException {
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         var screen = backend.text();
         while (screen.contains(expected)) {
             if (System.nanoTime() > deadline) {
@@ -635,10 +638,10 @@ class TuiCommandHeadlessTest {
                 container, deps, new TuiCommand.TuiConf("exit-session-a", "", KeyBindingPreset.STANDARD, true, "dark"));
 
         final var events = new CopyOnWriteArrayList<String>();
-        final var logger = java.util.logging.Logger.getLogger(TuiCommand.class.getName());
+        final var logger = Logger.getLogger(TuiCommand.class.getName());
         final var handler = new Handler() {
             {
-                setLevel(java.util.logging.Level.ALL);
+                setLevel(Level.ALL);
             }
 
             @Override
@@ -714,7 +717,7 @@ class TuiCommandHeadlessTest {
 
         // emitted after the TUI ran: run() already detached the inline root handler
         // (AutoLogConfigurer) and attached the content-view capture handlers
-        final var logger = java.util.logging.Logger.getLogger("io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph");
+        final var logger = Logger.getLogger("io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph");
         logger.info("captured info log");
         awaitText("captured info log");
         // inline log shape: [label][LEVEL][short logger] message on the same row

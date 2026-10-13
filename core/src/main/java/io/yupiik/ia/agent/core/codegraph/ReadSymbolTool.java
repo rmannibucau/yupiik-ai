@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.tools.builtin.ReadFileTool;
 import java.nio.file.Files;
@@ -79,6 +80,11 @@ public class ReadSymbolTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
         final var symbol = arg(args, "symbol");
         if (symbol == null || symbol.isBlank()) {
             return ToolResult.error("symbol is required");
@@ -87,8 +93,8 @@ public class ReadSymbolTool implements EmbeddedTool {
         if (codeGraph == null) {
             return ToolResult.error("Structural code graph is not available.");
         }
-        codeGraph.ensureRefreshedReady();
-        final var idx = codeGraph.queryIndex();
+        final var root = ctx == null ? null : ctx.projectDir();
+        final var idx = codeGraph.queryIndex(root);
         if (idx == null) {
             return ToolResult.error("Structural code graph is empty: index the project first.");
         }
@@ -100,8 +106,8 @@ public class ReadSymbolTool implements EmbeddedTool {
         if (resolved.file() == null || resolved.file().isBlank()) {
             return ToolResult.error("Symbol " + resolved.fqn() + " has no source file in the graph.");
         }
-        final var root = codeGraph.projectDir();
-        final var path = root == null ? Path.of(resolved.file()) : root.resolve(resolved.file());
+        final var base = codeGraph.projectDir(root);
+        final var path = base == null ? Path.of(resolved.file()) : base.resolve(resolved.file());
         if (!Files.isRegularFile(path)) {
             return ToolResult.error("Source file not found for " + resolved.fqn() + ": " + path);
         }

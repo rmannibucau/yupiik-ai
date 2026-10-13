@@ -229,7 +229,10 @@ class RunCommandTest {
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
                 .permissions(new PermissionsConfiguration(
-                        PermissionMode.ASK, List.of(), List.of(), new BashPermissionsConfiguration(List.of(), "")))
+                        PermissionMode.ASK,
+                        List.of(),
+                        List.of(),
+                        new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
         final var permissions = new PermissionService(configuration);
         permissions.setMode(AgentMode.BUILD);
@@ -268,7 +271,10 @@ class RunCommandTest {
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
                 .permissions(new PermissionsConfiguration(
-                        PermissionMode.ASK, List.of(), List.of(), new BashPermissionsConfiguration(List.of(), "")))
+                        PermissionMode.ASK,
+                        List.of(),
+                        List.of(),
+                        new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
         final var permissions = new PermissionService(configuration);
         // default mode, falls back to PLAN
@@ -338,7 +344,10 @@ class RunCommandTest {
                 .baseUrl("http://localhost:1/v1/chat/completions")
                 .storageHome(temp.toString())
                 .permissions(new PermissionsConfiguration(
-                        PermissionMode.ASK, List.of(), List.of(), new BashPermissionsConfiguration(List.of(), "")))
+                        PermissionMode.ASK,
+                        List.of(),
+                        List.of(),
+                        new BashPermissionsConfiguration(List.of(), "", 1024)))
                 .build();
         final var permissions = new PermissionService(configuration);
         final var reason = new AtomicReference<String>();

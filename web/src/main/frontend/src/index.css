@@ -1,0 +1,370 @@
+@import 'tailwindcss';
+
+/* Map the branded mono into Tailwind's font-mono utility so every `font-mono` in the app
+ * (tokens in/out, ids, tool cards, code) renders JetBrains Mono. */
+@theme {
+  --font-mono: var(--yca-font-mono);
+  --font-sans: var(--yca-font-sans);
+}
+
+@keyframes yca-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+:root {
+  /* brand typography: self-hosted Inter (300-700) + JetBrains Mono (400/500), same as the yupiik
+   * minisite so the web UI shares the product look (--font-sans / --font-mono in theme.css). */
+  --yca-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --yca-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* yupiik brand palette (mirrors minisite theme.css --brand-*): used for accents, the page-header
+   * underline and card hover rings so the web UI reads as part of the yupiik product family. */
+  --yca-brand-green: #46f72f;
+  --yca-brand-green-dark: #2ecf1c;
+  --yca-brand-purple: #d858ff;
+  --yca-brand-blue: #02abea;
+  --yca-brand-blue-dark: #056ebb;
+  --yca-radius: 14px;
+  --yca-radius-sm: 8px;
+  --yca-ring: var(--yca-brand-blue);
+  --yca-scrollbar: #333a47;
+  --yca-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --yca-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+
+  --yca-bg: #0f1115;
+  --yca-panel: #161a21;
+  --yca-panel-2: #1c212b;
+  --yca-border: #2a3040;
+  --yca-text: #e6e9ef;
+  --yca-muted: #9aa3b2;
+  --yca-primary: #fab283;
+  --yca-accent: #46f72f;
+  --yca-plan: #f0a020;
+  --yca-build: #fab283;
+  /* prose/code typography tokens (dark, default) */
+  --yca-heading: #f2f5f9;
+  --yca-code-bg: #232a36;
+  --yca-code-text: #fab283;
+  --yca-code-border: rgba(250, 178, 131, 0.28);
+  --yca-pre-bg: #0b0e13;
+  --yca-pre-text: #d7dee8;
+  --yca-blockquote-bg: rgba(255, 255, 255, 0.03);
+  --yca-blockquote-border: #fab283;
+  --yca-user-bg: rgba(250, 178, 131, 0.08);
+  /* heading titles in the assistant markdown output: a themed accent so "# title" sections read as
+   * real titles (brighter than plain --yca-heading text) + a short brand-colored rule underneath */
+  --yca-heading-accent: #fab283;
+  --yca-heading-rule: #fab283;
+}
+
+:root[data-theme='light'] {
+  --yca-brand-green: #1f7a12;
+  --yca-brand-green-dark: #2ecf1c;
+  --yca-brand-purple: #8a3bb8;
+  --yca-brand-blue: #02abea;
+  --yca-brand-blue-dark: #056ebb;
+  --yca-ring: var(--yca-brand-blue-dark);
+  --yca-scrollbar: var(--yca-border);
+  --yca-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --yca-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+
+  --yca-bg: #f7f8fa;
+  --yca-panel: #ffffff;
+  --yca-panel-2: #eef1f6;
+  --yca-border: #d8dee9;
+  --yca-text: #1c212b;
+  --yca-muted: #5a6474;
+  --yca-primary: #b36a1f;
+  --yca-accent: #1f7a12;
+  --yca-plan: #b36a1f;
+  --yca-build: #b36a1f;
+  /* prose/code typography tokens (light) */
+  --yca-heading: #1c212b;
+  --yca-code-bg: #fdf0e2;
+  --yca-code-text: #8a4d12;
+  --yca-code-border: rgba(179, 106, 31, 0.3);
+  --yca-pre-bg: #20242c;
+  --yca-pre-text: #e2e8f0;
+  --yca-blockquote-bg: #f6f3ee;
+  --yca-blockquote-border: #b36a1f;
+  --yca-user-bg: rgba(179, 106, 31, 0.07);
+  --yca-heading-accent: #b36a1f;
+  --yca-heading-rule: #02abea;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--yca-bg);
+  color: var(--yca-text);
+  font-family: var(--yca-font-sans);
+  font-size: 16px;
+  line-height: 1.75;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* markdown output in the transcript (Issue #10/#12): readable prose, first-class headings,
+ * distinct inline-code chips, tinted blockquotes and a separate pre/block background.
+ * The theme tokens (--yca-code-*, --yca-pre-*, --yca-blockquote-*, --yca-heading) switch with
+ * the light/dark theme so both stay readable - inspired by the yupiik minisite theme. */
+
+.aui-md {
+  font-family: var(--yca-font-sans);
+}
+
+.aui-md code {
+  font-family: var(--yca-font-mono);
+  font-size: 0.85em;
+}
+
+/* paragraphs: a little vertical air so consecutive paragraphs read as separate blocks */
+.aui-md p {
+  margin: 0.4em 0;
+  line-height: 1.7;
+}
+
+.aui-md ul,
+.aui-md ol {
+  margin: 0.35em 0;
+  padding-left: 1.5em;
+  list-style: disc;
+  line-height: 1.6;
+}
+.aui-md ol {
+  list-style: decimal;
+}
+.aui-md li {
+  margin: 0.15em 0;
+}
+
+/* headings: first-class hierarchy - bigger sizes, tighter letter-spacing, prominent themed
+ * tint + a short brand-colored rule under h1 so an assistant "# title" reads as a real section
+ * header. The tint (--yca-heading-accent) and rule (--yca-heading-rule) are per-theme tokens so
+ * both the dark and light surfaces stay readable - h1/h2 take the accent color, h3+ stay neutral
+ * to keep depth. */
+.aui-md h1,
+.aui-md h2,
+.aui-md h3,
+.aui-md h4,
+.aui-md h5,
+.aui-md h6 {
+  color: var(--yca-heading);
+  font-weight: 700;
+  letter-spacing: -0.025em;
+  line-height: 1.25;
+}
+.aui-md h1,
+.aui-md h2 {
+  color: var(--yca-heading-accent);
+}
+.aui-md h1 {
+  position: relative;
+  font-size: 1.5em;
+  margin: 1em 0 0.5em;
+  padding-bottom: 0.45em;
+}
+/* the branded accent bar under h1: a short rounded rule in the yupiik accent (like the page
+ * header underline) instead of a full-width neutral border, so a "# title" pops as a section. */
+.aui-md h1::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 48px;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--yca-heading-rule);
+}
+.aui-md h2 {
+  font-size: 1.3em;
+  margin: 0.9em 0 0.4em;
+  padding-bottom: 0.25em;
+}
+.aui-md h3 {
+  font-size: 1.15em;
+  margin: 0.8em 0 0.35em;
+}
+.aui-md h4 {
+  font-size: 1.05em;
+  margin: 0.7em 0 0.3em;
+}
+.aui-md h5,
+.aui-md h6 {
+  font-size: 1em;
+  margin: 0.6em 0 0.25em;
+}
+.aui-md h1:first-child,
+.aui-md h2:first-child {
+  margin-top: 0.2em;
+}
+
+.aui-md strong {
+  color: var(--yca-heading);
+  font-weight: 700;
+}
+
+/* inline code: a distinct tinted chip (colored text + subtle bg + border) rather than a flat
+ * panel-2 fill, so it stands apart from both the prose and the pre block. box-decoration-break
+ * clone keeps chips clean when a long span wraps across lines (minisite style). */
+.aui-md code {
+  background: var(--yca-code-bg);
+  color: var(--yca-code-text);
+  border: 1px solid var(--yca-code-border);
+  padding: 0.1em 0.4em;
+  border-radius: 5px;
+  font-size: 0.88em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* fenced/code blocks: a separately dark-themed pre/background distinct from the prose panel,
+ * with its own text color and a clear radius so it reads as a code surface. */
+.aui-md pre {
+  overflow-x: auto;
+  margin: 0.6em 0;
+  padding: 0.75em 1em;
+  border-radius: 8px;
+  background: var(--yca-pre-bg);
+  color: var(--yca-pre-text);
+  border: 1px solid var(--yca-border);
+  line-height: 1.55;
+}
+.aui-md pre code {
+  background: transparent;
+  color: inherit;
+  border: 0;
+  padding: 0;
+  font-size: 0.85em;
+  white-space: pre;
+  box-decoration-break: initial;
+  -webkit-box-decoration-break: initial;
+}
+
+/* blockquote: 3px accent left border + tinted background + rounded right edge (minisite style) */
+.aui-md blockquote {
+  margin: 0.5em 0;
+  border-left: 3px solid var(--yca-blockquote-border);
+  background: var(--yca-blockquote-bg);
+  padding: 0.4em 1em;
+  border-radius: 0 6px 6px 0;
+  color: var(--yca-muted);
+}
+.aui-md blockquote > :first-child {
+  margin-top: 0.2em;
+}
+.aui-md blockquote > :last-child {
+  margin-bottom: 0.2em;
+}
+
+.aui-md table {
+  border-collapse: collapse;
+  margin: 0.6em 0;
+  font-size: 0.92em;
+}
+.aui-md thead th {
+  background: var(--yca-panel-2);
+  text-align: left;
+}
+.aui-md th,
+.aui-md td {
+  border: 1px solid var(--yca-border);
+  padding: 0.3em 0.7em;
+  font-size: 0.95em;
+}
+
+.aui-md hr {
+  border: none;
+  border-top: 1px solid var(--yca-border);
+  margin: 0.9em 0;
+}
+
+.aui-md a {
+  color: var(--yca-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+  transition: color 0.15s ease;
+}
+.aui-md a:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* ============================================================================ */
+/* Yupiik shared UI helpers (Task: yupiik styling pass). Token-driven so they   */
+/* switch with the light/dark themes and give every page a consistent product   */
+/* look without per-component duplication (mirrors the minisite theme.css).     */
+/* ============================================================================ */
+
+/* Page header: big, tracked-tight title + a bottom rule. Applied via a shared component. */
+.yca-page-header {
+  padding-bottom: 18px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--yca-border);
+}
+.yca-page-header h1 {
+  margin: 0 0 6px;
+  font-size: clamp(1.6rem, 3vw, 2.1rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  color: var(--yca-heading);
+}
+
+/* Interactive card (sessions, tool lists): panel surface, radius, hover lift + ring border
+ * + shadow, matching minisite .card:hover. */
+.yca-card {
+  background: var(--yca-panel);
+  border: 1px solid var(--yca-border);
+  border-radius: var(--yca-radius);
+  box-shadow: var(--yca-shadow-sm);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.yca-card:hover {
+  border-color: color-mix(in srgb, var(--yca-ring) 60%, var(--yca-border));
+  box-shadow: var(--yca-shadow-md);
+  transform: translateY(-2px);
+}
+
+/* Branded scrollbars (theme.css ::-webkit-scrollbar) across the app surfaces. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--yca-scrollbar);
+  border-radius: 5px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--yca-muted);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Focus visibility ring (theme.css :focus-visible): a clear 3px brand ring so keyboard
+ * navigation is obvious against both themes. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--yca-ring);
+  outline-offset: 2px;
+  border-radius: var(--yca-radius-sm);
+}
+
+/* Brand-tinted text selection (theme.css ::selection). */
+::selection {
+  background: color-mix(in srgb, var(--yca-ring) 20%, var(--yca-panel));
+  color: var(--yca-heading);
+}

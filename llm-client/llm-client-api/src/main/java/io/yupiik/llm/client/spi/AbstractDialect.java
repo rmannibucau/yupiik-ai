@@ -275,7 +275,7 @@ public abstract class AbstractDialect implements Dialect {
      * @return the parsed value.
      * @throws LlmResponseParseException when the body is unparseable or carries an error envelope.
      */
-    protected <A> A parseResponse(final Class<A> type, final java.net.http.HttpResponse<String> response)
+    protected <A> A parseResponse(final Class<A> type, final HttpResponse<String> response)
             throws LlmResponseParseException {
         final var body = response.body();
         final var providerError = providerError(body);

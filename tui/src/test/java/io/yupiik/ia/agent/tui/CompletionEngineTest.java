@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
+import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;

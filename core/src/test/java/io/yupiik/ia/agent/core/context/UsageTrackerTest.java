@@ -33,6 +33,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -88,7 +89,7 @@ class UsageTrackerTest {
     void perModelContextWindowOverridesProviderAndDetection() {
         final var cfg = configuration(32000); // provider window
         // re-resolve with a per-model override the provider's own model name
-        final var entries = new java.util.HashMap<String, String>();
+        final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");
@@ -115,7 +116,7 @@ class UsageTrackerTest {
         // provider has no window -> detection via /v1/models (empty here) -> baseline; but the
         // per-model override pins it, and rememberShrinkOnOverflow must not persist the halved value
         final var cfg = configuration(-1);
-        final var entries = new java.util.HashMap<String, String>();
+        final var entries = new HashMap<String, String>();
         entries.put("yca.storageHome", storageHome.toString());
         entries.put("yca.provider.providers.length", "1");
         entries.put("yca.provider.providers.0.id", "default");

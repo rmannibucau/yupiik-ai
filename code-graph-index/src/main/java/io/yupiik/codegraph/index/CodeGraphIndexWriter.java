@@ -24,9 +24,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 /**
  * Writer for the {@link CodeGraphIndex} binary format (v1). Called once at indexation time; reads an {@link
@@ -155,8 +157,8 @@ public final class CodeGraphIndexWriter {
         final var outCount = new int[n];
         final var inCount = new int[n];
         final int[][] outEdge = new int[n][], inEdge = new int[n][];
-        java.util.Arrays.fill(outEdge, new int[0]);
-        java.util.Arrays.fill(inEdge, new int[0]);
+        Arrays.fill(outEdge, new int[0]);
+        Arrays.fill(inEdge, new int[0]);
         for (final var e : edges) {
             final Integer fromOrd = fqnOrdinal.get(nul(e.from()));
             final Integer toOrd = fqnOrdinal.get(nul(e.to()));
@@ -169,8 +171,8 @@ public final class CodeGraphIndexWriter {
         }
 
         final int[] outFirst = new int[n + 1];
-        final int[] outNodeArr = new int
-                [java.util.stream.IntStream.range(0, n).map(i -> outCount[i]).sum()];
+        final int[] outNodeArr =
+                new int[IntStream.range(0, n).map(i -> outCount[i]).sum()];
         final int[] outTypeArr = new int[outNodeArr.length];
         var outPos = 0;
         for (var i = 0; i < n; i++) {
@@ -186,8 +188,8 @@ public final class CodeGraphIndexWriter {
         outFirst[n] = outPos;
 
         final int[] inFirst = new int[n + 1];
-        final int[] inNodeArr = new int
-                [java.util.stream.IntStream.range(0, n).map(i -> inCount[i]).sum()];
+        final int[] inNodeArr =
+                new int[IntStream.range(0, n).map(i -> inCount[i]).sum()];
         final int[] inTypeArr = new int[inNodeArr.length];
         var inPos = 0;
         for (var i = 0; i < n; i++) {
@@ -225,7 +227,7 @@ public final class CodeGraphIndexWriter {
         int[] out = arr;
         final int need = (idx + 1) * 2;
         if (out.length < need) {
-            out = java.util.Arrays.copyOf(out, Math.max(need, out.length * 2));
+            out = Arrays.copyOf(out, Math.max(need, out.length * 2));
         }
         out[idx * 2] = a;
         out[idx * 2 + 1] = b;

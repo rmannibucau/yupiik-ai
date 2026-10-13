@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
@@ -34,12 +35,7 @@ class LlmWireTest {
         assertFalse(wire.extensions().containsKey(Message.IDENTITY_KEY), "identity must be stripped on the wire");
         // unrelated others keys are preserved
         final var withOther = new Message(
-                "user",
-                "x",
-                null,
-                null,
-                null,
-                java.util.Map.of("is_error", true, Message.IDENTITY_KEY, java.util.Map.of("provider", "p")));
+                "user", "x", null, null, null, Map.of("is_error", true, Message.IDENTITY_KEY, Map.of("provider", "p")));
         final var otherWire = LlmWire.toLlmMessage(withOther);
         assertFalse(otherWire.extensions().containsKey(Message.IDENTITY_KEY));
         assertFalse(otherWire.extensions().isEmpty());

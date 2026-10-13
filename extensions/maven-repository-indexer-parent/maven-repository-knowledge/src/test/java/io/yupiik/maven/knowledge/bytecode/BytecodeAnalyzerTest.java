@@ -19,9 +19,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.zip.ZipEntry;
@@ -40,24 +42,23 @@ class BytecodeAnalyzerTest {
     }
 
     private static void warmJavac(final javax.tools.JavaCompiler compiler) {
-        final var out = java.nio.file.Path.of("target", "javac-warmup");
+        final var out = Path.of("target", "javac-warmup");
         try {
-            java.nio.file.Files.createDirectories(out);
+            Files.createDirectories(out);
             final var unit =
                     new javax.tools.SimpleJavaFileObject(
-                            java.net.URI.create("string:///Warmup.java"), javax.tools.JavaFileObject.Kind.SOURCE) {
+                            URI.create("string:///Warmup.java"), javax.tools.JavaFileObject.Kind.SOURCE) {
                         @Override
                         public CharSequence getCharContent(final boolean ignoreEncodingErrors) {
                             return "public class Warmup { }";
                         }
                     };
-            final var task = compiler.getTask(
-                    null, null, null, java.util.List.of("-d", out.toString()), null, java.util.List.of(unit));
+            final var task = compiler.getTask(null, null, null, List.of("-d", out.toString()), null, List.of(unit));
             if (!task.call()) {
                 throw new IllegalStateException("javac warmup compilation failed");
             }
-        } catch (final java.io.IOException e) {
-            throw new java.io.UncheckedIOException(e);
+        } catch (final IOException e) {
+            throw new UncheckedIOException(e);
         }
     }
 
@@ -123,7 +124,7 @@ class BytecodeAnalyzerTest {
                                 + "public abstract class Service { public abstract String greet(String who); }",
                 "g.api.Marker", "package g.api; public @interface Marker {}"));
         final var models = new BytecodeAnalyzer().analyze(jar);
-        final var byName = new java.util.HashMap<String, ClassApi>();
+        final var byName = new HashMap<String, ClassApi>();
         for (final var api : models) {
             byName.put(api.className(), api);
         }

@@ -34,7 +34,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -175,7 +177,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 calls.add(promptOf(request).length());
@@ -209,7 +211,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 // always rejected as too large: halving must hit the floor and stop
@@ -227,7 +229,7 @@ class AdaptiveCompactionTest {
 
     @Test
     void nonSizeFailureNeverHalvesAndUsesRetriesThenTruncates() {
-        final var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        final var attempts = new AtomicInteger();
         final var cfg = config(
                 128_000,
                 Map.of(
@@ -237,7 +239,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();
@@ -256,13 +258,13 @@ class AdaptiveCompactionTest {
 
     @Test
     void singleCallSucceedsByDefaultOnALargeWindow() {
-        final var calls = new java.util.concurrent.atomic.AtomicInteger();
+        final var calls = new AtomicInteger();
         final var cfg = config(128_000, Map.of());
         final var chat = new ChatClient() {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 calls.incrementAndGet();
                 return new ChatResult(Message.assistant("digest: single", null), Usage.EMPTY);
@@ -277,7 +279,7 @@ class AdaptiveCompactionTest {
 
     @Test
     void noLoopOnPersistentSizeFailures() {
-        final var attempts = new java.util.concurrent.atomic.AtomicInteger();
+        final var attempts = new AtomicInteger();
         final var cfg = config(
                 128_000,
                 Map.of(
@@ -287,7 +289,7 @@ class AdaptiveCompactionTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled)
                     throws IOException {
                 attempts.incrementAndGet();

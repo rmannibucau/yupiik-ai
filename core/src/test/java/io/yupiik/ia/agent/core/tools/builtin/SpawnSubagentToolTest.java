@@ -40,6 +40,8 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -212,7 +214,7 @@ class SpawnSubagentToolTest {
         // model-driven cancel_subagent)
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var forwarded = new java.util.concurrent.atomic.AtomicReference<BooleanSupplier>();
+        final var forwarded = new AtomicReference<BooleanSupplier>();
         final var runner =
                 new SubagentRunner(
                         null,
@@ -245,7 +247,7 @@ class SpawnSubagentToolTest {
                                 state.id(), SubagentRegistry.SubagentResult.success("mock result", "conv", List.of()));
                     }
                 };
-        final var parentCancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final var parentCancelled = new AtomicBoolean(false);
         final var tool = new SpawnSubagentTool(reg, runner, noopStore(), noopSnapshotStore(), cfg);
         final var ctx =
                 new ToolContext("s1", null, null, null, null, noopTodoStore(), null, null, null, parentCancelled::get);
@@ -276,7 +278,7 @@ class SpawnSubagentToolTest {
     void forwardsExplicitModelToTheSubagentState() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var captured = new java.util.concurrent.atomic.AtomicReference<String>();
+        final var captured = new AtomicReference<String>();
         final var runner =
                 new SubagentRunner(
                         null,
@@ -320,7 +322,7 @@ class SpawnSubagentToolTest {
     void leavesModelNullWhenNotRequested() {
         final var cfg = config(Map.of());
         final var reg = registry(cfg);
-        final var captured = new java.util.concurrent.atomic.AtomicReference<String>();
+        final var captured = new AtomicReference<String>();
         final var runner =
                 new SubagentRunner(
                         null,

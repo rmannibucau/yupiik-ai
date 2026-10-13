@@ -678,22 +678,6 @@ public class CliCommand implements Runnable {
         }
     }
 
-    /**
-     * Reads a line for a non-REPL interaction. A Ctrl-C is treated as a
-     * cancellation (returns an empty optional) after notifying the interrupt
-     * handler.
-     */
-    private Optional<String> readLine(final String promptText) {
-        try {
-            return awaitLine(promptText);
-        } catch (final PromptInterruptException e) {
-            onInterrupt();
-            return Optional.empty();
-        } catch (final IOException e) {
-            return Optional.empty();
-        }
-    }
-
     private void runTurn(final String input) {
         if (queueing) {
             pendingPrompts.addFirst(input);
@@ -1013,16 +997,6 @@ public class CliCommand implements Runnable {
             println(MarkdownColorizer.status("bye"));
             requestQuit();
         }
-    }
-
-    private void printHelp() {
-        println(MarkdownColorizer.bold(symbols.toolMarker() + "yca cli - plain-terminal interactive session"));
-        println("  type a prompt to run the agent, or use a slash command:");
-        for (final var line : slashRegistry.helpMarkdown().split("\n", -1)) {
-            println(colorizer.colorizeLine(line));
-        }
-        println(
-                "  keys: Ctrl-C opens the interrupt menu (cancel the current turn / exit); pressed twice when idle it quits; Ctrl-D exits.");
     }
 
     private void installInterruptHandler() {

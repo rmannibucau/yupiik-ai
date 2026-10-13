@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.codegraph.index.CodeGraphIndex;
 import java.io.IOException;
 import java.util.List;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class ClassApiCodeGraphsTest {
@@ -59,8 +60,8 @@ class ClassApiCodeGraphsTest {
         assertTrue(idx.indexOfFqn("com.example.Foo") >= 0);
         assertTrue(idx.indexOfFqn("com.example.Foo.run") >= 0);
         final var foo = idx.indexOfFqn("com.example.Foo");
-        assertTrue(idx.neighbors(foo, java.util.Set.of(3), CodeGraphIndex.Direction.OUT).length >= 1); // IMPLEMENTS Bar
-        assertTrue(idx.neighbors(foo, java.util.Set.of(2), CodeGraphIndex.Direction.OUT).length >= 1); // EXTENDS Base
+        assertTrue(idx.neighbors(foo, Set.of(3), CodeGraphIndex.Direction.OUT).length >= 1); // IMPLEMENTS Bar
+        assertTrue(idx.neighbors(foo, Set.of(2), CodeGraphIndex.Direction.OUT).length >= 1); // EXTENDS Base
         assertTrue(idx.indexOfFqn("java.lang.Object") < 0); // external FQN is dropped, not a symbol
     }
 

@@ -20,6 +20,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -112,7 +113,7 @@ public final class SkillLocator {
      */
     public static List<SkillDescriptor> availableSkills(final CodingAgentConfiguration configuration) {
         final var out = new ArrayList<SkillDescriptor>();
-        final var seen = new java.util.HashSet<String>();
+        final var seen = new HashSet<String>();
         for (final var dir : skillDirectories(configuration)) {
             if (!Files.isDirectory(dir)) {
                 continue;

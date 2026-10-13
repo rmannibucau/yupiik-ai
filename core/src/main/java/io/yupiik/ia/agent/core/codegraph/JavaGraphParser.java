@@ -34,6 +34,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
@@ -156,7 +157,7 @@ public class JavaGraphParser implements GraphParser {
         private final SourcePositions positions;
         private final CompilationUnitTree unit;
         private final Map<String, String> importedTypes = new HashMap<>();
-        private final Deque<String> ownerStack = new java.util.ArrayDeque<>();
+        private final Deque<String> ownerStack = new ArrayDeque<>();
 
         private Collector(final CompilationUnitTree unit, final SourcePositions positions) {
             this.fileName = unit.getSourceFile().getName();

@@ -26,6 +26,7 @@ import io.yupiik.ia.agent.core.shell.slash.SlashAction;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommand;
 import io.yupiik.ia.agent.core.shell.slash.SlashCommandSet;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * TUI-contributed slash commands: the TUI-only theme switch and the TUI key
@@ -123,9 +124,8 @@ public class TuiSlashCommands implements SlashCommandSet {
         return (arg, env) -> {
             final var switcher = themeSwitcher;
             return switcher == null
-                    ? java.util.concurrent.CompletableFuture.completedStage(
-                            ShellOutcome.status("theme is not available yet"))
-                    : java.util.concurrent.CompletableFuture.completedStage(switcher.switchTheme(arg));
+                    ? CompletableFuture.completedStage(ShellOutcome.status("theme is not available yet"))
+                    : CompletableFuture.completedStage(switcher.switchTheme(arg));
         };
     }
 }

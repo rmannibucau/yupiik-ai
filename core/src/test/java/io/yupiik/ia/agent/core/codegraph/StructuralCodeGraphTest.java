@@ -29,13 +29,17 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.time.Clock;
+import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -44,7 +48,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 @ExtendWith(TestJsonMapper.class)
 class StructuralCodeGraphTest {
-    private static final long TIMEOUT_MS = java.time.Duration.ofSeconds(5).toMillis();
+    private static final long TIMEOUT_MS = Duration.ofSeconds(5).toMillis();
 
     @TempDir
     Path temp;
@@ -56,9 +60,9 @@ class StructuralCodeGraphTest {
         this.mapper = mapper;
     }
 
-    private final List<ChatClient> chatClients = new java.util.ArrayList<>();
-    private final List<StructuralCodeGraph> graphs = new java.util.ArrayList<>();
-    private final List<ScheduledExecutorService> schedulers = new java.util.ArrayList<>();
+    private final List<ChatClient> chatClients = new ArrayList<>();
+    private final List<StructuralCodeGraph> graphs = new ArrayList<>();
+    private final List<ScheduledExecutorService> schedulers = new ArrayList<>();
 
     @AfterEach
     void tearDown() {
@@ -118,6 +122,46 @@ class StructuralCodeGraphTest {
         final var client = new ChatClient(config, mapper, providerManager(config, mapper), Clock.systemUTC());
         chatClients.add(client);
         return client;
+    }
+
+    @Test
+    void queriesPerSessionRootIndependently() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), """
+                package demo;
+                public class Foo {
+                    public void a() {}
+                }
+                """);
+
+        // a second, independent project the web may point another session at
+        final var second = Files.createDirectory(temp.resolve("second"));
+        Files.writeString(second.resolve("Baz.java"), """
+                package other;
+                public class Baz {
+                    public void b() {}
+                }
+                """);
+
+        final var config = config(project, Map.of());
+        final var graph = newGraph(config, mapper);
+
+        // the default root serves its own graph
+        graph.ensureReady();
+        final var defaultIdx = graph.queryIndex();
+        assertTrue(defaultIdx != null && defaultIdx.resolve("demo.Foo") != null);
+        assertTrue(defaultIdx.resolve("other.Baz") == null, "default root must not know the second project");
+
+        // a per-session root resolves its own symbols lazily, independently of the default graph
+        final var secondIdx = graph.queryIndex(second);
+        assertTrue(secondIdx != null, "expected a lazily built per-root index");
+        assertTrue(secondIdx.resolve("other.Baz") != null, "second root should resolve its own symbol");
+        assertTrue(secondIdx.resolve("demo.Foo") == null, "second root must not contain the default project's symbol");
+
+        // path resolution must be root-aware
+        final var root = graph.projectDir(second);
+        assertEquals(second.toAbsolutePath().normalize(), root);
     }
 
     @Test
@@ -632,7 +676,7 @@ class StructuralCodeGraphTest {
         // the sidecar mtimes (snapshot taken while hashing, never after the whole build) ...
         final var newMtime =
                 Files.getLastModifiedTime(project.resolve("Foo.java")).toMillis() + 60_000;
-        Files.setLastModifiedTime(project.resolve("Foo.java"), java.nio.file.attribute.FileTime.fromMillis(newMtime));
+        Files.setLastModifiedTime(project.resolve("Foo.java"), FileTime.fromMillis(newMtime));
         final var reloaded = newGraph(config, mapper);
         reloaded.ensureReady();
         final var meta = Files.readString(project.resolve(".yca/generated/graph/index.meta"));
@@ -658,7 +702,7 @@ class StructuralCodeGraphTest {
 
     /** Deterministic LLM double: no network, scripted per prompt marker. */
     private static final class FakeChatClient extends ChatClient {
-        final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        final AtomicInteger calls = new AtomicInteger();
 
         @Override
         public ChatResult chat(final ChatCompletionRequest request) {

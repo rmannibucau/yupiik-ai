@@ -43,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -279,7 +280,7 @@ class MemoryExtractorTest {
         // so this only exercises the end-of-turn path.
         final var config = config(home);
         final var store = new MemoryStore(config);
-        final var calls = new java.util.concurrent.atomic.AtomicInteger();
+        final var calls = new AtomicInteger();
         final var chat = new ChatClient() {
             @Override
             public StructuredResult chatStructured(
@@ -400,7 +401,7 @@ class MemoryExtractorTest {
     void asyncExtractRunsImmediatelyButTheWatermarkDedups() throws Exception {
         final var config = config(home);
         final var store = new MemoryStore(config);
-        final var calls = new java.util.concurrent.atomic.AtomicInteger();
+        final var calls = new AtomicInteger();
         final var chat = new ChatClient() {
             @Override
             public StructuredResult chatStructured(

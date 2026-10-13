@@ -40,6 +40,8 @@ import java.net.URI;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -72,7 +74,7 @@ public class MavenKnowledgeTools {
         this.httpClient = httpClient;
         this.processes = processes;
         final var repo = KnowledgeConfig.defaults(
-                java.nio.file.Path.of(configuration.localRepository().replace("~", System.getProperty("user.home"))));
+                Path.of(configuration.localRepository().replace("~", System.getProperty("user.home"))));
         this.knowledgeConfig = new KnowledgeConfig(
                 repo.localRepository(),
                 Math.max(1, configuration.concurrency()),
@@ -200,17 +202,17 @@ public class MavenKnowledgeTools {
         if (!writer.alreadyIndexed(g)) {
             return "no knowledge indexed for " + g.coordinate();
         }
-        final java.nio.file.Path target;
+        final Path target;
         if (file == null || file.isBlank() || file.equals("index")) {
             target = writer.indexFile(g);
         } else {
             target = writer.sibling(g, file);
         }
-        if (!java.nio.file.Files.isRegularFile(target)) {
+        if (!Files.isRegularFile(target)) {
             return "no knowledge file " + g.coordinate() + " for '" + file + "'";
         }
         try {
-            return java.nio.file.Files.readString(target, StandardCharsets.UTF_8);
+            return Files.readString(target, StandardCharsets.UTF_8);
         } catch (final IOException e) {
             return "unable to read " + target + ": " + e.getMessage();
         }

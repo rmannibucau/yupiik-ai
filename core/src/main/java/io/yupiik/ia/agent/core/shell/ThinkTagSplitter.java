@@ -52,6 +52,12 @@ public class ThinkTagSplitter {
     private static final Pattern CLOSE_THINK = Pattern.compile("</think[ \\t]*>", Pattern.CASE_INSENSITIVE);
     private static final String BACKTICK_FENCE = "```";
     private static final String TILDE_FENCE = "~~~";
+    /** The think-close delimiter (case-insensitive), used by the THINKING hold tail. */
+    private static final String CLOSE_THINK_DELIMITER = "\u003c/think\u003e";
+    /** The think-open delimiter (case-insensitive); a tail proper prefix of it must be held. */
+    private static final String OPEN_THINK_DELIMITER = "<think>";
+    /** Delimiters that can open a construct from the NORMAL state; the hold tail scans for these. */
+    private static final String[] CHANNEL_DELIMITERS = {BACKTICK_FENCE, TILDE_FENCE, OPEN_THINK_DELIMITER};
     /** Bounded tail window: a delimiter can be at most 8 chars, keep a 7-char suffix. */
     private static final int WINDOW = 16;
 
@@ -229,32 +235,55 @@ public class ThinkTagSplitter {
 
         /**
          * Emits everything that can no longer take part in a delimiter: all but the
-         * first potential delimiter start found within the bounded suffix window.
+         * tail suffix that could still be a proper prefix of a delimiter.
          */
         private void hold(final Channel channel) {
             final var from =
                     switch (channel) {
-                        case VISIBLE -> holdFrom('<', '`', '~');
-                        case THINKING -> holdFrom('<');
-                        case FENCED -> holdFrom(fenceToken == null ? '`' : fenceToken.charAt(0));
+                        case VISIBLE -> holdTail(CHANNEL_DELIMITERS);
+                        case THINKING -> holdTail(CLOSE_THINK_DELIMITER);
+                        case FENCED -> holdTail(fenceToken == null ? BACKTICK_FENCE : fenceToken);
                     };
             if (from > 0) {
                 emit(channel, 0, from);
             }
         }
 
-        /** Index where the safe-to-emit prefix ends: the earliest viable delimiter start in the window. */
-        private int holdFrom(final char... starts) {
+        /**
+         * Index where the safe-to-emit prefix ends: only the bounded suffix of the carry can still be
+         * a partial delimiter (a delimiter can be split across stream chunks), and only when that
+         * suffix is a proper, case-insensitive prefix of a known delimiter. A delimiter character in
+         * the middle of text (an inline-code backtick followed by more text) can never grow into a
+         * fence or think tag, so it must stream immediately instead of being withheld.
+         */
+        private int holdTail(final String... delimiters) {
             final var window = Math.max(0, carry.length() - WINDOW);
             for (var i = window; i < carry.length(); i++) {
-                final var c = carry.charAt(i);
-                for (final var start : starts) {
-                    if (c == start) {
+                for (final var delimiter : delimiters) {
+                    if (isProperDelimiterPrefix(carry, i, delimiter)) {
                         return i;
                     }
                 }
             }
             return carry.length();
+        }
+
+        /**
+         * True when the carry suffix starting at {@code from} is a non-empty proper prefix of
+         * {@code delimiter}, compared case-insensitively (the think tags are matched case-insensitively).
+         */
+        private static boolean isProperDelimiterPrefix(
+                final StringBuilder carry, final int from, final String delimiter) {
+            final var tailLen = carry.length() - from;
+            if (tailLen <= 0 || tailLen >= delimiter.length()) {
+                return false;
+            }
+            for (var i = 0; i < tailLen; i++) {
+                if (Character.toLowerCase(carry.charAt(from + i)) != Character.toLowerCase(delimiter.charAt(i))) {
+                    return false;
+                }
+            }
+            return true;
         }
 
         private void emit(final Channel channel, final int from, final int to) {

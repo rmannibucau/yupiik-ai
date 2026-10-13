@@ -42,4 +42,16 @@ public record BashPermissionsConfiguration(
                         + " so the model only needs a compact, human-maintained summary. The rules"
                         + " remain the enforcement gate; this text only explains them to the model."
                         + " A blank value omits the sentence entirely.")
-        String readOnlyPromptHints) {}
+        String readOnlyPromptHints,
+
+        @Property(
+                defaultValue = "1024",
+                documentation =
+                        "Maximum number of compiled rule evaluations (configured rules merged with the session's"
+                                + " dynamic overrides) kept in the application-scoped registry cache. When a session"
+                                + " adds dynamic bash rules (per-session overrides cleared on switch back to plan and"
+                                + " when the session closes), each distinct override set compiles once and is cached"
+                                + " here; beyond this bound the whole combined cache is cleared and rebuilt on demand,"
+                                + " so the memory footprint of dynamic overrides stays bounded. The configured rules"
+                                + " themselves are compiled once for the app lifecycle and are not counted in this bound.")
+        int maxCombined) {}

@@ -19,9 +19,10 @@ import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 class McpEmbeddedTool implements EmbeddedTool {
-    private static final java.util.regex.Pattern UNSAFE_NAME = java.util.regex.Pattern.compile("[^A-Za-z0-9_-]");
+    private static final Pattern UNSAFE_NAME = Pattern.compile("[^A-Za-z0-9_-]");
 
     private final McpManager manager;
     private final String serverName;

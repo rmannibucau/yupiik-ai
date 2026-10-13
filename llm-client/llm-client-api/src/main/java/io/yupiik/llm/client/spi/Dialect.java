@@ -19,6 +19,7 @@ import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
+import java.net.http.HttpResponse;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.function.BooleanSupplier;
@@ -98,5 +99,5 @@ public interface Dialect {
      * @param request the neutral completion request.
      * @return the verbatim HTTP response.
      */
-    CompletionStage<java.net.http.HttpResponse<byte[]>> postRaw(LlmRequest request);
+    CompletionStage<HttpResponse<byte[]>> postRaw(LlmRequest request);
 }

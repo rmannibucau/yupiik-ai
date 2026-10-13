@@ -19,9 +19,11 @@ import io.yupiik.ia.agent.core.events.YcaEvent;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.lang.reflect.Modifier;
+import java.net.JarURLConnection;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
@@ -71,7 +73,7 @@ public class EventsDocumentationGenerator implements Runnable {
         final var result = new ArrayList<YcaEvent>();
         final var loader = YcaEvent.class.getClassLoader();
         try {
-            for (final var url : java.util.Collections.list(loader.getResources(RESOURCE))) {
+            for (final var url : Collections.list(loader.getResources(RESOURCE))) {
                 if ("file".equals(url.getProtocol())) {
                     final var dir = Path.of(url.toURI());
                     if (Files.isDirectory(dir)) {
@@ -95,7 +97,7 @@ public class EventsDocumentationGenerator implements Runnable {
                 } else if ("jar".equals(url.getProtocol())) {
                     // a packaged core jar: enumerate the package entries, not just a directory
                     final var jar = url.openConnection();
-                    if (jar instanceof java.net.JarURLConnection juc) {
+                    if (jar instanceof JarURLConnection juc) {
                         try (final var entries = juc.getJarFile().stream()) {
                             entries.filter(e -> !e.isDirectory()
                                             && e.getName().startsWith(RESOURCE + '/')

@@ -62,6 +62,7 @@ import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import io.yupiik.llm.client.model.Usage;
 import java.io.IOException;
+import java.io.StringReader;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -71,20 +72,25 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 public class AgentLoop {
     private static final Logger LOGGER = Logger.getLogger(AgentLoop.class.getName());
@@ -110,6 +116,14 @@ public class AgentLoop {
                     + " Stop re-reading: use the information you already collected, batch any remaining"
                     + " independent reads or searches into a single reply, and if you are stuck state"
                     + " exactly what information is still missing instead of probing the same targets.";
+
+    /** One-shot nudge sent when the doom-loop guard refused a repeated state-changing/bash call. */
+    static final String DOOM_LOOP_NUDGE_PROMPT =
+            "You just repeated the same bash/state-changing call with the same arguments, and it returned"
+                    + " the same already-known result again. Do not re-issue it: it adds no information."
+                    + " Change approach - use a different command or tool, narrow or widen the query, or"
+                    + " proceed from what you already collected. If you are stuck, state exactly what is"
+                    + " still missing instead of retrying the same call.";
 
     /** Nudge sent to the model after a truncated reply so it resumes instead of restarting. */
     private static final String TRUNCATION_CONTINUE_PROMPT =
@@ -201,6 +215,14 @@ public class AgentLoop {
      * the run argument. Event helpers tag with this value.
      */
     private volatile String currentSessionId;
+    /**
+     * The session's resolved working/project directory, set once by
+     * {@code SessionRuntimeFactory}. Null means the process default
+     * ({@code configuration.resolveProjectDir()}). Injected into every per-turn
+     * {@link ToolContext} so file-rooted tools resolve paths against the session's
+     * root. A mid-session change rebuilds the runtime rather than mutating this field.
+     */
+    private volatile java.nio.file.Path sessionWorkdir;
     /** Set when the loop/session is closed so {@link #close()} fires the SessionEnded hook only once. */
     private volatile boolean closed;
     /** Effective agent of the current turn (set at {@code doRun} start), used for identity capture. */
@@ -219,10 +241,9 @@ public class AgentLoop {
      */
     private volatile Consumer<PauseEvent> pauseListener;
     /** Per-tool-call cancellation handles, keyed by the tool-call ordinal (the TUI card #N). */
-    private final java.util.concurrent.ConcurrentHashMap<Long, AtomicBoolean> runningToolCancels =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, AtomicBoolean> runningToolCancels = new ConcurrentHashMap<>();
     /** Next ordinal handed to a started tool call, shared with ConversationTranscript's numbering. */
-    private final java.util.concurrent.atomic.AtomicLong toolCallOrdinal = new java.util.concurrent.atomic.AtomicLong();
+    private final AtomicLong toolCallOrdinal = new AtomicLong();
 
     /**
      * Immutable snapshot of the last request this loop handed to the provider: what the
@@ -290,7 +311,7 @@ public class AgentLoop {
      * and remembers the last output per signature for the no-progress termination. Created fresh
      * per turn, mutated on the loop thread only.
      */
-    private ToolRepeats repeats = new ToolRepeats();
+    private ToolRepeats repeats = new ToolRepeats(0);
 
     /** Consecutive tool rounds with no new information (reset on any informative round), see P2. */
     private int noProgressRounds;
@@ -301,13 +322,16 @@ public class AgentLoop {
      * keeps re-reading the same files/results with novel-but-redundant calls can be stopped instead
      * of burning the iteration window (see the plateauRounds cascade).
      */
-    private final java.util.Set<String> seenFiles = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> seenFiles = ConcurrentHashMap.newKeySet();
 
     /** Consecutive read-only rounds re-covering only already-seen files (reset on any informative round or write). */
     private int plateauRounds;
 
     /** Whether the plateau nudge (plateauFeedback nudge_1/nudge_2) was already injected this turn. */
     private boolean plateauNudged;
+
+    /** Whether the one-shot doom-loop nudge (DOOM_LOOP_NUDGE_PROMPT) was already injected this turn. */
+    private boolean doomLoopNudged;
 
     public AgentLoop(
             final ChatClient chatClient,
@@ -725,11 +749,13 @@ public class AgentLoop {
                 : agentProvider.byName(agentName);
         structuralCodeGraph.ensureReadyAsync();
         // fresh per-turn loop-guard state: repeat counts must not leak across turns
-        repeats = new ToolRepeats();
+        // (the threshold cascade is resolved here, once per turn, like the plateau guards)
+        repeats = new ToolRepeats(resolvedRepeatSuccessThreshold(resolvedModel()));
         noProgressRounds = 0;
         seenFiles.clear();
         plateauRounds = 0;
         plateauNudged = false;
+        doomLoopNudged = false;
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
                 + snapshotBlock(sessionId)));
@@ -841,11 +867,8 @@ public class AgentLoop {
      * question or writing a todo always touches the state of the tab that
      * started the turn, never another concurrent session's.
      */
-    private ToolContext toolContext(final BooleanSupplier cancelled) {
-        return toolContext(cancelled, cancelled);
-    }
-
-    private ToolContext toolContext(final BooleanSupplier cancelled, final BooleanSupplier callCancelled) {
+    private ToolContext toolContext(
+            final BooleanSupplier cancelled, final BooleanSupplier callCancelled, final long ordinal) {
         return new ToolContext(
                 currentSessionId,
                 subagentId,
@@ -858,7 +881,20 @@ public class AgentLoop {
                 contextView,
                 cancelled,
                 chatSettings,
-                callCancelled);
+                callCancelled,
+                sessionWorkdir,
+                ordinal);
+    }
+
+    /**
+     * The session's resolved working/project directory, frozen once when the session runtime is
+     * created. Null means "use the process default ({@code configuration.resolveProjectDir()})".
+     * It is injected into every per-turn {@link ToolContext} so file-rooted tools resolve paths
+     * against the session's root. Set once by {@code SessionRuntimeFactory}; a mid-session change
+     * (web {@code session.setProject}) rebuilds the runtime rather than mutating this field.
+     */
+    public void sessionWorkdir(final java.nio.file.Path dir) {
+        this.sessionWorkdir = dir;
     }
 
     // Event helpers that include the session and subagent info
@@ -912,12 +948,9 @@ public class AgentLoop {
     }
 
     /** Builds a ToolFinished event; the ordinal registration was already cleaned up at execution end. */
-    private AgentEvent.ToolFinished toolFinished(final String name, final String output, final boolean success) {
-        return new AgentEvent.ToolFinished(name, output, success, currentSessionId, subagentId, subagentName);
-    }
-
-    private AgentEvent.ToolStream toolStream(final String name, final String fragment) {
-        return new AgentEvent.ToolStream(name, fragment, currentSessionId, subagentId, subagentName);
+    private AgentEvent.ToolFinished toolFinished(
+            final String name, final String output, final boolean success, final long ordinal) {
+        return new AgentEvent.ToolFinished(name, output, success, ordinal, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.UsageUpdated usageUpdated(
@@ -941,10 +974,6 @@ public class AgentLoop {
 
     private AgentEvent.Compacted compacted(final String kind, final String mode) {
         return new AgentEvent.Compacted(kind, mode, currentSessionId, subagentId, subagentName);
-    }
-
-    private AgentEvent.Compacted compacted(final String kind) {
-        return new AgentEvent.Compacted(kind, "SUMMARY", currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.Status status(final String message) {
@@ -1305,7 +1334,8 @@ public class AgentLoop {
                     break;
                 }
                 final var roundInformative = new boolean[] {false};
-                final var roundCoverage = new java.util.HashSet<String>();
+                final var roundRefused = new boolean[] {false};
+                final var roundCoverage = new HashSet<String>();
                 executeToolCalls(
                         sessionId,
                         messages,
@@ -1315,8 +1345,19 @@ public class AgentLoop {
                         toolsTokens,
                         cancelled,
                         roundInformative,
+                        roundRefused,
                         roundCoverage);
                 toolsRanThisTurn = true;
+                // a doom-loop refusal is surfaced to the model as ONE strategy-change nudge (never as a
+                // failed tool result): after the refused round completes, inject it and let the model adapt.
+                if (roundRefused[0] && !doomLoopNudged) {
+                    doomLoopNudged = true;
+                    emit(notice(
+                            AgentEvent.Notice.Level.INFO,
+                            "doom-loop refusal sent to the model: a repeated state-changing/bash call was withheld."));
+                    messages.add(Message.user(DOOM_LOOP_NUDGE_PROMPT));
+                    continue windowLoop;
+                }
                 // a tool round is progress too: a later empty/truncated reply starts its retry budget fresh
                 emptyCompletionRetries = 0;
                 truncationContinues = 0;
@@ -1649,7 +1690,7 @@ public class AgentLoop {
                 AgentEvent.Notice.Level.INFO,
                 "Context " + directive.action()
                         + " requested by the model applied ("
-                        + result.mode().name().toLowerCase(java.util.Locale.ROOT)
+                        + result.mode().name().toLowerCase(Locale.ROOT)
                         + ")."));
         usageTracker.clearAnchor(); // the anchor predates the reduction: fall back to estimates until the next call
     }
@@ -1688,7 +1729,7 @@ public class AgentLoop {
                     model = current.model();
                 }
             }
-            final var identity = new java.util.LinkedHashMap<String, Object>();
+            final var identity = new LinkedHashMap<String, Object>();
             if (provider != null && !provider.isBlank()) {
                 identity.put("provider", provider);
             }
@@ -1702,7 +1743,7 @@ public class AgentLoop {
             if (identity.isEmpty()) {
                 return null;
             }
-            return java.util.Map.of(Message.IDENTITY_KEY, identity);
+            return Map.of(Message.IDENTITY_KEY, identity);
         } catch (final RuntimeException e) {
             // identity capture is best-effort: a provider manager without real wiring
             // (unit tests, bootstrapping) must never break a turn
@@ -1776,7 +1817,7 @@ public class AgentLoop {
             return "";
         }
         try {
-            final var json = mapper.read(Map.class, new java.io.StringReader(arguments));
+            final var json = mapper.read(Map.class, new StringReader(arguments));
             final var sorted = new TreeMap<String, Object>();
             if (json != null) {
                 json.forEach((k, v) -> sorted.put(String.valueOf(k), v));
@@ -1907,8 +1948,8 @@ public class AgentLoop {
             return null;
         }
         try {
-            final var json = mapper.read(
-                    Map.class, new java.io.StringReader(call.function().arguments()));
+            final var json =
+                    mapper.read(Map.class, new StringReader(call.function().arguments()));
             final var path = json == null ? null : json.get("path");
             return path == null ? null : String.valueOf(path);
         } catch (final RuntimeException e) {
@@ -2154,7 +2195,7 @@ public class AgentLoop {
      * {@link #WRITE_MARKER}). Writes and first-time files/results reset the plateau counter in the
      * caller because such rounds fall in the {@code else} branch.
      */
-    private static boolean isPlateauRound(final java.util.Set<String> roundCoverage) {
+    private static boolean isPlateauRound(final Set<String> roundCoverage) {
         for (final var key : roundCoverage) {
             if (!key.startsWith(REDUNDANT_MARKER)) {
                 return false;
@@ -2237,6 +2278,18 @@ public class AgentLoop {
                 ? null
                 : providerManager.plateauFeedback(resolved.provider(), resolved.model());
         return override == null ? configuration.llm().plateauFeedback() : override;
+    }
+
+    /**
+     * Doom-loop success threshold cascade: per-model behavior.repeatSuccessThreshold > per-provider
+     * tuning.repeatSuccessThreshold > the global yca.tools.repeatSuccessThreshold default (3).
+     * 0 at the global level disables the guard entirely.
+     */
+    private int resolvedRepeatSuccessThreshold(final ProviderManager.ResolvedModel resolved) {
+        final var override = resolved == null || providerManager == null
+                ? 0
+                : providerManager.repeatSuccessThreshold(resolved.provider(), resolved.model());
+        return override > 0 ? override : configuration.tools().repeatSuccessThreshold();
     }
 
     /**
@@ -2371,7 +2424,21 @@ public class AgentLoop {
             List<String> paths,
             long durationMs,
             boolean informative,
-            List<String> coverage) {
+            List<String> coverage,
+            boolean refused) {
+
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist,
+                final List<String> paths,
+                final long durationMs,
+                final boolean informative,
+                final List<String> coverage) {
+            this(callId, name, output, success, persist, paths, durationMs, informative, coverage, false);
+        }
 
         ToolOutcome(
                 final String callId,
@@ -2431,7 +2498,8 @@ public class AgentLoop {
             final int toolsTokens,
             final BooleanSupplier cancelled,
             final boolean[] roundInformative,
-            final java.util.Set<String> roundCoverage)
+            final boolean[] roundRefused,
+            final Set<String> roundCoverage)
             throws InterruptedException {
         var i = 0;
         while (i < calls.size()) {
@@ -2451,20 +2519,24 @@ public class AgentLoop {
                     // happen: bridges tolerate that, results order is still enforced below
                     final var batchStartNanos = precisionDurationMarker.now();
                     final var futures = new ArrayList<Future<ToolOutcome>>(end - i);
+                    // all calls in a parallel batch are read-only (isParallelizable), which the doom-loop
+                    // guard never refuses (reads are owned by the plateau guard): no repeat check here.
                     for (var j = i; j < end; j++) {
                         final var call = calls.get(j);
-                        // doom-loop check happens in call order, before the worker starts
-                        final var repeated = repeats.rejectIfRepeated(call, this::normalizedArguments);
-                        if (repeated != null) {
-                            emit(toolFinished(repeated.name(), repeated.output(), false));
-                            futures.add(executor.submit(() -> repeated));
-                        } else {
-                            futures.add(executor.submit(() -> runTool(call, cancelled)));
-                        }
+                        // register on the loop thread (workers must not touch ToolRepeats maps):
+                        // every executed read call gets a callId -> signature mapping for record().
+                        repeats.register(call, this::normalizedArguments);
+                        futures.add(executor.submit(() -> runTool(call, cancelled)));
                     }
                     for (final var future : futures) {
                         appendToolResult(
-                                sessionId, messages, awaitTool(future), staleReads, roundInformative, roundCoverage);
+                                sessionId,
+                                messages,
+                                awaitTool(future),
+                                staleReads,
+                                roundInformative,
+                                roundRefused,
+                                roundCoverage);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
                     final var batchWallMs = (precisionDurationMarker.now() - batchStartNanos) / 1_000_000;
@@ -2477,6 +2549,7 @@ public class AgentLoop {
                                 runGuarded(calls.get(j), repeats, cancelled),
                                 staleReads,
                                 roundInformative,
+                                roundRefused,
                                 roundCoverage);
                         checkRoundBudget(sessionId, messages, toolsTokens);
                     }
@@ -2489,6 +2562,7 @@ public class AgentLoop {
                         runGuarded(calls.get(i), repeats, cancelled),
                         staleReads,
                         roundInformative,
+                        roundRefused,
                         roundCoverage);
                 checkRoundBudget(sessionId, messages, toolsTokens);
                 i++;
@@ -2498,9 +2572,17 @@ public class AgentLoop {
     }
 
     private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats, final BooleanSupplier cancelled) {
+        // register the callId -> signature mapping on the loop thread (before any dispatch) so record()
+        // can match the result back for reads too, feeding the per-signature no-progress decision.
+        repeats.register(call, this::normalizedArguments);
+        // the doom-loop guard targets state-changing/bash calls only: read-only rounds are owned by
+        // the exploration-plateau guard (semantic re-coverage), so a read is never signature-refused here.
+        if (isReadOnly(call)) {
+            return runTool(call, cancelled);
+        }
         final var repeated = repeats.rejectIfRepeated(call, this::normalizedArguments);
         if (repeated != null) {
-            emit(toolFinished(repeated.name(), repeated.output(), false));
+            emit(toolFinished(repeated.name(), repeated.output(), false, -1));
             return repeated;
         }
         return runTool(call, cancelled);
@@ -2649,40 +2731,87 @@ public class AgentLoop {
     }
 
     /**
-     * Doom-loop breaker: counts executions of the same tool with the same normalized arguments across
-     * the whole turn. The third identical call is refused with guidance instead of burning another
-     * model round-trip on the exact same output (mirrors opencode's doom-loop detection). Arguments are
-     * normalized (JSON keys sorted) so cosmetic spelling variants do not bypass the guard, and the
-     * count is per signature (not merely consecutive): {@code read A, read B, read A, read A} refuses
-     * the third occurrence of {@code read A}. Read-only calls below the threshold are never refused:
-     * legitimate polling/exploration stays legal.
+     * Doom-loop breaker: refuses repeated identical tool calls that keep returning the SAME (already-known)
+     * successful result, instead of burning another model round-trip on duplicate information. Each signature
+     * (tool name + normalized arguments) tracks its own CONSECUTIVE success streak. The FIRST occurrence of a
+     * signature is reserved (it only primes comparison state, never counts), so the configured threshold T means
+     * "T identical-successful-output calls in a row, refuse the next one". A call counts toward the streak only
+     * when it succeeded AND its output carried no new information (identical output, ignoring embedded ISO-8601
+     * timestamps). A failing call (legitimate retry) or a same-signature call returning fresh content
+     * (polling/progress) resets the streak to zero. A refused call never runs and never resets the streak, so the
+     * diagnostic stays stable ("called T times") instead of escalating. Arguments are normalized (JSON keys
+     * sorted) so cosmetic spelling variants do not bypass the guard.
      */
     private static final class ToolRepeats {
-        private static final int THRESHOLD = 3;
+        /** ISO-8601 dates/times, clock times and build-tool durations; deliberately no bare digit runs. */
+        private static final Pattern DATE_LIKE = Pattern.compile(
+                // ISO-8601 date, optionally with time and zone (2026-10-13T18:00:00+02:00)
+                "\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d{1,9})?)?(?:Z|[+-]\\d{2}:?\\d{2})?)?"
+                        // standalone clock (18:00, 18:00:00, 18:00:00.123) - log prefixes and timestamps
+                        + "|\\b\\d{1,2}:\\d{2}(?::\\d{2}(?:\\.\\d{1,9})?)?\\b"
+                        // build-tool durations: "in 5s", "Total time: 1.234 s", "0.5ms", "[1.2s]"
+                        + "|\\b\\d{1,4}(?:\\.\\d{1,3})?\\s*(?:ms|s)\\b");
 
-        /** Signature (name + normalized args) -> number of occurrences seen this turn. */
-        private final Map<String, Integer> counts = new HashMap<>();
+        /** Success streak length that triggers a refusal; {@code <= 0} disables the guard entirely. */
+        private final int threshold;
+
         /** callId -> signature key of the call, so a result can be matched back to its call args. */
         private final Map<String, String> callKeyByCallId = new HashMap<>();
-        /** Signature -> last output seen this turn (for same-call-same-result detection). */
-        private final Map<String, String> lastOutputs = new HashMap<>();
+        /** Signature -> per-signature repeat state (last normalized output + consecutive success streak). */
+        private final Map<String, State> states = new HashMap<>();
+        /** Turn-level tombstone of already-seen normalized outputs (across all signatures/tools). */
+        private final Set<String> seenOutputs = new HashSet<>();
+
+        private static final class State {
+            String lastOutput; // normalized output, null until the first occurrence is primed
+            int streak;
+            boolean seen;
+        }
+
+        ToolRepeats(final int threshold) {
+            this.threshold = threshold;
+        }
+
+        /** Replaces embedded ISO-8601 dates/times so two otherwise-identical outputs compare equal. */
+        static String normalizeForComparison(final String raw) {
+            if (raw == null || raw.isEmpty()) {
+                return "";
+            }
+            return DATE_LIKE.matcher(raw).replaceAll("\u0000");
+        }
 
         /**
-         * Records one tool result {@code output} for the call {@code callId} and reports whether it
-         * brought new information: {@code false} when the same signature already produced
-         * byte-identical output this turn. The no-progress counting itself is done by the loop
-         * (one decision per round, aggregating all results of a round).
+         * Atomically records one executed tool result and updates its signature state. Returns whether the
+         * result carried NEW information for the round ({@code false} when its normalized output was already
+         * produced earlier this turn by any tool - the turn-level tombstone). Per-signature: the success streak
+         * used by the doom-loop refusal is bumped for a repeated identical-output success and reset on failure
+         * or fresh content; the first successful occurrence seeds it (T means T). Only reached for executed
+         * calls: refused/never-run calls skip it so the streak stays stable across refusals.
          */
-        synchronized boolean isNovelResult(final String callId, final String name, final String output) {
-            final var key = callKeyByCallId.get(callId);
+        boolean record(final String callId, final boolean success, final String output) {
+            final var key = callKeyByCallId.remove(callId);
             if (key == null) {
                 return true; // never saw the call: always informative
             }
-            final var previous = lastOutputs.get(key);
-            final var value = output == null ? "" : output;
-            final var novel = previous == null || !previous.equals(value);
-            lastOutputs.put(key, value);
-            return novel;
+            final var value = normalizeForComparison(output);
+            final var state = states.computeIfAbsent(key, k -> new State());
+            // per-signature novelty drives the doom-loop success streak (refusal); turn-wide novelty
+            // (tombstone across all tools/signatures) drives the no-progress/plateau "informative" signal.
+            final boolean signatureNovel = state.seen && !value.equals(state.lastOutput);
+            state.lastOutput = value;
+            if (!state.seen) {
+                // first occurrence: prime the baseline. A success counts as the first identical-output
+                // success in the streak (T means T), a first failure only primes and never starts one.
+                state.streak = success ? 1 : 0;
+            } else if (success && !signatureNovel) {
+                state.streak++;
+            } else {
+                state.streak = 0;
+            }
+            state.seen = true;
+            // tombstone: an output already produced this turn by ANY prior call is not (turn-wise) novel.
+            final var turnNovel = seenOutputs.add(value);
+            return turnNovel;
         }
 
         /** The normalized arguments are computed by the owning loop (JSON key sorting lives there). */
@@ -2690,33 +2819,58 @@ public class AgentLoop {
             return rejectIfRepeated(call, null);
         }
 
-        ToolOutcome rejectIfRepeated(
-                final ToolCall call, final java.util.function.Function<String, String> normalizer) {
+        /**
+         * Registers the callId -> signature-key mapping for {@code record()} to match the result back.
+         * Called for EVERY executed call (read and non-read alike) so the per-signature output/streak
+         * tracking in {@link #record(String, boolean, String)} works for reads too (it feeds the
+         * no-progress decision). Idempotent: the key is deterministic for a given call.
+         */
+        void register(final ToolCall call, final Function<String, String> normalizer) {
+            final var fn = call.function();
+            if (fn == null) {
+                return;
+            }
+            final var name = fn.name() == null ? "" : fn.name();
+            final var args = fn.arguments() == null ? "{}" : fn.arguments();
+            callKeyByCallId.put(call.id(), name + '\n' + (normalizer == null ? args : normalizer.apply(args)));
+        }
+
+        ToolOutcome rejectIfRepeated(final ToolCall call, final Function<String, String> normalizer) {
+            if (threshold <= 0) {
+                return null; // guard disabled
+            }
+            register(call, normalizer); // ensure the callId mapping exists for the streak lookup
             final var fn = call.function();
             final var name = fn == null || fn.name() == null ? "" : fn.name();
-            final var args = fn == null || fn.arguments() == null ? "{}" : fn.arguments();
-            final var normalized = normalizer == null ? args : normalizer.apply(args);
-            final var key = name + '\n' + normalized;
-            final var count = counts.merge(key, 1, Integer::sum);
-            callKeyByCallId.put(call.id(), key);
-            if (count < THRESHOLD) {
+            final var key = callKeyByCallId.get(call.id());
+            final var state = states.get(key);
+            if (state == null || state.streak < threshold) {
                 return null;
             }
-            final var diagnostic = "Tool " + name + " was called " + count + " times with the same arguments: "
-                    + "repeating it adds no information. Change strategy - narrow or widen the query, "
-                    + "use another tool, or answer from what you already collected.";
-            return new ToolOutcome(call.id(), name, diagnostic, false, false, List.of(), 0L, false);
+            // a refused call never runs, so record() is never called for it and would leave its
+            // callId -> key mapping behind: drop it here to keep ToolRepeats bounded within the turn.
+            callKeyByCallId.remove(call.id());
+            final var diagnostic = "Tool " + name + " was called " + threshold
+                    + " times in a row with the same arguments, each time returning the same already-known result."
+                    + " Repeating it adds no information. Change strategy - narrow or widen the query,"
+                    + " use a different command, or answer from what you already collected.";
+            return new ToolOutcome(call.id(), name, diagnostic, false, false, List.of(), 0L, false, List.of(), true);
         }
     }
 
-    /** A call can join a parallel run only if its tool is known and cannot mutate state. */
-    private boolean isParallelizable(final ToolCall call) {
+    /** Whether a call targets a read-only tool (never state-changing). Reads are owned by the plateau guard. */
+    private boolean isReadOnly(final ToolCall call) {
         if (toolRegistry == null) {
             return false;
         }
         final var fn = call.function();
         final EmbeddedTool tool = toolRegistry.tool(fn == null || fn.name() == null ? "" : fn.name());
         return tool != null && (tool.readonly() || tool.category() == ToolCategory.READ);
+    }
+
+    /** A call can join a parallel run only if its tool is known and cannot mutate state. */
+    private boolean isParallelizable(final ToolCall call) {
+        return isReadOnly(call);
     }
 
     private boolean parallelReadonlyEnabled() {
@@ -2756,7 +2910,7 @@ public class AgentLoop {
         if (tool == null) {
             final var diagnostic = "Unknown tool: " + name;
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, unknownToolDiagnostic(name), false));
+            emit(toolFinished(name, unknownToolDiagnostic(name), false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         final Map<String, Object> args;
@@ -2766,26 +2920,26 @@ public class AgentLoop {
         } catch (final RuntimeException e) {
             final var diagnostic = "Invalid tool arguments JSON: " + argsJson;
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, diagnostic, false));
+            emit(toolFinished(name, diagnostic, false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         emit(toolStarted(name, argsJson, ordinal));
         final var gateDenial = gateTool(name, tool, args, call.id());
         if (gateDenial != null) {
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, gateDenial, false));
+            emit(toolFinished(name, gateDenial, false, ordinal));
             return new ToolOutcome(call.id(), name, gateDenial, false, false);
         }
         final var toolStartNanos = precisionDurationMarker.now();
         final ToolResult result;
         try {
-            result = toolExecutionService.execute(tool, args, toolContext(cancelled, callCancel::get));
+            result = toolExecutionService.execute(tool, args, toolContext(cancelled, callCancel::get, ordinal));
         } finally {
             unregisterRunningTool(ordinal);
             // the turn keeps running after a per-call cancel: only the tool result is marked
         }
         final var toolDurationMs = (precisionDurationMarker.now() - toolStartNanos) / 1_000_000;
-        emit(toolFinished(name, result.output(), result.success()));
+        emit(toolFinished(name, result.output(), result.success(), ordinal));
         return new ToolOutcome(
                 call.id(),
                 name,
@@ -2900,7 +3054,17 @@ public class AgentLoop {
             final ToolOutcome outcome,
             final StaleReads staleReads,
             final boolean[] roundInformative,
-            final java.util.Set<String> roundCoverage) {
+            final boolean[] roundRefused,
+            final Set<String> roundCoverage) {
+        // a refused doom-loop call is NOT delivered as a failed tool result (that shape reads as "the
+        // tool errored, retry it" and feeds the very loop we are stopping): it only nudges the model at
+        // the round boundary and surfaces a UI event. So skip the conversation/session mutation entirely.
+        if (outcome.refused()) {
+            if (roundRefused != null) {
+                roundRefused[0] = true;
+            }
+            return;
+        }
         final var raw = outcome.output() == null || outcome.output().isBlank() ? "(no output)" : outcome.output();
         // Stale-read invalidation rides INSIDE this tool result (new content this round, so the
         // provider prefix cache is untouched — no extra message is injected mid-conversation).
@@ -2910,12 +3074,18 @@ public class AgentLoop {
         messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
         // a round is informative when at least one result is new (same call, different output) or
         // a write succeeded: used by the no-progress termination (P2). Refused doom-loop calls are
-        // explicitly non-informative (their diagnostic output would otherwise look "new").
-        if (outcome.informative() && outcome.success() && FILE_WRITE_TOOLS.contains(outcome.name())) {
-            roundInformative[0] = true;
-        } else if (roundInformative != null && !roundInformative[0]) {
-            roundInformative[0] =
-                    outcome.informative() && repeats.isNovelResult(outcome.callId(), outcome.name(), output);
+        // explicitly non-informative (their diagnostic output would otherwise look "new"), and never
+        // reach the repeat-streak tracking so the refusal stays stable.
+        if (outcome.informative()) {
+            // novelty is computed ONCE by the atomic record() and drives both the round-informative
+            // decision and the doom-loop success streak update (a non-novel success bumps the streak,
+            // failure or fresh content resets it). Only executed calls land here, hence on the loop thread.
+            final var novel = repeats.record(outcome.callId(), outcome.success(), output);
+            if (outcome.success() && FILE_WRITE_TOOLS.contains(outcome.name())) {
+                roundInformative[0] = true;
+            } else if (roundInformative != null && !roundInformative[0]) {
+                roundInformative[0] = novel;
+            }
         }
         // exploration-plateau tracking: successful read-only calls contribute their coverage keys
         // (already-seen files flagged as such); a write is a hard reset signal for the round.

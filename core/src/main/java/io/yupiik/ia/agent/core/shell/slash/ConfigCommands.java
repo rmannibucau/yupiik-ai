@@ -42,6 +42,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.function.Consumer;
 
 /**
  * Configuration commands shared by every shell: mode, model, provider, agent,
@@ -583,7 +584,7 @@ public class ConfigCommands implements SlashCommandSet {
             final ShellEnv env,
             final String arg,
             final String label,
-            final java.util.function.Consumer<Boolean> setter,
+            final Consumer<Boolean> setter,
             final boolean current) {
         final var parsed = parseShowHide(arg);
         if (parsed == null) {

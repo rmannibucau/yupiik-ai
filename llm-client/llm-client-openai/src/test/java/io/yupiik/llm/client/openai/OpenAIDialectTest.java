@@ -37,8 +37,12 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -85,10 +89,10 @@ class OpenAIDialectTest {
     }
 
     private static LlmRequest request(final boolean stream) {
-        return request(stream, java.util.Map.of());
+        return request(stream, Map.of());
     }
 
-    private static LlmRequest request(final boolean stream, final java.util.Map<String, Object> extensions) {
+    private static LlmRequest request(final boolean stream, final Map<String, Object> extensions) {
         return new LlmRequest(
                 "m",
                 List.of(LlmMessage.system("be concise"), LlmMessage.user("hi")),
@@ -206,8 +210,8 @@ class OpenAIDialectTest {
                 new ProviderSpec(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions",
                         "sk-test",
-                        java.time.Duration.ofSeconds(5),
-                        java.util.Map.of(),
+                        Duration.ofSeconds(5),
+                        Map.of(),
                         builder -> builder.setHeader("authorization", "Bearer tok-abc")));
         // the customizer is applied on each request (chat POST here)
         dialect.chat(request(false)).toCompletableFuture().get(5, TimeUnit.SECONDS);
@@ -445,15 +449,13 @@ class OpenAIDialectTest {
                 client,
                 ProviderSpec.of(
                         "http://localhost:" + server.getAddress().getPort() + "/v1/chat/completions", "sk-test"));
-        dialect.stream(request(true, java.util.Map.of("includeUsage", false)), () -> false)
+        dialect.stream(request(true, Map.of("includeUsage", false)), () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(!reqBody.get().contains("stream_options"), "disabled by includeUsage=false: " + reqBody.get());
         assertTrue(!reqBody.get().contains("includeUsage"), "control key must not leak: " + reqBody.get());
 
-        dialect.stream(
-                        request(true, java.util.Map.of("stream_options", java.util.Map.of("include_usage", false))),
-                        () -> false)
+        dialect.stream(request(true, Map.of("stream_options", Map.of("include_usage", false))), () -> false)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(
@@ -523,11 +525,11 @@ class OpenAIDialectTest {
                 () -> "expected the provider error body to surface but got: " + failure.getMessage());
     }
 
-    private static Optional<Throwable> failureOf(final java.util.concurrent.CompletableFuture<LlmResponse> future) {
+    private static Optional<Throwable> failureOf(final CompletableFuture<LlmResponse> future) {
         try {
             future.join();
             return Optional.empty();
-        } catch (final java.util.concurrent.CompletionException e) {
+        } catch (final CompletionException e) {
             return Optional.of(e.getCause());
         }
     }
@@ -578,7 +580,7 @@ class OpenAIDialectTest {
                 "low",
                 false,
                 false,
-                java.util.Map.of());
+                Map.of());
         dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
         // 'summary' is what makes official OpenAI stream reasoning deltas at all
         assertTrue(reqBody.get().contains("\"summary\":\"auto\""), reqBody.get());

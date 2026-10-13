@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 
 class FilesystemSearchOutputProcessorTest {
@@ -29,7 +30,7 @@ class FilesystemSearchOutputProcessorTest {
             new FilesystemSearchOutputProcessor(TestConfigs.codingAgent(Map.of("yca.optimize.maxEntries", "20")));
 
     private List<String> run(final String command, final String... lines) {
-        return processor.process(command, java.util.stream.Stream.of(lines)).toList();
+        return processor.process(command, Stream.of(lines)).toList();
     }
 
     @Test

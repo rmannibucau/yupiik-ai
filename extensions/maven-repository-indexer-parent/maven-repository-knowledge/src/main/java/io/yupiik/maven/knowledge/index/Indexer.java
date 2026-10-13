@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -104,7 +105,7 @@ public class Indexer {
      */
     public IndexResult.Results index(
             final List<Gav> gavs, final Consumer<IndexResult> onResult, final IntConsumer beforeBatch) {
-        final var results = new java.util.concurrent.CopyOnWriteArrayList<IndexResult>();
+        final var results = new CopyOnWriteArrayList<IndexResult>();
         final var toProcess = new ArrayList<Gav>();
         for (final var gav : gavs) {
             final var skip = shouldSkip(gav);

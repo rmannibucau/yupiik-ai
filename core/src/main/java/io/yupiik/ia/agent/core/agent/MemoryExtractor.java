@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +37,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.regex.Pattern;
 
 /**
  * Extracts durable facts (user preferences, project decisions, long-lived
@@ -415,7 +417,7 @@ public class MemoryExtractor {
                 worthy.add(m);
             }
         }
-        java.util.Collections.reverse(worthy);
+        Collections.reverse(worthy);
         if (worthy.isEmpty()) {
             return "";
         }
@@ -557,7 +559,7 @@ public class MemoryExtractor {
             return Map.of();
         }
         final var facts = new ArrayList<Map<String, String>>();
-        final var matcher = java.util.regex.Pattern.compile(
+        final var matcher = Pattern.compile(
                         "\\{\\s*\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*,\\s*\"scope\"\\s*:\\s*\"([^\"]*)\"\\s*}")
                 .matcher(content);
         while (matcher.find()) {

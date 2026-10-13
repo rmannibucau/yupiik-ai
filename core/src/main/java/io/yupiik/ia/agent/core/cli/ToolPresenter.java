@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.cli;
 
 import io.yupiik.fusion.json.JsonMapper;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -198,7 +199,7 @@ public final class ToolPresenter {
         try {
             final var parsed = mapper.fromString(Object.class, argsJson);
             if (parsed instanceof Map<?, ?> map) {
-                final var out = new java.util.LinkedHashMap<String, Object>();
+                final var out = new LinkedHashMap<String, Object>();
                 map.forEach((k, v) -> out.put(String.valueOf(k), v));
                 return out;
             }

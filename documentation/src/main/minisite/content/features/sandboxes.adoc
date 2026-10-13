@@ -1,0 +1,236 @@
+= External sandboxing (nono, AgentFS)
+:minisite-breadcrumb: Home[index.html] > Features > External sandboxing (nono, AgentFS)
+:minisite-nav-prev-link: permissions.html
+:minisite-nav-prev-label: Permission modes
+:minisite-nav-next-link: ui.html
+:minisite-nav-next-label: Interactive UI and headless mode
+:minisite-keywords: sandbox, nono, agentfs, isolation, landlock, seatbelt, copy-on-write
+
+IMPORTANT: In every command below, `yca` is a shorthand for whichever entry point
+you run: the Java fatjar (`java -jar yca-bin-...-fatjar.jar ...`) or the optional
+native binary. Replace it with your actual command — for example
+`java -jar yca-bin-1.0.0-fatjar.jar tui` — or, if `yca` is already on your `PATH`
+(native binary), run it as shown. The sandbox wrapper (`nono`/`agentfs`) does not
+care how yca is launched; it wraps the process either way.
+
+yca's own xref:permissions.adoc[permission modes] are a *consent* gate: they decide
+whether the model is allowed to ask for a tool call. They are not an isolation
+boundary — approve a `bash` command in `yolo` and that process runs with your real
+user privileges against your real filesystem, `~/.ssh`, and the real network.
+
+When you need kernel-level enforcement — least privilege *even after* an approval —
+wrap the whole yca process in an external sandbox. Two complementary tools cover
+different halves of the problem:
+
+* *nono* is a security boundary: a CLI that runs any command in an OS-enforced
+  sandbox (Landlock on Linux, Seatbelt on macOS, a ptrace fallback on WSL2),
+  with path-level allow/deny, automatic credential blocking, network control and
+  rollback.
+* *AgentFS* is a state and audit layer: a SQLite-backed copy-on-write filesystem.
+  `agentfs run` wraps a command so every write lands in a delta database and the
+  host tree is never modified, with `diff` and `timeline` to review before
+  applying.
+
+They complement (not replace) yca's permission modes: keep `ask`/`auto_edit` for
+consent and use one of these for isolation. They also complement each other —
+nono answers "how do I run this safely?", AgentFS answers "what happened and what
+is the state?".
+
+== Two isolation models at a glance
+
+[cols="1,2,2,2", opts=headers]
+|===
+| |yca permission modes |nono |AgentFS
+|Layer |application consent |kernel (Landlock/Seatbelt) |filesystem COW (FUSE/NFS)
+|Protects against |model acting without approval |any process touching denied paths/credentials |host filesystem mutation
+|Scope |tool call |whole process tree |write path
+|Isolation mechanism |allow/deny string matching |irreversible kernel policy at exec |copy-on-write overlay onto a SQLite delta
+|Reverses writes |no |opt-in (`--rollback`) |yes (`diff` before materializing)
+|Audits actions |transcript/session |audit trail |`timeline`
+|===
+
+Decide which fits your threat model:
+
+|===
+|If you need ... |use ...
+|Path-level allow/deny, credential blocking, network control around yca |nono
+|To review every change before it touches your repo, and revert at will |AgentFS
+|Both isolation *and* reversibility (expert, defense in depth) |nono + AgentFS
+|===
+
+WARNING: Running nono and AgentFS together is genuine defense-in-depth, but it
+stacks two kernel/FUSE enforcement layers and the add-ed friction. Prefer one as
+the primary boundary; combine only when you have a concrete reason.
+
+== Sandboxing yca with nono
+
+nono ships prebuilt profiles for Claude Code, Codex, OpenCode and OpenClaw, but
+has no yca profile in its registry. Sync yca with raw capability flags — or fork
+one of the built-in profiles into a custom one for repeatable runs.
+
+Install:
+
+[source,bash]
+----
+curl -fsSL https://nono.sh/install.sh | sh
+----
+
+Grant yca the working directory for read/write and `/tmp/yca` as its scratch
+space. nono still blocks `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`, `~/.docker`,
+shell rc files, `~/.npmrc` and `~/.git-credentials` by default, even though the
+parent directory is allowed:
+
+[source,bash]
+----
+# interactive TUI, contained: cwd + /tmp/yca, network blocked
+nono run --allow . --allow /tmp/yca --block-net -- yca tui
+
+# headless single shot with the same containment
+nono run --allow . --allow /tmp/yca --block-net -- yca run --prompt "explain the pom.xml"
+
+# detached + rollback for unattended longer work
+nono run --detached --rollback --allow . --allow /tmp/yca -- yca tui
+----
+
+* `--allow .` grants the working directory read+write (add `--allow /tmp/yca` for
+  yca's scratch dir). nono extends the granted dir to full access; read-only
+  grants come from a profile's `workdir` config.
+* `--block-net` drops outbound network — see <<_enabling_and_disabling_security_features>>
+  for the trade-off with yca's LLM endpoint.
+* `--detached`/`--rollback` run yca under a live supervisor session with attach/
+  detach control and filesystem rollback if the result goes wrong:
+
+[source,bash]
+----
+nono ps
+nono attach <session-id>
+nono stop <session-id>
+----
+
+NOTE: yca has no client/server split, so there is no `--standalone` equivalent to
+worry about — the whole agent runs in the sandboxed process tree, unlike OpenCode 2
+which needs `--standalone` for full containment.
+
+== Sandboxing yca with AgentFS
+
+`agentfs run` runs yca inside a copy-on-write sandbox: reads are scoped to the
+working tree, writes land in the delta database, and the real filesystem is never
+modified.
+
+Install:
+
+[source,bash]
+----
+curl -fsSL https://github.com/tursodatabase/agentfs/releases/latest/download/agentfs-installer.sh | sh
+----
+
+Start a named session covering the working directory and `/tmp/yca`:
+
+[source,bash]
+----
+# COW sandbox; yca's edits land in the delta DB, not the host
+agentfs run --session doc-fixes --allow /tmp/yca -- yca tui
+----
+
+Join the same session from another shell to inspect, or review what changed:
+
+[source,bash]
+----
+agentfs run --session doc-fixes bash
+agentfs diff doc-fixes
+agentfs timeline doc-fixes
+----
+
+The durable review workflow stays standard git: once yca finishes, ask it to branch,
+commit and push, then review the diff and create the PR manually.
+
+IMPORTANT: AgentFS does not block `~/.ssh`, `~/.aws` and friends by default the way
+nono does. Its isolation is copy-on-write of the *base tree* plus `--allow` grants;
+grant the least you need and rely on yca's own `yca.permissions.deny` for
+credential paths. Use `--no-default-allows` (Linux) to drop the default allowed dirs
+(which include `/tmp` on macOS) when you want a stricter baseline.
+
+== AgentFS over MCP (optional)
+
+Beyond wrapping the whole process, AgentFS can expose its filesystem as a local MCP
+server. This is an *additional* POSIX view of the delta DB — use it when you want
+yca to inspect or touch the sandboxed files through MCP tools rather than the
+process wrapper:
+
+[source,bash]
+----
+agentfs serve mcp doc-fixes
+----
+
+Wire it into yca's tool registry like any stdio server
+(xref:mcp.adoc[MCP support]):
+
+[source,json]
+----
+{
+  "mcps": {
+    "servers": [
+      {
+        "name": "agentfs",
+        "command": "agentfs",
+        "args": ["serve", "mcp", "doc-fixes"]
+      }
+    ]
+  }
+}
+----
+
+which exposes `agentfs_read_file`, `agentfs_write_file`, `agentfs_readdir`,
+`agentfs_mkdir`, `agentfs_remove`, `agentfs_rename`, `agentfs_stat`,
+`agentfs_access` and the `agentfs_kv_*` tools, controllable through the standard
+read-only MCP per-server list.
+
+NOTE: The MCP path is a *separate* window into the delta DB, not the way AgentFS
+isolates the process. Prefer `agentfs run` as the primary sandbox; use `serve mcp`
+only when you specifically want to drive the sandboxed files through tools.
+
+== Enabling and disabling security features
+
+[cols="3,3,3,3", opts=headers]
+|===
+|Goal |nono |AgentFS |yca side
+|Restrict to working dir only |`--allow .` |overlay cwd by default |`yca.permissions.bash.rules` read-only families
+|Add the yca scratch dir |`--allow /tmp/yca` |`--allow /tmp/yca` |yca writes scratch to `/tmp/yca`
+|Block outbound network |`--block-net` |n/a (no network control) |endpoint reachability is a prerequisite
+|Network domain allow-list |`--allow-domain https://<endpoint>` |n/a |LLM endpoint must be reachable
+|Block credential paths by default |automatic |no — scope reads via the base tree |`yca.permissions.deny`
+|Disable default allows |default profile is minimal |`--no-default-allows` |—
+|Ask before each tool call |keep `ask` on the yca side |keep `ask` |`/permissions ask` / `auto_edit` / `yolo`
+|Extra kernel enforcement |nono's own |`--experimental-sandbox` (ptrace, Linux) |—
+|Detached + rollback |`nono run --detached --rollback` |no rollback; `diff`/`timeline` review |sessions JSONL
+|Auditing |nono audit trail |`agentfs timeline` |yca transcript/sessions
+|===
+
+IMPORTANT: strict network blocking (`--block-net`, or an Allow-list that does not
+include your model endpoint) stops yca from reaching the LLM provider. Two options:
+allow-list the exact endpoint, or keep network open and rely on nono's credential
+injection so keys never enter the sandbox. Plan this before you wrap, or the run
+fails at the first model call.
+
+TIP: When running under nono, keep yca's permission mode at `ask` (at most
+`auto_edit`). The point of combining them is *consent then isolation* — nono
+enforces the boundary while yca still asks before each tool.
+
+== Platform and stability notes
+
+* Both tools are **Linux-first**; nono supports macOS (Seatbelt) with partial WSL2
+  coverage, AgentFS is Linux and macOS with FUSE/NFS mounts.
+* Both move fast — nono's registry/packs and AgentFS's "beta" status mean releases
+  churn. The samples above use long-lived core flags; re-validate profile and pack
+  names before trusting them.
+* yca must be able to write its session, transcript and memory inside the granted
+  dirs for sessions to resume inside a sandbox — point config at `/tmp/yca` or
+  grant the real config path read/write.
+
+== See also
+
+* xref:permissions.adoc[Permission modes] — yca's consent gate, the layer these
+  tools complement.
+* xref:modes.adoc[Plan and build modes] — the orthogonal read-only/build axis.
+* xref:mcp.adoc[MCP support] — wiring `agentfs serve mcp` into the tool registry.
+* xref:../configuration.adoc[Configuration] — `yca.permissions.*` and `mcps` keys.

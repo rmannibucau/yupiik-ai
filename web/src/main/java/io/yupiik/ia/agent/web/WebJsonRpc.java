@@ -1,0 +1,812 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.web;
+
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.build.api.jsonrpc.JsonRpc;
+import io.yupiik.fusion.framework.build.api.jsonrpc.JsonRpcParam;
+import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
+import io.yupiik.ia.agent.core.configuration.AgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.mcp.McpManager;
+import io.yupiik.ia.agent.core.session.AgentSessionService;
+import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
+import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
+import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
+import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+
+/**
+ * JSON-RPC surface of the web UI: thin delegation to the shared core services,
+ * exactly the operations the browser pages need. Method names are grouped by
+ * resource ({@code sessions.*}, {@code session.*}, {@code tools.*}, ...).
+ */
+@ApplicationScoped
+public class WebJsonRpc {
+    private final SessionStore sessionStore;
+    private final AgentSessionService agentSessionService;
+    private final WebSessionManager sessions;
+    private final StructuralCodeGraph codeGraph;
+    private final McpManager mcpManager;
+    private final CodingAgentConfiguration configuration;
+    private final SlashRegistry slashRegistry;
+    private final ChatClient chatClient;
+    private final ProviderManager providerManager;
+    private final CompletionEngine completionEngine;
+
+    public WebJsonRpc(
+            final SessionStore sessionStore,
+            final AgentSessionService agentSessionService,
+            final WebSessionManager sessions,
+            final StructuralCodeGraph codeGraph,
+            final McpManager mcpManager,
+            final CodingAgentConfiguration configuration,
+            final SlashRegistry slashRegistry,
+            final ChatClient chatClient,
+            final ProviderManager providerManager,
+            final AgentProvider agentProvider) {
+        this.sessionStore = sessionStore;
+        this.agentSessionService = agentSessionService;
+        this.sessions = sessions;
+        this.codeGraph = codeGraph;
+        this.mcpManager = mcpManager;
+        this.configuration = configuration;
+        this.slashRegistry = slashRegistry;
+        this.chatClient = chatClient;
+        this.providerManager = providerManager;
+        this.completionEngine = new CompletionEngine(slashRegistry, new ArgCompletion.Env() {
+            @Override
+            public List<String> models() {
+                return modelsOf(chatClient);
+            }
+
+            @Override
+            public List<String> providers() {
+                return providersOf(providerManager);
+            }
+
+            @Override
+            public List<String> agents() {
+                return agentsOf(agentProvider);
+            }
+
+            @Override
+            public List<String> sessions() {
+                return sessionsOf(sessionStore);
+            }
+
+            @Override
+            public List<String> tools() {
+                return toolsOf(mcpManager);
+            }
+
+            @Override
+            public List<String> servers() {
+                return serversOf(mcpManager);
+            }
+
+            @Override
+            public List<String> variants(final String model) {
+                return variantsOf(chatClient, model);
+            }
+
+            @Override
+            public List<String> variants() {
+                return variantsOf(chatClient, chatClient == null ? null : chatClient.model());
+            }
+
+            @Override
+            public List<String> paths(final String token) {
+                return CompletionEngine.pathCandidates(token);
+            }
+        });
+    }
+
+    @JsonRpc(
+            value = "sessions.list",
+            documentation = "Lists the persisted sessions with id, title, modifiedAt and size.")
+    public List<SessionSummary> listSessions(
+            @JsonRpcParam(documentation = "Optional case-insensitive filter on title or id.") final String query,
+            @JsonRpcParam(
+                            documentation =
+                                    "When set and non-blank, keeps only sessions whose recorded project matches; blank/absent returns every session "
+                                            + "(the home page passes an empty string to list all and group by working directory itself).")
+                    final String project) {
+        final var needle = query == null ? "" : query.toLowerCase(Locale.ROOT);
+        final var projectScope = project == null || project.isBlank() ? "" : project;
+        return sessionStore.list().stream()
+                .map(info -> new SessionSummary(
+                        info.id(), title(info.id()), info.modifiedAt(), info.sizeBytes(), projectOf(info.id())))
+                .filter(s -> projectScope.isEmpty()
+                        || s.project() == null
+                        || s.project().isBlank()
+                        || sameProject(s.project(), projectScope))
+                .filter(s -> needle.isEmpty()
+                        || s.title() != null
+                                && s.title().toLowerCase(Locale.ROOT).contains(needle)
+                        || s.id().toLowerCase(Locale.ROOT).contains(needle))
+                .toList();
+    }
+
+    @JsonRpc(value = "sessions.create", documentation = "Creates a new empty session and returns its id.")
+    public Map<String, String> createSession() {
+        return Map.of("id", sessionStore.create());
+    }
+
+    @JsonRpc(value = "sessions.currentProject", documentation = "Returns the current working/project directory.")
+    public Map<String, String> currentProject() {
+        return Map.of("project", currentProjectDir() == null ? "" : currentProjectDir());
+    }
+
+    @JsonRpc(value = "sessions.get", documentation = "Returns the full message list of a session.")
+    public List<io.yupiik.ia.agent.core.llm.Message> getSession(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return sessionStore.load(id);
+    }
+
+    @JsonRpc(value = "sessions.delete", documentation = "Deletes a session.")
+    public Map<String, Boolean> deleteSession(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        sessions.detach(id);
+        sessionStore.delete(id);
+        return Map.of("deleted", true);
+    }
+
+    @JsonRpc(
+            value = "session.prompt",
+            documentation = "Submits a prompt to the agent for a session; the turn runs asynchronously.")
+    public Map<String, Boolean> submitPrompt(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "The prompt to send.") final String prompt,
+            @JsonRpcParam(documentation = "Optional custom agent name (yca.agents).") final String agent) {
+        sessions.attach(id);
+        // record the working directory on this session so the home page can group it by project
+        final var dir = currentProjectDir();
+        if (dir != null) {
+            sessionStore.markProject(id, dir);
+        }
+        sessions.submit(id, prompt, blankToNull(agent));
+        return Map.of("submitted", true);
+    }
+
+    @JsonRpc(
+            value = "session.resume",
+            documentation = "Resumes the last turn of a session (no new prompt); runs asynchronously.")
+    public Map<String, Boolean> resumeSession(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        sessions.attach(id);
+        sessions.resume(id);
+        return Map.of("submitted", true);
+    }
+
+    @JsonRpc(value = "session.cancel", documentation = "Cancels the running turn of a session.")
+    public Map<String, Boolean> cancelSession(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        sessions.cancel(id);
+        return Map.of("cancelled", true);
+    }
+
+    @JsonRpc(
+            value = "session.slash",
+            documentation = "Dispatches a slash command (e.g. /model, /permissions yolo, /mode build) without"
+                    + " starting a turn; interactive commands open a picker modal the browser answers. Blocks"
+                    + " until the command settled so the caller can immediately read the resulting state."
+                    + " Returns true when the command was dispatched.")
+    public Map<String, Boolean> dispatchSlash(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "The full slash command line, e.g. '/mode build'.")
+                    final String text) {
+        sessions.attach(id);
+        final var ok = sessions.slash(id, text).toCompletableFuture().join();
+        return Map.of("dispatched", ok == null || ok);
+    }
+
+    @JsonRpc(
+            value = "session.btwClear",
+            documentation = "Clears the current /btw side question of a session: cancels an in-flight answer"
+                    + " and removes the btw pill + modal (the StatusBar 'x'). Returns true when there was an"
+                    + " active btw to clear.")
+    public Map<String, Boolean> clearBtw(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        sessions.attach(id);
+        final var had = sessions.btwState(id) != null;
+        sessions.clearBtw(id);
+        return Map.of("cleared", had);
+    }
+
+    @JsonRpc(value = "tools.list", documentation = "Lists the available MCP tools, grouped by server.")
+    public ToolListingDto tools(
+            @JsonRpcParam(documentation = "Space-separated lowercase filters matched against server_tool keys.")
+                    final String query) {
+        return toDto(agentSessionService.tools(query == null ? "" : query));
+    }
+
+    @JsonRpc(value = "memory.get", documentation = "Reads the global and project memory and their resolved file paths.")
+    public MemoryDto memory() {
+        final var content = agentSessionService.memory();
+        return new MemoryDto(
+                content.global(),
+                content.project(),
+                content.globalPath(),
+                content.projectPath(),
+                content.globalExists(),
+                content.projectExists());
+    }
+
+    @JsonRpc(value = "mode.get", documentation = "Returns the agent mode of a session.")
+    public Map<String, String> mode(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return Map.of("mode", lowerEnum(sessions.runtime(id).permissions().mode()));
+    }
+
+    @JsonRpc(
+            value = "session.queuedCount",
+            documentation = "Returns the number of prompts currently queued for a running turn of a session.")
+    public Map<String, Integer> queuedCount(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return Map.of("count", sessions.queuedPromptCount(id));
+    }
+
+    @JsonRpc(
+            value = "session.queuedList",
+            documentation = "Lists the prompts currently queued for a running turn, oldest first.")
+    public QueuedListDto queuedList(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return new QueuedListDto(sessions.queuedPrompts(id));
+    }
+
+    @JsonRpc(
+            value = "session.queuedRemove",
+            documentation = "Removes a queued prompt by index (0 = oldest, the next one the turn would pick up).")
+    public Map<String, Boolean> queuedRemove(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "Index of the queued prompt to drop.") final int index) {
+        return Map.of("removed", sessions.removeQueuedPrompt(id, index));
+    }
+
+    @JsonRpc(value = "mode.set", documentation = "Switches the agent mode of a session (build|plan).")
+    public ModeChangeDto setMode(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "build or plan.") final String mode) {
+        final var changed = agentSessionService.setMode(mode, id, sessions.runtime(id));
+        return new ModeChangeDto(changed.message(), changed.seedMessage(), changed.seedError());
+    }
+
+    @JsonRpc(value = "permissions.get", documentation = "Returns the permission state of a session.")
+    public PermissionsDto permissions(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        final var info = agentSessionService.permissionsInfo(sessions.runtime(id));
+        return new PermissionsDto(lowerEnum(info.agentMode()), lowerEnum(info.permissionMode()), info.sessionGrants());
+    }
+
+    @JsonRpc(
+            value = "permissions.set",
+            documentation = "Sets the tool permission level of a session (ask|auto_edit|yolo).")
+    public Map<String, String> setPermissions(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "ask, auto_edit or yolo.") final String mode) {
+        final var resolved = agentSessionService.setPermissions(mode, sessions.runtime(id));
+        return Map.of("permissionMode", lowerEnum(resolved));
+    }
+
+    @JsonRpc(value = "snapshot.status", documentation = "Reports the snapshot/checkpoint state of a session.")
+    public Map<String, String> snapshotStatus(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return Map.of("status", agentSessionService.snapshot("status", id));
+    }
+
+    @JsonRpc(value = "session.todos", documentation = "Lists the todo items of a session.")
+    public List<TodoDto> sessionTodos(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        final var todos = sessions.runtime(id).todos() == null
+                ? null
+                : sessions.runtime(id).todos().all();
+        if (todos == null || todos.isEmpty()) {
+            return List.of();
+        }
+        return todos.stream().map(t -> new TodoDto(t.content(), t.status())).toList();
+    }
+
+    @JsonRpc(
+            value = "session.setProject",
+            documentation = "Changes a session's working/project directory and restarts its runtime on it.")
+    public Map<String, Object> setProject(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "Absolute working directory path.") final String dir) {
+        if (dir == null || dir.isBlank()) {
+            return Map.of("ok", false, "error", "directory is required");
+        }
+        final var normalized = java.nio.file.Path.of(dir).toAbsolutePath().normalize();
+        if (!java.nio.file.Files.isDirectory(normalized)) {
+            return Map.of("ok", false, "error", "not a directory: " + normalized);
+        }
+        // persist the new marker (replaceProject handles the case where one already exists) ...
+        sessionStore.replaceProject(id, normalized.toString());
+        // ... then tear down and reattach so the next turn resolves tools/system prompt against the new root.
+        sessions.replace(id);
+        return Map.of("ok", true, "project", normalized.toString());
+    }
+
+    @JsonRpc(value = "session.gitBranch", documentation = "Returns the git branch of a session's working directory.")
+    public Map<String, String> sessionGitBranch(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        // a session has its own recorded project (set via session.setProject / recorded on submit) which
+        // may differ from the process-level project dir; report the branch of THAT dir, not the global cwd.
+        return Map.of("branch", gitBranchOf(projectDirOf(id)));
+    }
+
+    @JsonRpc(
+            value = "session.metadata",
+            documentation =
+                    "Returns the TUI-style right-pane metadata of a session: model, provider, flavor, working dir, "
+                            + "git branch, agent + permission mode, MCP server statuses and the model/provider "
+                            + "candidates for the pickers.")
+    public SessionMetadataDto sessionMetadata(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        final var runtime = sessions.runtime(id);
+        final var chatSettings = runtime.chatSettings();
+        final var dir = projectDirOf(id);
+        final var info = agentSessionService.permissionsInfo(runtime);
+        return new SessionMetadataDto(
+                id,
+                chatClient == null ? "" : safe(() -> chatClient.model(chatSettings)),
+                chatClient == null ? "" : safe(() -> chatClient.flavor().name()),
+                chatClient == null ? "" : safe(() -> chatClient.providerId(chatSettings)),
+                dir == null ? "" : dir,
+                gitBranchOf(dir),
+                lowerEnum(info.agentMode()),
+                lowerEnum(info.permissionMode()),
+                mcpManager.serverStatuses().stream()
+                        .map(s -> new SessionMetadataDto.McpStateDto(s.name(), String.valueOf(s.state())))
+                        .toList(),
+                modelsOf(chatClient),
+                providersOf(providerManager));
+    }
+
+    @JsonRpc(value = "model.list", documentation = "Lists the models available from the current provider.")
+    public List<String> modelList(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return modelsOf(chatClient);
+    }
+
+    @JsonRpc(value = "model.set", documentation = "Changes the model of a session; returns the effective model name.")
+    public Map<String, String> setModel(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "Model name (an optional leading $ is stripped).")
+                    final String model) {
+        final var runtime = sessions.runtime(id);
+        final var updated = agentSessionService.setModel(model, runtime.chatSettings());
+        runtime.updateChatSettings(updated);
+        final var effective =
+                updated == null || updated.model() == null || updated.model().isBlank() ? model : updated.model();
+        return Map.of("model", effective);
+    }
+
+    @JsonRpc(value = "provider.list", documentation = "Lists the configured provider names.")
+    public List<String> providerList(@JsonRpcParam(required = true, documentation = "Session id.") final String id) {
+        return providersOf(providerManager);
+    }
+
+    @JsonRpc(
+            value = "provider.set",
+            documentation = "Changes the provider of a session, resetting its model selection; blank or \"default\" "
+                    + "restores the process default provider.")
+    public Map<String, String> setProvider(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "Provider name (blank or \"default\" resets to default).")
+                    final String provider) {
+        final var runtime = sessions.runtime(id);
+        final var updated = agentSessionService.setProvider(provider, runtime.chatSettings());
+        runtime.updateChatSettings(updated);
+        return Map.of("provider", updated == null || updated.providerId() == null ? "" : updated.providerId());
+    }
+
+    @JsonRpc(
+            value = "session.resolve",
+            documentation =
+                    "Resolves a pending interactive request (approval/ask/question) pushed over SSE. The frontend "
+                            + "invokes this with the request id from the rpc frame and the browser's answer when the "
+                            + "user approves/declines or picks an option.")
+    public Map<String, Object> resolveRequest(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String id,
+            @JsonRpcParam(required = true, documentation = "The pending request id from the SSE rpc frame.")
+                    final String requestId,
+            @JsonRpcParam(
+                            required = true,
+                            documentation =
+                                    "The resolution: true/false for approvals, a string for asks, null to cancel.")
+                    final Object result) {
+        return Map.of("resolved", sessions.resolve(id, requestId, result));
+    }
+
+    private static String safe(final java.util.function.Supplier<String> supplier) {
+        try {
+            return supplier.get();
+        } catch (final RuntimeException e) {
+            return "";
+        }
+    }
+
+    /** Enum discriminator rendered as the lowercase value the web UI compares against. */
+    private static String lowerEnum(final Enum<?> value) {
+        return value == null ? "" : value.name().toLowerCase(Locale.ROOT);
+    }
+
+    /** Current git branch of a directory, read from its {@code .git/HEAD}; empty when not a repo. */
+    private static String gitBranchOf(final String dir) {
+        if (dir == null || dir.isBlank()) {
+            return "";
+        }
+        try {
+            final var head = java.nio.file.Path.of(dir, ".git", "HEAD");
+            if (!java.nio.file.Files.isRegularFile(head)) {
+                return "";
+            }
+            final var content = java.nio.file.Files.readString(head).strip();
+            if (content.startsWith("ref:")) {
+                final var ref = content.substring(4).strip();
+                return ref.startsWith("refs/heads/") ? ref.substring("refs/heads/".length()) : ref;
+            }
+            // detached HEAD: return the bare sha (like GitBranchPoller)
+            return content.length() > 12 ? content.substring(0, 12) : content;
+        } catch (final java.io.IOException e) {
+            return "";
+        }
+    }
+
+    private ToolListingDto toDto(final AgentSessionService.ToolListing listing) {
+        final var servers = listing.servers().stream()
+                .map(s -> new ToolListingDto.ServerDto(
+                        s.server(),
+                        s.tools().stream()
+                                .map(t -> new ToolListingDto.ToolDto(t.name(), t.description()))
+                                .toList()))
+                .toList();
+        return new ToolListingDto(listing.anyTool(), servers, listing.matches());
+    }
+
+    @JsonRpc(value = "mcp.status", documentation = "Lists the MCP servers and their connection state.")
+    public List<McpDto> mcpStatus() {
+        return mcpManager.serverStatuses().stream()
+                .map(s -> new McpDto(s.name(), String.valueOf(s.state())))
+                .toList();
+    }
+
+    @JsonRpc(value = "mcp.reset", documentation = "Resets one MCP server (or all when no name is given).")
+    public Map<String, Boolean> mcpReset(
+            @JsonRpcParam(documentation = "Server name to reset; blank resets every server.") final String name) {
+        if (name == null || name.isBlank()) {
+            mcpManager.reset();
+        } else {
+            mcpManager.reset(name);
+        }
+        return Map.of("reset", true);
+    }
+
+    @JsonRpc(
+            value = "slash.list",
+            documentation = "Lists the slash command catalog with name, usage, group and description.")
+    public List<SlashCommandCatalog> slashList() {
+        return slashRegistry.specs().stream()
+                .map(spec -> new SlashCommandCatalog(
+                        spec.name(),
+                        spec.command(),
+                        spec.usage(),
+                        String.valueOf(spec.group().name().toLowerCase(Locale.ROOT)),
+                        spec.description()))
+                .toList();
+    }
+
+    @JsonRpc(
+            value = "slash.complete",
+            documentation = "Completes a slash command (or its argument) at the given cursor position.")
+    public List<CompletionSuggestion> slashComplete(
+            @JsonRpcParam(required = true, documentation = "Full prompt text.") final String text,
+            @JsonRpcParam(required = true, documentation = "Cursor column into text.") final int cursor) {
+        final var suggestion = completionEngine.suggest(text == null ? "" : text, Math.max(0, cursor));
+        return List.of(new CompletionSuggestion(
+                suggestion.items() == null ? List.of() : suggestion.items(),
+                suggestion.replaceStart(),
+                suggestion.replaceEnd(),
+                suggestion.label() == null ? "" : suggestion.label()));
+    }
+
+    @JsonRpc(value = "codeGraph.status", documentation = "Reports the structural code graph freshness and statistics.")
+    public Map<String, Object> codeGraphStatus() {
+        final var text = codeGraph.freshness();
+        final var enabled = !text.startsWith("disabled");
+        final var parts = new LinkedHashMap<String, Object>();
+        parts.put("enabled", enabled);
+        parts.put("status", text);
+        return parts;
+    }
+
+    @JsonRpc(value = "codeGraph.resync", documentation = "Forces a resync of the structural code graph.")
+    public Map<String, String> codeGraphResync() {
+        return Map.of("status", codeGraph.resync());
+    }
+
+    @JsonRpc(
+            value = "codeGraph.resolve",
+            documentation = "Searches the structural code graph for a symbol and returns structured hits.")
+    public CodeGraphHits codeGraphResolve(
+            @JsonRpcParam(required = true, documentation = "Symbol or substring to search (exact fqn or simple name).")
+                    final String symbol,
+            @JsonRpcParam(documentation = "Max results, default 20.") final Integer max) {
+        final var limit = max == null || max < 1 ? 20 : Math.min(max, 200);
+        final var result = new ArrayList<Map<String, Object>>();
+        if (codeGraph.enabled()) {
+            codeGraph.ensureRefreshedReady();
+            final var index = codeGraph.queryIndex();
+            if (index != null) {
+                final var resolved = index.resolve(symbol);
+                if (resolved != null) {
+                    result.add(symbolHit(resolved));
+                }
+                for (final var found : index.find(symbol, null, limit)) {
+                    result.add(symbolHit(found));
+                }
+            }
+        }
+        return new CodeGraphHits(result);
+    }
+
+    private Map<String, Object> symbolHit(final io.yupiik.ia.agent.core.codegraph.GraphModel.Symbol symbol) {
+        final var map = new LinkedHashMap<String, Object>();
+        map.put("fqn", symbol.fqn());
+        map.put("kind", String.valueOf(symbol.kind()));
+        map.put("file", symbol.file());
+        map.put("startLine", symbol.startLine());
+        map.put("endLine", symbol.endLine());
+        map.put("signature", symbol.signature());
+        return map;
+    }
+
+    // ---- slash completion value sources (mirror the TUI SlashCommandCompleter) ----
+
+    private static List<String> modelsOf(final ChatClient chatClient) {
+        if (chatClient == null) {
+            return List.of();
+        }
+        try {
+            final var ids = chatClient.models().ids();
+            return ids == null ? List.of() : ids;
+        } catch (final Exception e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> providersOf(final ProviderManager providerManager) {
+        if (providerManager == null || providerManager.providers() == null) {
+            return List.of();
+        }
+        try {
+            return providerManager.providers().stream()
+                    .map(ProviderConfiguration::id)
+                    .toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> agentsOf(final AgentProvider agentProvider) {
+        if (agentProvider == null || agentProvider.agents() == null) {
+            return List.of();
+        }
+        try {
+            return agentProvider.agents().stream().map(AgentConfiguration::name).toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> sessionsOf(final SessionStore sessionStore) {
+        if (sessionStore == null) {
+            return List.of();
+        }
+        try {
+            final var sessions = sessionStore.list();
+            if (sessions == null || sessions.isEmpty()) {
+                return List.of();
+            }
+            return sessions.stream().map(SessionStore.SessionInfo::id).toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> toolsOf(final McpManager mcpManager) {
+        if (mcpManager == null) {
+            return List.of();
+        }
+        try {
+            final var byServer = mcpManager.toolsByServer();
+            if (byServer == null || byServer.isEmpty()) {
+                return List.of();
+            }
+            return byServer.values().stream()
+                    .flatMap(List::stream)
+                    .map(EmbeddedTool::name)
+                    .distinct()
+                    .sorted()
+                    .toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> serversOf(final McpManager mcpManager) {
+        if (mcpManager == null) {
+            return List.of();
+        }
+        try {
+            return mcpManager.serverStatuses().stream()
+                    .map(status -> status.name())
+                    .toList();
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private static List<String> variantsOf(final ChatClient chatClient, final String model) {
+        try {
+            if (chatClient == null) {
+                return List.of();
+            }
+            final var variants = chatClient.variants(model);
+            final var hasDefault = chatClient.implicitVariant(model) != null;
+            final var size = (variants == null ? 0 : variants.size()) + (hasDefault ? 1 : 0);
+            if (size == 0) {
+                return List.of();
+            }
+            final var names = new ArrayList<String>(size);
+            if (hasDefault) {
+                names.add("default");
+            }
+            if (variants != null) {
+                for (final var variant : variants) {
+                    names.add(variant.name());
+                }
+            }
+            return names;
+        } catch (final RuntimeException e) {
+            return List.of();
+        }
+    }
+
+    private String projectOf(final String id) {
+        // cheap first-line peek (file-backed), fallback to the slow full read for other stores
+        final var dir = sessionStore.projectDirOf(id);
+        return dir == null || dir.isBlank() ? "" : dir;
+    }
+
+    /**
+     * The directory a session actually works on: its recorded project marker when set (via
+     * {@code session.setProject} or recorded on submit), otherwise the process-level project dir.
+     * The side bar/branch read this so a session re-pointed at another project reflects it instead
+     * of always showing the server's global working directory.
+     */
+    private String projectDirOf(final String id) {
+        final var marked = projectOf(id);
+        if (!marked.isBlank()) {
+            return marked;
+        }
+        return currentProjectDir();
+    }
+
+    private static boolean sameProject(final String a, final String b) {
+        if (a.equals(b)) {
+            return true;
+        }
+        final var normalizedA = a.endsWith("/") ? a.substring(0, a.length() - 1) : a;
+        final var normalizedB = b.endsWith("/") ? b.substring(0, b.length() - 1) : b;
+        return normalizedA.equals(normalizedB);
+    }
+
+    private String currentProjectDir() {
+        try {
+            return configuration
+                    .resolveProjectDir()
+                    .toAbsolutePath()
+                    .normalize()
+                    .toString();
+        } catch (final RuntimeException e) {
+            return null;
+        }
+    }
+
+    private String title(String id) {
+        final var summary = sessionStore.summary(id);
+        return summary == null || summary.isBlank() ? id : summarize(summary);
+    }
+
+    private static String summarize(final String text) {
+        final var nl = text.indexOf('\n');
+        final var first = nl < 0 ? text : text.substring(0, nl);
+        return first.length() > 80 ? first.substring(0, 80) + "…" : first;
+    }
+
+    private static String blankToNull(final String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    /** Lightweight session summary for the sessions list. */
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record SessionSummary(String id, String title, long modifiedAt, long sizeBytes, String project) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record ToolListingDto(boolean anyTool, List<ServerDto> servers, int matches) {
+        @io.yupiik.fusion.framework.build.api.json.JsonModel
+        public record ServerDto(String server, List<ToolDto> tools) {}
+
+        @io.yupiik.fusion.framework.build.api.json.JsonModel
+        public record ToolDto(String name, String description) {}
+    }
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record MemoryDto(
+            String global,
+            String project,
+            String globalPath,
+            String projectPath,
+            boolean globalExists,
+            boolean projectExists) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record ModeChangeDto(String message, String seedMessage, String seedError) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record PermissionsDto(String agentMode, String permissionMode, List<String> sessionGrants) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record CodeGraphHits(List<Map<String, Object>> hits) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record McpDto(String name, String state) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record SlashCommandCatalog(String name, String command, String usage, String group, String description) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record CompletionSuggestion(List<String> items, int replaceStart, int replaceEnd, String label) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record TodoDto(String content, String status) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record QueuedListDto(List<String> prompts) {}
+
+    @io.yupiik.fusion.framework.build.api.json.JsonModel
+    public record SessionMetadataDto(
+            String sessionId,
+            String model,
+            String flavor,
+            String provider,
+            String cwd,
+            String gitBranch,
+            String mode,
+            String permissionMode,
+            List<McpStateDto> mcpServers,
+            List<String> modelCandidates,
+            List<String> providerCandidates) {
+        @io.yupiik.fusion.framework.build.api.json.JsonModel
+        public record McpStateDto(String name, String state) {}
+    }
+}

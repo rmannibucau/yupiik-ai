@@ -18,6 +18,7 @@ package io.yupiik.maven.knowledge.test;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
@@ -155,7 +156,7 @@ public final class FakeMavenRepo implements AutoCloseable {
                 if (body == null) {
                     exchange.sendResponseHeaders(404, -1);
                 } else {
-                    final var bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    final var bytes = body.getBytes(StandardCharsets.UTF_8);
                     exchange.sendResponseHeaders(200, bytes.length);
                     exchange.getResponseBody().write(bytes);
                 }
@@ -196,7 +197,7 @@ public final class FakeMavenRepo implements AutoCloseable {
             try (final var zos = new ZipOutputStream(Files.newOutputStream(jar))) {
                 for (final var entry : entries.entrySet()) {
                     zos.putNextEntry(new ZipEntry(entry.getKey()));
-                    zos.write(entry.getValue().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    zos.write(entry.getValue().getBytes(StandardCharsets.UTF_8));
                     zos.closeEntry();
                 }
             }

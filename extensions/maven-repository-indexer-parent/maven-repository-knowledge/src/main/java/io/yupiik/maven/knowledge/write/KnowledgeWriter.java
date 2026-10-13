@@ -18,8 +18,10 @@ package io.yupiik.maven.knowledge.write;
 import io.yupiik.maven.knowledge.Gav;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 
 /**
@@ -117,13 +119,9 @@ public final class KnowledgeWriter {
             final var tmp = file.resolveSibling(file.getFileName() + ".tmp");
             Files.write(tmp, bytes);
             try {
-                Files.move(
-                        tmp,
-                        file,
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (final AtomicMoveNotSupportedException e) {
+                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
             }
             return file;
         } catch (final IOException e) {

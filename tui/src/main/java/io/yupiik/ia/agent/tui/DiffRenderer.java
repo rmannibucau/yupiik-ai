@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.tui;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -67,9 +68,8 @@ public class DiffRenderer {
         }
         final var split = diff.replace("\r\n", "\n").split("\n", -1);
         // a trailing newline produces an empty tail segment: drop it
-        final var lines = split.length > 1 && split[split.length - 1].isEmpty()
-                ? java.util.Arrays.copyOf(split, split.length - 1)
-                : split;
+        final var lines =
+                split.length > 1 && split[split.length - 1].isEmpty() ? Arrays.copyOf(split, split.length - 1) : split;
         var i = 0;
         while (i < lines.length) {
             final var raw = lines[i];

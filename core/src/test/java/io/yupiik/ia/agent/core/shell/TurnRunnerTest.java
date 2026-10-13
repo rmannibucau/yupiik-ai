@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -245,13 +246,13 @@ class TurnRunnerTest {
         }
 
         @Override
-        public CompletionStage<java.util.Optional<String>> readLine(final String prompt) {
-            return completedStage(java.util.Optional.empty());
+        public CompletionStage<Optional<String>> readLine(final String prompt) {
+            return completedStage(Optional.empty());
         }
 
         @Override
-        public CompletionStage<java.util.Optional<String>> pick(final String title, final List<String> options) {
-            return completedStage(java.util.Optional.empty());
+        public CompletionStage<Optional<String>> pick(final String title, final List<String> options) {
+            return completedStage(Optional.empty());
         }
 
         @Override

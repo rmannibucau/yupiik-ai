@@ -39,6 +39,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -47,11 +48,12 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** Anthropic Messages reactive dialect mapping the neutral model to the Messages wire format. */
 public final class AnthropicDialect extends AbstractDialect {
 
-    private volatile java.util.function.Consumer<String> onRawLine;
+    private volatile Consumer<String> onRawLine;
 
     /**
      * Creates the dialect.
@@ -70,7 +72,7 @@ public final class AnthropicDialect extends AbstractDialect {
      *
      * @param onRawLine the raw-line consumer or null.
      */
-    public void setOnRawLine(final java.util.function.Consumer<String> onRawLine) {
+    public void setOnRawLine(final Consumer<String> onRawLine) {
         this.onRawLine = onRawLine;
     }
 
@@ -450,7 +452,7 @@ public final class AnthropicDialect extends AbstractDialect {
                             ? text.lastIndexOf("\n\n<session-state>")
                             : -1;
                     final var content = new ArrayList<Map<String, Object>>();
-                    final var result = new java.util.LinkedHashMap<String, Object>();
+                    final var result = new LinkedHashMap<String, Object>();
                     result.put("type", "tool_result");
                     result.put("tool_use_id", message.toolCallId());
                     result.put("content", split >= 0 ? text.substring(0, split) : text);
@@ -506,7 +508,7 @@ public final class AnthropicDialect extends AbstractDialect {
         if (requestExtensions.containsKey("promptCache")
                 || requestExtensions.containsKey("anthropicSplitBlocks")
                 || topK != null) {
-            final var stripped = new java.util.HashMap<String, Object>();
+            final var stripped = new HashMap<String, Object>();
             requestExtensions.forEach((k, v) -> {
                 if (!"promptCache".equals(k) && !"top_k".equals(k) && !"anthropicSplitBlocks".equals(k)) {
                     stripped.put(k, v);

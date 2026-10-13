@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.Locale;
 import java.util.Map;
@@ -72,6 +73,11 @@ public class CodeFindCodeTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
         final var query = arg(args, "query");
         if (query == null || query.isBlank()) {
             return ToolResult.error("query is required");
@@ -79,8 +85,7 @@ public class CodeFindCodeTool implements EmbeddedTool {
         final var kind = arg(args, "kind");
         final var qKind = parseKind(kind);
         final var max = (int) Math.max(1, Math.min(200, optInt(args, "max", 40)));
-        codeGraph.ensureRefreshedReady();
-        final var idx = codeGraph.queryIndex();
+        final var idx = codeGraph.queryIndex(ctx == null ? null : ctx.projectDir());
         if (idx == null) {
             return ToolResult.ok("Structural code graph is empty.");
         }

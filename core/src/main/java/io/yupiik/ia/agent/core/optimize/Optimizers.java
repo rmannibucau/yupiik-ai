@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
 
@@ -199,6 +200,105 @@ public final class Optimizers {
             }
         }
         return false;
+    }
+
+    /**
+     * @return the command with a leading well-known wrapper chain stripped, so `timeout 120 mvn -o apply`,
+     *     `sudo mvn ...`, `nohup git ...`, `env FOO=1 mvn ...`, `command mvn ...` or `sh -c "mvn ..."`
+     *     all resolve to the inner command (e.g. `mvn -o apply`). Handled wrappers (chained and repeatable):
+     *     {@code sudo}, {@code nohup}, {@code timeout <seconds>}, {@code env [VAR=..]}, {@code command} and
+     *     {@code sh/bash/zsh/dash -c "..."}. Returns empty when the head is not a recognized wrapper or the
+     *     unwrapped command is degenerate (a bare wrapper with nothing after it, or a {@code -c} multi-command
+     *     script containing `;`, `&&` or `|`, which is left to the generic fallback).
+     */
+    public static Optional<String> unwrapCommandWrapper(final String command) {
+        if (command == null || command.isBlank()) {
+            return Optional.empty();
+        }
+        return stripWrappers(tokenize(command));
+    }
+
+    private static Optional<String> stripWrappers(final List<String> tokens) {
+        var i = 0;
+        // skip a leading preamble made of env assignments and `cd <dir> &&` segments, like matchesHead
+        boolean progressed;
+        do {
+            progressed = false;
+            while (i < tokens.size() && isEnvAssignment(tokens.get(i))) {
+                i++;
+                progressed = true;
+            }
+            if (i + 1 < tokens.size() && "cd".equals(tokens.get(i)) && !"&&".equals(tokens.get(i + 1))) {
+                i += 2;
+                if (i < tokens.size() && "&&".equals(tokens.get(i))) {
+                    i++;
+                }
+                progressed = true;
+            }
+        } while (progressed);
+        if (i >= tokens.size()) {
+            return Optional.empty();
+        }
+        final var head = baseName(tokens.get(i));
+        return switch (head) {
+            case "sudo", "nohup", "command" -> {
+                final var j = skipFlags(tokens, i + 1);
+                if (j >= tokens.size()) {
+                    yield Optional.empty(); // bare wrapper with nothing after it
+                }
+                final var rest = tokens.subList(j, tokens.size());
+                yield stripWrappers(rest).or(() -> Optional.of(String.join(" ", rest)));
+            }
+            case "env" -> {
+                var j = i + 1;
+                while (j < tokens.size() && (tokens.get(j).startsWith("-") || isEnvAssignment(tokens.get(j)))) {
+                    j++;
+                }
+                if (j >= tokens.size()) {
+                    yield Optional.empty();
+                }
+                final var rest = tokens.subList(j, tokens.size());
+                yield stripWrappers(rest).or(() -> Optional.of(String.join(" ", rest)));
+            }
+            case "timeout" -> {
+                final var j = skipFlags(tokens, i + 1);
+                // a bare numeric duration follows the (flag-less) wrapper; a non-numeric token
+                // is not a duration, so `timeout` here is an actual command being invoked
+                if (j >= tokens.size() || !tokens.get(j).matches("\\d+")) {
+                    yield Optional.empty();
+                }
+                final var after = j + 1;
+                if (after >= tokens.size()) {
+                    yield Optional.empty(); // `timeout <duration>` with no command
+                }
+                final var rest = tokens.subList(after, tokens.size());
+                yield stripWrappers(rest).or(() -> Optional.of(String.join(" ", rest)));
+            }
+            case "sh", "bash", "zsh", "dash" -> {
+                if (i + 2 < tokens.size() && "-c".equals(tokens.get(i + 1))) {
+                    final var script = tokens.get(i + 2);
+                    if (script.contains(";") || script.contains("&&") || script.contains("|")) {
+                        // multi-command script: leave the whole thing to the generic fallback
+                        yield Optional.empty();
+                    }
+                    final var inner = tokenize(script);
+                    if (inner.isEmpty()) {
+                        yield Optional.empty();
+                    }
+                    yield stripWrappers(inner).or(() -> Optional.of(String.join(" ", inner)));
+                }
+                yield Optional.empty(); // sh without -c: not acting as a wrapper
+            }
+            default -> Optional.empty(); // not a recognized wrapper: the head is the command itself
+        };
+    }
+
+    private static int skipFlags(final List<String> tokens, final int start) {
+        var j = start;
+        while (j < tokens.size() && tokens.get(j).startsWith("-")) {
+            j++;
+        }
+        return j;
     }
 
     private static boolean isEnvAssignment(final String token) {

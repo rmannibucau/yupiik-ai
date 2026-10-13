@@ -29,8 +29,10 @@ import io.yupiik.llm.client.model.LlmToolCall;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -38,6 +40,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
@@ -95,7 +98,7 @@ final class LlmWire {
         if (others == null || others.isEmpty() || !others.containsKey(Message.IDENTITY_KEY)) {
             return others == null ? Map.of() : others;
         }
-        final var out = new java.util.LinkedHashMap<>(others);
+        final var out = new LinkedHashMap<>(others);
         out.remove(Message.IDENTITY_KEY);
         return out;
     }
@@ -172,7 +175,7 @@ final class LlmWire {
             final Consumer<LlmStreamEvent> onDelta,
             final BooleanSupplier cancelled)
             throws IOException, InterruptedException {
-        java.util.Objects.requireNonNull(cancelled, "cancelled");
+        Objects.requireNonNull(cancelled, "cancelled");
         final var done = new CompletableFuture<Message>();
         final var text = new StringBuilder();
         final var toolCalls = new ArrayList<ToolCall>();
@@ -196,7 +199,7 @@ final class LlmWire {
         final var delivered = new boolean[] {false};
         // the subscription is captured so the bounded-wait loop below can cancel it on a no-frame
         // interrupt (an abandon path that does not go through onNext)
-        final var subscriptionHolder = new java.util.concurrent.atomic.AtomicReference<Flow.Subscription>();
+        final var subscriptionHolder = new AtomicReference<Flow.Subscription>();
         publisher.subscribe(new Flow.Subscriber<>() {
             private Flow.Subscription subscription;
 

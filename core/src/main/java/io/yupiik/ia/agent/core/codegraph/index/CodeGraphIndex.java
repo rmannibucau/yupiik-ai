@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.codegraph.GraphStore;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Set;
@@ -85,7 +86,7 @@ public final class CodeGraphIndex {
      * (empty set = all). O(degree(node)).
      */
     public int[] neighbors(final int nodeOrdinal, final Set<GraphModel.EdgeType> types, final Direction dir) {
-        final Set<Integer> typeOrds = new java.util.HashSet<>(types.size());
+        final Set<Integer> typeOrds = new HashSet<>(types.size());
         for (final var t : types) {
             typeOrds.add(t.ordinal());
         }

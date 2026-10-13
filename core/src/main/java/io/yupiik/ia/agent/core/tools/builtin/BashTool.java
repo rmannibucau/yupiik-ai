@@ -32,33 +32,40 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @ApplicationScoped
 public class BashTool implements EmbeddedTool {
     private final Emitter emitter;
     private final ProcessService processes;
     private final int maxOutputChars;
+    /** Configured default working directory process, used when neither a workdir arg nor a session root apply. */
+    private final java.nio.file.Path fallbackDir;
 
     public BashTool(
             final Emitter emitter, final ProcessService processes, final CodingAgentConfiguration configuration) {
         this.emitter = emitter;
         this.processes = processes;
         this.maxOutputChars = configuration.tools().maxOutputChars();
+        this.fallbackDir = configuration.resolveWorkingDir().toAbsolutePath().normalize();
     }
 
     public BashTool(final Emitter emitter, final ProcessService processes) {
         this.emitter = emitter;
         this.processes = processes;
         this.maxOutputChars = 65536;
+        this.fallbackDir = null; // no configuration: inherit the JVM working directory
     }
 
     protected BashTool() {
         this.emitter = null;
         this.processes = null;
         this.maxOutputChars = 65536;
+        this.fallbackDir = null;
     }
 
     @Override
@@ -89,7 +96,9 @@ public class BashTool implements EmbeddedTool {
                 Map.of(
                         "command", Schemas.str("The shell command to run."),
                         "timeout_seconds", Schemas.intProp("Command timeout in seconds, default 120."),
-                        "workdir", Schemas.str("Working directory, default the current one.")),
+                        "workdir",
+                                Schemas.str("Working directory; defaults to the session's project directory, else the"
+                                        + " configured working directory.")),
                 "command");
     }
 
@@ -108,8 +117,48 @@ public class BashTool implements EmbeddedTool {
         final var workdir = arg(args, "workdir");
         final var pb = new ProcessBuilder("sh", "-c", command);
         pb.redirectErrorStream(true);
+        // A workdir chosen by the model this turn is a fact it can act on: reject it if it does not
+        // exist rather than silently running elsewhere (which would contradict what the model expects).
+        // Session-level directories (project root / configured working dir) were not chosen this turn,
+        // so a stale one falls through to the next live candidate with an explanatory notice.
+        final var workdirNotice = new StringBuilder();
         if (workdir != null && !workdir.isBlank()) {
-            pb.directory(Path.of(workdir).toFile());
+            final var dir = Path.of(workdir).toAbsolutePath().normalize();
+            if (Files.isDirectory(dir)) {
+                pb.directory(dir.toFile());
+            } else {
+                return ToolResult.error("workdir '" + workdir + "' does not exist");
+            }
+        } else {
+            // no explicit workdir: honour the session's project root, else the configured working dir,
+            // rather than silently inheriting the JVM launch directory (which may differ from both).
+            // A candidate that no longer exists is skipped and the fallback is reported in the output
+            // so the caller can see that the command did not run exactly where the session intended.
+            final var candidates = candidateDirectories(context);
+            java.nio.file.Path skipped = null;
+            boolean used = false;
+            for (final var candidate : candidates) {
+                if (Files.isDirectory(candidate)) {
+                    if (skipped != null) {
+                        workdirNotice
+                                .append("workdir '")
+                                .append(skipped)
+                                .append("' not found, using '")
+                                .append(candidate)
+                                .append('\'');
+                    }
+                    pb.directory(candidate.toFile());
+                    used = true;
+                    break;
+                }
+                skipped = candidate;
+            }
+            if (!used && skipped != null) {
+                workdirNotice
+                        .append("workdir '")
+                        .append(skipped)
+                        .append("' not found, using the JVM working directory");
+            }
         }
         final Process process;
         try {
@@ -121,9 +170,14 @@ public class BashTool implements EmbeddedTool {
             processes.track(process);
         }
         emitter.emit(new AgentEvent.ToolStream(
-                "bash", "$ " + command, context.sessionId(), context.subagentId(), context.subagentName()));
+                "bash",
+                "$ " + command,
+                context.ordinal(),
+                context.sessionId(),
+                context.subagentId(),
+                context.subagentName()));
         final var out = new StringBuilder();
-        final var streamed = new java.util.concurrent.atomic.AtomicInteger();
+        final var streamed = new AtomicInteger();
         final var reader = new Thread(() -> {
             try (BufferedReader r =
                     new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
@@ -136,7 +190,12 @@ public class BashTool implements EmbeddedTool {
                     }
                     if (streamed.incrementAndGet() <= 500 && emitter != null) {
                         emitter.emit(new AgentEvent.ToolStream(
-                                "bash", line, context.sessionId(), context.subagentId(), context.subagentName()));
+                                "bash",
+                                line,
+                                context.ordinal(),
+                                context.sessionId(),
+                                context.subagentId(),
+                                context.subagentName()));
                     }
                 }
             } catch (final IOException e) {
@@ -176,7 +235,8 @@ public class BashTool implements EmbeddedTool {
         }
         if (!finished) {
             dispose(process);
-            return ToolResult.error("Command timed out after " + timeout + "s\n" + snapshot(out, maxOutputChars));
+            return ToolResult.error("Command timed out after " + timeout + "s\n"
+                    + withNotice(workdirNotice, snapshot(out, maxOutputChars)));
         }
         try {
             reader.join(2000);
@@ -184,7 +244,28 @@ public class BashTool implements EmbeddedTool {
             Thread.currentThread().interrupt();
         }
         final var code = process.exitValue();
-        return ToolResult.ok(snapshot(out, maxOutputChars) + "\nExit code: " + code);
+        return ToolResult.ok(withNotice(workdirNotice, snapshot(out, maxOutputChars)) + "\nExit code: " + code);
+    }
+
+    /**
+     * The session-level working-directory candidates to try (in precedence order) when the call carries
+     * no explicit {@code workdir} arg: the session's project root, then the configured working directory.
+     * Missing or null candidates are skipped by the caller via {@link java.nio.file.Files#isDirectory}.
+     */
+    private java.util.List<java.nio.file.Path> candidateDirectories(final ToolContext context) {
+        final var candidates = new java.util.ArrayList<java.nio.file.Path>(2);
+        if (context.projectDir() != null) {
+            candidates.add(context.projectDir().toAbsolutePath().normalize());
+        }
+        if (fallbackDir != null) {
+            candidates.add(fallbackDir.toAbsolutePath().normalize());
+        }
+        return candidates;
+    }
+
+    /** Prepends the workdir-deviation notice (when any) as the first line of the tool output. */
+    private static String withNotice(final StringBuilder notice, final String output) {
+        return notice.length() == 0 ? output : notice + "\n" + output;
     }
 
     /** Kills and reaps the whole process tree through the service (null-safe for standalone tests). */

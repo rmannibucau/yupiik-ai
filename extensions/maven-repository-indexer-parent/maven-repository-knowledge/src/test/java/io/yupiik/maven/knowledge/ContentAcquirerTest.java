@@ -22,6 +22,7 @@ import io.yupiik.maven.knowledge.content.ContentAcquirer;
 import io.yupiik.maven.knowledge.content.ContentKind;
 import io.yupiik.maven.knowledge.content.LocalRepository;
 import io.yupiik.maven.knowledge.test.FakeMavenRepo;
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -110,7 +111,7 @@ class ContentAcquirerTest {
             final var acquirer = new ContentAcquirer(
                     new LocalRepository(tmp),
                     (url, timeout, bytes) -> {
-                        throw new java.io.IOException("connection refused (mocked)");
+                        throw new IOException("connection refused (mocked)");
                     },
                     config);
             assertEquals(

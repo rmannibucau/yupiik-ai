@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.OptimizeConfiguration;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -77,18 +78,68 @@ class OptimizersTest {
     }
 
     @Test
+    void unwrapsCommandWrappers() {
+        // plain command without a wrapper -> unchanged (empty)
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper(null));
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("  "));
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("mvn clean install"));
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("./mvnw test"));
+
+        // timeout <duration>
+        assertEquals(
+                Optional.of("mvn -o spotless:apply 2>&1"),
+                Optimizers.unwrapCommandWrapper("timeout 120 mvn -o spotless:apply 2>&1"));
+        // timeout with a leading flag
+        assertEquals(
+                Optional.of("git status"), Optimizers.unwrapCommandWrapper("timeout --preserve-status 30 git status"));
+        // a non-numeric "duration" is not a wrapper -> unchanged
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("timeout nope mvn install"));
+        // bare timeout (no command after the duration) -> unchanged
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("timeout 120"));
+
+        // sudo / nohup / command
+        assertEquals(Optional.of("mvn -q test"), Optimizers.unwrapCommandWrapper("sudo mvn -q test"));
+        assertEquals(Optional.of("git fetch"), Optimizers.unwrapCommandWrapper("nohup git fetch"));
+        assertEquals(Optional.of("./mvnw package"), Optimizers.unwrapCommandWrapper("command ./mvnw package"));
+
+        // env with leading assignments
+        assertEquals(
+                Optional.of("mvn clean install"), Optimizers.unwrapCommandWrapper("env FOO=1 BAR=2 mvn clean install"));
+        // bare env assignments without the env keyword are handled natively by matchesHead, so there
+        // is no wrapper to strip here (empty = leave the command unchanged)
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("FOO=1 mvn clean install"));
+
+        // chained wrappers
+        assertEquals(Optional.of("mvn -o apply"), Optimizers.unwrapCommandWrapper("sudo timeout 120 mvn -o apply"));
+        assertEquals(Optional.of("docker ps"), Optimizers.unwrapCommandWrapper("nohup env CI=1 sudo docker ps"));
+
+        // sh/bash -c
+        assertEquals(Optional.of("mvn test"), Optimizers.unwrapCommandWrapper("sh -c \"mvn test\""));
+        assertEquals(Optional.of("git status"), Optimizers.unwrapCommandWrapper("bash -c \"git status\""));
+        assertEquals(
+                Optional.of("mvn -o apply"),
+                Optimizers.unwrapCommandWrapper("bash -c \"sudo timeout 120 mvn -o apply\""));
+        // a multi-command script inside -c is left to the generic fallback
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("bash -c \"mvn package && git status\""));
+        assertEquals(Optional.empty(), Optimizers.unwrapCommandWrapper("sh -c \"ls | wc -l\""));
+
+        // cd <dir> && preamble kept consistent with matchesHead
+        assertEquals(Optional.of("mvn -q test"), Optimizers.unwrapCommandWrapper("cd /opt/proj && sudo mvn -q test"));
+    }
+
+    @Test
     void isDisabledMatchesConfiguredNames() {
-        final var maven = new OptimizeConfiguration(true, 400, 20, 10, List.of("mvn"), null, null);
+        final var maven = new OptimizeConfiguration(true, 400, 20, 10, true, List.of("mvn"), null, null);
         assertTrue(maven.isDisabled(List.of("mvn", "mvnd", "mvnw")));
         assertFalse(maven.isDisabled(List.of("git")));
 
-        final var mvnw = new OptimizeConfiguration(true, 400, 20, 10, List.of("./mvnw.cmd"), null, null);
+        final var mvnw = new OptimizeConfiguration(true, 400, 20, 10, true, List.of("./mvnw.cmd"), null, null);
         assertTrue(mvnw.isDisabled(List.of("mvn", "mvnd", "mvnw")));
 
-        final var tools = new OptimizeConfiguration(true, 400, 20, 10, List.of("bash"), null, null);
+        final var tools = new OptimizeConfiguration(true, 400, 20, 10, true, List.of("bash"), null, null);
         assertTrue(tools.isDisabled(List.of("bash")));
 
-        final var none = new OptimizeConfiguration(true, 400, 20, 10, List.of(), null, null);
+        final var none = new OptimizeConfiguration(true, 400, 20, 10, true, List.of(), null, null);
         assertFalse(none.isDisabled(List.of("mvn")));
     }
 

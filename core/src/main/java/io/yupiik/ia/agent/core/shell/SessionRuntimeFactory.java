@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
+import io.yupiik.ia.agent.core.permissions.BashRulesRegistry;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -74,6 +75,7 @@ public class SessionRuntimeFactory {
     private final Clock clock;
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
     private final ExecutorService executor;
+    private final BashRulesRegistry bashRulesRegistry;
 
     public SessionRuntimeFactory(
             final ChatClient chatClient,
@@ -93,7 +95,8 @@ public class SessionRuntimeFactory {
             final Emitter emitter,
             final Clock clock,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
-            final ExecutorService executor) {
+            final ExecutorService executor,
+            final BashRulesRegistry bashRulesRegistry) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -112,6 +115,7 @@ public class SessionRuntimeFactory {
         this.clock = clock;
         this.precisionDurationMarker = precisionDurationMarker;
         this.executor = executor;
+        this.bashRulesRegistry = bashRulesRegistry;
     }
 
     /**
@@ -120,7 +124,7 @@ public class SessionRuntimeFactory {
      * @param sessionId  the initial chat session id owned by the runtime
      */
     public SessionRuntime create(final String sessionKey, final String sessionId) {
-        final var permissions = new PermissionService(configuration, emitter);
+        final var permissions = new PermissionService(configuration, emitter, bashRulesRegistry);
         final var feedback = new UserFeedbackService();
         final var usage = new UsageTracker(providerManager, chatClient, contextWindowCache, clock);
         final var todos = new TodoStore(configuration, mapper, sessionKey);
@@ -180,6 +184,15 @@ public class SessionRuntimeFactory {
                 null,
                 feedback,
                 precisionDurationMarker);
+        // resolve the session's working directory once (explicit override > recorded project marker >
+        // process default) and freeze it in the loop + system prompt builder: the stable system-prompt
+        // core must stay byte-identical across turns, so this is never re-read mid-conversation.
+        final var workdir = resolveSessionWorkdir(sessionId);
+        if (workdir != null) {
+            loop.sessionWorkdir(workdir);
+            systemPromptBuilder.workdir(workdir);
+            permissions.projectDir(workdir);
+        }
         if (emitter != null) {
             emitter.emit(new SessionStartedEvent(
                     new EventContext(
@@ -194,6 +207,34 @@ public class SessionRuntimeFactory {
     /** Convenience: the key and the initial session id are the same value. */
     public SessionRuntime create(final String sessionId) {
         return create(sessionId, sessionId);
+    }
+
+    /**
+     * Resolves a session's working directory to a canonical absolute {@link Path}, or {@code null}
+     * when none can be established (the process default then applies downstream). Prefers the recorded
+     * project marker so a persisted session survives restarts on its own root, but only while that
+     * marker still points at an existing directory: a stale marker (project moved/renamed/deleted since
+     * the session was recorded) must never hand a dead path to tools, so it falls back to the configured
+     * working directory instead.
+     */
+    protected java.nio.file.Path resolveSessionWorkdir(final String sessionId) {
+        if (sessionStore == null || sessionId == null) {
+            return null;
+        }
+        final var recorded = sessionStore.projectDirOf(sessionId);
+        if (recorded != null && !recorded.isBlank()) {
+            try {
+                final var dir = java.nio.file.Path.of(recorded).toAbsolutePath().normalize();
+                if (java.nio.file.Files.isDirectory(dir)) {
+                    return dir;
+                }
+            } catch (final RuntimeException e) {
+                // malformed recorded marker: fall through to the configured working directory
+            }
+        }
+        // no record, a malformed one, or a stale one that no longer exists on disk: use the configured
+        // working directory so the session still gets a live cwd (never error just because the marker is dead).
+        return configuration == null ? null : configuration.resolveWorkingDir();
     }
 
     /** For subclasses wiring a fake session (tests). */
@@ -216,5 +257,6 @@ public class SessionRuntimeFactory {
         this.clock = null;
         this.executor = null;
         this.precisionDurationMarker = null;
+        this.bashRulesRegistry = null;
     }
 }

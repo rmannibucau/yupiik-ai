@@ -701,4 +701,33 @@ class PermissionServiceTest {
         assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "docker run nginx && ls"))
                 .allowed());
     }
+
+    @Test
+    void dynamicRulesExtendTheEffectiveRulesAndAreSessionScoped() {
+        final var registry = new BashRulesRegistry(io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                Map.of("yca.storageHome", storageHome.toString())));
+        final var service = new PermissionService(
+                io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(
+                        Map.of("yca.storageHome", storageHome.toString())),
+                null,
+                registry);
+        service.setMode(AgentMode.BUILD);
+        // mvn is not part of the default read-only families: denied without an override
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+        service.addDynamicRule(new io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration(
+                new io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration(
+                        new io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration(List.of("mvn")),
+                        List.of()),
+                PermissionMode.YOLO,
+                null));
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+        // the dynamic rule participates in nested substitution verification too
+        assertTrue(service.check("bash", ToolCategory.BASH, Map.of("command", "echo \"a $(mvn install) b\""))
+                .allowed());
+        service.clearDynamicRules();
+        assertFalse(service.check("bash", ToolCategory.BASH, Map.of("command", "mvn install"))
+                .allowed());
+    }
 }

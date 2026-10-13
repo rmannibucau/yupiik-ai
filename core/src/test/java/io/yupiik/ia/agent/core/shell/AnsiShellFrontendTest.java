@@ -30,9 +30,13 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -252,7 +256,7 @@ class AnsiShellFrontendTest {
 
     @Test
     void activePromptOutputRoutesWritesAboveThePrompt() {
-        final var seen = new java.util.ArrayList<String>();
+        final var seen = new ArrayList<String>();
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
@@ -295,7 +299,7 @@ class AnsiShellFrontendTest {
         // the row jline had just painted and leave the prompt invisible until the next
         // keystroke. It now delegates every chunk to the sink, which is the only place
         // that knows whether a read is live - atomically with the write.
-        final var seen = new java.util.ArrayList<String>();
+        final var seen = new ArrayList<String>();
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
@@ -357,10 +361,10 @@ class AnsiShellFrontendTest {
         // the sink is what keeps it off the prompt row: a raw write there is invisible
         // to the line editor's display bookkeeping, so the prompt only came back once
         // the user typed.
-        final var seen = new java.util.ArrayList<String>();
-        final var promptLive = new java.util.concurrent.atomic.AtomicBoolean();
-        final var painted = new java.util.concurrent.CountDownLatch(1);
-        final var release = new java.util.concurrent.CountDownLatch(1);
+        final var seen = new ArrayList<String>();
+        final var promptLive = new AtomicBoolean();
+        final var painted = new CountDownLatch(1);
+        final var release = new CountDownLatch(1);
         final var frontend = new AnsiShellFrontend(
                 new MarkdownColorizer(false),
                 new Symbols(false),
@@ -388,7 +392,7 @@ class AnsiShellFrontendTest {
         // the REPL is now painting the next prompt
         promptLive.set(true);
         painted.countDown();
-        assertTrue(painted.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        assertTrue(painted.await(5, TimeUnit.SECONDS));
 
         final var late = new Thread(
                 () -> {
@@ -402,7 +406,7 @@ class AnsiShellFrontendTest {
                 },
                 "late-event");
         late.start();
-        assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS), "the late event never completed");
+        assertTrue(release.await(5, TimeUnit.SECONDS), "the late event never completed");
         late.join(5000);
 
         assertTrue(

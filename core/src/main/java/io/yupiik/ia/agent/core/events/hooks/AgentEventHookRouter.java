@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.events.SubagentStartedEvent;
 import io.yupiik.ia.agent.core.events.SubagentStoppedEvent;
 import io.yupiik.ia.agent.core.events.ToolUsePostEvent;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
+import java.util.Locale;
 
 /**
  * Routes existing bus events (which already carry session coordinates) into the hook pipeline as {@link
@@ -111,7 +112,7 @@ public class AgentEventHookRouter {
                 "Notification",
                 new NotificationEvent(
                                 context,
-                                event.level().name().toLowerCase(java.util.Locale.ROOT),
+                                event.level().name().toLowerCase(Locale.ROOT),
                                 event.message(),
                                 event.finishReason())
                         .payload(),

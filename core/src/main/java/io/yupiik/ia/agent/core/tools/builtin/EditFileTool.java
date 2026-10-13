@@ -21,18 +21,32 @@ import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.optBool;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class EditFileTool implements EmbeddedTool {
+
+    private final CodingAgentConfiguration configuration;
+
+    public EditFileTool(final CodingAgentConfiguration configuration) {
+        this.configuration = configuration;
+    }
+
+    protected EditFileTool() {
+        this.configuration = null;
+    }
 
     @Override
     public String name() {
@@ -64,7 +78,13 @@ public class EditFileTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
-        final var path = Path.of(arg(args, "path"));
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
+        final var raw = arg(args, "path");
+        final var path = context.resolvePath(raw, configuration == null ? null : configuration.resolveProjectDir());
         final var oldString = arg(args, "oldString");
         final var newString = arg(args, "newString");
         if (oldString == null || oldString.isEmpty()) {
@@ -72,6 +92,10 @@ public class EditFileTool implements EmbeddedTool {
         }
         if (newString == null) {
             return ToolResult.error("newString is required");
+        }
+        final var escape = escapeGuard(context, raw, path);
+        if (escape != null) {
+            return ToolResult.error(escape);
         }
         if (!Files.isRegularFile(path)) {
             return ToolResult.error("File not found: " + path);
@@ -98,11 +122,10 @@ public class EditFileTool implements EmbeddedTool {
                     path,
                     optBool(args, "replaceAll", false)
                             ? content.replace(oldString, newString)
-                            : content.replaceFirst(
-                                    java.util.regex.Pattern.quote(oldString),
-                                    java.util.regex.Matcher.quoteReplacement(newString)));
-            return ToolResult.ok(
-                    "Replaced " + (optBool(args, "replaceAll", false) ? count : 1) + " occurrence(s) in " + path);
+                            : content.replaceFirst(Pattern.quote(oldString), Matcher.quoteReplacement(newString)));
+            final var notice = reRoutedNotice(context, raw, path);
+            return ToolResult.ok(notice + "Replaced " + (optBool(args, "replaceAll", false) ? count : 1)
+                    + " occurrence(s) in " + path);
         } catch (final IOException | UncheckedIOException e) {
             return ToolResult.error("Cannot edit " + path + ": " + e.getMessage());
         }
@@ -111,5 +134,31 @@ public class EditFileTool implements EmbeddedTool {
     private static String snippet(final String content) {
         final var s = content.stripLeading();
         return s.length() > 200 ? s.substring(0, 200) + "..." : s;
+    }
+
+    /** A relative path escaping the session root is refused; absolute paths are explicit caller choices. */
+    private static String escapeGuard(final ToolContext context, final String raw, final Path path) {
+        if (context.projectDir() == null || Path.of(raw).isAbsolute()) {
+            return null;
+        }
+        final var base = context.projectDir().toAbsolutePath().normalize();
+        return path.toAbsolutePath().normalize().startsWith(base)
+                ? null
+                : "path '" + raw + "' escapes the session project directory";
+    }
+
+    /**
+     * Surfaces that a relative edit was resolved against a session project root that differs from the
+     * configured default, so a cross-root operation is visible instead of silent. Default roots: no notice.
+     */
+    private String reRoutedNotice(final ToolContext context, final String raw, final Path path) {
+        if (!context.reRoutedToSessionRoot(raw) || configuration == null) {
+            return "";
+        }
+        final var configured =
+                configuration.resolveProjectDir().toAbsolutePath().normalize();
+        return context.projectDir().toAbsolutePath().normalize().equals(configured)
+                ? ""
+                : "target (session root " + context.projectDir() + "): " + path + "\n";
     }
 }

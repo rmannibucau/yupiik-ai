@@ -19,6 +19,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -69,7 +72,7 @@ class MavenOutputProcessorTest {
 
     @Test
     void wrapsPassingTestsInsteadOfOneUnboundedLine() {
-        final var lines = new java.util.ArrayList<String>();
+        final var lines = new ArrayList<String>();
         for (var i = 0; i < 40; i++) {
             lines.add("[INFO] Running io.my.VeryLongTestClassName" + String.format("%04d", i));
             lines.add("[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0");
@@ -121,12 +124,12 @@ class MavenOutputProcessorTest {
     }
 
     @Test
-    void enrichFromSurefireReadsQuietReports(@TempDir final java.nio.file.Path temp) throws Exception {
+    void enrichFromSurefireReadsQuietReports(@TempDir final Path temp) throws Exception {
         final var reports = temp.resolve("target/surefire-reports");
-        java.nio.file.Files.createDirectories(reports);
-        java.nio.file.Files.writeString(
+        Files.createDirectories(reports);
+        Files.writeString(
                 reports.resolve("io.example.GoodTest.txt"), "Tests run: 4, Failures: 0, Errors: 0, Skipped: 0");
-        java.nio.file.Files.writeString(
+        Files.writeString(
                 reports.resolve("io.example.BadTest.txt"), "Tests run: 2, Failures: 1, Errors: 0, Skipped: 0");
 
         final var enriched = MavenOutputProcessor.enrichFromSurefire("-q install", List.of("", "BUILD SUCCESS"), temp);

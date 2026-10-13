@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.framework.build.api.json.JsonOthers;
 import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -33,6 +34,29 @@ public record Message(
 
     public static Message system(final String content) {
         return new Message("system", content, null, null, null, null);
+    }
+
+    /** Persistent marker name carrying the session's working directory ({@link #projectDirOf}). */
+    public static final String PROJECT_MARKER_NAME = "project";
+
+    /**
+     * Builds the leading session marker recording the working directory the session belongs to,
+     * e.g. {@code /opt/foo/demo}. It is persisted as the first session JSONL entry and never sent
+     * to the LLM (all {@code system}-role history messages are dropped at the wire boundary) nor
+     * rendered as a transcript turn; it only lets the web home page group sessions by project.
+     */
+    public static Message projectDir(final String dir) {
+        return new Message("system", dir, PROJECT_MARKER_NAME, null, null, null);
+    }
+
+    /** @return true when {@code message} is the leading working-directory marker. */
+    public static boolean isProjectMarker(final Message message) {
+        return message != null && "system".equals(message.role()) && PROJECT_MARKER_NAME.equals(message.name());
+    }
+
+    /** @return the working directory recorded by a {@link #projectDir} marker, or {@code null}. */
+    public static String projectDirOf(final Message message) {
+        return isProjectMarker(message) && message.content() instanceof final String s ? s : null;
     }
 
     public static Message user(final String content) {
@@ -102,14 +126,14 @@ public record Message(
         if (message == null) {
             return null;
         }
-        final var identity = new java.util.LinkedHashMap<String, Object>();
+        final var identity = new LinkedHashMap<String, Object>();
         putIfPresent(identity, "provider", provider);
         putIfPresent(identity, "model", model);
         putIfPresent(identity, "agent", agent);
         if (identity.isEmpty()) {
             return message;
         }
-        final var others = new java.util.LinkedHashMap<String, Object>();
+        final var others = new LinkedHashMap<String, Object>();
         if (message.others() != null) {
             others.putAll(message.others());
         }

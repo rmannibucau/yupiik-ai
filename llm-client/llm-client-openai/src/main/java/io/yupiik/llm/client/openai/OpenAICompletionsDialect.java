@@ -35,6 +35,7 @@ import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.spi.SseParser;
 import io.yupiik.llm.client.spi.Streams;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -42,11 +43,12 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.Flow;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** OpenAI {@code /chat/completions} reactive dialect. */
 public class OpenAICompletionsDialect extends AbstractDialect {
 
-    private volatile java.util.function.Consumer<String> onRawLine;
+    private volatile Consumer<String> onRawLine;
 
     /**
      * Creates the dialect.
@@ -66,7 +68,7 @@ public class OpenAICompletionsDialect extends AbstractDialect {
      *
      * @param onRawLine the raw-line consumer or null.
      */
-    public void setOnRawLine(final java.util.function.Consumer<String> onRawLine) {
+    public void setOnRawLine(final Consumer<String> onRawLine) {
         this.onRawLine = onRawLine;
     }
 
@@ -188,7 +190,7 @@ public class OpenAICompletionsDialect extends AbstractDialect {
      * explicitly set {@code "includeUsage": false} or provided their own {@code stream_options}.
      */
     private static Map<String, Object> streamExtras(final LlmRequest request, final boolean stream) {
-        final Map<String, Object> extras = new java.util.LinkedHashMap<>();
+        final Map<String, Object> extras = new LinkedHashMap<>();
         if (request.extensions() != null) {
             extras.putAll(request.extensions());
         }

@@ -15,6 +15,7 @@
  */
 package io.yupiik.maven.knowledge.llm;
 
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -65,6 +66,6 @@ public enum DependencyScope {
      * {@code TEST} so de-duplicated coordinates still land in the "other" tail (after the important scopes).
      */
     public static DependencyScope parse(final String raw) {
-        return BY_NAME.getOrDefault(raw == null ? "" : raw.toLowerCase(java.util.Locale.ROOT), RUNTIME);
+        return BY_NAME.getOrDefault(raw == null ? "" : raw.toLowerCase(Locale.ROOT), RUNTIME);
     }
 }

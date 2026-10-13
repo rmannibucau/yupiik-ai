@@ -18,6 +18,9 @@ package io.yupiik.ia.agent.tui;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * Terminal UI view state on top of the shared {@link ConversationTranscript}:
@@ -131,10 +134,10 @@ public class TuiTranscriptModel extends ConversationTranscript {
      * @param userMarker       the user marker line ({@code **label**}), default {@code **You**}
      * @param assistantMarker  the assistant marker line ({@code **label**}), default {@code **Assistant**}
      */
-    public static java.util.List<TurnSegment> splitTurns(
+    public static List<TurnSegment> splitTurns(
             final String text, final String userMarker, final String assistantMarker) {
         final var lines = text.split("\n", -1);
-        final var out = new java.util.ArrayList<TurnSegment>();
+        final var out = new ArrayList<TurnSegment>();
         var start = 0;
         var user = false;
         String label = null;
@@ -161,7 +164,7 @@ public class TuiTranscriptModel extends ConversationTranscript {
             }
             if (from > start) {
                 out.add(new TurnSegment(
-                        String.join("\n", java.util.Arrays.asList(lines).subList(start, from)), user, labelled, label));
+                        String.join("\n", Arrays.asList(lines).subList(start, from)), user, labelled, label));
             }
             user = isUser;
             label = markerLabel(speaker);
@@ -170,16 +173,13 @@ public class TuiTranscriptModel extends ConversationTranscript {
         }
         if (start < lines.length) {
             out.add(new TurnSegment(
-                    String.join("\n", java.util.Arrays.asList(lines).subList(start, lines.length)),
-                    user,
-                    labelled,
-                    label));
+                    String.join("\n", Arrays.asList(lines).subList(start, lines.length)), user, labelled, label));
         }
         return out;
     }
 
     /** {@link #splitTurns(String, String, String)} with the historic default markers. */
-    public static java.util.List<TurnSegment> splitTurns(final String text) {
+    public static List<TurnSegment> splitTurns(final String text) {
         return splitTurns(text, "**You**", "**Assistant**");
     }
 

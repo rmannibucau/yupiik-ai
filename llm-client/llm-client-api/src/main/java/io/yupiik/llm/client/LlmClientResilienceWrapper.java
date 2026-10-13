@@ -21,6 +21,10 @@ import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.Dialect;
 import java.io.IOException;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -33,6 +37,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 
 /**
  * Shared resilience layer applied around a target {@link io.yupiik.llm.client.spi.Dialect} so the concurrency-throttling,
@@ -55,12 +60,9 @@ public final class LlmClientResilienceWrapper {
     /** Cadence (ms) at which the cancellation probe is polled during a scheduled retry wait. */
     private static final long CANCEL_POLL_MS = 100L;
 
-    private static final java.util.regex.Pattern CONCURRENCY_LIMIT_JSON =
-            java.util.regex.Pattern.compile("\"limit\"\\s*:\\s*(\\d+)");
-    private static final java.util.regex.Pattern CONCURRENCY_FAILED =
-            java.util.regex.Pattern.compile("concurrency_limit_exceeded");
-    private static final java.time.format.DateTimeFormatter HTTP_DATE =
-            java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME;
+    private static final Pattern CONCURRENCY_LIMIT_JSON = Pattern.compile("\"limit\"\\s*:\\s*(\\d+)");
+    private static final Pattern CONCURRENCY_FAILED = Pattern.compile("concurrency_limit_exceeded");
+    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME;
 
     private final LlmResilienceConfig config;
     private final Consumer<PauseEvent> pauseListener;
@@ -78,7 +80,7 @@ public final class LlmClientResilienceWrapper {
      */
     private volatile Semaphore semaphore;
 
-    private final java.util.ArrayDeque<Long> requestTimes;
+    private final ArrayDeque<Long> requestTimes;
     private final ReentrantLock concurrencyLock;
     private int adaptedConcurrency = -1;
     private long adaptedUntilMs;
@@ -111,7 +113,7 @@ public final class LlmClientResilienceWrapper {
         this.pauseListener = pauseListener;
         this.scheduler = scheduler;
         this.semaphore = this.config.maxConcurrent() > 0 ? new Semaphore(this.config.maxConcurrent()) : null;
-        this.requestTimes = new java.util.ArrayDeque<>();
+        this.requestTimes = new ArrayDeque<>();
         this.concurrencyLock = new ReentrantLock();
     }
 
@@ -507,10 +509,10 @@ public final class LlmClientResilienceWrapper {
         }
         // HTTP-date form: retry-after: Sat, 25 Dec 2099 15:00:00 GMT
         try {
-            final var date = java.time.ZonedDateTime.parse(token, HTTP_DATE);
+            final var date = ZonedDateTime.parse(token, HTTP_DATE);
             final var delay = date.toInstant().toEpochMilli() - System.currentTimeMillis();
             return delay > 0 ? (delay + 999) / 1000 : 0L;
-        } catch (final java.time.format.DateTimeParseException e) {
+        } catch (final DateTimeParseException e) {
             return null;
         }
     }

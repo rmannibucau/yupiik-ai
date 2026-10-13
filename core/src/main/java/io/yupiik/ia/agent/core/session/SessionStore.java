@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.session;
 
 import io.yupiik.ia.agent.core.llm.Message;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -85,6 +86,72 @@ public interface SessionStore {
      */
     default String summary(String id) {
         return "";
+    }
+
+    /**
+     * Ensures the session carries a leading {@link Message#projectDir(String)} marker recording
+     * the working directory it belongs to. No-op when the marker is already present (or the store
+     * does not persist markers, e.g. in-memory subagent stores). The default implementation is
+     * purely additive: it loads the session and, only when the marker is absent, rewrites it with
+     * the marker at index 0 -- file and in-memory stores both work through {@link #load}/
+     * {@link #replace}.
+     *
+     * @param id the session ID
+     * @param dir the absolute working directory to record
+     */
+    default void markProject(final String id, final String dir) {
+        if (dir == null || dir.isBlank()) {
+            return;
+        }
+        final var messages = load(id);
+        if (Message.isProjectMarker(messages.isEmpty() ? null : messages.get(0))) {
+            return;
+        }
+        final var withMarker = new ArrayList<Message>(messages.size() + 1);
+        withMarker.add(Message.projectDir(dir));
+        withMarker.addAll(messages);
+        replace(id, withMarker);
+    }
+
+    /**
+     * Replaces (or installs) the session's leading project marker with {@code dir}. Unlike
+     * {@link #markProject} this always rewrites the marker, even when the session already carries
+     * one - which is exactly what a mid-session working-directory change needs (e.g. the web
+     * {@code session.setProject} operation). No-op when {@code dir} is blank.
+     *
+     * @param id the session ID
+     * @param dir the new absolute working directory to record
+     */
+    default void replaceProject(final String id, final String dir) {
+        if (dir == null || dir.isBlank()) {
+            return;
+        }
+        final var messages = load(id);
+        final var withNewMarker = new ArrayList<Message>(messages.size() + 1);
+        withNewMarker.add(Message.projectDir(dir));
+        for (final var message : messages) {
+            if (!Message.isProjectMarker(message)) {
+                withNewMarker.add(message);
+            }
+        }
+        replace(id, withNewMarker);
+    }
+
+    /**
+     * Returns the working directory recorded by the session's leading project marker, or an empty
+     * string when none is set. Default implementation loads the whole session (cheap for the
+     * unicast callers); file-backed stores override to peek only the first line.
+     *
+     * @param id the session ID
+     * @return the recorded working directory, or empty string
+     */
+    default String projectDirOf(final String id) {
+        final var all = load(id);
+        if (all.isEmpty()) {
+            return "";
+        }
+        final var dir = Message.projectDirOf(all.get(0));
+        return dir == null ? "" : dir;
     }
 
     /**

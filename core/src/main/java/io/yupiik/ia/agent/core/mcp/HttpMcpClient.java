@@ -25,6 +25,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -134,7 +135,7 @@ class HttpMcpClient implements McpClient {
     private Object request(final String method, final Map<String, Object> params)
             throws IOException, InterruptedException {
         final var notification = method.startsWith("notifications/");
-        final var message = new java.util.LinkedHashMap<String, Object>();
+        final var message = new LinkedHashMap<String, Object>();
         message.put("jsonrpc", "2.0");
         if (!notification) {
             message.put("id", ids.incrementAndGet());

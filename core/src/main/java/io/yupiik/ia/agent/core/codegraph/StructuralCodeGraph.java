@@ -58,6 +58,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -129,6 +130,9 @@ public class StructuralCodeGraph implements AutoCloseable {
     private volatile List<String> pendingRefreshPaths = List.of();
     private final AtomicBoolean readyStarted = new AtomicBoolean();
     private volatile CompletableFuture<Void> readyFuture;
+    /** Lazily-built read-only query indexes for non-default (per-session) roots, keyed by absolute root. */
+    private final ConcurrentHashMap<Path, CodeGraphIndex> rootIndexes = new ConcurrentHashMap<>();
+
     private final ConcurrentLinkedQueue<PersistJob> persistQueue = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean persistScheduled = new AtomicBoolean();
     private final ReentrantLock refreshLock = new ReentrantLock();
@@ -475,7 +479,147 @@ public class StructuralCodeGraph implements AutoCloseable {
         return current;
     }
 
-    /** Raw load of the on-disk index, bypassing the freshness gate: used by {@link #queryIndex()} while a
+    /**
+     * Root-aware variant of {@link #queryIndex()} for a per-session working directory. When
+     * {@code root} is {@code null} or equals the process-wide project root, this is exactly the
+     * default {@link #queryIndex()} (byte-identical behaviour, one shared index). For any other root
+     * a read-only {@link CodeGraphIndex} is built lazily from that root's files (a fresh parse, no
+     * persistence, no file watcher) and cached per root, so sessions working on different projects
+     * resolve symbols against their own tree without disturbing the default graph.
+     */
+    public CodeGraphIndex queryIndex(final Path root) {
+        if (root == null || root.equals(projectDir)) {
+            return queryIndex();
+        }
+        final var normalized = root.toAbsolutePath().normalize();
+        if (Files.isDirectory(normalized)) {
+            return rootIndexes.computeIfAbsent(normalized, this::indexRoot);
+        }
+        return queryIndex();
+    }
+
+    /** Root-aware project directory: the per-session root when one is given, else the process default. */
+    public Path projectDir(final Path root) {
+        return root == null ? projectDir() : root.toAbsolutePath().normalize();
+    }
+
+    /** Root-aware relativization used to render symbol file paths against a per-session root. */
+    public String rel(final Path root, final Path file) {
+        if (root == null || root.equals(projectDir)) {
+            return rel(file);
+        }
+        try {
+            final var abs = file.toAbsolutePath().normalize();
+            final var r = root.toAbsolutePath().normalize();
+            return abs.startsWith(r) ? r.relativize(abs).toString().replace('\\', '/') : file.toString();
+        } catch (final RuntimeException e) {
+            return file.toString();
+        }
+    }
+
+    /**
+     * Builds a fresh read-only {@link CodeGraphIndex} for an arbitrary root without touching the
+     * default graph's state: a full watch-free, persistence-free parse of that root's indexable
+     * files, relativized against the root. Used to answer per-session code-graph queries for roots
+     * other than the process default.
+     */
+    private CodeGraphIndex indexRoot(final Path root) {
+        try {
+            final var symbols = new ArrayList<GraphModel.Symbol>();
+            final var edges = new ArrayList<GraphModel.Edge>();
+            final var ignore = FileIgnore.of(
+                            root, configuration.structuralCodeGraph().effectiveIgnoreGlobs())
+                    .rules();
+            final var files = new ArrayList<Path>();
+            Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                @Override
+                public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                    return isRootIgnored(root, ignore, dir) ? FileVisitResult.SKIP_SUBTREE : FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
+                    if (attrs.isRegularFile()
+                            && parserFor(file) != null
+                            && sizeOk(file)
+                            && !isRootIgnored(root, ignore, file)) {
+                        files.add(file);
+                    }
+                    return FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
+                    LOGGER.fine(() -> "Skipping unreadable path in per-session root " + root + ": " + file);
+                    return FileVisitResult.CONTINUE;
+                }
+            });
+            files.sort(Comparator.comparing(Path::toString));
+            final var javaParser = (JavaGraphParser) parsers.stream()
+                    .filter(p -> p instanceof JavaGraphParser)
+                    .findFirst()
+                    .orElse(null);
+            if (javaParser != null) {
+                final var batch = javaParser.parseBatch(files);
+                for (final var entry : batch.entrySet()) {
+                    final var model = entry.getValue();
+                    if (model == null) {
+                        continue;
+                    }
+                    final var rel = rootRelative(root, entry.getKey());
+                    final var relModel = relativizeModel(model, rel);
+                    symbols.addAll(relModel.symbols());
+                    edges.addAll(relModel.edges());
+                }
+            } else {
+                for (final var file : files) {
+                    final var parser = parserFor(file);
+                    if (parser == null) {
+                        continue;
+                    }
+                    try {
+                        final var relModel = relativizeModel(parser.parse(file), rootRelative(root, file));
+                        symbols.addAll(relModel.symbols());
+                        edges.addAll(relModel.edges());
+                    } catch (final RuntimeException e) {
+                        LOGGER.fine(() -> "Cannot index " + file + " for root " + root + ": " + e.getMessage());
+                    }
+                }
+            }
+            final var store = new GraphStore(
+                    List.copyOf(symbols), List.copyOf(edges), Map.of(), clock == null ? 0 : clock.millis());
+            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(store)));
+        } catch (final IOException e) {
+            LOGGER.warning("Cannot index per-session root " + root + ": " + e.getMessage());
+            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(GraphStore.empty())));
+        }
+    }
+
+    /** Root-relative, '/'-separated path of {@code file} under {@code root}. */
+    private static String rootRelative(final Path root, final Path file) {
+        return root.relativize(file).toString().replace('\\', '/');
+    }
+
+    /**
+     * Root-local ignore check mirroring {@link #isIgnored} but against a per-session root's own
+     * rule set (git-like last-match-wins, {@code !} negation re-includes).
+     */
+    private static boolean isRootIgnored(final Path root, final List<FileIgnore.Rule> ignore, final Path path) {
+        if (ignore == null || ignore.isEmpty()) {
+            return false;
+        }
+        final var rel = Path.of(rootRelative(root, path));
+        boolean ignored = false;
+        for (final var rule : ignore) {
+            if (FileIgnore.matchesRule(rule, rel)) {
+                ignored = !rule.negated();
+            }
+        }
+        return ignored;
+    }
+
+    /**
+     * Raw load of the on-disk index, bypassing the freshness gate: used by {@link #queryIndex()} while a
      * background patch/rebuild is still running so tools serve a complete (slightly stale) graph instead of
      * an empty one. */
     private CodeGraphIndex loadPersistedIndex() {

@@ -30,10 +30,14 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.Clock;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.locks.ReentrantLock;
@@ -265,8 +269,8 @@ public class FileSessionStore implements SessionStore {
             final var out = new ArrayList<Message>();
             // legacy sessions persisted the tool name as toolCallId: remember assistant call ids by
             // tool name so such entries can be remapped to the real call id on load
-            final var allCallIds = new java.util.HashSet<String>();
-            final var callIdsByTool = new java.util.HashMap<String, java.util.ArrayDeque<String>>();
+            final var allCallIds = new HashSet<String>();
+            final var callIdsByTool = new HashMap<String, ArrayDeque<String>>();
             String line;
             while ((line = in.readLine()) != null) {
                 if (line.isBlank()) {
@@ -286,7 +290,7 @@ public class FileSessionStore implements SessionStore {
                         if (call != null && call.id() != null && call.function() != null) {
                             allCallIds.add(call.id());
                             callIdsByTool
-                                    .computeIfAbsent(call.function().name(), k -> new java.util.ArrayDeque<>())
+                                    .computeIfAbsent(call.function().name(), k -> new ArrayDeque<>())
                                     .add(call.id());
                         }
                     }
@@ -349,7 +353,7 @@ public class FileSessionStore implements SessionStore {
             try {
                 Files.createDirectories(target.getParent());
                 Files.writeString(tmp, sb.toString());
-                Files.move(tmp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
             } catch (final IOException e) {
                 try {
                     Files.deleteIfExists(tmp);
@@ -373,7 +377,15 @@ public class FileSessionStore implements SessionStore {
         if (messages.isEmpty()) {
             return true;
         }
-        return messages.size() == 1 && "user".equals(messages.get(0).role());
+        // leading system markers (the web project marker, the compaction marker) are structural
+        // and do not make a session "non-empty"; only a real user turn does.
+        var first = 0;
+        while (first < messages.size() && "system".equals(messages.get(first).role())) {
+            first++;
+        }
+        return first >= messages.size()
+                || messages.size() - first == 1
+                        && "user".equals(messages.get(first).role());
     }
 
     @Override
@@ -406,17 +418,80 @@ public class FileSessionStore implements SessionStore {
     }
 
     @Override
+    public String projectDirOf(final String id) {
+        try (final var in = openReader(id)) {
+            if (in == null) {
+                return "";
+            }
+            final var first = in.readLine();
+            if (first == null || first.isBlank()) {
+                return "";
+            }
+            final SessionEntry entry;
+            try {
+                entry = mapper.fromString(SessionEntry.class, first);
+            } catch (final RuntimeException re) {
+                return "";
+            }
+            final var content = entry.content();
+            return "system".equals(entry.role()) && "project".equals(entry.name()) && content instanceof final String s
+                    ? s
+                    : "";
+        } catch (final IOException e) {
+            return "";
+        }
+    }
+
+    @Override
     public String summary(final String id) {
-        return load(id).stream()
-                .filter(m -> "user".equals(m.role())
-                        && m.content() instanceof final String text
-                        && !text.isBlank()
-                        && !text.startsWith("<compacted-context>")
-                        && !text.startsWith("<pruned-context>"))
-                .map(m -> (String) m.content())
-                .map(AgentSessionService::firstLine)
-                .findFirst()
-                .orElse("");
+        // the home-page listing calls summary once per session; loading and parsing the whole file
+        // for each of them is O(total bytes). The title is the first line of the first real user
+        // message, which sits near the top (after the leading system markers), so stream the JSONL
+        // until we find it and bail out - same result as load().stream() but bounded by the prefix.
+        try (final var in = openReader(id)) {
+            if (in == null) {
+                return "";
+            }
+            String line;
+            while ((line = in.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                final SessionEntry entry;
+                try {
+                    entry = mapper.fromString(SessionEntry.class, line);
+                } catch (final RuntimeException re) {
+                    continue;
+                }
+                if (!"user".equals(entry.role())
+                        || !(entry.content() instanceof final String text)
+                        || text.isBlank()
+                        || text.startsWith("<compacted-context>")
+                        || text.startsWith("<pruned-context>")) {
+                    continue;
+                }
+                return AgentSessionService.firstLine(text);
+            }
+            return "";
+        } catch (final IOException e) {
+            return "";
+        }
+    }
+
+    /**
+     * Opens a reader over the session's persisted content ({@code null} when no source exists),
+     * resolving the same folder/legacy, jsonl/gz priority as {@link #load}: folder jsonl, folder
+     * gz, legacy jsonl, legacy gz. Callers are responsible for closing it (try-with-resources).
+     */
+    private BufferedReader openReader(final String id) throws IOException {
+        final var source = resolveLoadSource(id);
+        if (source == null) {
+            return null;
+        }
+        return !source.gz()
+                ? Files.newBufferedReader(source.path())
+                : new BufferedReader(new InputStreamReader(
+                        new GZIPInputStream(Files.newInputStream(source.path())), StandardCharsets.UTF_8));
     }
 
     public List<SessionInfo> list() {

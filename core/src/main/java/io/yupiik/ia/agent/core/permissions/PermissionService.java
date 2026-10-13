@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.BashPermissionsConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
 import io.yupiik.ia.agent.core.events.EventContext;
 import io.yupiik.ia.agent.core.events.HookResult;
@@ -32,29 +33,85 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class PermissionService {
     private final CodingAgentConfiguration configuration;
     private final Emitter emitter;
+    private final BashRulesRegistry bashRulesRegistry;
+    /**
+     * Session-scoped dynamic bash rule overrides (eg. families the user allowed for this session), cleared
+     * when switching back to {@code PLAN} and when the session closes. Kept here (not in the
+     * application-scoped {@link BashRulesRegistry}) because they follow the session lifecycle.
+     */
+    private final CopyOnWriteArrayList<CommandPermissionConfiguration> dynamicRules = new CopyOnWriteArrayList<>();
+
     private volatile ApprovalGate gate;
     private final Set<String> sessionGrants = ConcurrentHashMap.newKeySet();
     private volatile AgentMode mode;
     private volatile PermissionMode permissionMode;
     private volatile RulesCache rulesCache;
+    /**
+     * The session's resolved working/project directory, set once at session creation
+     * ({@code SessionRuntimeFactory}); {@code null} means the process default
+     * ({@code configuration.resolveProjectDir()}). Scope for the command allowlist hash.
+     */
+    private volatile java.nio.file.Path projectDir;
 
     public PermissionService(final CodingAgentConfiguration configuration) {
-        this(configuration, null);
+        this(configuration, null, null);
+    }
+
+    /** Set once when the session runtime is created so allowlist hashing scopes to the session's project. */
+    public void projectDir(final java.nio.file.Path dir) {
+        this.projectDir = dir == null ? null : dir.toAbsolutePath().normalize();
     }
 
     public PermissionService(
             final CodingAgentConfiguration configuration, final io.yupiik.fusion.framework.api.event.Emitter emitter) {
+        this(configuration, emitter, null);
+    }
+
+    /** Session services created by the runtime factory pass the shared registry; tests/transient usages pass null. */
+    public PermissionService(
+            final CodingAgentConfiguration configuration,
+            final io.yupiik.fusion.framework.api.event.Emitter emitter,
+            final BashRulesRegistry bashRulesRegistry) {
         this.configuration = configuration;
         this.emitter = emitter;
+        this.bashRulesRegistry = bashRulesRegistry;
     }
 
     protected PermissionService() {
         this.configuration = null;
         this.emitter = null;
+        this.bashRulesRegistry = null;
+    }
+
+    /**
+     * Adds a dynamic bash rule override for this session (deduplicated with the existing ones). The rule
+     * participates in the read-only evaluation (and therefore in {@code $( ... )} substitution verification)
+     * until {@link #clearDynamicRules()} - ie. until the next switch back to plan or the session close.
+     */
+    public void addDynamicRule(final CommandPermissionConfiguration rule) {
+        if (rule != null && !dynamicRules.contains(rule)) {
+            dynamicRules.add(rule);
+        }
+    }
+
+    /** Removes a previously added dynamic rule; no-op when absent. */
+    public void removeDynamicRule(final CommandPermissionConfiguration rule) {
+        dynamicRules.remove(rule);
+    }
+
+    /** Snapshot of the session's dynamic bash rule overrides. */
+    public List<CommandPermissionConfiguration> dynamicRules() {
+        return new ArrayList<>(dynamicRules);
+    }
+
+    /** Drops every dynamic bash rule override of this session (switch back to plan, session release). */
+    public void clearDynamicRules() {
+        dynamicRules.clear();
     }
 
     public void setGate(final ApprovalGate gate) {
@@ -287,6 +344,12 @@ public class PermissionService {
 
     /** Lazily compiled {@code yca.permissions.bash.rules}, refreshed if the underlying configuration changes. */
     private BashRules.Compiled compiledBashRules() {
+        final var registry = bashRulesRegistry;
+        if (registry != null) {
+            // the registry owns the app-scoped caches: base config compiled once per config identity,
+            // plus a bounded combined cache keyed by this session's dynamic overrides snapshot
+            return registry.compiled(dynamicRules);
+        }
         final var permissions = configuration.permissions();
         final var bash = permissions != null ? permissions.bash() : null;
         final var cache = rulesCache;
@@ -360,7 +423,10 @@ public class PermissionService {
     }
 
     private String projectDir() {
-        return configuration.resolveProjectDir().normalize().toString();
+        return (projectDir != null
+                        ? projectDir
+                        : configuration.resolveProjectDir().normalize())
+                .toString();
     }
 
     private static String describe(final String toolName, final Map<String, Object> args) {

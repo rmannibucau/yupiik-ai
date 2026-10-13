@@ -24,6 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Locale;
 import java.util.Set;
 
@@ -236,7 +237,7 @@ public final class CodeGraphIndex {
             }
             out[size++] = node[i];
         }
-        return out == null ? new int[0] : (size == out.length ? out : java.util.Arrays.copyOf(out, size));
+        return out == null ? new int[0] : (size == out.length ? out : Arrays.copyOf(out, size));
     }
 
     /**

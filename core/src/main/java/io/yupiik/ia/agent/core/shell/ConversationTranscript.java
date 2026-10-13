@@ -19,9 +19,13 @@ import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.llm.Message;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.BiFunction;
 
 /**
  * UI-less conversation state shared by the shells: transcript, streaming
@@ -125,9 +129,9 @@ public class ConversationTranscript {
      * rebuild each block's label from what actually produced it; when unset (or when a message
      * carries no identity) replay falls back to the current {@link #setLabels} values.
      */
-    private volatile java.util.function.BiFunction<Message.Identity, Boolean, String> labelResolver;
+    private volatile BiFunction<Message.Identity, Boolean, String> labelResolver;
 
-    public void setLabelResolver(final java.util.function.BiFunction<Message.Identity, Boolean, String> resolver) {
+    public void setLabelResolver(final BiFunction<Message.Identity, Boolean, String> resolver) {
         this.labelResolver = resolver;
     }
 
@@ -175,7 +179,7 @@ public class ConversationTranscript {
         if (message == null || message.isBlank()) {
             return false;
         }
-        final var m = message.toLowerCase(java.util.Locale.ROOT);
+        final var m = message.toLowerCase(Locale.ROOT);
         if (m.contains("concurrency_limit_exceeded")
                 || m.contains("too many concurrent requests")
                 || m.contains("rate limit")
@@ -256,7 +260,7 @@ public class ConversationTranscript {
     private volatile AgentEvent.Throughput turnThroughput = AgentEvent.Throughput.EMPTY;
 
     /** Recent context appliances (dedup/prune/compact/...), newest first, for side feedback. */
-    private final java.util.ArrayDeque<AgentEvent.Compacted> appliances = new java.util.ArrayDeque<>(8);
+    private final ArrayDeque<AgentEvent.Compacted> appliances = new ArrayDeque<>(8);
 
     /** Max number of appliance entries remembered for the sidebar. */
     private static final int MAX_APPLIANCES = 6;
@@ -328,13 +332,24 @@ public class ConversationTranscript {
                 AgentEvent.ToolStream(
                         String name,
                         String fragment,
+                        long ordinal,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
             final var deque = runningTools.get(name);
             if (deque != null && !deque.isEmpty()) {
-                // the most recently started tool with this name is the live one
-                final var tool = deque.peekLast();
+                // the most recently started tool with this name is the live one; when the stream carries
+                // the runner's ordinal (#<n>) prefer the exact started call so a late fragment of an
+                // earlier same-named call can never land on a sibling card
+                final RunningTool tool;
+                if (ordinal > 0) {
+                    tool = deque.stream()
+                            .filter(t -> t.ordinal() == ordinal)
+                            .findFirst()
+                            .orElse(deque.peekLast());
+                } else {
+                    tool = deque.peekLast();
+                }
                 tool.stream.append(fragment).append('\n');
                 if (tool.stream.length() > MAX_EMBEDDED_TOOL_CHARS) {
                     tool.stream.delete(0, tool.stream.length() - MAX_EMBEDDED_TOOL_CHARS);
@@ -347,11 +362,28 @@ public class ConversationTranscript {
                         String name,
                         String output,
                         boolean success,
+                        long eventOrdinal,
                         String sessionId,
                         String subagentId,
                         String subagentName)) {
             final var deque = runningTools.get(name);
-            final var tool = deque == null ? null : deque.pollFirst();
+            // prefer the exact started call identified by the runner's ordinal; fall back to the name
+            // deque (parallel batches and legacy events without an ordinal) when no ordinal matched
+            RunningTool tool = null;
+            if (deque != null && eventOrdinal > 0) {
+                final var it = deque.iterator();
+                while (it.hasNext()) {
+                    final var candidate = it.next();
+                    if (candidate.ordinal() == eventOrdinal) {
+                        tool = candidate;
+                        it.remove();
+                        break;
+                    }
+                }
+            }
+            if (tool == null && deque != null) {
+                tool = deque.pollFirst();
+            }
             if (deque != null && deque.isEmpty()) {
                 runningTools.remove(name);
             }
@@ -437,7 +469,7 @@ public class ConversationTranscript {
                     .append("\n\n> context ")
                     .append(kind)
                     .append(" applied (")
-                    .append(mode.toLowerCase(java.util.Locale.ROOT))
+                    .append(mode.toLowerCase(Locale.ROOT))
                     .append(")\n");
             touch();
         } else if (event
@@ -534,17 +566,26 @@ public class ConversationTranscript {
                         .append(THOUGHT_END)
                         .append('\n');
             }
-            // content is only the last assistant message: it supersedes the pending
-            // tail of this round (already in the transcript from the flushes above),
-            // so the label is only re-emitted when the turn never streamed text
-            if (!answerHeaderWritten) {
-                answerHeaderWritten = true;
-                transcript.append("\n\n" + assistantMarker() + "\n\n");
+            // The final assistant message ("content") is authoritative but must never
+            // truncate what already streamed into the pending tail. When the final content is a
+            // prefix (or equals) what already streamed - a clipped provider reply - the fuller
+            // streamed text wins and nothing is lost. Otherwise the final content extends the
+            // stream or is a regeneration, so it supersedes the pending tail and is written
+            // fresh (no duplication).
+            final var streamed = pending.toString();
+            final var visible = parts.visible();
+            if (!streamed.isEmpty() && streamed.startsWith(visible)) {
+                flushPending();
             } else {
-                transcript.append("\n\n");
+                pending.setLength(0);
+                if (!answerHeaderWritten) {
+                    answerHeaderWritten = true;
+                    transcript.append("\n\n" + assistantMarker() + "\n\n");
+                } else {
+                    transcript.append("\n\n");
+                }
+                transcript.append(visible).append('\n');
             }
-            transcript.append(parts.visible()).append('\n');
-            pending.setLength(0);
             thinking.setLength(0);
             inlineThink.reset();
             answerHeaderWritten = false;
@@ -702,9 +743,7 @@ public class ConversationTranscript {
     public synchronized String markdown(final String spinner, final String fallback) {
         // hot path: nothing changed since the last build -> reuse the cached string
         // instead of re-concatenating the whole transcript on every render tick
-        if (markdownCache != null
-                && markdownVersion == contentVersion
-                && java.util.Objects.equals(markdownSpinner, spinner)) {
+        if (markdownCache != null && markdownVersion == contentVersion && Objects.equals(markdownSpinner, spinner)) {
             return markdownCache;
         }
         final var sb = new StringBuilder(transcript);
@@ -725,9 +764,8 @@ public class ConversationTranscript {
         // the header carries the (#ordinal) stamped by the runner on ToolStarted so
         // the TUI can anchor the live block (clickable running-tool overlay, per-tool
         // cancel) before the call finishes
-        for (final var tool : runningTools.values().stream()
-                .flatMap(java.util.Collection::stream)
-                .toList()) {
+        for (final var tool :
+                runningTools.values().stream().flatMap(Collection::stream).toList()) {
             sb.append("\n\n")
                     .append(TOOL_BEGIN)
                     .append("\n`")
@@ -1032,7 +1070,7 @@ public class ConversationTranscript {
     }
 
     /** Recent context appliances (dedup/prune/compact/...), newest first, capped for the sidebar. */
-    public java.util.List<AgentEvent.Compacted> appliances() {
+    public List<AgentEvent.Compacted> appliances() {
         synchronized (this) {
             return List.copyOf(appliances);
         }

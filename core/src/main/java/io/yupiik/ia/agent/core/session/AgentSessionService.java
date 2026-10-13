@@ -198,6 +198,9 @@ public class AgentSessionService {
         if (mode == AgentMode.PLAN) {
             // approvals granted during a build phase must not leak back into planning
             runtime.permissions().clearSessionGrants();
+            // session-scoped dynamic bash rule overrides (families allowed during the build phase) do not
+            // leak either: switching back to plan restores the configured read-only posture
+            runtime.permissions().clearDynamicRules();
             // a session approval mode set during build (yolo/auto_edit) must not silently keep
             // plan building: drop the session override so the mode falls back to the configured
             // default (ASK unless explicitly configured otherwise). An explicit /permissions
@@ -500,13 +503,33 @@ public class AgentSessionService {
         return new PlanReload(true, applied, null);
     }
 
-    public record MemoryContent(String global, String project) {}
+    public record MemoryContent(
+            String global,
+            String project,
+            String globalPath,
+            String projectPath,
+            boolean globalExists,
+            boolean projectExists) {}
 
     /**
-     * Reads global and project memory. Empty strings mean "no memory".
+     * Reads global and project memory. Empty strings mean "no memory". Also exposes the resolved
+     * file paths and whether each file exists, so UIs can show exactly where the memory is read
+     * from and distinguish "no facts yet" from "file not found".
      */
     public MemoryContent memory() {
-        return new MemoryContent(memoryStore.readGlobal(), memoryStore.readProject());
+        final var globalFile = java.nio.file.Path.of(configuration.resolveStorageHome(), "memory", "MEMORY.md");
+        final var projectFile = configuration
+                .resolveWorkingDir()
+                .resolve(".yca")
+                .resolve("memory")
+                .resolve("MEMORY.md");
+        return new MemoryContent(
+                memoryStore.readGlobal(),
+                memoryStore.readProject(),
+                globalFile.toAbsolutePath().normalize().toString(),
+                projectFile.toAbsolutePath().normalize().toString(),
+                java.nio.file.Files.isRegularFile(globalFile),
+                java.nio.file.Files.isRegularFile(projectFile));
     }
 
     public record MemoryStats(

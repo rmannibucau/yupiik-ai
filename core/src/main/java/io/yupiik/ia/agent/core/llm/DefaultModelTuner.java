@@ -19,6 +19,7 @@ import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -516,7 +517,7 @@ public final class DefaultModelTuner {
     }
 
     private static List<ModelVariantConfiguration> efforts(
-            final List<String> efforts, final java.util.function.Function<String, String> payload) {
+            final List<String> efforts, final Function<String, String> payload) {
         final var vars = new ArrayList<ModelVariantConfiguration>(efforts.size());
         for (final var effort : efforts) {
             vars.add(variant(effort, effort, payload.apply(effort)));

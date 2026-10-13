@@ -37,8 +37,11 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.time.Clock;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -66,7 +69,7 @@ class SpeakerLabelsTest {
     private static final String USER_FALLBACK = USER == null || USER.isBlank() ? "You" : USER;
 
     private CodingAgentConfiguration configuration(final Map<String, String> overrides) {
-        final var map = new java.util.HashMap<>(overrides);
+        final var map = new HashMap<>(overrides);
         map.put("yca.provider.providers.length", "1");
         map.put("yca.provider.providers.0.id", "default");
         map.put("yca.provider.providers.0.baseUrl", "http://localhost:1/v1/chat/completions");
@@ -128,9 +131,8 @@ class SpeakerLabelsTest {
         assertEquals("p::m", labels.assistantLabel(new SpeakerLabels.Ctx("m", "p", null, "plan", "s1", null)));
     }
 
-    private static String compile(
-            final String template, final java.util.function.Function<HelperContext, Object> helper) {
-        final var functions = new java.util.LinkedHashMap<String, java.util.function.Function<HelperContext, Object>>();
+    private static String compile(final String template, final Function<HelperContext, Object> helper) {
+        final var functions = new LinkedHashMap<String, Function<HelperContext, Object>>();
         functions.put("systemProperty", helper);
         return new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(

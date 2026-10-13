@@ -36,6 +36,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -108,7 +109,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -155,7 +156,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant("digest: custom focus", null), Usage.EMPTY);
@@ -204,7 +205,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -260,7 +261,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(request);
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
@@ -309,7 +310,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), new Usage(11, 7, 18));
             }
@@ -665,7 +666,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
             }
@@ -677,7 +678,7 @@ class ContextManagerTest {
             @Override
             public ChatResult chat(
                     final ChatCompletionRequest request,
-                    final java.util.function.Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
                     final BooleanSupplier cancelled) {
                 captured.add(List.copyOf(request.messages()));
                 return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);

@@ -15,6 +15,8 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import static java.util.stream.Collectors.joining;
+
 import dev.tamboui.layout.Constraint;
 import dev.tamboui.layout.Layout;
 import dev.tamboui.layout.Padding;
@@ -92,24 +94,36 @@ import io.yupiik.ia.agent.core.shell.ToolOutputVisibility;
 import io.yupiik.ia.agent.core.shell.TurnRunner;
 import io.yupiik.ia.agent.core.shell.btw.BtwAnswerer;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
+import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Deque;
 import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -119,6 +133,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -486,13 +502,13 @@ public class TuiCommand implements Runnable {
     private String persistedTheme() {
         final var file = themeStoragePath();
         try {
-            if (java.nio.file.Files.isRegularFile(file)) {
-                final var value = java.nio.file.Files.readString(file).strip().toLowerCase(java.util.Locale.ROOT);
+            if (Files.isRegularFile(file)) {
+                final var value = Files.readString(file).strip().toLowerCase(Locale.ROOT);
                 if ("light".equals(value) || "dark".equals(value)) {
                     return value;
                 }
             }
-        } catch (final java.io.IOException e) {
+        } catch (final IOException e) {
             // ignore and fall back to the configured theme
         }
         return null;
@@ -501,9 +517,9 @@ public class TuiCommand implements Runnable {
     private void persistTheme(final String theme) {
         final var file = themeStoragePath();
         try {
-            java.nio.file.Files.createDirectories(file.getParent() == null ? Path.of(".") : file.getParent());
-            java.nio.file.Files.writeString(file, theme);
-        } catch (final java.io.IOException e) {
+            Files.createDirectories(file.getParent() == null ? Path.of(".") : file.getParent());
+            Files.writeString(file, theme);
+        } catch (final IOException e) {
             // best-effort persistence; it must never break a command
         }
     }
@@ -625,7 +641,7 @@ public class TuiCommand implements Runnable {
                         try {
                             tui.backend().writeRaw(TuiRunnerFactory.MOUSE_MOTION_DISABLE);
                             tui.backend().flush();
-                        } catch (final java.io.IOException e) {
+                        } catch (final IOException e) {
                             // best-effort restoration on the abrupt path, never mask the shutdown
                         }
                     },
@@ -669,7 +685,7 @@ public class TuiCommand implements Runnable {
                 try {
                     tui.backend().writeRaw(TuiRunnerFactory.MOUSE_MOTION_DISABLE);
                     tui.backend().flush();
-                } catch (final java.io.IOException | RuntimeException e) {
+                } catch (final IOException | RuntimeException e) {
                     // best-effort restoration, never mask the normal teardown
                 }
                 try {
@@ -750,6 +766,14 @@ public class TuiCommand implements Runnable {
 
     private void activate(final int index) {
         tabManager.activate(index);
+        // force an immediate repaint of the newly-active tab: activation alone schedules a single
+        // render, but a busy-but-inert turn (between tool rounds) has nothing else pushing a redraw,
+        // so without this the returned-to tab can briefly show a stale idle frame before the next
+        // tick/heartbeat. Mark dirty so the pending mutation path repaints it right away.
+        final var state = tabManager.get(index);
+        if (state != null) {
+            state.dirty = true;
+        }
     }
 
     private void cycleTab(final int delta) {
@@ -1024,7 +1048,7 @@ public class TuiCommand implements Runnable {
     private FeedbackGate feedbackGate(final TuiRunner tui, final UiState state) {
         return questions -> {
             final var latch = new CountDownLatch(1);
-            final var answers = new java.util.concurrent.ConcurrentHashMap<String, Object>();
+            final var answers = new ConcurrentHashMap<String, Object>();
             final var answered = new AtomicBoolean(); // true => answered, false => canceled
             tui.runLater(() -> {
                 state.dirty = true;
@@ -1032,7 +1056,12 @@ public class TuiCommand implements Runnable {
             });
             try {
                 while (!latch.await(200, TimeUnit.MILLISECONDS)) {
-                    if (state.interrupted || renderStalled(state)) {
+                    // a background tab is legitimately unpainted (its lastRenderTick goes stale as
+                    // long as the user is on another tab), so only treat a stale tick as a render
+                    // stall when this tab is the one on screen: an ask_user raised by a background
+                    // turn must pause (keep the latch held) and surface once the tab is active again,
+                    // not fail-closed as "headless". Interrupting the turn still cancels it below.
+                    if (state.interrupted || (tabManager.active() == state && renderStalled(state))) {
                         tui.runLater(() -> {
                             state.dirty = true;
                             if (state.feedbackPrompt != null && state.feedbackPrompt.latch() == latch) {
@@ -1337,20 +1366,20 @@ public class TuiCommand implements Runnable {
         if (event instanceof AgentEvent.ToolStarted started) {
             state.spinnerState.reset();
             state.pendingToolArgs
-                    .computeIfAbsent(started.name(), n -> new java.util.ArrayDeque<>())
+                    .computeIfAbsent(started.name(), n -> new ArrayDeque<>())
                     .addLast(started.args());
             // reserve the ordinal this call will be stamped with so the running tool
             // opens its overlay immediately; the ToolFinished event overwrites it
             final var ordinal = started.ordinal() > 0 ? started.ordinal() : state.model.toolCallCount() + 1;
             state.pendingToolOrdinals
-                    .computeIfAbsent(started.name(), n -> new java.util.ArrayDeque<>())
+                    .computeIfAbsent(started.name(), n -> new ArrayDeque<>())
                     .addLast(ordinal);
             // the renderer resolves the running card's ordinal from the command label
             // (a running card's ToolCard.name holds the command, not the tool name)
             final var cmd = commandOfArgs(started.args());
             if (cmd != null && !cmd.isBlank()) {
                 state.pendingToolOrdinals
-                        .computeIfAbsent(cmd, n -> new java.util.ArrayDeque<>())
+                        .computeIfAbsent(cmd, n -> new ArrayDeque<>())
                         .addLast(ordinal);
             }
             state.toolOutputs.record(
@@ -1452,7 +1481,8 @@ public class TuiCommand implements Runnable {
      * is left untouched until input or a state change forces one.
      */
     private boolean needsTickRender(final UiState state) {
-        return state.model.runningTool() != null
+        return state.model.busy()
+                || state.model.runningTool() != null
                 || activeWait(state) != null
                 || state.model.thinkingLength() > 0
                 || !state.pendingPrompts.isEmpty()
@@ -1497,7 +1527,12 @@ public class TuiCommand implements Runnable {
             return scrollTopOverlay(wheel, state);
         }
         if (event instanceof final MouseEvent move && move.kind() == MouseEventKind.MOVE) {
-            return onTabHover(move, state);
+            // a MOVE can drive either the tab-bar title tooltip or the tool-output
+            // modal footer tooltip; both are pure hover state with no fallthrough.
+            // repaint when either hover state changed (a moved pointer over the footer
+            // tooltip must schedule a redraw or the chip never appears)
+            final var footerHovered = state.toolOverlay != null && onToolFooterHover(move, state);
+            return footerHovered | onTabHover(move, state);
         }
         if (state.toolOverlay != null) {
             return onToolOverlayEvent(event, runner, state);
@@ -2062,7 +2097,7 @@ public class TuiCommand implements Runnable {
      * for the whole drag, so overflowing past a dialog's bottom edge stops at
      * the dialog instead of copying the content drawn underneath it.
      */
-    private static java.util.List<Rect> copyZones(final UiState state) {
+    private static List<Rect> copyZones(final UiState state) {
         final var panes = state.paneZones;
         final var zones = new ArrayList<Rect>(panes.size() + 2);
         for (var i = panes.size() - 1; i >= 0; i--) {
@@ -2579,6 +2614,10 @@ public class TuiCommand implements Runnable {
     }
 
     private void dismissCompletion(final UiState state) {
+        // invalidate any in-flight live-completion result so a late one cannot resurrect the popup
+        // after an explicit dismissal (Esc, Enter accepting a candidate, Tab, a cursor move)
+        ++completionGeneration;
+        state.completionDismissed = true;
         state.completion = null;
         state.completionCursor = -1;
         state.completionIndex = 0;
@@ -2635,6 +2674,9 @@ public class TuiCommand implements Runnable {
         final var line = state.input.getLine(state.input.cursorRow());
         final var cursor = state.input.cursorCol();
         final var gen = ++completionGeneration;
+        // a fresh edit re-arms the popup after an explicit dismissal (the warm-up reopen checks
+        // the flag before calling this method, so it can never re-arm itself this way)
+        state.completionDismissed = false;
         if (!line.startsWith("/") && !tokenAt(line, cursor).startsWith("@")) {
             dismissCompletion(state);
             return;
@@ -2643,6 +2685,24 @@ public class TuiCommand implements Runnable {
         final var reqCursor = cursor;
         executor.execute(() -> {
             final var suggestion = completionEngine.suggest(reqLine, reqCursor);
+            applyCompletionResult(state, gen, reqLine, reqCursor, suggestion);
+        });
+    }
+
+    /**
+     * Applies a live-completion result on the render thread so the popup is painted on the next
+     * tick even when no other event would repaint it (a bare mutation from the executor thread
+     * had to wait for an unrelated render, which made the popup flush appear and disappear
+     * non-deterministically). The relevance guards run at apply time so a dismissal that raced
+     * with the computation still wins.
+     */
+    private void applyCompletionResult(
+            final UiState state,
+            final long gen,
+            final String reqLine,
+            final int reqCursor,
+            final CompletionEngine.Suggestion suggestion) {
+        final Runnable mutation = () -> {
             if (gen != completionGeneration || !completionInputMatches(state, reqLine, reqCursor)) {
                 return;
             }
@@ -2666,7 +2726,12 @@ public class TuiCommand implements Runnable {
                 state.completionIndex = 0;
                 state.completionNavigated = false;
             }
-        });
+        };
+        if (state.runner == null) {
+            mutation.run();
+        } else {
+            runLater(state, mutation);
+        }
     }
 
     /**
@@ -2731,7 +2796,7 @@ public class TuiCommand implements Runnable {
                     try {
                         // most recent first regardless of the store implementation
                         final var sessions = sessionStore.list().stream()
-                                .sorted(java.util.Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
+                                .sorted(Comparator.comparingLong(SessionStore.SessionInfo::modifiedAt)
                                         .reversed())
                                 .toList();
                         if (sessions.isEmpty()) {
@@ -2775,6 +2840,28 @@ public class TuiCommand implements Runnable {
                         }
                     }
                     completionCache.updateVariants(variantGeneration, variants);
+                }
+                // If the input already warrants a live-completion popup but none is open (it was
+                // typed before the async candidate caches finished populating), recompute it now that
+                // the models/tools are cached - otherwise a user who typed "/model m" and paused would
+                // see no popup until they hit another key. Only reopen an *empty* popup so an explicit
+                // Esc dismissal or an in-progress arrow navigation is never disturbed.
+                final var activeState = active();
+                if (activeState != null) {
+                    final var line = activeState.input.getLine(activeState.input.cursorRow());
+                    final var cursor = activeState.input.cursorCol();
+                    if (!activeState.completionDismissed
+                            && (activeState.completion == null || activeState.completion.empty())
+                            && (line.startsWith("/") || tokenAt(line, cursor).startsWith("@"))) {
+                        // re-check the dismissal flag on the render thread: the user may have hit
+                        // Esc (or accepted a candidate) between this warm-up refresh completing
+                        // and this action running, and an explicit dismissal must never be undone
+                        runLater(activeState, () -> {
+                            if (!activeState.completionDismissed) {
+                                liveComplete(activeState);
+                            }
+                        });
+                    }
                 }
             });
         } catch (final RuntimeException e) {
@@ -2833,10 +2920,30 @@ public class TuiCommand implements Runnable {
         final var hovered = index < 0 ? null : tabManager.get(index);
         final var next = hovered == null ? null : tabTitle(hovered);
         final var current = state.hoverTitle;
-        if (java.util.Objects.equals(current, next)) {
+        if (Objects.equals(current, next)) {
             return false;
         }
         state.hoverTitle = next;
+        return true;
+    }
+
+    /**
+     * Mouse motion over the tool output modal footer: hovering the ellipsized raw-args
+     * line surfaces the full args JSON as a floating chip ({@link UiState#hoverToolCmd}),
+     * cleared when the pointer leaves the footer row. The rendered footer rect is
+     * consulted so a MOVE outside the modal (or over the tab strip while the modal is
+     * open) never toggles anything.
+     */
+    private boolean onToolFooterHover(final MouseEvent move, final UiState state) {
+        final var footer = state.toolOverlayFooter;
+        final var args =
+                state.toolOverlay == null ? null : state.toolOverlay.entry().args();
+        final var next =
+                footer != null && args != null && !args.isBlank() && footer.contains(move.x(), move.y()) ? args : null;
+        if (Objects.equals(state.hoverToolCmd, next)) {
+            return false;
+        }
+        state.hoverToolCmd = next;
         return true;
     }
 
@@ -3362,7 +3469,13 @@ public class TuiCommand implements Runnable {
             // match the palette; widgets with their own background draw over it
             frame.buffer().fill(frame.area(), new dev.tamboui.buffer.Cell(" ", Style.EMPTY.bg(screenBackground)));
         }
-        if (state.model.runningTool() != null || activeWait(state) != null || state.model.thinkingLength() > 0) {
+        // a busy-but-inert turn (mid-round wait: no tool, no reasoning stream) still needs its
+        // spinner to advance: the gate must not rely solely on runningTool/activeWait/thinkingLength,
+        // which can all be cold between tool rounds or after a status divergence (see needsTickRender)
+        if (state.model.busy()
+                || state.model.runningTool() != null
+                || activeWait(state) != null
+                || state.model.thinkingLength() > 0) {
             state.spinnerState.advance();
         }
         // thinking timer lifecycle: armed on the first frame with live reasoning and
@@ -3480,6 +3593,9 @@ public class TuiCommand implements Runnable {
         }
         if (state.toolOverlay != null) {
             renderToolOverlay(frame, state);
+            if (state.hoverToolCmd != null && !state.hoverToolCmd.isBlank()) {
+                renderToolOverlayTooltip(frame, state);
+            }
         }
         if (state.errorDetail != null && state.errorOpen) {
             renderErrorDetail(frame, state);
@@ -3852,7 +3968,7 @@ public class TuiCommand implements Runnable {
         // search match highlighting: reversed strips over matched rows, same buffer
         // trick as the scrollbar indicator (no span surgery needed)
         if (state.search.active() && !state.search.matches().isEmpty()) {
-            final var matches = new java.util.HashSet<>(state.search.matches());
+            final var matches = new HashSet<>(state.search.matches());
             var top = 0;
             for (final var chunk : chunks) {
                 for (var r = 0; r < chunk.height(); r++) {
@@ -3885,7 +4001,7 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private record RenderedChunk(int height, java.util.function.IntFunction<dev.tamboui.widget.Widget> supplier) {
+    private record RenderedChunk(int height, IntFunction<dev.tamboui.widget.Widget> supplier) {
         dev.tamboui.widget.Widget widget(final int skip) {
             return supplier.apply(skip);
         }
@@ -4728,11 +4844,21 @@ public class TuiCommand implements Runnable {
             headerSpans.add(Span.styled((card.failed() ? "  " : " ") + card.args(), muted));
         }
         lines.add(Line.from(headerSpans.toArray(Span[]::new)));
+        final var full = card.ordinal() >= 0 ? state.toolOutputs.get(card.ordinal()) : null;
         if (!card.output().isBlank()) {
             lines.add(Line.empty());
+            // a running bash card repeats the command in two places: its header carries it
+            // as the card name (the "<command> running" header), and BashTool also streams
+            // "$ <command>" as the first body line - drop that echo so the body does not
+            // repeat what the header already shows, mirroring the Ctrl+O overlay fix
+            var body = card.output();
+            if (card.running() && body != null) {
+                final var rawCommand = full != null ? commandArgOf(full.args()) : card.name();
+                body = stripLeadingCommandEcho(body, rawCommand);
+            }
             // ask_user answers read better as key: value pairs than raw JSON
-            var outputLines = toolBodyLines(
-                    card.name(), card.keyCommand(), null, card.output(), innerW, card.isDiff(diffRenderer));
+            var outputLines =
+                    toolBodyLines(card.name(), card.keyCommand(), null, body, innerW, card.isDiff(diffRenderer));
             // keep the card compact: a short inline preview, the rest lives behind
             // the "click to expand" footer / Ctrl+O overlay
             final var clipped = outputLines.size() > MAX_INLINE_TOOL_LINES;
@@ -4744,7 +4870,6 @@ public class TuiCommand implements Runnable {
             }
             lines.addAll(outputLines);
             // point at the full output when the preview was cut (line cap or transcript cap)
-            final var full = card.ordinal() >= 0 ? state.toolOutputs.get(card.ordinal()) : null;
             final var transcriptCapped =
                     full != null && full.output().length() > card.output().length();
             if (clipped || transcriptCapped) {
@@ -4792,7 +4917,7 @@ public class TuiCommand implements Runnable {
     static String hiddenToolLineText(final ToolCard card, final Palette palette, final Glyphs glyphs) {
         return hiddenToolLine(card, palette, glyphs).spans().stream()
                 .map(Span::content)
-                .collect(java.util.stream.Collectors.joining());
+                .collect(joining());
     }
 
     /** Internal shared implementation of the collapsed one-liner. */
@@ -5363,7 +5488,7 @@ public class TuiCommand implements Runnable {
         final var statusColor = Color.hex(
                 activeError(state) ? palette.error() : (state.model.busy() ? palette.warning() : palette.success()));
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
-        final var parts = new java.util.ArrayList<Span>();
+        final var parts = new ArrayList<Span>();
         final var busy = busyIndicator(state);
         // While the agent is busy the busy label (calling <tool> / thinking (Ns) / working...)
         // already lives on the call line directly above this strip (renderCalling), so the strip
@@ -5700,6 +5825,47 @@ public class TuiCommand implements Runnable {
                         .overflow(Overflow.CLIP)
                         .build(),
                 inner);
+    }
+
+    /**
+     * Floating chip over the tool output modal footer: shows the full (raw) tool args
+     * JSON the footer only ellipsizes. A multi-line wrapped chip anchored just above
+     * the footer row so it reads without covering the output the user is looking at;
+     * clamped to the frame so a very wide/tall payload never escapes the viewport.
+     */
+    private void renderToolOverlayTooltip(final dev.tamboui.terminal.Frame frame, final UiState state) {
+        final var cmd = state.hoverToolCmd;
+        final var footer = state.toolOverlayFooter;
+        if (cmd == null || cmd.isBlank() || footer == null) {
+            return;
+        }
+        final var wrapWidth =
+                Math.max(10, Math.min(footer.width() - 2, Math.min(frame.area().width() - 4, 120)));
+        final var lines = MarkdownLines.wrapCode(List.of(Line.from(Span.styled(cmd, Style.EMPTY))), wrapWidth);
+        final var height = Math.min(lines.size(), Math.max(1, frame.height() - 2));
+        final var tooltipBg =
+                palette.mono() ? null : TuiColors.blend(palette.borderActive(), palette.backgroundPanel(), 0.85);
+        final var tooltipStyle = palette.mono()
+                ? Style.EMPTY
+                : Style.EMPTY.fg(Color.hex(palette.text())).bg(tooltipBg);
+        final var wrapped = new ArrayList<Line>();
+        for (var i = 0; i < height; i++) {
+            final var line = lines.get(i);
+            final var styled = line.spans().stream()
+                    .map(s -> Span.styled(s.content(), tooltipStyle))
+                    .toList();
+            wrapped.add(Line.from(styled.toArray(Span[]::new)));
+        }
+        // anchor just above the footer row, aligned to the footer's left edge, clamped
+        // so the chip stays fully on-screen
+        final var x = Math.max(0, Math.min(frame.area().width() - wrapWidth, footer.x()));
+        final var y = Math.max(1, footer.y() - height - 1);
+        frame.renderWidget(
+                Paragraph.builder()
+                        .text(Text.from(wrapped.toArray(Line[]::new)))
+                        .overflow(Overflow.CLIP)
+                        .build(),
+                new Rect(x, y, wrapWidth, height));
     }
 
     private void renderTabsListOverlay(final dev.tamboui.terminal.Frame frame) {
@@ -6057,6 +6223,7 @@ public class TuiCommand implements Runnable {
     }
 
     private void scrollToolOverlay(final UiState state, final int delta) {
+        state.hoverToolCmd = null;
         state.toolOverlay = new UiState.ToolOverlay(
                 state.toolOverlay.ordinal(),
                 state.toolOverlay.entry(),
@@ -6085,6 +6252,8 @@ public class TuiCommand implements Runnable {
                 runtime.loop().cancelTool(state.toolOverlay.ordinal());
             }
             state.toolOverlay = null;
+            state.toolOverlayFooter = null;
+            state.hoverToolCmd = null;
             return true;
         }
         if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
@@ -6113,6 +6282,9 @@ public class TuiCommand implements Runnable {
         if (mouse.isScroll()) {
             return true;
         }
+        // any press/drag/release steals the pointer for selection: drop the hover tooltip
+        // so it cannot overlap the drag selection being drawn
+        state.hoverToolCmd = null;
         if (mouse.isPress() && mouse.isLeftButton()) {
             state.selection.press(mouse.x(), mouse.y(), state.screenGrid, copyZones(state));
             return true;
@@ -6229,7 +6401,7 @@ public class TuiCommand implements Runnable {
         try {
             final var args = toolOutputFormat.parseArguments(rawArgs);
             if (args != null) {
-                for (final var key : java.util.List.of("command", "path", "workdir")) {
+                for (final var key : List.of("command", "path", "workdir")) {
                     if (args.get(key) instanceof final String value && !value.isBlank()) {
                         sb.append(value).append(' ');
                     }
@@ -6240,6 +6412,50 @@ public class TuiCommand implements Runnable {
         }
         final var cmd = sb.toString().strip();
         return cmd.isEmpty() ? null : cmd;
+    }
+
+    /**
+     * The raw {@code command} argument of a tool call, exactly what BashTool echoes as
+     * its leading stream line ({@code "$ " + command}), so the overlay can drop that
+     * echo once it prepends its own command header. Null when the tool has no command.
+     */
+    private String commandArgOf(final String rawArgs) {
+        if (rawArgs == null || rawArgs.isBlank() || "{}".equals(rawArgs.strip())) {
+            return null;
+        }
+        try {
+            final var args = toolOutputFormat.parseArguments(rawArgs);
+            if (args != null && args.get("command") instanceof final String command && !command.isBlank()) {
+                return command;
+            }
+        } catch (final RuntimeException e) {
+            // not JSON: no echo to strip
+        }
+        return null;
+    }
+
+    /**
+     * Removes a leading {@code "$ <command>"} line (the echo BashTool streams before any
+     * real output) from a running tool's accumulated output, so the modal body does not
+     * repeat the command that its bold header already shows. Only the very first line is
+     * touched: a command genuinely echoed mid-output is left as-is.
+     */
+    private String stripLeadingCommandEcho(final String output, final String rawCommand) {
+        if (rawCommand == null || rawCommand.isBlank() || output == null || output.isEmpty()) {
+            return output;
+        }
+        final var prefix = "$ " + rawCommand;
+        var rest = output.stripLeading();
+        if (!rest.startsWith(prefix)) {
+            return output;
+        }
+        rest = rest.substring(prefix.length());
+        if (rest.startsWith("\r\n")) {
+            rest = rest.substring(2);
+        } else if (rest.startsWith("\n") || rest.startsWith("\r")) {
+            rest = rest.substring(1);
+        }
+        return rest.stripLeading();
     }
 
     private void renderToolOverlay(final dev.tamboui.terminal.Frame frame, final UiState state) {
@@ -6259,8 +6475,19 @@ public class TuiCommand implements Runnable {
         if (inner == null) {
             return;
         }
-        final var body =
-                toolBodyLines(entry.name(), toolCommandOf(entry), entry.args(), entry.output(), inner.width(), false);
+        final var command = toolCommandOf(entry);
+        // BashTool echoes the invoked command as its first stream line ("$ <command>"),
+        // which lands in the running-tool output store; the modal leads with its own
+        // bold "$ <command>" header, so drop the redundant echo from the body or the
+        // command would read twice at the top (header + echoed first output line).
+        final var output = stripLeadingCommandEcho(entry.output(), commandArgOf(entry.args()));
+        final var body = toolBodyLines(entry.name(), command, entry.args(), output, inner.width(), false);
+        // the full command always leads the modal: it is the first thing the user sees
+        // (and stays reachable at the top), so a long invocation is never hidden behind
+        // the ellipsized raw-args footer or buried in the output preview
+        if (command != null && !command.isBlank()) {
+            body.addAll(0, toolCommandHeader(command, inner.width()));
+        }
         if (running) {
             // a running tool streams into the overlay: keep the live output visible
             // and mark the call as still executing (Esc cancels it)
@@ -6286,6 +6513,8 @@ public class TuiCommand implements Runnable {
         }
         final var hint =
                 "Ctrl+O/q/Esc close | Wheel/Up/Down scroll | c copy output | drag or Ctrl+Shift+C copies the selection ";
+        final var footerRect = splits.get(1);
+        state.toolOverlayFooter = footerRect;
         final var footer = " "
                 + (entry.args() == null || entry.args().isBlank()
                         ? ""
@@ -6296,7 +6525,22 @@ public class TuiCommand implements Runnable {
                         .text(Text.from(Line.from(Span.styled(footer, Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
-                splits.get(1));
+                footerRect);
+    }
+
+    /**
+     * The header leading the tool output modal: the full command (from the tool
+     * args) on its own wrapped lines prefixed by a shell {@code $} prompt, so a long
+     * invocation stays fully readable before the args preview and the output. Nothing
+     * is ellipsized here - the modal body already scrolls, so wrapping off the edge
+     * is the only truncation.
+     */
+    private List<Line> toolCommandHeader(final String command, final int width) {
+        final var marker =
+                Span.styled("$ ", Style.EMPTY.fg(Color.hex(palette.textMuted())).bold());
+        final var prompt =
+                Span.styled(command, Style.EMPTY.fg(Color.hex(palette.text())).bold());
+        return new ArrayList<>(MarkdownLines.wrapCode(List.of(Line.from(marker, prompt)), Math.max(8, width)));
     }
 
     /** Key handling while the error detail modal (Alt+E) is open. */
@@ -6543,8 +6787,7 @@ public class TuiCommand implements Runnable {
      * different spinners (e.g. the first-token {@code CLOCK} and the streaming
      * {@code SQUARE_CORNERS}) can never animate on screen at the same time.
      */
-    private final java.util.concurrent.ConcurrentHashMap<SpinnerStyle, Spinner> spinnerCache =
-            new java.util.concurrent.ConcurrentHashMap<>();
+    private final ConcurrentHashMap<SpinnerStyle, Spinner> spinnerCache = new ConcurrentHashMap<>();
 
     private Spinner spinnerOf(final SpinnerStyle style) {
         return spinnerCache.computeIfAbsent(style, key -> {
@@ -6585,7 +6828,7 @@ public class TuiCommand implements Runnable {
      * @return the {@code (spinner style, label)} of the current busy phase, or {@code null}
      *     when the agent is not busy
      */
-    private java.util.Map.Entry<SpinnerStyle, String> busyIndicator(final UiState state) {
+    private Map.Entry<SpinnerStyle, String> busyIndicator(final UiState state) {
         if (state.model.runningTool() != null) {
             final var name = state.model.runningToolCommand() == null
                             || state.model.runningToolCommand().isBlank()
@@ -6599,7 +6842,7 @@ public class TuiCommand implements Runnable {
         }
         final var wait = activeWait(state);
         if (wait != null) {
-            return Map.entry(wait, state.model.status());
+            return Map.entry(wait, waitLabel(state));
         }
         if (state.model.busy()) {
             return Map.entry(SpinnerStyle.DOTS, BusyLabels.working());
@@ -6607,14 +6850,53 @@ public class TuiCommand implements Runnable {
         return null;
     }
 
-    private static void waiting(final UiState state, final String message, final SpinnerStyle style) {
-        state.model.status(message);
-        state.wait = new UiState.Wait(message, style);
+    /**
+     * Live label for the armed wait phase. For the first-token CLOCK wait this renders
+     * {@link BusyLabels#thinking(long)} with the elapsed seconds since the wait was armed, so a
+     * slow/backoff wait visibly ticks up instead of staying frozen on the submit-time
+     * {@code "thinking... (0s)"}. The label no longer depends on {@code state.model.status()},
+     * which other event paths can overwrite mid-turn (dropping the spinner entirely before this
+     * fix); it is driven purely by the wait's own armed-at clock.
+     */
+    private String waitLabel(final UiState state) {
+        final var wait = state.wait;
+        if (wait == null
+                || wait.style() != SpinnerStyle.CLOCK
+                || wait.armedAtMillis() < 0
+                // only the first-token "thinking..." wait gets the elapsed counter; the other
+                // CLOCK waits (an interrupt in progress) carry their own fixed message
+                || !wait.message().startsWith("thinking...")) {
+            return wait == null ? "" : wait.message();
+        }
+        final var secs = Math.max(0, (clock.millis() - wait.armedAtMillis()) / 1000);
+        return BusyLabels.thinking(secs);
     }
 
+    private static void waiting(final UiState state, final String message, final SpinnerStyle style) {
+        state.model.status(message);
+        state.wait = new UiState.Wait(message, style, state.clock.millis());
+    }
+
+    /**
+     * The spinner style of the currently armed wait phase, or {@code null} when none is active.
+     * A CLOCK wait armed while a turn runs is the first-token "thinking... (Ns)" phase: it must
+     * survive mid-turn status rewrites (a retryable-error recovery, a queued prompt, ... change
+     * the transcript status text). Gating it on that text let any such rewrite silently drop the
+     * wait spinner while the turn was still waiting on the network — the very "looks idle but is
+     * busy" bug — so while {@code busy()} is true we keep the CLOCK wait regardless of the status
+     * string. The other waits (background resync/compact, SQUARE_CORNERS/BOUNCING_BALL) still
+     * require the status to reflect them, so a completed background op drops its spinner exactly
+     * as before.
+     */
     private static SpinnerStyle activeWait(final UiState state) {
         final var wait = state.wait;
-        return wait != null && wait.message().equals(state.model.status()) ? wait.style() : null;
+        if (wait == null) {
+            return null;
+        }
+        if (state.model.busy() && wait.style() == SpinnerStyle.CLOCK) {
+            return wait.style();
+        }
+        return wait.message().equals(state.model.status()) ? wait.style() : null;
     }
 
     private static void notify(final UiState state, final String message) {
@@ -6642,8 +6924,8 @@ public class TuiCommand implements Runnable {
     }
 
     private static String stackTraceOf(final Throwable error) {
-        final var sw = new java.io.StringWriter();
-        error.printStackTrace(new java.io.PrintWriter(sw));
+        final var sw = new StringWriter();
+        error.printStackTrace(new PrintWriter(sw));
         return sw.toString();
     }
 
@@ -6720,7 +7002,7 @@ public class TuiCommand implements Runnable {
         final var accent = Color.hex(palette.accent());
         final var muted = Color.hex(palette.textMuted());
         final var textColor = Color.hex(palette.text());
-        final var spans = new java.util.ArrayList<Span>(actions.length);
+        final var spans = new ArrayList<Span>(actions.length);
         for (int i = 0; i < actions.length; i++) {
             final var label = "[" + (i + 1) + "] " + actions[i].label();
             final var selected = i == approval.action();
@@ -6752,7 +7034,7 @@ public class TuiCommand implements Runnable {
             final UiState state,
             final String title,
             final List<String> items,
-            final java.util.function.Consumer<String> onSelect,
+            final Consumer<String> onSelect,
             final Runnable onCancel) {
         state.picker = new PickerPrompt(
                 title,
@@ -7410,7 +7692,7 @@ public class TuiCommand implements Runnable {
         private final String title;
         private final List<String> items;
         private final StringBuilder filter = new StringBuilder();
-        private final java.util.function.Consumer<String> onSelect;
+        private final Consumer<String> onSelect;
         private final Runnable onCancel;
         private final List<Rect> itemRects = new ArrayList<>();
         private final List<String> renderedValues = new ArrayList<>();
@@ -7419,7 +7701,7 @@ public class TuiCommand implements Runnable {
         private PickerPrompt(
                 final String title,
                 final List<String> items,
-                final java.util.function.Consumer<String> onSelect,
+                final Consumer<String> onSelect,
                 final Runnable onCancel) {
             this.title = title;
             this.items = new ArrayList<>(items == null ? List.of() : items);
@@ -7427,7 +7709,7 @@ public class TuiCommand implements Runnable {
             this.onCancel = onCancel;
         }
 
-        private java.util.function.Consumer<String> onSelect() {
+        private Consumer<String> onSelect() {
             return onSelect;
         }
 
@@ -7456,13 +7738,13 @@ public class TuiCommand implements Runnable {
         }
 
         private List<String> visible() {
-            final var f = filter.toString().toLowerCase(java.util.Locale.ROOT);
+            final var f = filter.toString().toLowerCase(Locale.ROOT);
             if (f.isEmpty()) {
                 return items;
             }
             final var out = new ArrayList<String>();
             for (final var it : items) {
-                if (it != null && it.toLowerCase(java.util.Locale.ROOT).contains(f)) {
+                if (it != null && it.toLowerCase(Locale.ROOT).contains(f)) {
                     out.add(it);
                 }
             }
@@ -7703,7 +7985,13 @@ public class TuiCommand implements Runnable {
     }
 
     static final class UiState {
-        private record Wait(String message, SpinnerStyle style) {}
+        /**
+         * An armed busy wait phase with the spinner style to render and the wall-clock time it
+         * was armed ({@code -1} before the first {@link #waiting} call). The armed time lets the
+         * busy label advance "thinking... (Ns)" and friends without depending on the transcript
+         * status string (which other event paths may rewrite mid-turn, see {@code busyIndicator}).
+         */
+        private record Wait(String message, SpinnerStyle style, long armedAtMillis) {}
 
         /** Full-screen expandable view of one captured tool output (Ctrl+O). */
         private record ToolOverlay(long ordinal, ToolOutputStore.Entry entry, int scroll) {
@@ -7764,7 +8052,7 @@ public class TuiCommand implements Runnable {
          * by its gate invocation and resolved one after the other, so a late approval never
          * steals the visible dialog of an earlier one.
          */
-        private final java.util.Deque<Approval> approvals = new java.util.concurrent.ConcurrentLinkedDeque<>();
+        private final Deque<Approval> approvals = new ConcurrentLinkedDeque<>();
 
         private volatile FeedbackPrompt feedbackPrompt;
         private volatile PickerPrompt picker;
@@ -7775,6 +8063,13 @@ public class TuiCommand implements Runnable {
         private volatile boolean completionNavigated;
         /** Screen hit-area of the completion popup (full box) as drawn last frame; null when no popup. */
         private volatile Rect completionRect;
+        /**
+         * Set when the popup is dismissed explicitly (Esc, Enter accepting a candidate, Tab, a
+         * cursor move) so the asynchronous completion warm-up refresh cannot reopen it right after
+         * the user closed it; cleared by {@link #liveComplete(UiState)} on the next text edit,
+         * which legitimately re-arms live completion.
+         */
+        private volatile boolean completionDismissed;
 
         private final SelectionState selection = new SelectionState();
         private volatile String[][] screenGrid = new String[0][0];
@@ -7796,21 +8091,21 @@ public class TuiCommand implements Runnable {
          * confined to, in draw order (bottom to top). Read by the event thread
          * to resolve a mouse press, published by the render thread each frame.
          */
-        private volatile java.util.List<Rect> paneZones = java.util.List.of();
+        private volatile List<Rect> paneZones = List.of();
 
         private final SpinnerState spinnerState = new SpinnerState();
         private volatile String lastTodosRender = "";
         private volatile Toast toast;
         private volatile long toastShownAt;
         private volatile TuiRunner runner;
-        private final java.util.Deque<String> pendingPrompts = new java.util.concurrent.ConcurrentLinkedDeque<>();
+        private final Deque<String> pendingPrompts = new ConcurrentLinkedDeque<>();
 
         /**
          * Startup prompts ({@code --initial-prompt}) not yet submitted: each one waits for the
          * previous turn to end so they run one after the other, one turn each, instead of being
          * merged into a running turn like a type-ahead prompt.
          */
-        private final java.util.Deque<String> initialPrompts = new java.util.concurrent.ConcurrentLinkedDeque<>();
+        private final Deque<String> initialPrompts = new ConcurrentLinkedDeque<>();
 
         private volatile String errorMessage;
         private volatile ErrorDetail errorDetail;
@@ -7830,6 +8125,22 @@ public class TuiCommand implements Runnable {
         private volatile String hoverTitle;
 
         private volatile ToolOverlay toolOverlay;
+
+        /**
+         * Screen rect of the tool output modal's footer row (the ellipsized raw-args
+         * line), recorded by the render thread so the event thread can hit-test a
+         * MOVE and surface the full command/args in a hover tooltip. {@code null}
+         * while no tool overlay is drawn.
+         */
+        private volatile Rect toolOverlayFooter;
+
+        /**
+         * Full command or raw args text the pointer currently hovers in the tool
+         * output modal footer, or {@code null}. Rendered by the render thread as a
+         * floating chip over the modal; cleared on scroll / press / drag / release.
+         */
+        private volatile String hoverToolCmd;
+
         private volatile BtwOverlay btw;
 
         private record BtwOverlay(
@@ -7846,13 +8157,13 @@ public class TuiCommand implements Runnable {
         private volatile List<String> flatRows = List.of();
         private volatile int maxViewOffset;
         private volatile int pendingJumpRow = -1;
-        private final java.util.Set<Long> collapsedTools = new java.util.HashSet<>();
+        private final Set<Long> collapsedTools = new HashSet<>();
         /**
          * Per-run collapse overrides keyed by the run's first tool ordinal; a run with no
          * entry follows the current mode default (SHOWN open, COLLAPSED collapsed). Cleared
          * on Ctrl+L together with {@link #collapsedTools}.
          */
-        private final java.util.Map<Long, Boolean> runCollapsed = new java.util.HashMap<>();
+        private final Map<Long, Boolean> runCollapsed = new HashMap<>();
 
         private volatile List<ToolAnchor> toolAnchors = List.of();
         private volatile List<ToolAnchor> toolFooterLinks = List.of();
@@ -7861,7 +8172,7 @@ public class TuiCommand implements Runnable {
         /** Wall-clock millis when the current live thinking stream started, -1 when idle. */
         private volatile long thinkingStartedAtMillis = -1;
 
-        private final java.util.List<Rect> queueRects = new ArrayList<>();
+        private final List<Rect> queueRects = new ArrayList<>();
         private volatile boolean shortcutsOpen;
         private volatile int shortcutsScroll;
         private volatile Rect shortcutRect;
@@ -7871,7 +8182,7 @@ public class TuiCommand implements Runnable {
         private volatile int subagentsScroll;
         private volatile String lastCodeBlock;
         /** Pending tool args per name (FIFO), mirroring the core transcript's running tools. */
-        private final java.util.Map<String, java.util.ArrayDeque<String>> pendingToolArgs = new java.util.HashMap<>();
+        private final Map<String, ArrayDeque<String>> pendingToolArgs = new HashMap<>();
         /**
          * Ordinals of the started-not-finished tools per name (FIFO), aligned with
          * {@link #pendingToolArgs}: the running block parsed by {@link ToolCard} carries
@@ -7879,7 +8190,7 @@ public class TuiCommand implements Runnable {
          * this queue when the header has no suffix yet, so the running card is always
          * anchored (clickable running-tool overlay) even before the first marked header.
          */
-        private final java.util.Map<String, java.util.ArrayDeque<Long>> pendingToolOrdinals = new java.util.HashMap<>();
+        private final Map<String, ArrayDeque<Long>> pendingToolOrdinals = new HashMap<>();
 
         private volatile long focusedToolOrdinal = -1;
         private volatile int toolNavIndex = -1;

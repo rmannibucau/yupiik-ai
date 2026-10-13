@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.tools;
 
+import static java.util.stream.Collectors.toSet;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -24,6 +25,7 @@ import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -108,7 +110,7 @@ class ToolRegistryTest {
         final var mcp = new McpManager() {
             @Override
             public List<EmbeddedTool> tools() {
-                final var all = new java.util.ArrayList<EmbeddedTool>(tools);
+                final var all = new ArrayList<EmbeddedTool>(tools);
                 if (resolve != null) {
                     all.add(resolve);
                 }
@@ -131,7 +133,7 @@ class ToolRegistryTest {
                         stub("grep")),
                 resolve);
         final var wire = registry.toWireTools();
-        final var names = wire.stream().map(t -> t.function().name()).collect(java.util.stream.Collectors.toSet());
+        final var names = wire.stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("code_resolve", "maven_knowledge_content", "grep"), names);
     }
 
@@ -147,7 +149,7 @@ class ToolRegistryTest {
                         stub("grep")),
                 resolve);
         final var wire = registry.toWireTools();
-        final var names = wire.stream().map(t -> t.function().name()).collect(java.util.stream.Collectors.toSet());
+        final var names = wire.stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("maven_knowledge_content", "grep"), names);
     }
 
@@ -156,7 +158,7 @@ class ToolRegistryTest {
         final var registry =
                 registry(List.of(stub("code_trace_calls"), stub("maven_knowledge_content"), stub("grep")), null);
         final var wire = registry.toWireTools();
-        final var names = wire.stream().map(t -> t.function().name()).collect(java.util.stream.Collectors.toSet());
+        final var names = wire.stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("code_trace_calls", "maven_knowledge_content", "grep"), names);
     }
 
@@ -167,9 +169,8 @@ class ToolRegistryTest {
         final var registry = registry(
                 List.of(stub("code_trace_calls"), stub("maven_repository_knowledge"), stub("maven_knowledge_content")),
                 resolve);
-        final var names = registry.toWireTools().stream()
-                .map(t -> t.function().name())
-                .collect(java.util.stream.Collectors.toSet());
+        final var names =
+                registry.toWireTools().stream().map(t -> t.function().name()).collect(toSet());
         assertEquals(Set.of("code_resolve", "maven_knowledge_content"), names);
     }
 }

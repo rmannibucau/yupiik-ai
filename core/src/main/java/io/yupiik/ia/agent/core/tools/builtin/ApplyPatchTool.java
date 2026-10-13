@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -68,11 +69,21 @@ public class ApplyPatchTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var patch = arg(args, "patch");
         if (patch == null || patch.isBlank()) {
             return ToolResult.error("patch is required");
         }
-        final var base = configuration.resolveProjectDir();
+        // honour a per-session working directory when the running session set one; the process
+        // default applies otherwise. This is how a session on project B applies patches to B, not
+        // to the directory the web/TUI process was launched from.
+        final var base = context != null && context.projectDir() != null
+                ? context.projectDir()
+                : configuration.resolveProjectDir();
         try {
             final var changes = parse(patch);
             final var applied = new ArrayList<String>();

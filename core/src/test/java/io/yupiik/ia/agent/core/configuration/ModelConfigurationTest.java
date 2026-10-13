@@ -75,12 +75,14 @@ class ModelConfigurationTest {
                 null,
                 null,
                 PlateauFeedbackMode.NUDGE_2,
+                null,
                 List.of(),
                 "");
         assertNull(tuning.outputTokens());
         assertNull(tuning.systemPromptMaxChars());
         assertNull(tuning.plateauRounds());
         assertNull(tuning.maxIterations());
+        assertNull(tuning.repeatSuccessThreshold());
         assertEquals(PlateauFeedbackMode.NUDGE_2, tuning.plateauFeedback());
         assertEquals(RepairToolCallArgumentsMode.AUTO, tuning.repairToolCallArguments());
         assertEquals(List.of(), tuning.variants());

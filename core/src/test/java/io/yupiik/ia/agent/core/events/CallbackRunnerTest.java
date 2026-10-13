@@ -27,7 +27,9 @@ import io.yupiik.maven.knowledge.process.ProcessService;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.AfterAll;
@@ -117,6 +119,24 @@ class CallbackRunnerTest {
         assertTrue(received.contains("\"sessionId\""));
     }
 
+    @Test
+    void honorsConfiguredWorkingDir(final JsonMapper mapper, @TempDir final Path tmp) throws Exception {
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                !System.getProperty("os.name", "").toLowerCase().contains("win"));
+        final var workdir = tmp.resolve("hook-cwd");
+        Files.createDirectories(workdir);
+        final var sentinel = tmp.resolve("started-in").toString();
+        // a trivial callback that just records its cwd (empty stdout => noop) and exits 0
+        final var hooks = new HooksConfiguration(List.of(new HookRegistration(
+                "ToolUsePreEvent", List.of("sh", "-c", "pwd > " + sentinel), workdir.toString(), 10)));
+        final var runner = new CallbackRunner(hooks, EXECUTOR, PROCESSES, mapper);
+        runner.run("ToolUsePreEvent", input().payload(), 1);
+        assertEquals(
+                workdir.toAbsolutePath().normalize().toString(),
+                Files.readString(tmp.resolve("started-in")).strip(),
+                "the hook callback must run in its configured dir");
+    }
+
     private CallbackRunner runner(final JsonMapper mapper, final String mode) {
         return runner(mapper, mode, 10);
     }
@@ -129,11 +149,12 @@ class CallbackRunnerTest {
             final JsonMapper mapper, final String mode, final int timeout, final List<String> extra) {
         final var javaBin =
                 Path.of(System.getProperty("java.home"), "bin", "java").toString();
-        final var command = new java.util.ArrayList<String>();
+        final var command = new ArrayList<String>();
         command.add(javaBin);
         command.addAll(extra);
         command.addAll(List.of("-cp", fixtureClasspath(), CallbackFixtureMain.class.getName(), mode));
-        final var hooks = new HooksConfiguration(List.of(new HookRegistration("ToolUsePreEvent", command, timeout)));
+        final var hooks =
+                new HooksConfiguration(List.of(new HookRegistration("ToolUsePreEvent", command, null, timeout)));
         return new CallbackRunner(hooks, EXECUTOR, PROCESSES, mapper);
     }
 
@@ -156,7 +177,7 @@ class CallbackRunnerTest {
         return new ToolUsePreEvent(
                 new EventContext("s1", null, null, null, null, null, null, null),
                 "bash",
-                java.util.Map.of("command", "ls", "timeout_seconds", 1),
+                Map.of("command", "ls", "timeout_seconds", 1),
                 "call-1",
                 new HookResult(),
                 null,

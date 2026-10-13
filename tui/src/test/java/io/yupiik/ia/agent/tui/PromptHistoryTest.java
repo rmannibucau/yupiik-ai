@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -33,7 +34,7 @@ class PromptHistoryTest {
         loaded.add("older");
         h.replaceWith(loaded);
         // entries are most-recent-first ("older" was added last)
-        assertEquals(java.util.List.of("older", "newest"), h.entries());
+        assertEquals(List.of("older", "newest"), h.entries());
         // cursor was reset: the first Older recall returns the most recent entry
         assertEquals("older", h.olderPush("draft"));
         // walking back down to the baseline restores the draft

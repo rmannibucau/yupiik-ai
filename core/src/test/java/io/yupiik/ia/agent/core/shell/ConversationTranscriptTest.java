@@ -382,6 +382,51 @@ class ConversationTranscriptTest {
         assertFalse(md.contains("half an ans\n"), md);
     }
 
+    @Test
+    void truncatedTurnDoneDoesNotClipTheStreamedTail() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        // the stream delivered the full answer, but the final message TurnDone carries is
+        // truncated (a clipped provider reply): the fuller streamed text must survive
+        t.onEvent(new AgentEvent.TextDelta(
+                "the file is present. Let me look at the git diff of `TuiCommand.java` specifically", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("the file is present. Let me look at the git diff of ", "s1"));
+
+        final var md = t.transcript().toString();
+        assertTrue(
+                md.contains("`TuiCommand.java` specifically"),
+                "the streamed tail must survive a truncated TurnDone: " + md);
+        assertEquals(
+                1,
+                countOccurrences(md, "the file is present. Let me look at the git diff of"),
+                "the answer must appear exactly once, no duplication: " + md);
+    }
+
+    @Test
+    void extendedTurnDoneAppendsOnlyTheExtraTail() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        // the stream ended early but the final message is complete (longer): only the
+        // un-streamed remainder must be appended, without duplicating the prefix
+        t.onEvent(new AgentEvent.TextDelta("let me look at the git diff of ", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("let me look at the git diff of `TuiCommand.java`", "s1"));
+
+        final var md = t.transcript().toString();
+        assertEquals(1, countOccurrences(md, "let me look at the git diff of"), md);
+        assertTrue(md.contains("`TuiCommand.java`"), md);
+    }
+
+    @Test
+    void identicalStreamedAndFinalTextDoesNotDuplicate() {
+        final var t = new ConversationTranscript();
+        t.startUserTurn("hi");
+        t.onEvent(new AgentEvent.TextDelta("the answer", "s1"));
+        t.onEvent(new AgentEvent.TurnDone("the answer", "s1"));
+
+        final var md = t.transcript().toString();
+        assertEquals(1, countOccurrences(md, "the answer"), md);
+    }
+
     private static void assertOrdered(final String md, final String... fragments) {
         var previous = -1;
         for (final var fragment : fragments) {

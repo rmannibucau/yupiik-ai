@@ -24,14 +24,17 @@ import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.net.ProxySelector;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -79,7 +82,7 @@ class HttpClientProducerTest {
             public void publish(final LogRecord record) {
                 try {
                     logs.write(record.getMessage().getBytes(StandardCharsets.UTF_8));
-                } catch (final java.io.IOException e) {
+                } catch (final IOException e) {
                     throw new IllegalStateException(e);
                 }
             }
@@ -145,8 +148,8 @@ class HttpClientProducerTest {
                     URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/"));
             assertFalse(proxies.isEmpty(), "select() must return the configured proxy");
             final var address = proxies.getFirst().address();
-            Assertions.assertEquals("proxy.example.com", ((java.net.InetSocketAddress) address).getHostString());
-            Assertions.assertEquals(3128, ((java.net.InetSocketAddress) address).getPort());
+            Assertions.assertEquals("proxy.example.com", ((InetSocketAddress) address).getHostString());
+            Assertions.assertEquals(3128, ((InetSocketAddress) address).getPort());
         }
     }
 
@@ -384,18 +387,18 @@ class HttpClientProducerTest {
         }
     }
 
-    private static boolean isNoProxy(final java.net.ProxySelector selector, final String uri) {
+    private static boolean isNoProxy(final ProxySelector selector, final String uri) {
         return isNoProxy(selector, URI.create(uri));
     }
 
-    private static boolean isNoProxy(final java.net.ProxySelector selector, final URI uri) {
+    private static boolean isNoProxy(final ProxySelector selector, final URI uri) {
         return selector.select(uri).stream().allMatch(p -> p.type() == Proxy.Type.DIRECT);
     }
 
     private static String pem() {
         try {
             return Files.readString(Path.of("src/test/resources/io/yupiik/ia/agent/core/wiring/localhost.pem"));
-        } catch (final java.io.IOException e) {
+        } catch (final IOException e) {
             throw new IllegalStateException(e);
         }
     }
@@ -410,7 +413,7 @@ class HttpClientProducerTest {
         final var kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
         kmf.init(keyStore, "changeit".toCharArray());
         final var ssl = SSLContext.getInstance("TLS");
-        ssl.init(kmf.getKeyManagers(), null, new java.security.SecureRandom());
+        ssl.init(kmf.getKeyManagers(), null, new SecureRandom());
 
         final var https = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         https.setHttpsConfigurator(new HttpsConfigurator(ssl));

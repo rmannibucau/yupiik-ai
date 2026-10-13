@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.agent.MemoryExtractor;
 import io.yupiik.ia.agent.core.todo.PlanTodoSeeder;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 
@@ -86,7 +87,7 @@ class StructuredOutputSchemasTest {
                         "name",
                         Map.of("type", "string", "maxLength", 10, "format", "email")),
                 "required",
-                java.util.List.of("age"));
+                List.of("age"));
         final var sanitized = io.yupiik.ia.agent.core.llm.ChatClient.sanitizeSchema(schema);
         // objects gain additionalProperties:false at every level
         assertTrue(Boolean.FALSE.equals(sanitized.get("additionalProperties")), "root object must be closed");

@@ -22,7 +22,9 @@ import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.config.KnowledgeConfig;
 import io.yupiik.maven.knowledge.config.TokenBudget;
 import io.yupiik.maven.knowledge.content.ContentAcquired;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -55,12 +57,12 @@ class BatchSizerTest {
 
     private static KnowledgeConfig config(final int maxBatchChars, final int batchSize, final TokenBudget budget) {
         return new KnowledgeConfig(
-                java.nio.file.Path.of("."),
+                Path.of("."),
                 4,
                 batchSize,
                 true,
                 false,
-                KnowledgeConfig.defaults(java.nio.file.Path.of(".")).boundedFetch(),
+                KnowledgeConfig.defaults(Path.of(".")).boundedFetch(),
                 maxBatchChars,
                 budget);
     }
@@ -160,6 +162,6 @@ class BatchSizerTest {
             seen.addAll(w);
         }
         assertEquals(129, seen.size());
-        assertEquals(129, new java.util.HashSet<>(seen).size(), "windows must not duplicate or drop GAVs");
+        assertEquals(129, new HashSet<>(seen).size(), "windows must not duplicate or drop GAVs");
     }
 }

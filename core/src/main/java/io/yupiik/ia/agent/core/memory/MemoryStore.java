@@ -19,10 +19,14 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -30,7 +34,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -54,13 +60,12 @@ public class MemoryStore {
      * (mid-turn memory_write): keyed by session id so parallel sessions never see each
      * other's memory deltas. A small LRU guard prevents unbounded growth.
      */
-    private final java.util.Map<String, java.util.Deque<String>> pendingDiffs =
-            new java.util.LinkedHashMap<>(8, 0.75f, true) {
-                @Override
-                protected boolean removeEldestEntry(final java.util.Map.Entry<String, java.util.Deque<String>> eldest) {
-                    return size() > 64;
-                }
-            };
+    private final Map<String, Deque<String>> pendingDiffs = new LinkedHashMap<>(8, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(final Map.Entry<String, Deque<String>> eldest) {
+            return size() > 64;
+        }
+    };
 
     private volatile long globalMtime = Long.MIN_VALUE;
     private volatile long globalSize = Long.MIN_VALUE;
@@ -102,7 +107,7 @@ public class MemoryStore {
         synchronized (this) {
             v = contentVersion;
             if (v < 0 || (configuration != null && stampsChanged())) {
-                v = java.util.Objects.hash(readGlobal(), readProject());
+                v = Objects.hash(readGlobal(), readProject());
                 contentVersion = v;
                 if (configuration != null) {
                     snapshotStamps();
@@ -154,12 +159,22 @@ public class MemoryStore {
                 .resolve("MEMORY.md");
     }
 
+    /** Project memory file for a specific session working directory (per-session root). */
+    public static Path projectFile(final Path root) {
+        return root.resolve(".yca").resolve("memory").resolve("MEMORY.md");
+    }
+
     public String readGlobal() {
         return read(globalFile());
     }
 
     public String readProject() {
         return read(projectFile());
+    }
+
+    /** Reads the project memory under the given session root, or an empty string. */
+    public String readProject(final Path root) {
+        return root == null ? readProject() : read(projectFile(root));
     }
 
     public String promptSection() {
@@ -198,6 +213,29 @@ public class MemoryStore {
         if (global.isBlank() && project.isBlank()) {
             return "";
         }
+        return buildMemorySection(global, project, prompt, budget);
+    }
+
+    /**
+     * Root-aware variant for a session working on a specific project directory: the project memory
+     * is read from {@code projectRoot/.yca/memory/MEMORY.md} instead of the process-wide working dir,
+     * so each session gets its own project memory. {@code projectRoot == null} falls back to the
+     * process-wide project file ({@link #promptSection(String, int)}).
+     */
+    public String promptSection(final String prompt, final int budget, final Path projectRoot) {
+        if (configuration == null || !configuration.memory().enabled() || budget < 500) {
+            return "";
+        }
+        final var global = readGlobal();
+        final var project = projectRoot == null ? readProject() : readProject(projectRoot);
+        if (global.isBlank() && project.isBlank()) {
+            return "";
+        }
+        return buildMemorySection(global, project, prompt, budget);
+    }
+
+    private String buildMemorySection(
+            final String global, final String project, final String prompt, final int budget) {
         final var max = budget;
         final var globalText = withScope("global", global);
         final var projectText = withScope("project", project);
@@ -339,11 +377,11 @@ public class MemoryStore {
      * {@code maxLen} characters, breaking at word boundaries where possible. A single short fact is
      * returned as-is. Used so long extracted knowledge is never silently discarded.
      */
-    private static java.util.List<String> wrapLine(final String line, final int maxLen) {
+    private static List<String> wrapLine(final String line, final int maxLen) {
         if (line.length() <= maxLen) {
-            return java.util.List.of(line);
+            return List.of(line);
         }
-        final var out = new java.util.ArrayList<String>();
+        final var out = new ArrayList<String>();
         final var words = line.split(" ");
         final var current = new StringBuilder();
         for (final var word : words) {
@@ -552,8 +590,8 @@ public class MemoryStore {
         return best;
     }
 
-    private static java.util.Set<String> set(final List<String> tokens) {
-        return new java.util.HashSet<>(tokens);
+    private static Set<String> set(final List<String> tokens) {
+        return new HashSet<>(tokens);
     }
 
     /**
@@ -568,10 +606,7 @@ public class MemoryStore {
             final var file = global ? globalFile() : projectFile();
             Files.createDirectories(file.getParent());
             if (Files.exists(file)) {
-                Files.copy(
-                        file,
-                        file.resolveSibling(file.getFileName() + ".bak"),
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.copy(file, file.resolveSibling(file.getFileName() + ".bak"), StandardCopyOption.REPLACE_EXISTING);
             }
             final var content = new StringBuilder(HEADER);
             bullets.stream()
@@ -580,11 +615,7 @@ public class MemoryStore {
             final var tmp = file.resolveSibling(file.getFileName() + ".tmp-"
                     + Thread.currentThread().getName().hashCode());
             Files.writeString(tmp, content.toString());
-            Files.move(
-                    tmp,
-                    file,
-                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
             return content.length();
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
@@ -600,13 +631,13 @@ public class MemoryStore {
      * Records the facts just written by {@code sessionId} so the next wire tail of that session
      * can re-send only what changed. Call from the session-aware execution path.
      */
-    public void recordDiff(final String sessionId, final java.util.List<String> facts) {
+    public void recordDiff(final String sessionId, final List<String> facts) {
         if (sessionId == null || sessionId.isBlank() || facts == null || facts.isEmpty()) {
             return;
         }
-        final java.util.Deque<String> queue;
+        final Deque<String> queue;
         synchronized (pendingDiffs) {
-            queue = pendingDiffs.computeIfAbsent(sessionId, k -> new java.util.ArrayDeque<>());
+            queue = pendingDiffs.computeIfAbsent(sessionId, k -> new ArrayDeque<>());
         }
         synchronized (queue) {
             queue.addAll(facts);
@@ -614,18 +645,18 @@ public class MemoryStore {
     }
 
     /** Drains and returns this session's pending memory diff (facts written since the last tail). */
-    public java.util.List<String> drainPendingDiff(final String sessionId) {
+    public List<String> drainPendingDiff(final String sessionId) {
         if (sessionId == null || sessionId.isBlank()) {
-            return java.util.List.of();
+            return List.of();
         }
-        final java.util.Deque<String> queue;
+        final Deque<String> queue;
         synchronized (pendingDiffs) {
             queue = pendingDiffs.get(sessionId);
             if (queue == null) {
-                return java.util.List.of();
+                return List.of();
             }
         }
-        final var out = new java.util.ArrayList<String>();
+        final var out = new ArrayList<String>();
         synchronized (queue) {
             String fact;
             while ((fact = queue.poll()) != null) {
@@ -648,14 +679,10 @@ public class MemoryStore {
         Files.createDirectories(file.getParent());
         Files.writeString(tmp, content.toString());
         try {
-            Files.move(
-                    tmp,
-                    file,
-                    java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                    java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-        } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
-            Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-        } catch (final java.io.IOException e) {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (final AtomicMoveNotSupportedException e) {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+        } catch (final IOException e) {
             Files.deleteIfExists(tmp);
             throw e;
         }

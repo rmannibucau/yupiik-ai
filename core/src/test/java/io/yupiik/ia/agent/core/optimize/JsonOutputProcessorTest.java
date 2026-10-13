@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.optimize;
 
+import static java.util.stream.Collectors.joining;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -22,7 +23,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 
@@ -42,9 +45,9 @@ class JsonOutputProcessorTest {
     @Test
     void passthroughOnNonJson(final JsonMapper mapper) {
         final var p = new JsonOutputProcessor(TestConfigs.codingAgent(Map.of()), mapper);
-        final var out = p.process("kubectl get pods", java.util.stream.Stream.of("NAME READY", "a 1/1"))
-                .toList();
-        assertEquals(java.util.List.of("NAME READY", "a 1/1"), out);
+        final var out =
+                p.process("kubectl get pods", Stream.of("NAME READY", "a 1/1")).toList();
+        assertEquals(List.of("NAME READY", "a 1/1"), out);
     }
 
     @Test
@@ -54,8 +57,8 @@ class JsonOutputProcessorTest {
                 [{"metadata":{"name":"web-0","namespace":"default"},"status":{"phase":"Running"}},
                  {"metadata":{"name":"db-0","namespace":"default"},"status":{"phase":"Pending"}}]
                 """;
-        final var out = p.process("kubectl get pods -o json", java.util.stream.Stream.of(json.strip()))
-                .collect(java.util.stream.Collectors.joining("\n"));
+        final var out =
+                p.process("kubectl get pods -o json", Stream.of(json.strip())).collect(joining("\n"));
         assertTrue(out.contains("metadata.name=web-0"));
         assertTrue(out.contains("status.phase=Running"));
         assertTrue(out.contains("metadata.name=db-0"));
@@ -68,8 +71,8 @@ class JsonOutputProcessorTest {
         final var json = """
                 [{"Id":"abc123","Image":"nginx:1.25","State":{"Status":"running"},"NetworkSettings":{"Ports":{"80/tcp":null}}}]
                 """;
-        final var out = p.process("docker inspect abc123", java.util.stream.Stream.of(json.strip()))
-                .collect(java.util.stream.Collectors.joining("\n"));
+        final var out =
+                p.process("docker inspect abc123", Stream.of(json.strip())).collect(joining("\n"));
         assertTrue(out.contains("Id=abc123"));
         assertTrue(out.contains("Image=nginx:1.25"));
     }
@@ -77,8 +80,8 @@ class JsonOutputProcessorTest {
     @Test
     void malformedJsonFallsBackToPassthrough(final JsonMapper mapper) {
         final var p = new JsonOutputProcessor(TestConfigs.codingAgent(Map.of()), mapper);
-        final var out = p.process("kubectl get pods -o json", java.util.stream.Stream.of("{not json"))
-                .toList();
-        assertEquals(java.util.List.of("{not json"), out);
+        final var out =
+                p.process("kubectl get pods -o json", Stream.of("{not json")).toList();
+        assertEquals(List.of("{not json"), out);
     }
 }

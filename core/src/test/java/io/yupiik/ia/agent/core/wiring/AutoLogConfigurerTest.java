@@ -114,6 +114,28 @@ class AutoLogConfigurerTest {
     }
 
     @Test
+    void secondStartMustNotStackASecondInlineHandler() {
+        // Regression for the native duplicate-logs issue: the GraalVM build can resolve this
+        // @ApplicationScoped bean twice and run onStart twice, which used to stack two inline
+        // StandardHandlers and print every JUL record twice with identical timestamps.
+        final var configurer = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+        final var other = new AutoLogConfigurer(TestConfigs.codingAgent(Map.of()));
+        try {
+            configurer.onStart(new Start());
+            final var first = configurer.installedInlineHandler();
+            assertNotNull(first);
+            other.onStart(new Start()); // second bean instance, second Start event
+            assertTrue(
+                    countStandardHandlers(Logger.getLogger("").getHandlers()) == 1,
+                    "a second onStart must not stack a second inline handler");
+            assertNotNull(other.installedInlineHandler(), "the second instance still owns the surviving handler");
+        } finally {
+            configurer.onStop(new Stop());
+            other.onStop(new Stop());
+        }
+    }
+
+    @Test
     void replacesTheJdkConsoleHandlerSoRecordsArePrintedOnce() {
         final var root = Logger.getLogger("");
         final var console = new ConsoleHandler();
@@ -149,5 +171,15 @@ class AutoLogConfigurerTest {
             }
         }
         return false;
+    }
+
+    private static long countStandardHandlers(final Handler[] handlers) {
+        var count = 0;
+        for (final var handler : handlers) {
+            if (handler instanceof StandardHandler) {
+                count++;
+            }
+        }
+        return count;
     }
 }

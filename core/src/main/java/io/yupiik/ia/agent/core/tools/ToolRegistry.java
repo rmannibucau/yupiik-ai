@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class ToolRegistry {
@@ -64,7 +65,7 @@ public class ToolRegistry {
      * @param filter the subset predicate applied to the visible, non-pruned tools.
      * @return the wire tool declarations for the matching tools.
      */
-    public List<Tool> toWireTools(final java.util.function.Predicate<EmbeddedTool> filter) {
+    public List<Tool> toWireTools(final Predicate<EmbeddedTool> filter) {
         final var all = tools();
         // The merged code_resolve tool subsumes the granular structural/share tools. When it is registered we
         // expose only it (plus on-demand maven_knowledge_content); when registered but no data source is live we

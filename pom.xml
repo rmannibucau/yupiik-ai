@@ -48,6 +48,26 @@
       </dependency>
       <dependency>
         <groupId>io.yupiik.fusion</groupId>
+        <artifactId>fusion-http-server</artifactId>
+        <version>${fusion.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.yupiik.fusion</groupId>
+        <artifactId>fusion-http-server-api</artifactId>
+        <version>${fusion.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.yupiik.fusion</groupId>
+        <artifactId>fusion-http-server-jre</artifactId>
+        <version>${fusion.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.yupiik.fusion</groupId>
+        <artifactId>fusion-jsonrpc</artifactId>
+        <version>${fusion.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>io.yupiik.fusion</groupId>
         <artifactId>fusion-build-api</artifactId>
         <version>${fusion.version}</version>
       </dependency>
@@ -301,12 +321,62 @@
     </plugins>
   </build>
 
+  <profiles>
+    <profile>
+      <id>pmd</id>
+      <properties>
+        <pmd.version>7.28.0</pmd.version>
+      </properties>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-pmd-plugin</artifactId>
+            <version>3.24.0</version>
+            <configuration>
+              <rulesets>
+                <ruleset>${maven.multiModuleProjectDirectory}/config/pmd/ruleset.xml</ruleset>
+              </rulesets>
+              <includeTests>true</includeTests>
+              <failOnViolation>false</failOnViolation>
+              <printFailingErrors>true</printFailingErrors>
+            </configuration>
+            <dependencies>
+              <dependency>
+                <groupId>net.sourceforge.pmd</groupId>
+                <artifactId>pmd-core</artifactId>
+                <version>${pmd.version}</version>
+              </dependency>
+              <dependency>
+                <groupId>net.sourceforge.pmd</groupId>
+                <artifactId>pmd-java</artifactId>
+                <version>${pmd.version}</version>
+              </dependency>
+              <dependency>
+                <groupId>net.sourceforge.pmd</groupId>
+                <artifactId>pmd-javascript</artifactId>
+                <version>${pmd.version}</version>
+              </dependency>
+              <dependency>
+                <groupId>net.sourceforge.pmd</groupId>
+                <artifactId>pmd-jsp</artifactId>
+                <version>${pmd.version}</version>
+              </dependency>
+            </dependencies>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+
   <subprojects>
     <subproject>llm-client</subproject>
     <subproject>html-to-markdown</subproject>
     <subproject>code-graph-index</subproject>
     <subproject>core</subproject>
+    <subproject>web</subproject>
     <subproject>tui</subproject>
+    <subproject>yca</subproject>
     <subproject>documentation</subproject>
     <subproject>extensions</subproject>
   </subprojects>

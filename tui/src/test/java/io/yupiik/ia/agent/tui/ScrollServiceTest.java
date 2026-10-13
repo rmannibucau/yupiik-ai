@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import dev.tamboui.tui.event.KeyCode;
 import dev.tamboui.tui.event.KeyEvent;
 import dev.tamboui.tui.event.MouseEvent;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ScrollServiceTest {
@@ -113,7 +114,7 @@ class ScrollServiceTest {
                 "unicode",
                 "auto",
                 "auto",
-                java.util.List.of(),
+                List.of(),
                 null,
                 null,
                 true,

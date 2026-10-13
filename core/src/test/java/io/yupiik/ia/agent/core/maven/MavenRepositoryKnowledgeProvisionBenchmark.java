@@ -35,10 +35,13 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
@@ -160,7 +163,7 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
 
     private RuntimeContainer container(final Path projectDir, final Path localRepository, final Path storageHome) {
         final var provider = readHomeProvider();
-        final var config = new java.util.LinkedHashMap<String, String>();
+        final var config = new LinkedHashMap<String, String>();
         config.put("yca.storageHome", storageHome.toString());
         // YcaConfigurationProducer looks this file up before falling back to the "yca.storage.home"
         // system property: pointing it at a file that does not exist keeps the user home
@@ -219,7 +222,7 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
             throw new IllegalStateException("cannot read " + home, e);
         }
         final var provider = objectBlock(json, "provider");
-        final var out = new java.util.LinkedHashMap<String, String>();
+        final var out = new LinkedHashMap<String, String>();
         scalar(provider, "baseUrl").ifPresent(v -> out.put("baseUrl", v));
         scalar(provider, "apiKey").ifPresent(v -> out.put("apiKey", v));
         scalar(provider, "model").ifPresent(v -> out.put("model", v));
@@ -252,13 +255,13 @@ class MavenRepositoryKnowledgeProvisionBenchmark {
         throw new IllegalStateException("unbalanced object for key: " + key);
     }
 
-    private java.util.Optional<String> scalar(final String block, final String field) {
-        final var matcher = java.util.regex.Pattern.compile("\"" + field + "\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))")
+    private Optional<String> scalar(final String block, final String field) {
+        final var matcher = Pattern.compile("\"" + field + "\"\\s*:\\s*(?:\"([^\"]*)\"|([0-9.]+))")
                 .matcher(block);
         if (!matcher.find()) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
-        return java.util.Optional.of(matcher.group(1) != null ? matcher.group(1) : matcher.group(2));
+        return Optional.of(matcher.group(1) != null ? matcher.group(1) : matcher.group(2));
     }
 
     /**

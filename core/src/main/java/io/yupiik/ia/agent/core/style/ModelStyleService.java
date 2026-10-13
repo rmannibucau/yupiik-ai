@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -256,7 +257,7 @@ public class ModelStyleService {
         return chatClient.providerPosition(provider);
     }
 
-    private static int listedIndex(final java.util.List<ProviderModelConfiguration> models, final String model) {
+    private static int listedIndex(final List<ProviderModelConfiguration> models, final String model) {
         if (models == null || model == null) {
             return -1;
         }
@@ -271,8 +272,7 @@ public class ModelStyleService {
         return -1;
     }
 
-    private static ProviderModelConfiguration match(
-            final java.util.List<ProviderModelConfiguration> models, final String model) {
+    private static ProviderModelConfiguration match(final List<ProviderModelConfiguration> models, final String model) {
         if (models == null || model == null) {
             return null;
         }

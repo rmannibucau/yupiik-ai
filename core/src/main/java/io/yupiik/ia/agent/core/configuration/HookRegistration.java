@@ -51,6 +51,12 @@ public record HookRegistration(
         List<String> command,
 
         @Property(
+                documentation = "Working directory for the callback process; defaults to the agent process directory. "
+                        + "Set it to root the callback (eg. a repository-local hook script) in a specific "
+                        + "directory.")
+        String dir,
+
+        @Property(
                 defaultValue = "-1",
                 documentation =
                         "Timeout in seconds for this callback; `<= 0` inherits the triggering event's own budget"

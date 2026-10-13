@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.llm;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.helper.SafeString;
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.Writer;
@@ -207,8 +208,8 @@ public class ExecTemplateHelper {
         final var out = new StringBuilder();
         final var err = new StringBuilder();
         final var outThread = Thread.ofVirtual().start(() -> {
-            try (final var reader = new java.io.BufferedReader(
-                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            try (final var reader =
+                    new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 reader.transferTo(appendWriter(out));
             } catch (final IOException e) {
                 // ignored: the exit status below is the source of truth
@@ -217,8 +218,8 @@ public class ExecTemplateHelper {
         // the stderr is consumed concurrently on a virtual thread so a chatty command
         // cannot wedge the process on a full pipe
         final var errThread = Thread.ofVirtual().start(() -> {
-            try (final var reader = new java.io.BufferedReader(
-                    new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+            try (final var reader =
+                    new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
                 reader.transferTo(appendWriter(err));
             } catch (final IOException e) {
                 // ignored

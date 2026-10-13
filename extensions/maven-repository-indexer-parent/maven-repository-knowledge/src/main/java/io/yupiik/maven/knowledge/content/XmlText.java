@@ -15,6 +15,8 @@
  */
 package io.yupiik.maven.knowledge.content;
 
+import java.util.ArrayList;
+import java.util.List;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
 
@@ -38,8 +40,8 @@ final class XmlText {
     }
 
     /** Returns all descendant elements with the given tag, in document order. */
-    static java.util.List<Element> elementsByTagName(final Node parent, final String tag) {
-        final var result = new java.util.ArrayList<Element>();
+    static List<Element> elementsByTagName(final Node parent, final String tag) {
+        final var result = new ArrayList<Element>();
         final var all = ((Element) parent).getElementsByTagName(tag);
         for (int i = 0; i < all.getLength(); i++) {
             final var item = all.item(i);

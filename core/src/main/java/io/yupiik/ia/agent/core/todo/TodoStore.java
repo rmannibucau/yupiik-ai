@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class TodoStore {
     private final CodingAgentConfiguration configuration;
@@ -167,7 +168,7 @@ public class TodoStore {
             for (final var o : raw) {
                 if (o instanceof TodoItem t) {
                     out.add(t);
-                } else if (o instanceof java.util.Map<?, ?> m) {
+                } else if (o instanceof Map<?, ?> m) {
                     out.add(new TodoItem(str(m.get("content")), str(m.get("status"))));
                 }
             }

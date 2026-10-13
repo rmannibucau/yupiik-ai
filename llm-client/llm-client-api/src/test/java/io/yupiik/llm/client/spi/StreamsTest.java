@@ -21,8 +21,10 @@ import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Flow;
 import java.util.concurrent.SubmissionPublisher;
 import java.util.concurrent.TimeUnit;
@@ -37,7 +39,7 @@ class StreamsTest {
         final var chunks = new ArrayList<List<ByteBuffer>>();
         for (var i = 0; i < full.length; i += 4) {
             final var end = Math.min(i + 4, full.length);
-            chunks.add(List.of(ByteBuffer.wrap(java.util.Arrays.copyOfRange(full, i, end))));
+            chunks.add(List.of(ByteBuffer.wrap(Arrays.copyOfRange(full, i, end))));
         }
 
         final var events = collect(chunks, false);
@@ -73,7 +75,7 @@ class StreamsTest {
     private static List<LlmStreamEvent> collect(final List<List<ByteBuffer>> chunks, final boolean cancelled)
             throws InterruptedException {
         final var events = new CopyOnWriteArrayList<LlmStreamEvent>();
-        final var done = new java.util.concurrent.CountDownLatch(1);
+        final var done = new CountDownLatch(1);
         final SubmissionPublisher<List<ByteBuffer>> source = new SubmissionPublisher<>();
         Streams.toEvents(
                         source,

@@ -22,6 +22,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 @ApplicationScoped
@@ -29,11 +30,9 @@ public class GitOutputProcessor implements OutputProcessor {
     private static final int MAX_HUNK_LINES = 8;
     private static final int MAX_LOG_BODY = 3;
     private static final int DEFAULT_MAX_BLOB_BYTES = 8192;
-    private static final java.util.regex.Pattern WHITESPACE = java.util.regex.Pattern.compile("\\s+");
-    private static final java.util.regex.Pattern COMMIT_LINE =
-            java.util.regex.Pattern.compile("\\[([^\\]\\s]+)\\s+([0-9a-f]{7,40})\\]");
-    private static final java.util.regex.Pattern PUSH_BRANCH =
-            java.util.regex.Pattern.compile("\\*\\s+([^\\s]+)\\s+->");
+    private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+    private static final Pattern COMMIT_LINE = Pattern.compile("\\[([^\\]\\s]+)\\s+([0-9a-f]{7,40})\\]");
+    private static final Pattern PUSH_BRANCH = Pattern.compile("\\*\\s+([^\\s]+)\\s+->");
 
     private final int maxBlobBytes;
 
@@ -312,7 +311,7 @@ public class GitOutputProcessor implements OutputProcessor {
     }
 
     private Stream<String> processMutation(final String command, final Stream<String> lines) {
-        final var out = new java.util.ArrayList<String>();
+        final var out = new ArrayList<String>();
         final var sub = Optimizers.firstToken(command.replaceFirst("^git\\s+", ""));
         for (final var raw : lines.toList()) {
             final var line = Optimizers.stripAnsi(raw).strip();
@@ -342,7 +341,7 @@ public class GitOutputProcessor implements OutputProcessor {
                 continue;
             }
             if ("pull".equals(sub)) {
-                final var files = java.util.regex.Pattern.compile(
+                final var files = Pattern.compile(
                                 "(\\d+) files? changed, (\\d+) insertions?\\(\\+\\), (\\d+) deletions?\\(-\\)")
                         .matcher(line);
                 if (files.matches()) {

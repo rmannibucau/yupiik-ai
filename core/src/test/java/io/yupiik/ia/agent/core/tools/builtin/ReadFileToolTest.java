@@ -96,4 +96,16 @@ class ReadFileToolTest {
         assertEquals(1, ReadFileTool.levenshtein("abc", "abd"));
         assertEquals(1, ReadFileTool.levenshtein("ProviderConfiguraion", "ProviderConfiguration"));
     }
+
+    @Test
+    void relativePathResolvesAgainstSessionProjectDir(@TempDir final Path projectDir, @TempDir final Path cwd)
+            throws IOException {
+        // a relative path must land under the session root, NOT the JVM working directory
+        Files.writeString(projectDir.resolve("rel.txt"), "session content\n");
+        final var tool = new ReadFileTool();
+        final var result =
+                tool.execute(Map.of("path", "rel.txt"), io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir));
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().contains("session content"), result.output());
+    }
 }

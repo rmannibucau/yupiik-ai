@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.tui;
 
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -165,7 +166,7 @@ public record ToolCard(
      * command *before* the display-length clip, so shortening (e.g. relativizing
      * an absolute path) sees the untruncated value {@code beforeClip}.
      */
-    public String keyCommand(final java.util.function.Function<String, String> beforeClip) {
+    public String keyCommand(final Function<String, String> beforeClip) {
         final var raw = args.isBlank() && running ? name : args;
         var significant = ToolPresenter.significantCommand(raw);
         if (beforeClip != null) {

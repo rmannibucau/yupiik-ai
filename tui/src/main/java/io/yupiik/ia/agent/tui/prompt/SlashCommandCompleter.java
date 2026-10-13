@@ -23,10 +23,11 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.mcp.McpManager;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
+import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
-import io.yupiik.ia.agent.tui.CompletionEngine;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import org.jline.reader.Candidate;
@@ -240,7 +241,7 @@ public class SlashCommandCompleter implements Completer {
             if (size == 0) {
                 return List.of();
             }
-            final var names = new java.util.ArrayList<String>(size);
+            final var names = new ArrayList<String>(size);
             if (hasDefault) {
                 names.add("default");
             }

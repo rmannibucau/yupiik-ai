@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.ia.agent.core.configuration.AgentMode;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class TodoPromptResolverTest {
@@ -59,7 +60,7 @@ class TodoPromptResolverTest {
                 resolver.resolve("auto", "https://generativelanguage.googleapis.com/v1")
                         .contains("Consult the todo list in the <session-state> block at the"),
                 "the Gemini block must order consulting the list at turn start");
-        for (final var url : java.util.List.of(
+        for (final var url : List.of(
                 "https://mystery.example/v1",
                 "https://api.anthropic.com/v1/messages",
                 "https://generativelanguage.googleapis.com/v1")) {
@@ -146,8 +147,7 @@ class TodoPromptResolverTest {
 
     @Test
     void buildBlocksAllowParallelInProgress() {
-        for (final var url :
-                java.util.List.of("https://mystery.example/v1", "https://generativelanguage.googleapis.com/v1")) {
+        for (final var url : List.of("https://mystery.example/v1", "https://generativelanguage.googleapis.com/v1")) {
             final var block = resolver.resolve("auto", url, AgentMode.BUILD);
             assertFalse(
                     block.contains("exactly one"),

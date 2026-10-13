@@ -21,6 +21,7 @@ import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
+import java.util.Date;
 import java.util.List;
 
 /**
@@ -73,7 +74,7 @@ public class InspectCommands implements SlashCommandSet {
                 .append(" bullets\n");
         if (stats.lastCompaction() != null) {
             sb.append("-- last compaction: ")
-                    .append(new java.util.Date(stats.lastCompaction().timestamp()))
+                    .append(new Date(stats.lastCompaction().timestamp()))
                     .append(" (before=")
                     .append(stats.lastCompaction().before())
                     .append(", after=")

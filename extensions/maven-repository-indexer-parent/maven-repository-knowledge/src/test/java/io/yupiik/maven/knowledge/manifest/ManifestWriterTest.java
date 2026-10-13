@@ -22,6 +22,7 @@ import io.yupiik.maven.knowledge.Gav;
 import io.yupiik.maven.knowledge.skill.SkillWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -40,7 +41,7 @@ class ManifestWriterTest {
         writer.write(GAV, "large", large);
 
         final var manifestWriter = new ManifestWriter(tmp);
-        manifestWriter.write(GAV, java.util.List.of("simple", "large"));
+        manifestWriter.write(GAV, List.of("simple", "large"));
 
         final var manifestText = Files.readString(manifestWriter.manifestPath(GAV));
         // the simple skill is inlined verbatim (its body is present, no reference marker)

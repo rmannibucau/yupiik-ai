@@ -19,11 +19,14 @@ import io.yupiik.fusion.json.JsonMapper;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -60,13 +63,9 @@ public class WiringGraphWriter {
                     path.resolveSibling("wiring.json." + ProcessHandle.current().pid() + ".tmp");
             Files.writeString(tmp, render(mapper, store, cache), StandardCharsets.UTF_8);
             try {
-                Files.move(
-                        tmp,
-                        path,
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING,
-                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
-            } catch (final java.nio.file.AtomicMoveNotSupportedException e) {
-                Files.move(tmp, path, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (final AtomicMoveNotSupportedException e) {
+                Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING);
             }
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
@@ -89,7 +88,7 @@ public class WiringGraphWriter {
             final var id = s.file() + "#" + name;
             m.put("id", id);
             m.put("name", name);
-            m.put("kind", s.kind().name().toLowerCase(java.util.Locale.ROOT));
+            m.put("kind", s.kind().name().toLowerCase(Locale.ROOT));
             m.put("path", s.file());
             m.put("span", "L" + s.startLine() + "-" + s.endLine());
             m.put("signature", s.signature());

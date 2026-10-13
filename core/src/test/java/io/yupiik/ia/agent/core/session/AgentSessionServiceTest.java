@@ -181,10 +181,18 @@ class AgentSessionServiceTest {
         permissions.setMode(AgentMode.BUILD);
         permissions.grantSession("bash", Map.of("command", "mvn install"));
         assertEquals(1, permissions.sessionGrants().size());
+        permissions.addDynamicRule(new io.yupiik.ia.agent.core.configuration.CommandPermissionConfiguration(
+                new io.yupiik.ia.agent.core.configuration.CommandStartMatcherConfiguration(
+                        new io.yupiik.ia.agent.core.configuration.CommandOptionsConfiguration(List.of("mvn")),
+                        List.of()),
+                PermissionMode.YOLO,
+                null));
+        assertEquals(1, permissions.dynamicRules().size());
 
         service.setMode("plan", "s1", runtime(permissions));
 
         assertTrue(permissions.sessionGrants().isEmpty(), "build approvals must not leak back into plan mode");
+        assertTrue(permissions.dynamicRules().isEmpty(), "build-time dynamic rules must not leak back into plan mode");
     }
 
     @Test
@@ -463,24 +471,35 @@ class AgentSessionServiceTest {
     }
 
     @Test
-    void memoryReadsProjectAndGlobal() {
-        final var memoryStore = new MemoryStore() {
-            @Override
-            public String readGlobal() {
-                return "global notes";
-            }
+    void memoryReadsProjectAndGlobal() throws Exception {
+        final var storageHome = Files.createTempDirectory("agent-session-global");
+        final var projectRoot = Files.createTempDirectory("agent-session-project");
+        Files.createDirectories(storageHome.resolve("memory"));
+        Files.createDirectories(projectRoot.resolve(".yca").resolve("memory"));
+        Files.writeString(storageHome.resolve("memory").resolve("MEMORY.md"), "global notes");
+        Files.writeString(projectRoot.resolve(".yca").resolve("memory").resolve("MEMORY.md"), "project notes");
 
-            @Override
-            public String readProject() {
-                return "project notes";
-            }
-        };
-        final var service = service(memoryStore);
+        final var config = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", projectRoot.toString()));
+        final var memoryStore = new MemoryStore(config);
+        final var service =
+                new AgentSessionService(null, null, null, null, memoryStore, null, null, null, config, null);
 
         final var memory = service.memory();
 
         assertEquals("global notes", memory.global());
         assertEquals("project notes", memory.project());
+        assertEquals(storageHome.resolve("memory").resolve("MEMORY.md").toString(), memory.globalPath());
+        assertEquals(
+                projectRoot
+                        .resolve(".yca")
+                        .resolve("memory")
+                        .resolve("MEMORY.md")
+                        .toString(),
+                memory.projectPath());
+        assertTrue(memory.globalExists());
+        assertTrue(memory.projectExists());
     }
 
     @Test

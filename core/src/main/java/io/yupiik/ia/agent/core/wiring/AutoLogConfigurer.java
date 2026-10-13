@@ -95,8 +95,15 @@ public class AutoLogConfigurer {
         // LogManager initializes; without removing it every record would print twice
         // (once JDK-formatted, once inline) until a terminal-owning frontend or the
         // process exit replaces the setup
+        // Detect duplicates too: the GraalVM-native build can resolve this @ApplicationScoped
+        // bean twice (two runtime contexts), running onStart twice and stacking two inline
+        // StandardHandlers - every JUL record would then print twice with the identical
+        // timestamp on both lines. StandardHandler is only ever installed by this configurer
+        // (or an explicit user logging.properties, which is excluded above via
+        // shouldKeepJdkDefaults), so removing any pre-existing one before adding ours keeps
+        // exactly one inline handler on the root whatever the graph resolution count.
         for (final var previous : root.getHandlers()) {
-            if (previous instanceof ConsoleHandler) {
+            if (previous instanceof ConsoleHandler || previous instanceof StandardHandler) {
                 root.removeHandler(previous);
             }
         }
@@ -116,8 +123,20 @@ public class AutoLogConfigurer {
      * headless commands log readably out of the box.
      */
     private static boolean shouldKeepJdkDefaults() {
-        return System.getProperty("java.util.logging.config.file") != null
-                && LogManager.getLogManager().getClass() == LogManager.class;
+        if (System.getProperty("java.util.logging.config.file") != null
+                && LogManager.getLogManager().getClass() == LogManager.class) {
+            return true;
+        }
+        // The YupiikLogManager (activated via `-Djava.util.logging.manager=...YupiikLogManager`,
+        // as the GraalVM-native build does) already installs its own inline handler on the loggers
+        // it manages and prints every record exactly once in the inline format. Adding our own
+        // StandardHandler here on top would publish each record through BOTH the Yupiik-managed
+        // path and this root handler, printing every line twice with identical timestamps (the
+        // native "MCP ready / CodeGraph load duplicated" bug). Let the manager's own inline output
+        // win, exactly like an explicit JUL configuration would. The TUI tolerates a null
+        // installed handler (it guards with `installedInlineHandler() != null`) and wires its own
+        // log-redirect handlers regardless.
+        return LogManager.getLogManager().getClass().getName().equals("io.yupiik.logging.jul.YupiikLogManager");
     }
 
     /**

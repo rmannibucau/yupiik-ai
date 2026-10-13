@@ -15,12 +15,15 @@
  */
 package io.yupiik.ia.agent.core.tools;
 
+import static java.util.stream.Collectors.joining;
+
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
 import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
+import io.yupiik.ia.agent.core.optimize.Optimizers;
 import io.yupiik.ia.agent.core.optimize.OutputProcessor;
 import java.util.Comparator;
 import java.util.List;
@@ -105,6 +108,11 @@ public class ToolExecutionService {
         final var reporter = context.statusReporter();
         final var command = args.get("command") instanceof String s ? s : tool.name();
         final var optimize = configuration.optimize();
+        // Peek through a leading wrapper (sudo, timeout 120, env VAR=.., command, sh -c ...) so the
+        // command head matchers see the inner command: `timeout 120 mvn ...` is optimized as `mvn ...`.
+        final var effective = optimize.skipCommandWrapper()
+                ? Optimizers.unwrapCommandWrapper(command).orElse(command)
+                : command;
         final var minReduction = Math.max(0, Math.min(100, optimize.minReductionPercent()));
         final var sorted = processors.stream()
                 .filter(p -> p.appliesToTool(tool.name()))
@@ -115,10 +123,9 @@ public class ToolExecutionService {
                 continue;
             }
             try {
-                if (processor.supports(command)) {
-                    final var processed = processor
-                            .process(command, output.lines())
-                            .collect(java.util.stream.Collectors.joining("\n"));
+                if (processor.supports(effective)) {
+                    final var processed =
+                            processor.process(effective, output.lines()).collect(joining("\n"));
                     // only accept a meaningful reduction: tiny wins are noise, not optimization
                     if (processed.length() * 100L <= output.length() * (100L - minReduction)) {
                         if (reporter != null) {

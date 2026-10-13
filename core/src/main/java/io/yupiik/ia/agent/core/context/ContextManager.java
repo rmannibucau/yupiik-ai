@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 /**
  * Triggers for context pruning/compaction and thin facades over the
@@ -107,7 +108,7 @@ public class ContextManager {
             final boolean force,
             final String focus,
             final int keepLastOverride,
-            final java.util.function.BooleanSupplier cancelled) {
+            final BooleanSupplier cancelled) {
         return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, ChatSettings.EMPTY);
     }
 
@@ -117,7 +118,7 @@ public class ContextManager {
             final boolean force,
             final String focus,
             final int keepLastOverride,
-            final java.util.function.BooleanSupplier cancelled,
+            final BooleanSupplier cancelled,
             final ChatSettings settings) {
         return coordinator.compact(messages, force, focus, keepLastOverride, cancelled, settings);
     }
@@ -126,16 +127,13 @@ public class ContextManager {
         return coordinator.compact(messages, true, null, 0, Cancellations.NEVER, ChatSettings.EMPTY);
     }
 
-    public CompactionResult compactForOverflow(
-            final List<Message> messages, final java.util.function.BooleanSupplier cancelled) {
+    public CompactionResult compactForOverflow(final List<Message> messages, final BooleanSupplier cancelled) {
         return coordinator.compact(messages, true, null, 0, cancelled, ChatSettings.EMPTY);
     }
 
     /** {@link #compactForOverflow(List, BooleanSupplier)} for the session's model selection. */
     public CompactionResult compactForOverflow(
-            final List<Message> messages,
-            final java.util.function.BooleanSupplier cancelled,
-            final ChatSettings settings) {
+            final List<Message> messages, final BooleanSupplier cancelled, final ChatSettings settings) {
         return coordinator.compact(messages, true, null, 0, cancelled, settings);
     }
 }

@@ -6,18 +6,21 @@
 :minisite-nav-next-label: Prompt templates
 
 The agent loop bounds how long a single turn can run and stops models that spin
-without making progress. Two guards cooperate:
+without making progress. Three guards cooperate, split by what they cover:
 
-* the pre-existing *no-progress* guard stops rounds that repeat the same tool
-  call with the same arguments and the same output;
-* the *exploration-plateau* guard (added for flash-class models such as
-  `deepseek-v4-flash`, whose native style is one small novel tool call per round)
-  stops rounds that keep re-covering files/results the turn already read, even
-  when every call signature is different.
+* the *doom-loop* guard refuses repeated identical *state-changing/bash* calls
+  that keep returning the same already-known result;
+* the *exploration-plateau* guard stops *read-only* rounds that keep re-covering
+  files/results the turn already read, even when every call signature is
+  different (added for flash-class models such as `deepseek-v4-flash`, whose
+  native style is one small novel tool call per round);
+* the *no-progress* guard (plus the turn-level output tombstone) is the backstop
+  for any round, read or not, that repeats known output without new information.
 
-Both guards are configured with a three-level cascade: per-model
+Each guard is configured with a three-level cascade: per-model
 (`yca.provider.<id>.models[i].behavior.*`) wins over per-provider
-(`yca.provider.<id>.tuning.*`) wins over the global default (`yca.llm.*`).
+(`yca.provider.<id>.tuning.*`) wins over the global default (`yca.llm.*` for the
+plateau, `yca.tools.*` for the doom-loop).
 
 == Exploration plateau
 
@@ -79,6 +82,60 @@ yca.provider.<id>.tuning.plateauRounds=5
 
 # per-model (wins over the provider and the global)
 yca.provider.<id>.models.0.behavior.plateauRounds=3
+----
+
+== Doom-loop guard
+
+The *doom-loop* guard refuses repeated identical *state-changing/bash* tool calls
+that keep returning the exact same already-known result, so a model spinning on
+one command cannot burn the whole turn on duplicate information. Read-only
+tools are deliberately *not* covered: they are owned by the exploration-plateau
+guard (semantic re-coverage), so a read is never signature-refused here - only a
+repeated state-changing call can trip the doom-loop breaker.
+
+An execution counts toward the guard only when the same tool + the same
+normalized arguments **succeeded *and* produced identical output**.
+
+Key semantics:
+
+* **Failures are never counted** - a failing call is a legitimate retry, resets
+  the success streak, and is never refused.
+* **Fresh content resets the streak** - the same call returning different output
+  (polling a changing state) restarts the count, so legitimate progress is never
+  refused.
+* **Identical timestamps and durations count as identical output** - outputs that
+  differ only by an embedded ISO-8601 date/time, a clock time, or an elapsed
+  duration maven/gradle emit (`in 5s`, `Total time: 1.234 s`, `0.5ms`) are
+  treated as the same result, so a command re-run that only changes its log time
+  is still detected as a repeat. Bare digit runs (versions, build ids, checksums)
+  are *never* stripped, so genuinely different numbers are not conflated.
+* **Refusals are strategy nudges, not errors** - a refused call never runs and is
+  surfaced to the model as a one-shot strategy-change directive (like the plateau
+  nudge), never as a failed tool result that would read as "retry it". After the
+  nudge, further identical calls are withheld and feed the no-progress backstop.
+* **T means T** - the threshold is the number of identical-output successes
+  observed before the next identical call is refused: with `repeatSuccessThreshold=3`
+  the first three run and the fourth is refused.
+* **Turn-level output tombstone** - a normalized output already produced this turn
+  by *any* tool (even a different one) is treated as non-novel for the
+  no-progress/plateau decision, catching `ls`, `find`, `grep` and similar breath
+  that all yield the same content. The tombstone only steers the no-progress
+  guard; it never produces a hard refusal by itself.
+
+`repeatSuccessThreshold` uses the same three-level cascade as the other guards:
+per-model wins over per-provider wins over the global default; `0` at the global
+level disables the guard entirely.
+
+[source,properties]
+----
+# global default (built-in): 3, 0 disables the guard entirely
+yca.tools.repeatSuccessThreshold=3
+
+# per-provider
+yca.provider.<id>.tuning.repeatSuccessThreshold=5
+
+# per-model: a flash/small model that repeats more stubbornly is caught sooner
+yca.provider.<id>.models.0.behavior.repeatSuccessThreshold=2
 ----
 
 == Iteration window cap

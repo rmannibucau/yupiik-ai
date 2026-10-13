@@ -59,6 +59,19 @@ class GrepToolTest {
         assertTrue(out.contains("results capped at 3"), out);
     }
 
+    @Test
+    void relativeBasePathResolvesAgainstSessionProjectDir(@TempDir final Path projectDir) throws IOException {
+        write(projectDir.resolve("src/App.java"), "needle here\n");
+        write(projectDir.resolve("src/Other.java"), "nothing\n");
+        // relative "src" must be rooted on the session projectDir, not the JVM working directory
+        final var out = tool.execute(
+                        Map.of("pattern", "needle", "path", "src"),
+                        io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir))
+                .output();
+        assertTrue(out.contains("App.java"), out);
+        assertFalse(out.contains("Other.java"), out);
+    }
+
     private static void write(final Path file, final String content) throws IOException {
         Files.createDirectories(file.getParent());
         Files.writeString(file, content);

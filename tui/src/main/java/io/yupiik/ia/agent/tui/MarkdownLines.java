@@ -20,6 +20,7 @@ import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import org.commonmark.ext.gfm.strikethrough.Strikethrough;
 import org.commonmark.ext.gfm.strikethrough.StrikethroughExtension;
@@ -769,7 +770,7 @@ public final class MarkdownLines {
     }
 
     private static Iterable<Node> children(final Node node) {
-        return () -> new java.util.Iterator<>() {
+        return () -> new Iterator<>() {
             private Node next = node.getFirstChild();
 
             @Override

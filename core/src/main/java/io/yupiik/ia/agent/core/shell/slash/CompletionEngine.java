@@ -13,10 +13,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-package io.yupiik.ia.agent.tui;
+package io.yupiik.ia.agent.core.shell.slash;
 
-import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
-import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;

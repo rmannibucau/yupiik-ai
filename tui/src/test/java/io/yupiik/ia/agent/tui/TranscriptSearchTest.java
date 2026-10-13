@@ -15,17 +15,19 @@
  */
 package io.yupiik.ia.agent.tui;
 
+import static java.util.Arrays.asList;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class TranscriptSearchTest {
     private TranscriptSearch search(final String query, final String... rows) {
         final var search = new TranscriptSearch();
         search.query(query);
-        search.recompute(java.util.Arrays.asList(rows));
+        search.recompute(asList(rows));
         return search;
     }
 
@@ -77,14 +79,14 @@ class TranscriptSearchTest {
     void recomputeWithNewRows() {
         final var search = search("needle", "no needle yet");
         assertEquals(1, search.count());
-        search.recompute(java.util.List.of("nothing"));
+        search.recompute(List.of("nothing"));
         assertEquals(0, search.count());
     }
 
     @Test
     void matchesAscending() {
         final var search = search("b", "ab", "bb", "cb");
-        assertEquals(java.util.List.of(0, 1, 2), search.matches());
+        assertEquals(List.of(0, 1, 2), search.matches());
     }
 
     @Test
@@ -99,7 +101,7 @@ class TranscriptSearchTest {
     void nullAndEmptyRowsIgnored() {
         final var search = new TranscriptSearch();
         search.query("a");
-        search.recompute(java.util.Arrays.asList(null, "a", ""));
+        search.recompute(asList(null, "a", ""));
         assertTrue(search.active());
         assertEquals(1, search.count());
     }

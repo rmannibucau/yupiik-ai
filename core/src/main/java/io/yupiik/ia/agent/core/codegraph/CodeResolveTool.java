@@ -22,9 +22,12 @@ import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import java.nio.file.Path;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -156,11 +159,16 @@ public class CodeResolveTool implements EmbeddedTool {
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext ctx) {
         final var op = arg(args, "op");
         if (op != null && !op.isBlank() && "list".equalsIgnoreCase(op)) {
             return list();
         }
-        return resolve(args);
+        return resolve(args, ctx == null ? null : ctx.projectDir());
     }
 
     private ToolResult list() {
@@ -180,7 +188,7 @@ public class CodeResolveTool implements EmbeddedTool {
         return ToolResult.ok(sb.toString());
     }
 
-    private ToolResult resolve(final Map<String, Object> args) {
+    private ToolResult resolve(final Map<String, Object> args, final Path root) {
         final var symbol = arg(args, "symbol");
         if (symbol == null || symbol.isBlank()) {
             return ToolResult.error("symbol is required for op=resolve");
@@ -194,7 +202,7 @@ public class CodeResolveTool implements EmbeddedTool {
         final var sb = new StringBuilder();
         int graphHits = 0;
         if (graphLive()) {
-            graphHits = appendGraph(sb, symbol, relation, edgeTypes, depth, max);
+            graphHits = appendGraph(sb, symbol, relation, edgeTypes, depth, max, root);
         }
         if (knowledgeLive()
                 && (alwaysSuggestKnowledge() || graphHits == 0 || (artifact != null && !artifact.isBlank()))) {
@@ -217,9 +225,9 @@ public class CodeResolveTool implements EmbeddedTool {
             final String relation,
             final Set<GraphModel.EdgeType> edgeTypes,
             final int depth,
-            final int max) {
-        codeGraph.ensureRefreshedReady();
-        final var idx = codeGraph.queryIndex();
+            final int max,
+            final Path root) {
+        final var idx = codeGraph.queryIndex(root);
         if (idx == null || idx.symbolCount() == 0) {
             sb.append("code graph: empty (nothing indexed for this project).\n");
             return 0;
@@ -276,7 +284,7 @@ public class CodeResolveTool implements EmbeddedTool {
                 if (neighbors.length == 0) {
                     neighbors = in;
                 } else if (in.length > 0) {
-                    neighbors = java.util.Arrays.copyOf(neighbors, neighbors.length + in.length);
+                    neighbors = Arrays.copyOf(neighbors, neighbors.length + in.length);
                     System.arraycopy(in, 0, neighbors, neighbors.length - in.length, in.length);
                 }
             }

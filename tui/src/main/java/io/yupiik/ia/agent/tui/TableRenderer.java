@@ -19,6 +19,7 @@ import dev.tamboui.style.Style;
 import dev.tamboui.text.Line;
 import dev.tamboui.text.Span;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 import org.jline.utils.WCWidth;
@@ -175,7 +176,7 @@ public final class TableRenderer {
 
     /** Fills {@code natural} with the full single-line width of the widest cell (min 1). */
     private static void collectNatural(final List<Cell> header, final List<List<Cell>> rows, final int[] natural) {
-        java.util.Arrays.fill(natural, 1);
+        Arrays.fill(natural, 1);
         if (header != null) {
             for (int i = 0; i < header.size() && i < natural.length; i++) {
                 natural[i] = Math.max(natural[i], cellWidth(header.get(i)));

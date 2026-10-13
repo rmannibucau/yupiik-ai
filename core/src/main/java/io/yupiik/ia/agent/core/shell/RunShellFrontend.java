@@ -185,10 +185,11 @@ public class RunShellFrontend implements ShellFrontend {
         } else if (event instanceof AgentEvent.ToolStarted(var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolStream(var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.ToolStream(var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.ToolFinished(var _, var _, var _, var _, String id, String name)) {
+        } else if (event
+                instanceof AgentEvent.ToolFinished(var _, var _, var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name)) {

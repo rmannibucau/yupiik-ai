@@ -81,17 +81,33 @@ public sealed interface AgentEvent {
     }
 
     record ToolFinished(
-            String name, String output, boolean success, String sessionId, String subagentId, String subagentName)
+            String name,
+            String output,
+            boolean success,
+            long ordinal,
+            String sessionId,
+            String subagentId,
+            String subagentName)
             implements AgentEvent {
         public ToolFinished(String name, String output, boolean success, String sessionId) {
-            this(name, output, success, sessionId, null, null);
+            this(name, output, success, -1, sessionId, null, null);
+        }
+
+        public ToolFinished(
+                String name, String output, boolean success, String sessionId, String subagentId, String subagentName) {
+            this(name, output, success, -1, sessionId, subagentId, subagentName);
         }
     }
 
-    record ToolStream(String name, String fragment, String sessionId, String subagentId, String subagentName)
+    record ToolStream(
+            String name, String fragment, long ordinal, String sessionId, String subagentId, String subagentName)
             implements AgentEvent {
         public ToolStream(String name, String fragment, String sessionId) {
-            this(name, fragment, sessionId, null, null);
+            this(name, fragment, -1, sessionId, null, null);
+        }
+
+        public ToolStream(String name, String fragment, String sessionId, String subagentId, String subagentName) {
+            this(name, fragment, -1, sessionId, subagentId, subagentName);
         }
     }
 

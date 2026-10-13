@@ -68,18 +68,28 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.IOException;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.AbstractExecutorService;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -257,9 +267,8 @@ class TuiCommandRenderTest {
 
         // a prompt far taller than the input block (capped ~8 rows): without the
         // follow fix the bottom lines (where the caret lives) were clipped out of view
-        final var lines = java.util.stream.IntStream.range(0, 15)
-                .mapToObj(i -> "prompt line " + i)
-                .collect(Collectors.joining("\n"));
+        final var lines =
+                IntStream.range(0, 15).mapToObj(i -> "prompt line " + i).collect(Collectors.joining("\n"));
         tuiRef.get().dispatch(new PasteEvent(lines));
         // the very last line contains the caret and must stay visible
         awaitText("prompt line 13");
@@ -279,9 +288,8 @@ class TuiCommandRenderTest {
         awaitText("yca coding agent");
 
         // content far taller than the input block (capped ~8 rows)
-        final var lines = java.util.stream.IntStream.range(0, 20)
-                .mapToObj(i -> "long input line " + i)
-                .collect(Collectors.joining("\n"));
+        final var lines =
+                IntStream.range(0, 20).mapToObj(i -> "long input line " + i).collect(Collectors.joining("\n"));
         tuiRef.get().dispatch(new PasteEvent(lines));
         awaitText("long input line 19"); // bottom (follow anchored to the caret)
 
@@ -630,6 +638,59 @@ class TuiCommandRenderTest {
         // Enter now submits the raw line (there is no popup to accept)
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
         awaitText("model: m"); // /model m executed (no candidate accepted)
+
+        quit();
+    }
+
+    @Test
+    void completionDismissedByEscIsNotResurrectedByALateResult() throws Exception {
+        // Regression: a live-completion result that lands after an explicit Esc dismissal must be
+        // discarded, never reopen the popup. Otherwise Enter right after Esc would accept a stale
+        // candidate instead of submitting the raw line (the intermittent flake that made
+        // completionEscDismissesAndSecondEnterSubmits fail on loaded machines). The late result is
+        // produced deterministically here by holding the completion tasks and releasing them after
+        // the dismissal.
+        final var executor = new HoldingExecutor();
+        final var command = command(
+                testRegistry(),
+                stubAgentLoop(),
+                false,
+                newUsageTracker(),
+                new TodoStore(configuration(), formatMapper),
+                Clock.systemUTC(),
+                new SubagentRegistry(configuration(), new ProviderManager(configuration(), formatMapper)),
+                executor);
+        uiThread = new Thread(command, "tui-completion-late-result-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        for (final var c : "/model m".toCharArray()) {
+            tuiRef.get().dispatch(KeyEvent.ofChar(c));
+        }
+        awaitText("> m01");
+
+        // hold the next completion results: type then erase a char so the held result matches the
+        // current input ("/model m") - exactly the shape of a result that lands a moment too late
+        executor.hold();
+        tuiRef.get().dispatch(KeyEvent.ofChar('x'));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.BACKSPACE));
+
+        // Esc dismisses the popup; only then do the held results land
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("> m01");
+        executor.releaseHeld();
+
+        // let the late results be applied and repainted: a rejected result still marks the
+        // state dirty, so frames keep flowing and a resurrected popup would be drawn here
+        final var settleDeadline = System.nanoTime() + Duration.ofMillis(500).toNanos();
+        while (System.nanoTime() < settleDeadline) {
+            backend.awaitFrame(50);
+        }
+        assertFalse(
+                backend.text().contains("> m01"),
+                () -> "an Esc-dismissed completion popup must not be resurrected by a late result:\n" + backend.text());
 
         quit();
     }
@@ -1048,6 +1109,26 @@ class TuiCommandRenderTest {
             final TodoStore todoStore,
             final Clock clock,
             final SubagentRegistry subagentRegistry) {
+        return command(
+                shellRegistry,
+                agentLoop,
+                showThinking,
+                usageTracker,
+                todoStore,
+                clock,
+                subagentRegistry,
+                Executors.newVirtualThreadPerTaskExecutor());
+    }
+
+    private TuiCommand command(
+            final ShellRegistry shellRegistry,
+            final AgentLoop agentLoop,
+            final boolean showThinking,
+            final UsageTracker usageTracker,
+            final TodoStore todoStore,
+            final Clock clock,
+            final SubagentRegistry subagentRegistry,
+            final ExecutorService executor) {
         final var mapper = formatMapper;
         final var configuration = configuration();
         final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, showThinking, "dark");
@@ -1083,8 +1164,7 @@ class TuiCommandRenderTest {
                 List.of(),
                 new io.yupiik.fusion.httpclient.core.ExtendedHttpClient(
                         new io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration()
-                                .setDelegate(
-                                        java.net.http.HttpClient.newBuilder().build())),
+                                .setDelegate(HttpClient.newBuilder().build())),
                 new io.yupiik.maven.knowledge.process.ProcessService());
         final var factory = new TuiRunnerFactory() {
             @Override
@@ -1161,7 +1241,7 @@ class TuiCommandRenderTest {
                 new AutoLogConfigurer(configuration),
                 mcpManager,
                 new ProcessService(),
-                Executors.newVirtualThreadPerTaskExecutor(),
+                executor,
                 providerManager,
                 new AgentProvider(configuration),
                 agentSessionService,
@@ -1246,7 +1326,7 @@ class TuiCommandRenderTest {
         // must never share the screen with a square-corner frame. The spinner advances with the
         // tick, so polling for a square frame and then checking a single grab is racy: assert
         // the invariant on the very frame that shows a square.
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         var squareFrame = (String) null;
         while (squareFrame == null && System.nanoTime() < deadline) {
             final var text = backend.text();
@@ -1359,7 +1439,7 @@ class TuiCommandRenderTest {
         final var stripRow = HeadlessBackend.HEIGHT - 1;
         final var callRow = HeadlessBackend.HEIGHT - 2;
         awaitText("calling mvn test");
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(2);
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
         while (System.nanoTime() < deadline) {
             final var lines = backend.text().split("\n");
             if (lines[callRow].contains("calling mvn test")) {
@@ -1375,6 +1455,72 @@ class TuiCommandRenderTest {
         }
         releaseTurn.countDown();
         fail("the call line never showed the calling label:\n" + backend.text());
+    }
+
+    @Test
+    void firstTokenWaitCounterAdvancesWhileBusyInert() throws Exception {
+        // regression: a busy-but-inert turn (turn running, no tool, no reasoning stream yet) used to
+        // drop the busy animation because needsTickRender/spinnerState.advance were gated on
+        // runningTool/activeWait/thinkingLength but NOT on busy. A slow provider waiting for the first
+        // token therefore showed a frozen "thinking... (0s)" that never advanced and, on the 3.5s idle
+        // heartbeat, no longer animated at all — looking like nothing was happening. The wait now has
+        // its own armed-at clock and renders a live elapsed "thinking... (Ns)" counter regardless of
+        // whether any event has arrived.
+        final var clock = new MutableClock(0);
+        final var shellRegistry = testRegistry();
+        final var turnStarted = new CountDownLatch(1);
+        final var releaseTurn = new CountDownLatch(1);
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                try {
+                    turnStarted.countDown();
+                    releaseTurn.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(
+                shellRegistry, agentLoop, true, newUsageTracker(), new TodoStore(configuration(), formatMapper), clock);
+        uiThread = new Thread(command, "tui-first-token-inert-timer-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // start a parked turn: the busy line must show the first-token CLOCK wait immediately
+        tuiRef.get().dispatch(new PasteEvent("first"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        assertTrue(
+                turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
+
+        // no tool, no thinking event: the wait is inert, but the elapsed counter must still advance
+        awaitTextWithin("thinking... (0s)", TIMEOUT_MS);
+        clock.advance(5_000);
+        awaitTextWithin("thinking... (5s)", TIMEOUT_MS);
+        clock.advance(6_000);
+        awaitTextWithin("thinking... (11s)", TIMEOUT_MS);
+
+        releaseTurn.countDown();
+        quit();
     }
 
     @Test
@@ -1826,7 +1972,7 @@ class TuiCommandRenderTest {
 
     /** Waits until {@code token} appears exactly {@code expected} times on screen. */
     private void awaitOccurrences(final String token, final int expected) throws InterruptedException {
-        final var deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
+        final var deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         while (occurrences(token) != expected) {
             if (System.nanoTime() > deadline) {
                 throw new AssertionError("expected " + expected + " occurrence(s) of '" + token + "' within "
@@ -2867,6 +3013,161 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void toolOverlayLeadsWithTheFullCommand() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-cmd-header-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // a long bash invocation: long enough that the ellipsized footer used to hide its tail
+        final var longCommand =
+                "mvn install -DskipTests -Dmaven.javadoc.skip=true -Dspotless.check.skip=true -Dunique=ZZZTAIL -pl tui -am";
+        final var output = "build finished\n";
+        shellRegistry.onEvent(
+                new AgentEvent.ToolStarted("bash", "{\"command\":\"" + longCommand + "\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry)));
+        awaitTextWithin("✓ bash", TIMEOUT_MS); // condensed tool block
+
+        // open the full output overlay: the command must lead the body, never ellipsized
+        // (it is line-wrapped off the modal edge, so its tail lands on a following body row
+        // instead of being truncated)
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+        awaitTextWithin("full output", TIMEOUT_MS);
+        awaitText("$ mvn install");
+        // the command tail is fully visible on a wrapped body row - exactly what the
+        // old ellipsized footer dropped
+        awaitText("-pl tui -am");
+        final var cmdStart = rowOf("$ mvn install");
+        final var cmdTail = rowOf("-pl tui -am");
+        final var outRow = rowOf("build finished");
+        assertTrue(cmdTail > cmdStart, "the wrapped command tail must come after its head");
+        assertTrue(outRow > cmdTail, "the output preview must come after the command");
+
+        quit();
+    }
+
+    @Test
+    void toolOverlayRunningBashLeadsWithTheCommandOnce() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-cmd-once-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // BashTool streams "$ <command>" as its first output line; the modal must not
+        // repeat it below the bold command header (which already leads the body with it).
+        final var cmd = "mvn install";
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"" + cmd + "\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "$ " + cmd, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "build finished", sid(shellRegistry)));
+
+        // open the running-tool overlay (Ctrl+O): a live bash call with the echoed command
+        tuiRef.get().dispatch(KeyEvent.ofChar('o', KeyModifiers.CTRL));
+        awaitTextWithin("bash - running", TIMEOUT_MS);
+        awaitText("$ " + cmd); // the bold header leads the body
+        awaitText("build finished");
+
+        // the echoed "$ <command>" line BashTool streamed first is dropped, so the
+        // command is rendered exactly once (the header), never twice at the top
+        assertEquals(
+                1,
+                countOccurrences(backend.text(), "$ " + cmd),
+                () -> "the running bash command must appear exactly once in the modal:\n" + backend.text());
+
+        quit();
+    }
+
+    @Test
+    void runningBashCardShowsTheCommandOnceNotEchoedFirstInTheBody() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-running-card-echo-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // BashTool streams "$ <command>" as its first output line; the running inline card
+        // already carries the command as its header name, so the body must not re-echo it.
+        final var cmd = "mvn install";
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"" + cmd + "\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "$ " + cmd, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", "build finished", sid(shellRegistry)));
+        awaitText("mvn install"); // the running card (or collapsed one-liner) shows the command
+
+        // show full cards (default is collapsed): the running card body must not repeat the
+        // command echo that its header already shows
+        tuiRef.get().dispatch(KeyEvent.ofChar('y', KeyModifiers.CTRL));
+        awaitText("build finished"); // real output visible in the shown card body
+        // the header still carries the command (no "$ " prefix), but the echoed "$ mvn install"
+        // line must be gone from the body - the command is rendered exactly once, in the header
+        awaitText("mvn install");
+        awaitTextGone("$ " + cmd);
+
+        quit();
+    }
+
+    @Test
+    void hoverOverToolOverlayFooterRevealsTheFullArgs() throws Exception {
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
+        uiThread = new Thread(command, "tui-tool-footer-tooltip-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        // the command is short enough that the whole args JSON fits the tooltip's single
+        // tooltip line, but long enough that the footer ellipsizes it. the JSON closing
+        // ("-pl tui -am\"}") is the tooltip-only marker: the footer ellipsizes to the head,
+        // and the modal body renders the extracted command value without the JSON wrapper
+        final var longCommand = "mvn install -DskipTests -Dtail=TAILTOKEN123 -pl tui -am";
+        final var rawArgs = "{\"command\":\"" + longCommand + "\"}";
+        final var output = "ok\n";
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", rawArgs, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStream("bash", output, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", output, true, sid(shellRegistry)));
+        awaitTextWithin("✓ bash", TIMEOUT_MS);
+
+        // open the overlay: the footer (holding the ellipsized args + the hint) is not hovered yet
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ bash")));
+        awaitTextWithin("Ctrl+O/q/Esc close", TIMEOUT_MS);
+        final var footerRow = rowOf("Ctrl+O/q/Esc close");
+        // locate the modal's top-left corner (the body title row), so the hover lands just
+        // inside the modal footer rather than on the transcript wall sharing the same row
+        final var titleRow = rowOf("full output");
+        final var titleLine = backend.text().split("\n")[titleRow];
+        final var modalLeft = titleLine.indexOf("╭");
+        assertTrue(modalLeft >= 0, "the modal title row must show its rounded corner");
+        final var footerCol = modalLeft + 2; // just inside the modal footer
+        assertFalse(
+                backend.text().contains("-pl tui -am\"}"),
+                "the JSON closing must be hidden until the footer is hovered");
+
+        // hovering the footer surfaces the full args, including the JSON closing the footer dropped
+        tuiRef.get().dispatch(MouseEvent.move(footerCol, footerRow));
+        awaitTextWithin("-pl tui -am\"}", 2_000);
+
+        // moving the pointer away dismisses the tooltip
+        tuiRef.get().dispatch(MouseEvent.move(footerCol, Math.max(0, footerRow - 8)));
+        awaitTextGoneWithin("-pl tui -am\"}", 2_000);
+
+        // scrolling the modal also dismisses it
+        tuiRef.get().dispatch(MouseEvent.move(footerCol, footerRow));
+        awaitTextWithin("-pl tui -am\"}", 2_000);
+        tuiRef.get().dispatch(MouseEvent.scrollDown(10, 10));
+        awaitTextGoneWithin("-pl tui -am\"}", 2_000);
+
+        quit();
+    }
+
+    @Test
     void btwWheelScrollsItsDetailNotTheTranscript() throws Exception {
         final var shellRegistry = testRegistry();
         final var command = command(shellRegistry, stubAgentLoop(), true, newUsageTracker());
@@ -3094,6 +3395,12 @@ class TuiCommandRenderTest {
     }
 
     /**
+     * Waits for {@code expected} to appear across the screen with line breaks ignored
+     * (each screen row becomes a line with no trailing padding). Used where a long
+     * value - e.g. a tool command wrapped off the modal edge - is verified in full
+     * without depending on where the wrap landed.
+     */
+    /**
      * Waits for {@code unexpected} to leave the screen and fails when it is still there at the
      * deadline: the frames painted before the mutation are legitimately on screen for a while, so
      * asserting on a fixed frame count would be a race (and a fast tick widens that race).
@@ -3171,7 +3478,7 @@ class TuiCommandRenderTest {
      * quiescent (no more frames), the last observed state is accepted as-is, mirroring the previous
      * behavior where an already-correct-but-not-repainted state still passed.
      */
-    private int[] settledCursor(final java.util.function.Predicate<HeadlessBackend.Cursor> accept, final String what)
+    private int[] settledCursor(final Predicate<HeadlessBackend.Cursor> accept, final String what)
             throws InterruptedException {
         var prev = HeadlessBackend.Cursor.NONE;
         while (true) {
@@ -3226,6 +3533,17 @@ class TuiCommandRenderTest {
         return -1;
     }
 
+    /** Number of times {@code token} appears across the whole screen text. */
+    private static int countOccurrences(final String text, final String token) {
+        int count = 0;
+        int from = 0;
+        while ((from = text.indexOf(token, from)) >= 0) {
+            count++;
+            from += token.length();
+        }
+        return count;
+    }
+
     /** Screen row index of the first row containing {@code token}. */
     private int rowOf(final String token) throws InterruptedException {
         while (true) {
@@ -3267,10 +3585,10 @@ class TuiCommandRenderTest {
 
     /** Clock the test controls explicitly so elapsed-time rendering is deterministic. */
     private static final class MutableClock extends Clock {
-        private final java.util.concurrent.atomic.AtomicLong millis;
+        private final AtomicLong millis;
 
         MutableClock(final long initialMillis) {
-            this.millis = new java.util.concurrent.atomic.AtomicLong(initialMillis);
+            this.millis = new AtomicLong(initialMillis);
         }
 
         void advance(final long ms) {
@@ -3278,18 +3596,81 @@ class TuiCommandRenderTest {
         }
 
         @Override
-        public java.time.ZoneId getZone() {
-            return java.time.ZoneOffset.UTC;
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
         }
 
         @Override
-        public Clock withZone(final java.time.ZoneId zone) {
+        public Clock withZone(final ZoneId zone) {
             return this;
         }
 
         @Override
-        public java.time.Instant instant() {
-            return java.time.Instant.ofEpochMilli(millis.get());
+        public Instant instant() {
+            return Instant.ofEpochMilli(millis.get());
+        }
+    }
+
+    /**
+     * An executor that can hold submitted tasks and release them on demand. Used to land a
+     * live-completion result after an explicit dismissal deterministically instead of relying on a
+     * timing race. Submissions received while not holding run on a virtual thread, like the
+     * production executor.
+     */
+    private static final class HoldingExecutor extends AbstractExecutorService {
+        private final ExecutorService delegate = Executors.newVirtualThreadPerTaskExecutor();
+        private final AtomicBoolean holding = new AtomicBoolean(false);
+        private final List<Runnable> held = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void execute(final Runnable command) {
+            if (holding.get()) {
+                held.add(command);
+            } else {
+                delegate.execute(command);
+            }
+        }
+
+        /** Routes subsequent submissions to the held queue instead of running them. */
+        void hold() {
+            holding.set(true);
+        }
+
+        /**
+         * Runs the held tasks synchronously on the caller thread so every resulting UI mutation is
+         * enqueued before the caller dispatches a repaint-triggering key, then accepts submissions
+         * again.
+         */
+        void releaseHeld() {
+            holding.set(false);
+            final var pending = List.copyOf(held);
+            held.clear();
+            pending.forEach(Runnable::run);
+        }
+
+        @Override
+        public void shutdown() {
+            delegate.shutdownNow();
+        }
+
+        @Override
+        public List<Runnable> shutdownNow() {
+            return delegate.shutdownNow();
+        }
+
+        @Override
+        public boolean isShutdown() {
+            return delegate.isShutdown();
+        }
+
+        @Override
+        public boolean isTerminated() {
+            return delegate.isTerminated();
+        }
+
+        @Override
+        public boolean awaitTermination(final long timeout, final TimeUnit unit) throws InterruptedException {
+            return delegate.awaitTermination(timeout, unit);
         }
     }
 }

@@ -1,7 +1,7 @@
 = Interactive UI and headless mode
 :minisite-breadcrumb: Home[index.html] > Features > Interactive UI and headless mode
-:minisite-nav-prev-link: permissions.html
-:minisite-nav-prev-label: Permission modes
+:minisite-nav-prev-link: sandboxes.html
+:minisite-nav-prev-label: External sandboxing (nono, AgentFS)
 :minisite-nav-next-link: streaming.html
 :minisite-nav-next-label: Streaming output and reasoning
 

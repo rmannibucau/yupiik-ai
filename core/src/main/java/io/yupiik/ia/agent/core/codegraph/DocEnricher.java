@@ -42,23 +42,18 @@ import java.util.logging.Logger;
  */
 public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     @JsonModel
-    public record ConceptDtos(java.util.List<ConceptDto> concepts) {
+    public record ConceptDtos(List<ConceptDto> concepts) {
         public ConceptDtos {
-            concepts = concepts == null ? java.util.List.of() : concepts;
+            concepts = concepts == null ? List.of() : concepts;
         }
     }
 
     @JsonModel
     public record ConceptDto(
-            String name,
-            String slug,
-            String type,
-            String summary,
-            java.util.List<String> sources,
-            java.util.List<ConceptLinkDto> links) {
+            String name, String slug, String type, String summary, List<String> sources, List<ConceptLinkDto> links) {
         public ConceptDto {
-            sources = sources == null ? java.util.List.of() : sources;
-            links = links == null ? java.util.List.of() : links;
+            sources = sources == null ? List.of() : sources;
+            links = links == null ? List.of() : links;
         }
     }
 
@@ -66,7 +61,6 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     public record ConceptLinkDto(String to, String relation, String description) {}
 
     private static final Logger LOGGER = Logger.getLogger(DocEnricher.class.getName());
-    private static final String DEEP_TAG = " --deep";
     private static final String GRAFT_NOTE =
             "This concept card groups several source files into one curated, LLM-written node, inspired by "
                     + "Graft (https://github.com/trailhq/Graft). Links reference other concept cards by slug.";
@@ -77,7 +71,6 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
     private final DocTreeWriter writer;
     private final JsonMapper mapper;
     private final DocEnricherCache cache;
-    private final Path docsRoot;
     private final Path storeRoot;
     private final ExecutorService executor;
     private final AtomicBoolean running = new AtomicBoolean(true);
@@ -96,10 +89,6 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         this.writer = writer;
         this.mapper = mapper;
         this.cache = new DocEnricherCache(mapper, storeRoot);
-        final var workingDir = configuration.resolveWorkingDir().toString();
-        this.docsRoot = Path.of(configuration.structuralCodeGraph().resolvedStoreDir(workingDir))
-                .toAbsolutePath()
-                .normalize();
         this.storeRoot = storeRoot;
         this.executor = Executors.newSingleThreadExecutor(task -> {
             final var t = new Thread(task, "yca-doc-enricher");
@@ -115,7 +104,6 @@ public class DocEnricher implements AutoCloseable, DocTreeWriter.Enrichment {
         this.writer = null;
         this.mapper = null;
         this.cache = null;
-        this.docsRoot = null;
         this.storeRoot = null;
         this.executor = null;
     }

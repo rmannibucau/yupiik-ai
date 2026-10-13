@@ -23,6 +23,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
@@ -32,7 +33,7 @@ import java.util.concurrent.Executors;
 public final class MockLlmServer implements AutoCloseable {
     private final HttpServer server;
     private final List<String> requests = new CopyOnWriteArrayList<>();
-    private final java.util.concurrent.ExecutorService executor;
+    private final ExecutorService executor;
     private volatile String answer = "hello from mock";
 
     public MockLlmServer() throws IOException {

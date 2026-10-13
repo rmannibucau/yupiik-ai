@@ -26,6 +26,7 @@ import dev.tamboui.terminal.Backend;
 import java.util.Optional;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -104,7 +105,7 @@ final class HeadlessBackend implements Backend {
             if (System.nanoTime() >= deadline) {
                 return false;
             }
-            java.util.concurrent.locks.LockSupport.parkNanos(200_000L);
+            LockSupport.parkNanos(200_000L);
         }
     }
 
@@ -148,7 +149,7 @@ final class HeadlessBackend implements Backend {
         // a real backend blocks here for up to timeoutMillis; returning -2 straight away would
         // turn the runner's input reader into a 100% cpu spin for the whole test (one core per
         // running test, which then slows the agent loop down when tests run in parallel)
-        java.util.concurrent.locks.LockSupport.parkNanos(200_000L);
+        LockSupport.parkNanos(200_000L);
         return -2;
     }
 

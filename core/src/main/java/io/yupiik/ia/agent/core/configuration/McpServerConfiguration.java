@@ -37,6 +37,12 @@ public record McpServerConfiguration(
         @Property(documentation = "Environment variables of the spawned process, KEY=VALUE entries.")
         List<String> env,
 
+        @Property(
+                documentation = "Working directory for the spawned stdio server process. Defaults to the agent process"
+                        + " directory; set it to root the server (eg. a project-local npx/deno script) in a"
+                        + " specific directory. Ignored for HTTP (url) servers.")
+        String dir,
+
         @Property(documentation = "URL of a streamable HTTP server, alternative to command.")
         String url,
 

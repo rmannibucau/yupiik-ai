@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 class BashRulesTest {
 
     private static BashRules.Compiled compile(final List<CommandPermissionConfiguration> rules) {
-        return BashRules.compile(new BashPermissionsConfiguration(rules, null));
+        return BashRules.compile(new BashPermissionsConfiguration(rules, null, 1024));
     }
 
     private static CommandPermissionConfiguration rule(
@@ -211,7 +211,7 @@ class BashRulesTest {
 
     @Test
     void emptyRulesAllowNothingButToleratedSegments() {
-        final var compiled = BashRules.compile(null);
+        final var compiled = BashRules.compile((BashPermissionsConfiguration) null);
         assertFalse(compiled.evaluate(AgentMode.BUILD, "git status").allowed());
         assertFalse(compiled.evaluate(AgentMode.BUILD, "git status && rm -rf /").allowed());
         assertTrue(compiled.evaluate(AgentMode.BUILD, "cd /somewhere").allowed());
@@ -253,7 +253,9 @@ class BashRulesTest {
         // quoted content is literal: no redirection, no substitution
         assertTrue(compiled.evaluate(AgentMode.BUILD, "echo \"a > b\"").allowed());
         assertTrue(compiled.evaluate(AgentMode.BUILD, "echo 'a $(ls) b'").allowed());
-        assertFalse(compiled.evaluate(AgentMode.BUILD, "echo \"a $(ls) b\"").allowed());
+        // a glued live substitution is verified read-only, so `ls` auto-allows; a mutating glued
+        // substitution (echo "a $(rm -rf /) b") still gates via the recursive inner evaluation
+        assertTrue(compiled.evaluate(AgentMode.BUILD, "echo \"a $(ls) b\"").allowed());
     }
 
     @Test
@@ -422,7 +424,8 @@ class BashRulesTest {
                 "echo \"$(rm -rf /)\"",
                 "echo `rm -rf /`",
                 "echo <(rm -rf /)",
-                "echo \"a $(ls) b\"",
+                "echo \"a $(rm -rf /) b\"",
+                "echo \"a $(rm -rf /) b $(ls) c\"",
                 "for f in $(rm -rf /); do echo $f; done",
                 "echo $(git push)",
                 "echo $(find . -delete)",
@@ -430,6 +433,15 @@ class BashRulesTest {
         for (final var command : denied) {
             assertFalse(compiled.evaluate(AgentMode.PLAN, command).allowed(), command);
             assertFalse(compiled.evaluate(AgentMode.BUILD, command).allowed(), command);
+        }
+        // glued read-only substitutions are not gated: `ls` auto-allows (verified in
+        // redirectionsAndSubstitutionsFallBackToTheGate too, kept equal across both modes here)
+        for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
+            assertTrue(compiled.evaluate(agentMode, "echo \"a $(ls) b\"").allowed(), agentMode.name());
+            assertTrue(
+                    compiled.evaluate(agentMode, "echo \"a $(ls) b $(basename x) c\"")
+                            .allowed(),
+                    agentMode.name());
         }
     }
 
@@ -497,6 +509,20 @@ class BashRulesTest {
     void segmentsExpandSubstitutionsBackForPatternMatching() {
         final var compiled = compile(List.of(rule(PermissionMode.YOLO, null, "echo")));
         assertEquals(List.of("echo $(ls -la)", "grep foo bar"), compiled.segments("echo $(ls -la) | grep foo bar"));
+    }
+
+    @Test
+    void gluedReadOnlySubstitutionsInLoopsAreAutoAllowed() {
+        // the reported command: a read-only archive-inspection loop whose echo interpolates a verified
+        // $(basename $j) glued into surrounding text - the loop variable $j and the env-captured pipeline
+        // must not gate any of it once the glued placeholder itself verifies read-only
+        final var compiled = compile(CommandPermissionConfiguration.defaultRules());
+        final var command = "cd /tmp && for j in $(cat /tmp/cp.txt | tr ':' '\\n' | grep -E '\\.jar$'); do "
+                + "hits=$(jar tf \"$j\" 2>/dev/null | grep -E '^[^/]+(/[^/]+)*/LocalStrings\\.properties$'); "
+                + "if [ -n \"$hits\" ]; then echo \"=== $(basename $j) ===\"; echo \"$hits\"; fi; done";
+        for (final var agentMode : List.of(AgentMode.PLAN, AgentMode.BUILD)) {
+            assertTrue(compiled.evaluate(agentMode, command).allowed(), agentMode.name());
+        }
     }
 
     @Test

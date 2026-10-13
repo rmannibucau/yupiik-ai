@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,6 +37,7 @@ class StdioMcpClient implements McpClient {
     private final String name;
     private final List<String> command;
     private final List<String> env;
+    private final String dir;
     private final JsonMapper mapper;
     private final ProcessService processes;
     private final AtomicLong ids = new AtomicLong();
@@ -48,11 +50,13 @@ class StdioMcpClient implements McpClient {
             final String name,
             final List<String> command,
             final List<String> env,
+            final String dir,
             final JsonMapper mapper,
             final ProcessService processes) {
         this.name = name;
         this.command = command;
         this.env = env;
+        this.dir = dir;
         this.mapper = mapper;
         this.processes = processes;
     }
@@ -61,6 +65,9 @@ class StdioMcpClient implements McpClient {
     public synchronized void initialize() throws IOException, InterruptedException {
         final var pb = new ProcessBuilder(command);
         pb.redirectErrorStream(false);
+        if (dir != null && !dir.isBlank()) {
+            pb.directory(Path.of(dir).toAbsolutePath().normalize().toFile());
+        }
         for (final var kv : env) {
             final var i = kv.indexOf('=');
             if (i > 0) {

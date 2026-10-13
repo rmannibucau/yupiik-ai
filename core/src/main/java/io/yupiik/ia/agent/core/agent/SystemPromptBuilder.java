@@ -54,6 +54,19 @@ public class SystemPromptBuilder {
     /** The session's per-tab selection (provider/model); when set the prompt caps follow it. */
     protected volatile ChatSettings settings;
 
+    /**
+     * The session's resolved working/project directory, set exactly once when the session runtime is
+     * created (never mid-conversation) so the stable system-prompt core stays byte-identical across
+     * turns and provider prefix caches keep hitting. When {@code null} the process default
+     * ({@code configuration.resolveWorkingDir()/resolveProjectDir()}) is used.
+     */
+    protected volatile java.nio.file.Path workdir;
+
+    /** Attach the owning session's working directory; called once at runtime creation. */
+    public void workdir(final java.nio.file.Path dir) {
+        this.workdir = dir == null ? null : dir.toAbsolutePath().normalize();
+    }
+
     /** Attach the owning session's model/provider selection so this builder resolves the right caps. */
     public void attach(final ChatSettings sessionSettings) {
         this.settings = sessionSettings;
@@ -170,8 +183,15 @@ public class SystemPromptBuilder {
         sb.append(
                 "- Avoid tiny repeated slices: when you need more context around a hit, read a larger window instead of many 30-line chunks.\n");
         sb.append('\n');
-        final var workingDir = configuration.resolveWorkingDir();
-        final var projectDir = configuration.resolveProjectDir();
+        // per-session override wins when set (frozen once at runtime creation so the stable prefix stays
+        // byte-identical across turns); otherwise the process default applies.
+        final var w = workdir != null
+                ? workdir
+                : configuration.resolveWorkingDir().toAbsolutePath().normalize();
+        final var projectDir = workdir != null
+                ? workdir
+                : configuration.resolveProjectDir().toAbsolutePath().normalize();
+        final var workingDir = w;
         sb.append("Environment:\n");
         sb.append("- Working directory: ").append(workingDir).append('\n');
         if (!projectDir.equals(workingDir)) {
@@ -212,7 +232,9 @@ public class SystemPromptBuilder {
         // durable memory lives in the stable prefix (message[0], built once per turn) so it is never
         // re-sent at every tool-call round; only a mid-turn memory_write refreshes it via the tail
         if (memoryStore != null) {
-            final var memory = memoryStore.promptSection(prompt, resolvedMemoryBudget());
+            final var memory = workdir != null
+                    ? memoryStore.promptSection(prompt, resolvedMemoryBudget(), workdir)
+                    : memoryStore.promptSection(prompt, resolvedMemoryBudget());
             if (!memory.isBlank()) {
                 sb.append('\n').append(memory).append('\n');
             }

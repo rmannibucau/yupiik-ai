@@ -33,6 +33,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -338,7 +339,7 @@ class SessionStoreTest {
         final var flat = store.dir().resolve(id + ".jsonl");
         Files.writeString(flat, mapper.toString(SessionEntry.of(1, "user", "legacy", null, null)) + "\n");
         final var gzPath = store.dir().resolve(id + ".jsonl.gz");
-        try (java.util.zip.GZIPOutputStream gz = new java.util.zip.GZIPOutputStream(Files.newOutputStream(gzPath))) {
+        try (GZIPOutputStream gz = new GZIPOutputStream(Files.newOutputStream(gzPath))) {
             gz.write(Files.readAllBytes(flat));
         }
         Files.deleteIfExists(flat);
@@ -442,6 +443,18 @@ class SessionStoreTest {
     }
 
     @Test
+    void summarySkipsCompactedContextMarkerThenFirstUserPrompt() {
+        final var store = newStore();
+        final var id = store.create();
+        // the streaming summary must behave like the full-load one: the compacted/pruned context
+        // markers are skipped so the real follow-up prompt becomes the title.
+        store.append(id, SessionEntry.of(1, "user", "<compacted-context>\n{...}", null, null));
+        store.append(id, SessionEntry.of(2, "user", "<pruned-context>\n{...}", null, null));
+        store.append(id, SessionEntry.of(3, "user", "second turn prompt", null, null));
+        assertEquals("second turn prompt", store.summary(id));
+    }
+
+    @Test
     void isEmptyDetectsInitialPromptOnly() {
         final var store = newStore();
         final var empty = store.create();
@@ -486,5 +499,32 @@ class SessionStoreTest {
         final var withoutEmptyDeletion = store.housekeeping(false);
         assertTrue(Files.exists(store.path(withReply)));
         assertEquals(0, withoutEmptyDeletion.deleted());
+    }
+
+    @Test
+    void projectMarkerIsWrittenFirstReadAndKeepsEmpty() {
+        final var store = newStore();
+        final var id = store.create();
+        // marker-only session is still "empty"
+        store.markProject(id, "/opt/demo");
+        assertTrue(store.isEmpty(id), "a project marker alone must not count as content");
+        assertEquals("/opt/demo", store.projectDirOf(id));
+
+        // appending a turn keeps the marker first; a marker + single initial prompt is still "empty"
+        store.append(id, SessionEntry.of(1, "user", "hi", null, null));
+        assertEquals("/opt/demo", store.projectDirOf(id));
+        final var first = store.load(id).get(0);
+        assertTrue(Message.isProjectMarker(first));
+        assertEquals("/opt/demo", Message.projectDirOf(first));
+        assertTrue(store.isEmpty(id), "marker + one initial prompt is still just the initial prompt");
+
+        // a real reply makes it non-empty
+        store.append(id, SessionEntry.of(2, "assistant", "hello", null, null));
+        assertFalse(store.isEmpty(id));
+
+        // idempotent re-mark does not duplicate
+        store.markProject(id, "/opt/demo");
+        assertEquals("/opt/demo", store.projectDirOf(id));
+        assertEquals(3, store.load(id).size(), "markProject must not duplicate the marker");
     }
 }

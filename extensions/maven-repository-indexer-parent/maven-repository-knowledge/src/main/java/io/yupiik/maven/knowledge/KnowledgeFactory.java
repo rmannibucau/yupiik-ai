@@ -17,6 +17,7 @@ package io.yupiik.maven.knowledge;
 
 import io.yupiik.maven.knowledge.content.ContentPart;
 import io.yupiik.maven.knowledge.write.KnowledgeWriter;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -105,7 +106,7 @@ public final class KnowledgeFactory {
         index.append("## Skills\n\n");
         for (final var skill : skills) {
             final var existing = writer.sibling(gav, "skill-" + skill.shortName());
-            if (java.nio.file.Files.isRegularFile(existing)) {
+            if (Files.isRegularFile(existing)) {
                 continue; // never overwrite a hand-written skill
             }
             writer.write(gav, "skill-" + skill.shortName(), skill.content());

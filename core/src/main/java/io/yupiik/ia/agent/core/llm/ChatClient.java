@@ -78,7 +78,7 @@ import java.util.logging.Logger;
 @ApplicationScoped
 public class ChatClient implements AutoCloseable {
 
-    private static final java.util.logging.Logger LOGGER = Logger.getLogger(ChatClient.class.getName());
+    private static final Logger LOGGER = Logger.getLogger(ChatClient.class.getName());
 
     private final CodingAgentConfiguration configuration;
     private final JsonMapper mapper;
@@ -211,8 +211,7 @@ public class ChatClient implements AutoCloseable {
                         .build());
         if (configuration.httpClient().debug()) {
             clientConfig.setRequestListeners(List.of(new CurlLoggerListener(
-                    new CurlLoggerListener.Configuration(java.util.logging.Logger.getLogger("yca.http"))
-                            .setLogPayload(true))));
+                    new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true))));
         }
         return new ExtendedHttpClient(clientConfig);
     }
@@ -377,8 +376,7 @@ public class ChatClient implements AutoCloseable {
     }
 
     private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec) {
-        final var debugLogger =
-                configuration.httpClient().debug() ? java.util.logging.Logger.getLogger("yca.http") : null;
+        final var debugLogger = configuration.httpClient().debug() ? Logger.getLogger("yca.http") : null;
         return switch (flavor) {
             case COMPLETIONS -> {
                 final var d = new OpenAICompletionsDialect(mapper, httpClient, spec);
@@ -407,7 +405,7 @@ public class ChatClient implements AutoCloseable {
 
     /**
      * Translate a library pause into the core {@link PauseEvent} and hand it to the per-call listener
-     * (see {@link #chat(ChatCompletionRequest, ChatSettings, Consumer, BooleanSupplier)}). The listener
+     * (see {@link #chat(ChatCompletionRequest, Consumer, BooleanSupplier)}). The listener
      * travels with the call so concurrent sessions each get their own notices instead of fighting over
      * a single process-wide slot.
      */
@@ -1035,7 +1033,7 @@ public class ChatClient implements AutoCloseable {
         if (others != null && others.containsKey(key)) {
             return message;
         }
-        final java.util.Map<String, Object> merged = new LinkedHashMap<>();
+        final Map<String, Object> merged = new LinkedHashMap<>();
         if (others != null) {
             merged.putAll(others);
         }
@@ -1151,11 +1149,6 @@ public class ChatClient implements AutoCloseable {
         return null;
     }
 
-    /** Anthropic claude models map a reasoning effort hint to an explicit thinking budget. */
-    private static boolean isClaude(final String model) {
-        return model != null && model.startsWith("claude");
-    }
-
     /**
      * Whether a claude id can use extended thinking: everything from 3.7 on, but the plain 3.x
      * family has no thinking support at all (a {@code thinking} request field would be rejected).
@@ -1228,7 +1221,7 @@ public class ChatClient implements AutoCloseable {
      * target these keys, the explicit one wins verbatim: the variant must not fill in missing sub-keys
      * (such as a {@code display}) of an explicitly configured object.
      */
-    private static final java.util.Set<String> REASONING_CONFIG_KEYS = java.util.Set.of("thinking", "output_config");
+    private static final Set<String> REASONING_CONFIG_KEYS = Set.of("thinking", "output_config");
 
     /**
      * The variant extras without the reasoning-config keys the user already supplied in {@code merged}.
@@ -1476,7 +1469,7 @@ public class ChatClient implements AutoCloseable {
             final OutputBudgetResolver.Decision decision) {
         if (budgetLogged.add(flavor.name() + '|' + providerId + '|' + model)) {
             LOGGER.info(() -> "Output budget for " + providerId + '/' + model + " ["
-                    + flavor.name().toLowerCase(java.util.Locale.ROOT) + "]: " + decision.budget()
+                    + flavor.name().toLowerCase(Locale.ROOT) + "]: " + decision.budget()
                     + " tokens (source: " + decision.source() + ")");
         }
     }

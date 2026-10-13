@@ -129,12 +129,13 @@ class McpManagerTest {
         final var manager = new McpManager(
                 configuration(List.of(
                         new McpServerConfiguration(
-                                "test", null, List.of(), List.of(), url, "key", List.of(), true, List.of()),
+                                "test", null, List.of(), List.of(), null, url, "key", List.of(), true, List.of()),
                         new McpServerConfiguration(
                                 "disabled",
                                 null,
                                 List.of(),
                                 List.of(),
+                                null,
                                 "http://localhost:1",
                                 null,
                                 List.of(),
@@ -170,6 +171,51 @@ class McpManagerTest {
         assertTrue(error.getMessage().contains("does-not-exist"));
         final var disabled = assertThrows(IllegalArgumentException.class, () -> manager.reset("disabled"));
         assertTrue(disabled.getMessage().contains("disabled"));
+    }
+
+    @Test
+    void secondStartMustNotReconnectTheServers() throws Exception {
+        // Regression for the native duplicate-logs issue: the GraalVM build can resolve the shared
+        // McpManager twice (two bean instances) or fire start() twice, which used to reconnect every
+        // MCP server and duplicate the "ready" startup logs. A re-entrant start() must be a no-op.
+        final var initializations = new AtomicInteger();
+        server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/mcp", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (body.contains("\"method\":\"initialize\"")) {
+                initializations.incrementAndGet();
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"test\",\"version\":\"1\"}},\"id\":1}",
+                        "application/json");
+            } else if (body.contains("\"method\":\"tools/list\"")) {
+                respond(
+                        exchange,
+                        200,
+                        "{\"result\":{\"tools\":[{\"name\":\"find_docs\",\"description\":\"find docs\",\"inputSchema\":{\"type\":\"object\"}}]},\"id\":2}",
+                        "application/json");
+            } else {
+                respond(exchange, 200, "{}", "application/json");
+            }
+        });
+        server.start();
+
+        final var url = "http://localhost:" + server.getAddress().getPort() + "/mcp";
+        final var manager = new McpManager(
+                configuration(List.of(new McpServerConfiguration(
+                        "test", null, List.of(), List.of(), null, url, "key", List.of(), true, List.of()))),
+                mapper,
+                List.of(),
+                httpClient,
+                new ProcessService());
+
+        manager.start();
+        final var firstTools = manager.tools();
+        manager.start(); // re-entrant: must not reconnect
+        assertEquals(1, initializations.get(), "a second start() must not re-initialize the server");
+        assertEquals(1, manager.tools().size());
+        assertEquals(firstTools, manager.tools());
     }
 
     @Test

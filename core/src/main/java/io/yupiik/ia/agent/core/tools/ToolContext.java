@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.todo.TodoStore;
+import java.nio.file.Path;
 import java.util.Objects;
 import java.util.function.BooleanSupplier;
 
@@ -65,7 +66,14 @@ public record ToolContext(
         ContextView contextView,
         BooleanSupplier cancelled,
         ChatSettings settings,
-        BooleanSupplier callCancelled) {
+        BooleanSupplier callCancelled,
+        // nullable per-session working/project directory the tools resolve file paths against
+        Path projectDir,
+        // the per-call tool ordinal (the TUI/UI card number) when a turn owns this call; -1 when the
+        // context is not tied to a specific running tool call (standalone/btw invocations). Tools that
+        // emit their own streaming fragments (e.g. BashTool's ToolStream) surface it so every fragment
+        // correlates to the exact started call, never to a same-named sibling.
+        long ordinal) {
 
     /** Backward-compatible convenience: builds a context without per-session provider/model settings. */
     public ToolContext(
@@ -91,7 +99,41 @@ public record ToolContext(
                 contextView,
                 cancelled,
                 null,
-                null);
+                null,
+                null,
+                -1);
+    }
+
+    /** Convenience: a full context (per-session services + settings + project dir) for a non-tool context. */
+    public ToolContext(
+            final String sessionId,
+            final String subagentId,
+            final String subagentName,
+            final PermissionService permissions,
+            final UserFeedbackService feedback,
+            final TodoStore todos,
+            final StatusReporter statusReporter,
+            final UsageTracker usage,
+            final ContextView contextView,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings,
+            final BooleanSupplier callCancelled,
+            final Path projectDir) {
+        this(
+                sessionId,
+                subagentId,
+                subagentName,
+                permissions,
+                feedback,
+                todos,
+                statusReporter,
+                usage,
+                contextView,
+                cancelled,
+                settings,
+                callCancelled,
+                projectDir,
+                -1);
     }
 
     public ToolContext {
@@ -103,8 +145,25 @@ public record ToolContext(
 
     /** A context without any session-scoped service, for standalone tool invocation. */
     public static ToolContext empty() {
-        return new ToolContext(null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null);
+        return new ToolContext(
+                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, null, -1);
     }
+
+    /**
+     * A context without any session-scoped service but rooted on a session project directory,
+     * matching how a real session on a non-default project root forwards its {@code projectDir}
+     * to every tool. Standalone tools exercise their per-session path resolution through this.
+     */
+    public static ToolContext empty(final Path projectDir) {
+        return new ToolContext(
+                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, projectDir, -1);
+    }
+
+    /**
+     * The absolute project root this session's tools operate on, or {@code null} when the process
+     * default ({@code configuration.resolveProjectDir()}) applies. Tools that resolve file paths
+     * against a base directory check this first and fall back to the configured root.
+     */
 
     /** Cancellation probe, never {@code null}: standalone contexts report "not cancelled". */
     public boolean isCancelled() {
@@ -114,5 +173,37 @@ public record ToolContext(
     /** Per-call cancellation probe: when it flips, only this tool call should abort. */
     public boolean isCallCancelled() {
         return callCancelled.getAsBoolean();
+    }
+
+    /**
+     * Resolves a file-path tool argument against this session's root. Absolute paths pass through
+     * untouched; relative paths are anchored on {@link #projectDir()} when the session set one,
+     * else on {@code fallbackBase} (typically {@code configuration.resolveProjectDir()}), else kept
+     * relative (which resolves against the JVM working directory). This is how a session rooted on
+     * project B writes {@code ./src/X.java} into B, not into the directory the process was launched
+     * from - the cross-root split that only {@code bash}/{@code apply_patch} honoured before.
+     */
+    public Path resolvePath(final String raw, final Path fallbackBase) {
+        final var path = Path.of(raw);
+        if (path.isAbsolute()) {
+            return path;
+        }
+        final var base = projectDir != null ? projectDir : fallbackBase;
+        if (base == null) {
+            return path;
+        }
+        final var resolved = base.resolve(path).normalize();
+        // a bare "." base is the session root itself: keep it without a trailing segment
+        return path.toString().equals(".") ? base : resolved;
+    }
+
+    /**
+     * Whether a relative {@code raw} argument was anchored on this session's {@link #projectDir()}
+     * (as opposed to the JVM working directory or the configured fallback). When true, a tool that
+     * resolves paths through {@link #resolvePath(String, Path)} is acting on the session root, and
+     * may surface that to the caller so the re-rooting is visible rather than silent.
+     */
+    public boolean reRoutedToSessionRoot(final String raw) {
+        return projectDir != null && !java.nio.file.Path.of(raw).isAbsolute();
     }
 }
