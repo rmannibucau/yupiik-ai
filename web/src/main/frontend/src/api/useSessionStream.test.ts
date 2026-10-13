@@ -9,6 +9,14 @@ function btwEv(data: Record<string, unknown>, message?: string | null): WebEvent
   return { type: 'btw', sessionId: 's1', message: message ?? null, data } as WebEvent;
 }
 
+function usageEv(data: Record<string, unknown>, message?: string | null): WebEvent {
+  return { type: 'usage-updated', sessionId: 's1', message: message ?? null, data } as WebEvent;
+}
+
+function statusEv(message: string | null, busy?: boolean): WebEvent {
+  return { type: 'status', sessionId: 's1', message, data: busy === undefined ? {} : { busy } } as WebEvent;
+}
+
 describe('foldLiveOutChars - realtime out estimate', () => {
   it('accumulates streamed text and thinking characters', () => {
     let acc = 0;
@@ -80,5 +88,85 @@ describe('foldStatus - btw side-question folding (latest-wins single slot)', () 
   it('leaves status.btw undefined when no btw event is present', () => {
     const s = foldStatus([ev('status', 'working'), ev('usage-updated', 'model')]);
     expect(s.btw).toBeUndefined();
+  });
+});
+
+describe('foldStatus - live per-turn out/reasoning tokens', () => {
+  it('reports the per-turn delta from cumulative usage while no turn-metrics yet', () => {
+    const s = foldStatus([
+      statusEv('working', true),
+      usageEv({ completionTokens: 120, reasoningTokens: 40 }),
+      usageEv({ completionTokens: 300, reasoningTokens: 90 }),
+    ]);
+    expect(s.busy).toBe(true);
+    expect(s.liveOutTokens).toBe(300);
+    expect(s.liveReasoningTokens).toBe(90);
+  });
+
+  it('resets the baseline at each new turn (false -> true) so the delta is per-turn', () => {
+    const s = foldStatus([
+      statusEv('working', true),
+      usageEv({ completionTokens: 300, reasoningTokens: 90 }),
+      statusEv('ready', false),
+      statusEv('working', true),
+      usageEv({ completionTokens: 420, reasoningTokens: 110 }),
+    ]);
+    expect(s.liveOutTokens).toBe(120);
+    expect(s.liveReasoningTokens).toBe(20);
+  });
+
+  it('a new turn drops the previous turn authoritative metrics so the live delta shows', () => {
+    const s = foldStatus([
+      statusEv('working', true),
+      usageEv({ completionTokens: 300 }),
+      { type: 'turn-metrics', sessionId: 's1', message: null, data: { outputTokens: 300, reasoningTokens: 90 } } as WebEvent,
+      statusEv('ready', false),
+      statusEv('working', true),
+      usageEv({ completionTokens: 340 }),
+    ]);
+    expect(s.outputTokens).toBeUndefined();
+    expect(s.reasoningTokens).toBeUndefined();
+    expect(s.liveOutTokens).toBe(40);
+  });
+
+  it('keeps counting from the same baseline across repeated busy:true activity frames mid-turn', () => {
+    const s = foldStatus([
+      statusEv('working', true),
+      usageEv({ completionTokens: 100 }),
+      statusEv('thinking...', true),
+      usageEv({ completionTokens: 250 }),
+      statusEv('calling bash', true),
+    ]);
+    expect(s.liveOutTokens).toBe(250);
+    expect(s.liveReasoningTokens).toBeUndefined();
+  });
+
+  it('a turn-done ends the turn and the next usage is a fresh delta', () => {
+    const s = foldStatus([
+      statusEv('working', true),
+      usageEv({ completionTokens: 300, reasoningTokens: 90 }),
+      { type: 'turn-done', sessionId: 's1', message: 'done' } as WebEvent,
+      statusEv('working', true),
+      usageEv({ completionTokens: 380, reasoningTokens: 95 }),
+    ]);
+    expect(s.liveOutTokens).toBe(80);
+    expect(s.liveReasoningTokens).toBe(5);
+  });
+
+  it('authoritative turn-metrics outputTokens still win over the live delta', () => {
+    const s = foldStatus([
+      statusEv('working', true),
+      usageEv({ completionTokens: 300, reasoningTokens: 90 }),
+      { type: 'turn-metrics', sessionId: 's1', message: null, data: { outputTokens: 300, reasoningTokens: 90 } } as WebEvent,
+    ]);
+    expect(s.outputTokens).toBe(300);
+    expect(s.reasoningTokens).toBe(90);
+    expect(s.liveOutTokens).toBe(300);
+  });
+
+  it('no live out when the provider reports no usage', () => {
+    const s = foldStatus([statusEv('working', true)]);
+    expect(s.liveOutTokens).toBeUndefined();
+    expect(s.liveReasoningTokens).toBeUndefined();
   });
 });

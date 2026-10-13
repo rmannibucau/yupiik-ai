@@ -3197,6 +3197,8 @@ public class AgentLoop {
                                 (int) usageTracker.completionTokens(),
                                 (int) (usageTracker.promptTokens() + usageTracker.completionTokens()),
                                 usageTracker.cacheReadTokens(),
+                                0,
+                                (int) usageTracker.reasoningTokens(),
                                 0)
                         : io.yupiik.ia.agent.core.llm.Usage.EMPTY,
                 effective,

@@ -841,6 +841,24 @@ function formatTokens(n: number | undefined): string {
   return `${m > 9 ? Math.round(m) : m.toFixed(1)}M`;
 }
 
+/**
+ * Current "out" token count to display: the authoritative per-turn value once turn-metrics records
+ * it, otherwise the per-turn live provider count (usage-updated, ticks up during the turn), and
+ * only as a last resort the chars≈tokens proxy of the streamed text. This keeps the counter moving
+ * in real time instead of staying frozen until the request completes.
+ */
+function currentOutTokens(status: SessionStatus): number {
+  if (status.outputTokens != null) return status.outputTokens;
+  if (status.liveOutTokens != null) return status.liveOutTokens;
+  return Math.round((status.liveOutChars ?? 0) / 4);
+}
+
+/** Current "reasoning" token count to display: per-turn turn-metrics value, else the live per-turn count. */
+function currentReasoningTokens(status: SessionStatus): number {
+  if (status.reasoningTokens != null) return status.reasoningTokens;
+  return status.liveReasoningTokens ?? 0;
+}
+
 /** TUI-format per-turn metrics (compact): N LLM (think) · tok/s · M tools (sum/wall) · duration. */
 function TurnMetrics({ status }: { status: SessionStatus }) {
   const parts: string[] = [];
@@ -862,13 +880,16 @@ function TurnMetrics({ status }: { status: SessionStatus }) {
     status.completionTokens != null ||
     status.outputTokens != null ||
     status.reasoningTokens != null ||
+    status.liveOutTokens != null ||
+    status.liveReasoningTokens != null ||
     status.liveOutChars != null
   ) {
-    // realtime "out": prefer the exact turn tokens; while a turn streams, use the live out-char
-    // estimate (≈4 chars per token) so the counter ticks up instead of staying frozen until the
-    // request completes. It snaps to the authoritative value as soon as turn-metrics records it.
-    const out = status.outputTokens ?? Math.round((status.liveOutChars ?? 0) / 4);
-    const reas = status.reasoningTokens ?? 0;
+    // realtime "out": prefer the exact turn tokens; while a turn streams, use the live per-turn
+    // provider count (usage-updated) or, lacking usage, the chars≈tokens proxy of the streamed text
+    // so the counter ticks up instead of staying frozen until the request completes. It snaps to the
+    // authoritative value as soon as turn-metrics records it.
+    const out = currentOutTokens(status);
+    const reas = currentReasoningTokens(status);
     const outTxt = reas > 0 ? `${formatTokens(out)} out + ${formatTokens(reas)} reasoning` : `${formatTokens(out)} out`;
     const inTxt = status.promptTokens != null ? `in ${formatTokens(status.promptTokens)}` : '';
     parts.push(`${inTxt && inTxt + ' · '}${outTxt}`.trim());
@@ -1043,10 +1064,8 @@ function Sidebar({
           <div className="flex justify-between">
             <span style={{ color: 'var(--yca-muted)' }}>tokens out</span>
             <span className="font-mono">
-              {formatTokens(status.outputTokens ?? Math.round((status.liveOutChars ?? 0) / 4))}
-              {status.reasoningTokens != null && status.reasoningTokens > 0
-                ? ` + ${formatTokens(status.reasoningTokens)} r`
-                : ''}
+              {formatTokens(currentOutTokens(status))}
+              {currentReasoningTokens(status) > 0 ? ` + ${formatTokens(currentReasoningTokens(status))} r` : ''}
             </span>
           </div>
           <div className="flex justify-between">

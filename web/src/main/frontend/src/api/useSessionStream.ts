@@ -29,6 +29,12 @@ export type SessionStatus = {
   // character length (a chars≈tokens proxy), reset at each turn boundary and superseded by the exact
   // turn-metrics outputTokens+reasoningTokens once the turn records them.
   liveOutChars?: number;
+  // per-turn delivery made of the cumulative provider completion/reasoning tokens since the last turn
+  // start (busy:true frame): ticks up live on every usage-updated the server emits mid-turn, and is
+  // superseded by the exact turn-metrics outputTokens+reasoningTokens once the turn records them.
+  // Preferred over the liveOutChars chars-proxy while the provider reports usage.
+  liveOutTokens?: number;
+  liveReasoningTokens?: number;
   turnThroughputTokPerSec?: number;
   // session totals
   sessionLlmCalls?: number;
@@ -302,6 +308,17 @@ export function useSessionStream(sessionId: string | undefined) {
 
 export function foldStatus(events: WebEvent[]): SessionStatus {
   const s: SessionStatus = {};
+  // cumulative provider completion/reasoning tokens (monotonic across the session) and the baseline
+  // captured at the last turn start: the per-turn live delta is `cumulative - baseline`. Baseline
+  // resets when the agent goes busy (a beginTurn status:true frame) so a new turn's counter ticks
+  // up from zero while the provider keeps reporting cumulative usage.
+  let completionTotal: number | undefined;
+  let reasoningTotal: number | undefined;
+  let outBase = 0;
+  let reasoningBase = 0;
+  // last explicit busy flag seen (unset until the first frame carries one): used to detect a real
+  // turn start (false -> true) and ignore the repeated busy:true activity frames mid-turn.
+  let lastBusy: boolean | undefined;
   for (const ev of events) {
     if (ev.type === 'usage-updated') {
       const d = ev.data ?? {};
@@ -310,6 +327,8 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.estimatedContext = num(d.estimatedContextTokens, s.estimatedContext);
       s.promptTokens = num(d.promptTokens, s.promptTokens);
       s.completionTokens = num(d.completionTokens, s.completionTokens);
+      completionTotal = num(d.completionTokens, completionTotal) ?? completionTotal;
+      reasoningTotal = num(d.reasoningTokens, reasoningTotal) ?? reasoningTotal;
       // session totals persist in the log tail; count LLM calls via turn-metrics below.
     } else if (ev.type === 'turn-metrics') {
       const d = ev.data ?? {};
@@ -328,7 +347,22 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       // beginTurn/endTurn/activity). A plain status (e.g. AgentLoop progress reports) carries no
       // busy field and must NOT toggle the busy state - only the message.
       const d = ev.data ?? {};
-      if (typeof d.busy === 'boolean') s.busy = d.busy;
+      if (typeof d.busy === 'boolean') {
+        // reset the cumulative-token baseline only when the turn actually starts: a false -> true
+        // transition (beginTurn), or the first busy frame of the stream (a mid-turn reconnect). The
+        // repeated busy:true "activity" frames and the busy:true tool/thinking labels must NOT reset
+        // it, otherwise the per-turn delta would be zeroed mid-generation.
+        if (d.busy && lastBusy !== true) {
+          outBase = completionTotal ?? 0;
+          reasoningBase = reasoningTotal ?? 0;
+          // a previous turn's authoritative turn-metrics no longer describes this turn: drop it so the
+          // live per-turn delta shows until this turn's own metrics land.
+          s.outputTokens = undefined;
+          s.reasoningTokens = undefined;
+        }
+        lastBusy = d.busy;
+        s.busy = d.busy;
+      }
       s.notice = { message: (ev.message as string) ?? '' };
     } else if (ev.type === 'notice') {
       const d = ev.data ?? {};
@@ -346,11 +380,24 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.btw = { id, running, question, answer, error };
     } else if (ev.type === 'turn-done' || ev.type === 'turn-cancelled') {
       s.busy = false;
+      lastBusy = false;
     } else if (ev.type === 'error') {
       // a turn that errored is no longer running: without this the status bar could stay stuck on
       // "working · Ns" when the loop ends in an error rather than a clean turn-done/turn-cancelled.
       s.busy = false;
+      lastBusy = false;
     }
+  }
+  // per-turn live out/reasoning: the cumulative provider usage since the last turn start. Only
+  // meaningful while the provider reports usage (completionTotal set) and before the exact
+  // turn-metrics land (the UI prefers outputTokens/reasoningTokens, so these are the live fallback).
+  if (completionTotal != null) {
+    const out = Math.max(0, completionTotal - outBase);
+    if (out > 0) s.liveOutTokens = out;
+  }
+  if (reasoningTotal != null) {
+    const reasoning = Math.max(0, reasoningTotal - reasoningBase);
+    if (reasoning > 0) s.liveReasoningTokens = reasoning;
   }
   return s;
 }

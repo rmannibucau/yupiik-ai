@@ -98,6 +98,7 @@ public record WebEventDto(
                 Map.of(
                         "promptTokens", t.usage() == null ? 0 : t.usage().promptTokens(),
                         "completionTokens", t.usage() == null ? 0 : t.usage().completionTokens(),
+                        "reasoningTokens", t.usage() == null ? 0 : t.usage().reasoningTokens(),
                         "cacheReadTokens", t.usage() == null ? 0 : t.usage().cacheReadTokens(),
                         "estimatedContextTokens", t.estimatedContextTokens(),
                         "contextPercent", t.contextPercent());

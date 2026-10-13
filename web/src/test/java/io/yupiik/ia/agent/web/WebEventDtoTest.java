@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.web;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.llm.Usage;
 import org.junit.jupiter.api.Test;
 
 /** Mapping of the tool lifecycle events to the flat SSE DTO the browser consumes. */
@@ -45,5 +46,18 @@ class WebEventDtoTest {
         assertEquals("write_file", finished.message());
         assertEquals("ok", finished.data().get("output"));
         assertEquals(true, finished.data().get("success"));
+    }
+
+    @Test
+    void usageUpdatedExposesLiveCompletionAndReasoningTokens() {
+        final var dto = WebEventDto.of(new AgentEvent.UsageUpdated(
+                new Usage(10, 120, 130, 0, 0, 40, 0), 50, 2.0, 0, -1, "model-x", "s1", null, null));
+        assertEquals("usage-updated", dto.type());
+        assertEquals("model-x", dto.message());
+        assertEquals(120, dto.data().get("completionTokens"));
+        // reasoning is carried for the frontend's live per-turn "out + reasoning" display
+        assertEquals(40, dto.data().get("reasoningTokens"));
+        assertEquals(50, dto.data().get("estimatedContextTokens"));
+        assertEquals(2.0, dto.data().get("contextPercent"));
     }
 }
