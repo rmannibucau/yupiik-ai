@@ -41,6 +41,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConf
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
@@ -1264,8 +1265,7 @@ class TuiCommandRenderTest {
                         sessionStore,
                         configuration,
                         Executors.newVirtualThreadPerTaskExecutor(),
-                        new ToolCallMarkupStripper(),
-                        new ToolCallMarkupParser(),
+                        new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper()),
                         null,
                         null,
                         null,

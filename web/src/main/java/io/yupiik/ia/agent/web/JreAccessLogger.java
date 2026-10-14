@@ -81,7 +81,8 @@ public class JreAccessLogger implements Endpoint {
                 .filter(e -> e.matches(request))
                 .findFirst()
                 .map(e -> e.handle(request))
-                .orElseGet(() -> completedFuture(Response.of().status(404).body("Not Found").build()))
+                .orElseGet(() -> completedFuture(
+                        Response.of().status(404).body("Not Found").build()))
                 .whenComplete((response, error) -> log(request, response, error));
     }
 

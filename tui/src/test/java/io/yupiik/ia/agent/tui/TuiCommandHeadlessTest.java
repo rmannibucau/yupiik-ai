@@ -42,6 +42,7 @@ import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.cli.AskUserAnswersFormatter;
 import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
+import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
@@ -405,8 +406,7 @@ class TuiCommandHeadlessTest {
                             d.sessionStore(),
                             d.configuration(),
                             d.executor(),
-                            new ToolCallMarkupStripper(),
-                            new ToolCallMarkupParser(),
+                            new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper()),
                             null,
                             null,
                             null,
