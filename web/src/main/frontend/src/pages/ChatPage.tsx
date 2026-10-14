@@ -18,6 +18,7 @@ import { useSessionStream, type WebEvent, type SessionStatus } from '../api/useS
 import {
   eventsToBlocks,
   renderWindow,
+  latestDrainBoundary,
   DEFAULT_WINDOW_BLOCKS,
   LOAD_EARLIER_CHUNK,
   type Block,
@@ -52,6 +53,13 @@ const SIDEBAR_MAX_WIDTH = 560;
 // prompt input resize bounds (px); 0 means "fill the available width" (the default before resizing)
 const PROMPT_MIN_WIDTH = 240;
 const PROMPT_MAX_WIDTH = 1200;
+// prompt input vertical resize bounds (px); 0 means the natural auto height (2 rows, the default before
+// dragging). The max is bounded both absolutely and by a share of the window so the input can never
+// grow taller than the viewport leaves for the transcript.
+const PROMPT_MIN_HEIGHT = 56; // roughly the natural 2-row height with padding
+const PROMPT_MAX_HEIGHT = 360;
+const PROMPT_MAX_HEIGHT_VH = 0.5; // hard ceiling: half the viewport height
+const promptMaxHeight = () => Math.min(PROMPT_MAX_HEIGHT, Math.floor(window.innerHeight * PROMPT_MAX_HEIGHT_VH));
 
 type TodoItem = { content: string; status: string };
 type SidebarInfo = {
@@ -127,6 +135,16 @@ export function ChatPage({
     if (typeof localStorage !== 'undefined' && promptWidth > 0) localStorage.setItem('yca-prompt-width', String(promptWidth));
   }, [promptWidth]);
   const promptDrag = useRef<{ startX: number; startWidth: number } | null>(null);
+  // prompt input height (px): vertically resizable via a drag handle on its top edge, persisted.
+  const [promptHeight, setPromptHeight] = useState(() => {
+    const saved = typeof localStorage !== 'undefined' ? localStorage.getItem('yca-prompt-height') : null;
+    const n = saved ? Number(saved) : NaN;
+    return Number.isFinite(n) && n >= PROMPT_MIN_HEIGHT ? Math.min(n, promptMaxHeight()) : 0; // 0 = natural auto height
+  });
+  useEffect(() => {
+    if (typeof localStorage !== 'undefined' && promptHeight > 0) localStorage.setItem('yca-prompt-height', String(promptHeight));
+  }, [promptHeight]);
+  const promptVDrag = useRef<{ startY: number; startHeight: number } | null>(null);
   const [sidebar, setSidebar] = useState<SidebarInfo>({ todos: [], mode: 'plan' });
   // number of prompts currently queued behind the running turn (see the queue strip in the bottom bar)
   const [queuedCount, setQueuedCount] = useState(0);
@@ -348,13 +366,18 @@ export function ChatPage({
   // Issue #3: slash commands (/model, /mode, /permissions, /provider...) mutate backend
   // state through the prompt line. Refresh the sidebar whenever a turn completes or a
   // prompt is integrated so the right-pane metadata (and todos) reflect the change.
+  //
+  // This must NOT be gated on the very last event being a boundary (the old tail-only check):
+  // when a queued prompt is absorbed, `prompt-integrated` is emitted but the loop keeps streaming
+  // status/text-delta/usage frames right after it, so it is almost never the tail - the queue
+  // strip then stayed stale (showing a consumed prompt) until turn-done. `latestDrainBoundary`
+  // scans backward for the most recent drain-relevant boundary and we dedup by its signature.
   const lastEventRef = useRef<string>('');
   useEffect(() => {
-    if (!sessionId || events.length === 0) return;
-    const tail = events[events.length - 1];
-    if (tail.type !== 'turn-done' && tail.type !== 'turn-cancelled' && tail.type !== 'prompt-integrated') return;
-    if (lastEventRef.current === `${tail.type}:${tail.sessionId}:${events.length}`) return;
-    lastEventRef.current = `${tail.type}:${tail.sessionId}:${events.length}`;
+    if (!sessionId) return;
+    const sig = latestDrainBoundary(events);
+    if (sig == null || lastEventRef.current === sig) return;
+    lastEventRef.current = sig;
     loadSidebar();
     refreshQueued(); // the queue drains as prompts are integrated / the turn ends
   }, [events, sessionId, loadSidebar, refreshQueued]);
@@ -577,6 +600,34 @@ export function ChatPage({
     window.addEventListener('pointerup', onUp);
   };
 
+  // prompt input vertical resize handle (top edge): same drag pattern as the horizontal handle. A
+  // height of 0 means the natural auto height (2 rows); once dragged it locks to a concrete px height.
+  // Dragging up (negative vertical delta) grows the input because the handle sits on the TOP edge.
+  const onPromptVResizeStart = (e: React.PointerEvent) => {
+    if (e.button !== 0 && e.pointerType !== 'touch') return;
+    e.preventDefault();
+    const startHeight = promptHeight > 0 ? promptHeight : textareaRef.current?.getBoundingClientRect().height ?? PROMPT_MIN_HEIGHT;
+    promptVDrag.current = { startY: e.clientY, startHeight };
+    const target = e.currentTarget as HTMLElement;
+    target.setPointerCapture(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      const drag = promptVDrag.current;
+      if (!drag) return;
+      const next = drag.startHeight + (drag.startY - ev.clientY);
+      const clamped = Math.max(PROMPT_MIN_HEIGHT, Math.min(promptMaxHeight(), next));
+      setPromptHeight(clamped);
+    };
+    const onUp = () => {
+      promptVDrag.current = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      (target as HTMLElement).style.overscrollBehavior = '';
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    (target as HTMLElement).style.overscrollBehavior = 'contain';
+  };
+
   return (
     <div className="flex h-full flex-col">
       {/* Merged top bar: session info (connected/mode/model), TUI-format metrics and the
@@ -760,25 +811,40 @@ export function ChatPage({
             </div>
           )}
           <div className="flex gap-2 items-start">
-            <div className="flex min-w-0 flex-1 items-stretch" style={promptWidth > 0 ? { width: promptWidth, flex: '0 0 auto' } : undefined}>
-              {/* horizontal resize handle on the prompt input's left edge */}
+            <div className="flex min-w-0 flex-1 flex-col" style={promptWidth > 0 ? { width: promptWidth, flex: '0 0 auto' } : undefined}>
+              {/* vertical resize handle on the prompt input's top edge: a full-width strip above the
+                  textarea. Dragging up grows the input; 0 height (never dragged) keeps the natural
+                  auto height of rows={2}. */}
               <div
-                onPointerDown={onPromptResizeStart}
-                className="shrink-0 cursor-ew-resize select-none touch-none"
-                style={{ width: 5, marginRight: -1, background: 'transparent' }}
+                onPointerDown={onPromptVResizeStart}
+                className="shrink-0 cursor-ns-resize select-none touch-none"
+                style={{ height: 5, marginBottom: -1, background: 'transparent' }}
                 title="Drag to resize the prompt input"
               />
-              <textarea
-                ref={textareaRef}
-                value={prompt}
-                onChange={(e) => resetCursor(e.target.value, e.target.selectionStart ?? e.target.value.length)}
-                onSelect={(e) => setCursor(e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
-                onKeyDown={onKeyDown}
-                rows={2}
-                placeholder="Ask the agent… (try /help, /model, /tools…) "
-                className="min-w-0 flex-1 resize-none rounded border px-3 py-2 text-[15px] outline-none"
-                style={{ borderColor: 'var(--yca-border)', background: 'var(--yca-panel)' }}
-              />
+              <div className="flex min-w-0 flex-1 items-stretch">
+                {/* horizontal resize handle on the prompt input's left edge */}
+                <div
+                  onPointerDown={onPromptResizeStart}
+                  className="shrink-0 cursor-ew-resize select-none touch-none"
+                  style={{ width: 5, marginRight: -1, background: 'transparent' }}
+                  title="Drag to resize the prompt input"
+                />
+                <textarea
+                  ref={textareaRef}
+                  value={prompt}
+                  onChange={(e) => resetCursor(e.target.value, e.target.selectionStart ?? e.target.value.length)}
+                  onSelect={(e) => setCursor(e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
+                  onKeyDown={onKeyDown}
+                  rows={promptHeight > 0 ? undefined : 2}
+                  placeholder="Ask the agent… (try /help, /model, /tools…) "
+                  className="min-w-0 flex-1 resize-none rounded border px-3 py-2 text-[15px] outline-none"
+                  style={{
+                    borderColor: 'var(--yca-border)',
+                    background: 'var(--yca-panel)',
+                    ...(promptHeight > 0 ? { height: promptHeight, overflowY: 'auto' } : {}),
+                  }}
+                />
+              </div>
             </div>
             <div className="flex flex-col gap-2">
               <button

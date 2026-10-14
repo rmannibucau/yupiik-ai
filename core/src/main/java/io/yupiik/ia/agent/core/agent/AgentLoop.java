@@ -333,6 +333,14 @@ public class AgentLoop {
     /** Whether the one-shot doom-loop nudge (DOOM_LOOP_NUDGE_PROMPT) was already injected this turn. */
     private boolean doomLoopNudged;
 
+    /**
+     * Names of the tools the registry serves in build mode (the unfiltered {@code toWireTools()} list),
+     * frozen once per {@code loop}. Plan mode hides EDIT tools from that list; a call to an EDIT tool that
+     * IS served (present here) is plan-hidden and rejected at dispatch instead of reaching the approval gate.
+     * Tools never served (empty/bare test registries) are not treated as plan-hidden, so they keep executing.
+     */
+    private volatile Set<String> servedToolNames;
+
     public AgentLoop(
             final ChatClient chatClient,
             final ToolRegistry toolRegistry,
@@ -1047,6 +1055,12 @@ public class AgentLoop {
         final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
         final var tools = wireTools();
         final var toolsTokens = toolTokens(tools);
+        // snapshot which tools the registry actually serves (unfiltered by mode): plan mode may hide an EDIT
+        // tool from this turn's wire list, so a call to a served EDIT tool in plan mode is a hidden-tool call
+        // to auto-reject (never gate). Bare/empty test registries simply serve nothing and stay unaffected.
+        servedToolNames = toolRegistry.toWireTools().stream()
+                .map(t -> t.function().name())
+                .collect(java.util.stream.Collectors.toSet());
         var overflowRetried = false;
         var consecutiveCompactions = 0;
         var autoNoticeEmitted = false;
@@ -2913,6 +2927,22 @@ public class AgentLoop {
             emit(toolFinished(name, unknownToolDiagnostic(name), false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
+        // a tool that is served but was NOT offered in the current request's wire list must not be executed:
+        // plan mode removes the EDIT tools from the schema, so a model reaching for one (e.g. carried over
+        // from a prior build-mode turn in the append-only transcript) is auto-rejected here with a mode-aware
+        // diagnostic - the approval gate is never consulted for a tool that was hidden. Only tools the registry
+        // actually serves are subject to being plan-hidden; bare/empty test registries are unaffected.
+        final var served = servedToolNames;
+        if (permissionService != null
+                && permissionService.mode() == AgentMode.PLAN
+                && tool.category() == ToolCategory.EDIT
+                && served != null
+                && served.contains(name)) {
+            final var modeDenial = hiddenToolDiagnostic(name);
+            unregisterRunningTool(ordinal);
+            emit(toolFinished(name, modeDenial, false, ordinal));
+            return new ToolOutcome(call.id(), name, modeDenial, false, false);
+        }
         final Map<String, Object> args;
         try {
             final var parsed = mapper.fromString(Object.class, argsJson.isBlank() ? "{}" : argsJson);
@@ -3140,6 +3170,26 @@ public class AgentLoop {
     private static String unknownToolDiagnostic(final String name) {
         return "Unknown tool \"" + name + "\": not in this session's toolset (built-in or enabled MCP)."
                 + " Run /tools to list the valid tools; only exact names from the request's tools field are accepted.";
+    }
+
+    /**
+     * Diagnostic surfaced back to the model when it calls a tool that exists but was hidden from the current
+     * request's wire list by the mode (e.g. EDIT tools in plan mode). Read-only tools (READ/AGENT categories)
+     * are never hidden, so the tool is state-changing; the message says so and re-anchors the model to the
+     * mode's rules instead of letting the call reach the approval gate.
+     */
+    private String hiddenToolDiagnostic(final String name) {
+        final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
+        if (plan) {
+            return "\"" + name + "\" is not available in plan mode - file-mutating tools (edit_file, write_file,"
+                    + " apply_patch) are only offered in build mode. If this is part of the plan, describe it and"
+                    + " record it with write_todo; execution happens when the user switches to build mode.";
+        }
+        final var mode = permissionService == null
+                ? "this"
+                : permissionService.mode().name().toLowerCase(Locale.ROOT);
+        return "\"" + name + "\" was not offered in this request's tools field and cannot be called in " + mode
+                + " mode. Describe what you intended instead and wait for an appropriate mode.";
     }
 
     private void dispatch(

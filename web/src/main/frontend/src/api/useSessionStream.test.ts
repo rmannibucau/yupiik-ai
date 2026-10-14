@@ -89,6 +89,25 @@ describe('foldStatus - btw side-question folding (latest-wins single slot)', () 
     const s = foldStatus([ev('status', 'working'), ev('usage-updated', 'model')]);
     expect(s.btw).toBeUndefined();
   });
+
+  it('a cleared btw event (StatusBar x -> session.btwClear) removes the slot instead of respawning it', () => {
+    // the clear broadcast carries {id, cleared:true} with no running/question: it must clear the
+    // pill + modal, NOT reconstruct a fresh running btw from the message (the respawn bug).
+    const s = foldStatus([
+      btwEv({ id: 1, running: true, question: 'what is xyz?' }),
+      btwEv({ id: 1, cleared: true }, 'what is xyz?'),
+    ]);
+    expect(s.btw).toBeUndefined();
+  });
+
+  it('a clear after an answer also removes the slot', () => {
+    const s = foldStatus([
+      btwEv({ id: 1, running: true, question: 'q' }),
+      btwEv({ id: 1, running: false, question: 'q', answer: 'the answer' }),
+      btwEv({ id: 1, cleared: true }),
+    ]);
+    expect(s.btw).toBeUndefined();
+  });
 });
 
 describe('foldStatus - live per-turn out/reasoning tokens', () => {

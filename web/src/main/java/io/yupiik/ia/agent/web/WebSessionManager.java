@@ -163,8 +163,16 @@ public class WebSessionManager implements AutoCloseable {
         // running loop picks it up at its next checkpoint via the queuedPrompt supplier, mirroring
         // the TUI's pending-prompts queue. Slash commands above always run immediately.
         if (prompt != null && !prompt.isBlank() && session.env.session().busy()) {
+            // surface the prompt immediately as a user turn in the UI, exactly like the persisted
+            // replay does, so the browser transcript shows it live instead of waiting for the next
+            // checkpoint to consume the queue (and, without it, never showing it until a reload).
+            broadcastUserPrompt(sessionId, prompt.strip());
             session.enqueuePrompt(prompt.strip());
             return CompletableFuture.completedFuture(Boolean.TRUE);
+        }
+        // the fresh-submit path surfaces the user turn the same way (see the comment above).
+        if (prompt != null && !prompt.isBlank()) {
+            broadcastUserPrompt(sessionId, prompt.strip());
         }
         session.cancelled.set(false);
         return turnRunner
@@ -343,6 +351,22 @@ public class WebSessionManager implements AutoCloseable {
                 sessionId,
                 "event: agent\ndata: "
                         + mapper.toString(new WebEventDto("btw", sessionId, null, null, state.question(), data))
+                        + "\n\n");
+    }
+
+    /**
+     * Broadcasts a submitted prompt to the session's live SSE subscribers as a {@code user} agent
+     * event - the exact type {@link WebReplay} emits for a persisted user message - so the browser
+     * transcript renders the prompt live (both when it starts a fresh turn and when it is queued
+     * behind a running turn that absorbs it at its next checkpoint). The structural (never-droppable)
+     * broadcast is a no-op when no tab is connected: the same prompt is replayed by the snapshot on
+     * the next connect, so nothing is ever lost.
+     */
+    private void broadcastUserPrompt(final String sessionId, final String text) {
+        broker.broadcast(
+                sessionId,
+                "event: agent\ndata: "
+                        + mapper.toString(new WebEventDto("user", sessionId, null, null, text, Map.of()))
                         + "\n\n");
     }
 

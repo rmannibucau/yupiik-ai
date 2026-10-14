@@ -368,16 +368,24 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       const d = ev.data ?? {};
       s.notice = { level: (d.level as string) ?? 'INFO', message: (ev.message as string) ?? '' };
     } else if (ev.type === 'btw') {
-      // latest-wins single /btw slot: the newest frame (running start, or the final answer/error)
-      // wholly replaces the previous btw state. data carries the durable content; the event message
-      // is the question (legacy fallback for snapshots built before data.question existed).
+      // latest-wins single /btw slot: the newest frame (running start, final answer/error, or a
+      // clear) wholly replaces the previous btw state. data carries the durable content; the event
+      // message is the question (legacy fallback for snapshots built before data.question existed).
       const d = ev.data ?? {};
-      const id = typeof d.id === 'number' ? d.id : undefined;
-      const running = d.running !== false;
-      const question = typeof d.question === 'string' && d.question ? d.question : (ev.message ?? '');
-      const answer = typeof d.answer === 'string' ? d.answer : undefined;
-      const error = typeof d.error === 'string' ? d.error : undefined;
-      s.btw = { id, running, question, answer, error };
+      // a clear (StatusBar "x" -> session.btwClear) carries {id, cleared:true} with no running/question:
+      // it removes the pill + modal. It must NOT reconstruct a fresh running btw from the message
+      // (the old code did, because running defaulted to true and question fell back to the message,
+      // which re-spawned the pill as if a new /btw had been asked).
+      if (d.cleared === true) {
+        s.btw = undefined;
+      } else {
+        const id = typeof d.id === 'number' ? d.id : undefined;
+        const running = d.running !== false;
+        const question = typeof d.question === 'string' && d.question ? d.question : (ev.message ?? '');
+        const answer = typeof d.answer === 'string' ? d.answer : undefined;
+        const error = typeof d.error === 'string' ? d.error : undefined;
+        s.btw = { id, running, question, answer, error };
+      }
     } else if (ev.type === 'turn-done' || ev.type === 'turn-cancelled') {
       s.busy = false;
       lastBusy = false;

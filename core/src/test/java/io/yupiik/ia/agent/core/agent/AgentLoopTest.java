@@ -4777,6 +4777,83 @@ class AgentLoopTest {
         assertTrue(buildTools.contains("read_file"), "build mode must keep READ tools: " + buildTools);
     }
 
+    @Test
+    void planModeAutoRejectsHiddenEditToolCallFeedback() {
+        // script the model to call write_file even though plan mode hides it from the wire list - the
+        // append-only build-mode history can push a model to do exactly that after plan -> build -> plan
+        final var replies = new ArrayDeque<>(List.of(
+                toolCallReply("w1", "write_file", "{\"path\":\"/a.txt\",\"content\":\"new\"}"),
+                new ScriptedReply("here is the plan", "stop", false)));
+        final var planRequests = new ArrayList<List<Message>>();
+        final var config = configuration(true);
+        final var planPermissions = new PermissionService(config);
+        planPermissions.setMode(AgentMode.PLAN);
+        permissionServiceOverride = planPermissions;
+        try {
+            loop(
+                            chatClient(replies, planRequests),
+                            null,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            readWriteWireToolsRegistry(),
+                            directExecutions(),
+                            null)
+                    .run("plan it", null, "s1", null, () -> false);
+        } finally {
+            permissionServiceOverride = null;
+        }
+        // the hidden write_file call must be auto-rejected with the plan-mode feedback diagnostic and
+        // NEVER executed (no "written" tool output) nor routed to the approval gate
+        final var toolResults = planRequests.stream()
+                .flatMap(List::stream)
+                .filter(m -> "tool".equals(m.role()))
+                .map(m -> String.valueOf(m.content()))
+                .toList();
+        assertFalse(toolResults.isEmpty(), "a tool result for the rejected call is expected: " + planRequests);
+        final var denied = toolResults.getLast();
+        assertTrue(
+                denied.contains("write_file\" is not available in plan mode"),
+                "plan mode must auto-reject the hidden EDIT call with mode-aware feedback: " + denied);
+        assertTrue(
+                denied.contains("only offered in build mode"),
+                "the feedback must steer the model to build mode: " + denied);
+        assertFalse(denied.contains("written"), "the write_file tool must NOT have executed in plan mode: " + denied);
+
+        // the same call in build mode executes normally
+        final var buildReplies = new ArrayDeque<>(List.of(
+                toolCallReply("w1", "write_file", "{\"path\":\"/a.txt\",\"content\":\"new\"}"),
+                new ScriptedReply("done", "stop", false)));
+        final var buildRequests = new ArrayList<List<Message>>();
+        final var buildPermissions = new PermissionService(config);
+        buildPermissions.setMode(AgentMode.BUILD);
+        permissionServiceOverride = buildPermissions;
+        try {
+            loop(
+                            chatClient(buildReplies, buildRequests),
+                            null,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            readWriteWireToolsRegistry(),
+                            directExecutions(),
+                            null)
+                    .run("build it", null, "s1", null, () -> false);
+        } finally {
+            permissionServiceOverride = null;
+        }
+        final var buildToolResults = buildRequests.stream()
+                .flatMap(List::stream)
+                .filter(m -> "tool".equals(m.role()))
+                .map(m -> String.valueOf(m.content()))
+                .toList();
+        assertTrue(
+                buildToolResults.stream().anyMatch(o -> o.contains("written")),
+                "build mode must run write_file: " + buildToolResults);
+    }
+
     private ToolRegistry registryOf(final EmbeddedTool... tools) {
         return new ToolRegistry(null) {
             @Override

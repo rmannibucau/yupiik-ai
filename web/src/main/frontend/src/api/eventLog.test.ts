@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { eventsToBlocks, renderWindow } from './eventLog';
+import { eventsToBlocks, renderWindow, latestDrainBoundary } from './eventLog';
 import type { WebEvent } from './useSessionStream';
 
 function ev(partial: Partial<WebEvent> & { type: string; sessionId: string }): WebEvent {
@@ -230,5 +230,49 @@ describe('renderWindow', () => {
     expect(r.extended).toBe(true);
     expect(r.start).toBe(10);
     expect(blocks.slice(r.start)).toHaveLength(10);
+  });
+});
+describe('latestDrainBoundary', () => {
+  it('returns null with no drain-relevant boundary present', () => {
+    expect(latestDrainBoundary([
+      ev({ type: 'user', sessionId: 's1', message: 'hi' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'ok' }),
+    ])).toBeNull();
+  });
+
+  it('detects a prompt-integrated mid-stream even when it is NOT the last event (the queue-strip bug)', () => {
+    // the loop keeps streaming status/text frames right after the prompt-integrated, so it is never
+    // the tail - a tail-only check (the old behavior) missed it and left the queue block stale.
+    const sig = latestDrainBoundary([
+      ev({ type: 'user', sessionId: 's1', message: 'first' }),
+      ev({ type: 'prompt-integrated', sessionId: 's1', message: 'queued one' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'answering…' }),
+      ev({ type: 'usage-updated', sessionId: 's1' }),
+    ]);
+    expect(sig).toBe('prompt-integrated:s1:queued one');
+  });
+
+  it('prefers the most recent boundary scanning backward', () => {
+    const sig = latestDrainBoundary([
+      ev({ type: 'prompt-integrated', sessionId: 's1', message: 'older' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: '…' }),
+      ev({ type: 'prompt-integrated', sessionId: 's1', message: 'newer' }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'bash' }),
+    ]);
+    expect(sig).toBe('prompt-integrated:s1:newer');
+  });
+
+  it('uses prompt text to keep distinct queued prompts distinct', () => {
+    const a = latestDrainBoundary([ev({ type: 'prompt-integrated', sessionId: 's1', message: 'q1' })]);
+    const b = latestDrainBoundary([ev({ type: 'prompt-integrated', sessionId: 's1', message: 'q2' })]);
+    expect(a).not.toBe(b);
+  });
+
+  it('turn boundaries are keyed by type+sessionId (no message)', () => {
+    const sig = latestDrainBoundary([
+      ev({ type: 'status', sessionId: 's1' }),
+      ev({ type: 'turn-done', sessionId: 's1' }),
+    ]);
+    expect(sig).toBe('turn-done:s1');
   });
 });

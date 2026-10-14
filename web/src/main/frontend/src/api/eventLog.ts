@@ -216,6 +216,29 @@ function ordinalBlock(blocks: Block[], runningTools: Map<string, number[]>, ev: 
 /** How many blocks are always rendered from the tail before pagination kicks in. */
 export const DEFAULT_WINDOW_BLOCKS = 4096;
 
+/**
+ * Computes the signature of the most recent "queue/sidebar drain" boundary in an event log:
+ * the latest {@code prompt-integrated}, {@code turn-done} or {@code turn-cancelled} scanning
+ * backward from the tail. A {@code prompt-integrated} is identified by its prompt text (each queued
+ * prompt is unique); a turn boundary carries no message, so its type+sessionId is enough.
+ *
+ * <p>Returns {@code null} when no boundary is present. This exists so the web UI can react to a
+ * queued prompt being absorbed (or a turn ending) by refreshing the queue strip + sidebar even when
+ * the boundary is NOT the last event - mid-turn, the agent loop immediately streams status/text/usage
+ * frames right after a {@code prompt-integrated}, so a tail-only check would miss it and leave the
+ * green "N queued prompt(s)" block stale until turn-done.</p>
+ */
+export function latestDrainBoundary(events: WebEvent[]): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev.type !== 'turn-done' && ev.type !== 'turn-cancelled' && ev.type !== 'prompt-integrated') continue;
+    return ev.type === 'prompt-integrated'
+      ? `${ev.type}:${ev.sessionId}:${ev.message ?? ''}`
+      : `${ev.type}:${ev.sessionId}`;
+  }
+  return null;
+}
+
 /** Chunk size of one "Load earlier" pagination step. */
 export const LOAD_EARLIER_CHUNK = 256;
 
