@@ -22,6 +22,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
+import io.yupiik.ia.agent.core.tools.ToolArgs;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
@@ -43,7 +44,9 @@ public class MemoryWriteTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Persist a durable fact, decision or user preference to memory (global or project scope).";
+        return "Persist a durable fact, decision or user preference to memory (global or project scope). "
+                + "By default the fact is stored as an explicit keep directive (importance 5, never auto-pruned); "
+                + "set keep=false for an ordinary lower-priority observation.";
     }
 
     @Override
@@ -56,7 +59,17 @@ public class MemoryWriteTool implements EmbeddedTool {
         return Schemas.object(
                 Map.of(
                         "fact", str("The fact to remember, one sentence."),
-                        "scope", str("`global` or `project`, default `project`.")),
+                        "scope", str("`global` or `project`, default `project`."),
+                        "keep",
+                                Schemas.bool("Whether this is an explicit keep directive (default true): importance 5, "
+                                        + "bounded-no-prune. false stores it as a normal p2 observation."),
+                        "p",
+                                Schemas.intProp(
+                                        "Optional explicit importance weight 1..5 (overrides keep). 5 = keep directive."),
+                        "topic", str("Optional space-separated topic keywords to aid retrieval (eg. `maven build`)."),
+                        "path",
+                                str(
+                                        "Optional relative code path/package the fact is anchored to (eg. `src/main/App.java`).")),
                 "fact");
     }
 
@@ -72,7 +85,18 @@ public class MemoryWriteTool implements EmbeddedTool {
             return ToolResult.error("fact is required");
         }
         final var global = "global".equalsIgnoreCase(arg(args, "scope") == null ? "project" : arg(args, "scope"));
-        final var added = memoryStore.append(global, List.of(fact));
+        // default to an explicit keep directive (p5); keep=false or an explicit p override downgrades it.
+        // (optBool does not honor its default when the key is absent, so default the absence here)
+        final var keep = args.containsKey("keep") ? ToolArgs.optBool(args, "keep", true) : true;
+        final long explicitP = ToolArgs.optInt(args, "p", 0);
+        final int p = explicitP >= 1 && explicitP <= 5 ? (int) explicitP : (keep ? 5 : 2);
+        final var topic = splitTopic(arg(args, "topic"));
+        final var path = optional(arg(args, "path"));
+        final var stored = MemoryStore.withMeta(p, topic, path, fact.strip());
+        if (stored == null) {
+            return ToolResult.error("fact is required");
+        }
+        final var added = memoryStore.append(global, List.of(stored));
         if (!added.isEmpty() && context != null) {
             // record the per-session diff so the wire tail can re-send only what changed
             memoryStore.recordDiff(context.sessionId(), added);
@@ -80,5 +104,18 @@ public class MemoryWriteTool implements EmbeddedTool {
         return added.isEmpty()
                 ? ToolResult.ok("Already remembered (or skipped).")
                 : ToolResult.ok("Remembered (" + (global ? "global" : "project") + "): " + added.get(0));
+    }
+
+    private static List<String> splitTopic(final String topic) {
+        if (topic == null || topic.isBlank()) {
+            return List.of();
+        }
+        return topic.trim().split("\\s+").length == 0
+                ? List.of()
+                : List.of(topic.trim().split("\\s+"));
+    }
+
+    private static String optional(final String value) {
+        return value == null || value.isBlank() ? null : value.strip();
     }
 }

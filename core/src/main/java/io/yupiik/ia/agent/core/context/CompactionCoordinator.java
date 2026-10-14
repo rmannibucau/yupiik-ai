@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.context;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.context.CompactionResult.Mode;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
@@ -319,7 +320,7 @@ public class CompactionCoordinator {
             out = ensureUnderWindow(out, force, digestIndex);
             if (halvings == 0
                     && configuration.compaction().summarizerChunkChars() == 0
-                    && configuration.model().compact() == null) {
+                    && compactName(configuration.model().compact()) == null) {
                 emit(new AgentEvent.Notice(
                         AgentEvent.Notice.Level.INFO,
                         "Compacted the context in " + (outcome.calls() >= 1 ? outcome.calls() : 1)
@@ -616,7 +617,12 @@ public class CompactionCoordinator {
                                             null,
                                             null,
                                             null)
-                                    .withSettings(routedSettings),
+                                    .withSettings(routedSettings)
+                                    .withTuning(
+                                            providerManager == null
+                                                    ? null
+                                                    : providerManager.resolvedBackgroundTuning(
+                                                            routedSettings, "compact")),
                             // surface provider throttles/backoffs during compaction too:
                             // transient right-slot feedback, never the leading status
                             pause -> emit(new AgentEvent.Pause(
@@ -910,10 +916,9 @@ public class CompactionCoordinator {
             }
         } else if (configuration != null
                 && configuration.model() != null
-                && configuration.model().compact() != null
-                && !configuration.model().compact().isBlank()) {
+                && compactName(configuration.model().compact()) != null) {
             // no provider manager (test wiring): still honor the global compact reference
-            return configuration.model().compact();
+            return compactName(configuration.model().compact());
         }
         // no background model resolved: use the session's provider/model (kept empty when the
         // selection carries no model override: the effective model of the session applies)
@@ -939,9 +944,10 @@ public class CompactionCoordinator {
             return;
         }
         warnedCompactModel = true;
-        final var compact =
-                configuration.model() == null ? null : configuration.model().compact();
-        if (compact == null || compact.isBlank()) {
+        final var compact = configuration.model() == null
+                ? null
+                : compactName(configuration.model().compact());
+        if (compact == null) {
             LOGGER.info("No yca.model.compact configured: context compaction summarizes with the current "
                     + "conversation model. Set yca.model.compact to a cheaper model to reduce background spend.");
         }
@@ -955,5 +961,12 @@ public class CompactionCoordinator {
 
     private static String str(final Object content) {
         return content instanceof String s ? s : content == null ? "" : content.toString();
+    }
+
+    /** The model name carried by a background compact {@link ModelVariantConfiguration}, or null when unset. */
+    private static String compactName(final ModelVariantConfiguration v) {
+        return v == null || v.name() == null || v.name().isBlank()
+                ? null
+                : v.name().strip();
     }
 }

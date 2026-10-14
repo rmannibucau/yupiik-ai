@@ -16,6 +16,7 @@
 package io.yupiik.ia.agent.core.agent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.framework.api.event.Emitter;
@@ -440,6 +441,57 @@ class MemoryExtractorTest {
     }
 
     @Test
+    void asyncExtractNowHonorsEligibilityWithoutAdvancingWatermark() throws Exception {
+        // the cadence gate (memory.extractEveryTurns) must not fire the LLM pass when
+        // AgentLoop says not eligible, and must NOT advance the watermark: the delta stays
+        // pending for the next eligible turn or the forced close-time pass.
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var calls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws IOException {
+                calls.incrementAndGet();
+                return new StructuredResult(
+                        new ChatResult(Message.assistant("{\"facts\":[]}", null), new Usage(1, 1, 2)), true);
+            }
+        };
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null,
+                store,
+                mapper,
+                EXECUTOR,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        // no-op
+                    }
+                },
+                Clock.systemUTC(),
+                null,
+                "s-gating",
+                null);
+        final var one = List.of(Message.user("one"));
+        final var two = List.of(Message.user("one"), Message.user("two"));
+        // not eligible: nothing runs, watermark must stay put
+        extractor.asyncExtractNow(one, ChatSettings.EMPTY, false);
+        Thread.sleep(300);
+        assertEquals(0, calls.get(), "ineligible pass must not call the LLM");
+        // eligible: the pending delta (both messages) is extracted once
+        extractor.asyncExtractNow(two, ChatSettings.EMPTY, true);
+        Thread.sleep(300);
+        assertEquals(1, calls.get(), "eligible pass must extract the pending delta");
+        // a repeat eligible pass on the same messages is a watermark no-op
+        extractor.asyncExtractNow(two, ChatSettings.EMPTY, true);
+        Thread.sleep(300);
+        assertEquals(1, calls.get(), "watermark must still dedup after the eligible pass");
+    }
+
+    @Test
     void excerptFiltersTransientAndKeepsUserSignal() throws Exception {
         // the excerpt fed to the model must contain only user/assistant text, never
         // tool results, tool-call frames, digests or the volatile tail
@@ -499,6 +551,16 @@ class MemoryExtractorTest {
             // user-old got dropped only because assistants were exhausted or would exceed alone
             assertTrue(!assistantAFound && !assistantBFound, "assistants must go before any user: " + excerpt);
         }
+    }
+
+    @Test
+    void recallIntentIsDetectedInUserProse() {
+        assertTrue(MemoryExtractor.hasRecallIntent("[user] remember that I prefer tabs\n"), "remember-that");
+        assertTrue(MemoryExtractor.hasRecallIntent("[user] don't forget to run mvn -o\n"), "don't forget");
+        assertTrue(MemoryExtractor.hasRecallIntent("please keep in mind the discount rule\n"), "keep in mind");
+        assertFalse(MemoryExtractor.hasRecallIntent("[user] the build now uses Maven\n"), "no recall phrasings");
+        assertFalse(MemoryExtractor.hasRecallIntent(null), "null excerpt never triggers recall");
+        assertFalse(MemoryExtractor.hasRecallIntent(""), "blank excerpt never triggers recall");
     }
 
     @AfterAll

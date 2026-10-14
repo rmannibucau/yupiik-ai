@@ -108,4 +108,23 @@ class ToolCallMarkupStripperTest {
         final var raw = "Answer.\n\n<\uFF5CDSML\uFF5Ctool_calls>\n<\uFF5CDSML\uFF5Cinvoke name=read_file>\n{\"p\":1}";
         assertEquals("Answer.", stripper.strip(raw));
     }
+
+    @Test
+    void qwenJsonTagIsRemoved() {
+        final var raw =
+                "Let me check.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\"}}\n</tool_call>";
+        assertEquals("Let me check.", stripper.strip(raw));
+    }
+
+    @Test
+    void glmKvTagIsRemoved() {
+        final var raw = "Answering.\n\n<tool_call>search_web<arg_key>q</arg_key><arg_value>foo</arg_value></tool_call>";
+        assertEquals("Answering.", stripper.strip(raw));
+    }
+
+    @Test
+    void proseAroundXmlTagsIsPreserved() {
+        final var raw = "Before\n\n<tool_call>{\"name\":\"a\"}</tool_call>\n\nAfter";
+        assertEquals("Before\n\nAfter", stripper.strip(raw));
+    }
 }

@@ -68,4 +68,37 @@ public record MemoryConfiguration(
                                 + "selection ranker still picks the most relevant bullets for the prompt, so a full "
                                 + "cap does not mean the model sees everything - only that the store does not grow "
                                 + "forever. Applies to the global memory file and to the project memory file.")
-        int maxLines) {}
+        int maxLines,
+
+        @Property(
+                defaultValue = "50",
+                documentation =
+                        "Per-scope cap on the number of `p==5` \"keep\" bullets (explicit directives). Keeps the "
+                                + "protected tier bounded: when the keep count exceeds this, the oldest keep bullet is "
+                                + "demoted to p4 (not dropped) before the normal eviction runs. 0 disables the cap.")
+        int maxKeepLines,
+
+        @Property(
+                defaultValue = "2",
+                documentation =
+                        "Default importance weight (1..5, 5 = explicit keep directive) assigned to a memory bullet "
+                                + "when it carries no metadata (plain extracted facts, hand-written lines). The selection "
+                                + "ranker multiplies relevance by this weight, and pruning evicts lowest-weight first.")
+        int defaultPriority,
+
+        @Property(
+                defaultValue = "3",
+                documentation = "Run the end-of-turn memory extraction only every N completed user turns "
+                        + "(0 or negative disables the periodic extraction entirely: extraction then runs "
+                        + "only on the todo-completion flush or the forced session-close pass). Skipped turns "
+                        + "do not advance the extraction watermark, so their delta is picked up by the next "
+                        + "eligible turn - nothing is lost, extraction never re-processes already-mined text.")
+        int extractEveryTurns,
+
+        @Property(
+                defaultValue = "true",
+                documentation = "Additionally run the end-of-turn memory extraction when a todo item transitions into "
+                        + "completed/cancelled during the turn (a natural milestone flush), even when the "
+                        + "extractEveryTurns cadence has not been reached. The finished-set comparison is "
+                        + "membership-based, so todos added mid-turn cannot fake a completion.")
+        boolean extractOnTodosDone) {}

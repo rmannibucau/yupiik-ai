@@ -75,6 +75,20 @@ public class ToolCallMarkupParser {
             "<" + PIPE + "DSML" + PIPE + "parameter\\b([^>]*)>" + "(.*?)</" + PIPE + "DSML" + PIPE + "parameter\\s*>",
             Pattern.DOTALL);
 
+    /** Qwen/Hermes JSON-in-tag: {@code <tool_call>{"name":...,"arguments":{...}}</tool_call>}. */
+    private static final Pattern JSON_TAG_CALL =
+            Pattern.compile("<tool_call>\\s*(.*?)\\s*</tool_call>", Pattern.DOTALL);
+    /** {@code "name": "..."} literal inside a JSON-tag body (anchored on the fixed key). */
+    private static final Pattern JSON_TAG_NAME = Pattern.compile("\"name\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])*)\"");
+    /** {@code "arguments": { ... }} brace-delimited object captured verbatim (fixed keys only). */
+    private static final Pattern JSON_TAG_ARGS = Pattern.compile("\"arguments\"\\s*:\\s*(\\{)");
+
+    /** GLM kv: {@code <tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value>...</tool_call>}. */
+    private static final Pattern GLM_TAG_CALL = Pattern.compile("<tool_call>\\s*(.*?)\\s*</tool_call>", Pattern.DOTALL);
+
+    private static final Pattern GLM_KV =
+            Pattern.compile("<arg_key>(.*?)</arg_key>\\s*<arg_value>(.*?)</arg_value>", Pattern.DOTALL);
+
     /**
      * Extracts the markup tool calls from the raw model output.
      *
@@ -86,6 +100,17 @@ public class ToolCallMarkupParser {
             return List.of();
         }
         final var calls = new ArrayList<ToolCall>();
+        parseDsml(raw, calls);
+        parseJsonTag(raw, calls);
+        parseGlmKv(raw, calls);
+        return calls;
+    }
+
+    /** DeepSeek-style DSML and its V3.1/ASCII manglings. */
+    private void parseDsml(final String raw, final List<ToolCall> calls) {
+        if (raw.indexOf("DSML") < 0 && raw.indexOf(LOW_LINE) < 0 && raw.indexOf("tool_calls") < 0) {
+            return; // fast path: no DSML marker family present
+        }
         int id = 0;
         for (final var block : blocks(raw)) {
             final var invokes = new ArrayList<String[]>();
@@ -124,7 +149,103 @@ public class ToolCallMarkupParser {
                 calls.add(new ToolCall("btw-" + (++id), "function", new FunctionCall(name, json(args)), null));
             }
         }
-        return calls;
+    }
+
+    /** Qwen / Hermes function-calling: {@code <tool_call>}{@code {"name":..., "arguments":{...}}}{@code </tool_call>}. */
+    private void parseJsonTag(final String raw, final List<ToolCall> calls) {
+        if (raw.indexOf("<tool_call>") < 0) {
+            return; // fast path: no Qwen/Hermes tag present
+        }
+        final var m = JSON_TAG_CALL.matcher(raw);
+        while (m.find()) {
+            final var inner = m.group(1).strip();
+            if (inner.isEmpty()) {
+                continue;
+            }
+            final var call = jsonTagCall(inner, null);
+            if (call != null) {
+                calls.add(call);
+            }
+        }
+    }
+
+    /** GLM kv: {@code <tool_call>name<arg_key>k</arg_key><arg_value>v</arg_value></tool_call>}. */
+    private void parseGlmKv(final String raw, final List<ToolCall> calls) {
+        if (raw.indexOf("<arg_key>") < 0 || raw.indexOf("<tool_call>") < 0) {
+            return; // fast path: no GLM kv marker present
+        }
+        final var outer = GLM_TAG_CALL.matcher(raw);
+        while (outer.find()) {
+            final var body = outer.group(1);
+            final var args = new LinkedHashMap<String, Object>();
+            final var kv = GLM_KV.matcher(body);
+            while (kv.find()) {
+                // GLM kv values are plain strings; keep them quoted in the marshalled JSON
+                args.put(kv.group(1).strip(), kv.group(2).strip());
+            }
+            if (args.isEmpty()) {
+                continue;
+            }
+            // the tool name precedes the first <arg_key> inside the tag
+            final var nameIdx = body.indexOf("<arg_key>");
+            final var name = (nameIdx <= 0 ? body : body.substring(0, nameIdx)).strip();
+            if (name.isEmpty()) {
+                continue;
+            }
+            calls.add(new ToolCall("btw-" + (calls.size() + 1), "function", new FunctionCall(name, json(args)), null));
+        }
+    }
+
+    /**
+     * Parses one Qwen/Hermes JSON-tag call: the inner text is a JSON object with a {@code name} and
+     * a possibly-loose {@code arguments} map. Uses fixed-key extraction (no full JSON parser) so the
+     * tag body is never mis-parsed and the arguments object is preserved verbatim for the repairer.
+     */
+    private ToolCall jsonTagCall(final String inner, final Integer id) {
+        final var nameMatcher = JSON_TAG_NAME.matcher(inner);
+        if (!nameMatcher.find()) {
+            return null;
+        }
+        final var name = nameMatcher.group(1).replace("\\\"", "\"").replace("\\\\", "\\");
+        if (name.isBlank()) {
+            return null;
+        }
+        final var argsMatcher = JSON_TAG_ARGS.matcher(inner);
+        String argsJson = "{}";
+        if (argsMatcher.find()) {
+            final var open = argsMatcher.start(1);
+            final var closing = closingBrace(inner, open);
+            if (closing > open) {
+                argsJson = inner.substring(open, closing + 1);
+            }
+        }
+        return new ToolCall("btw-" + (id == null ? 1 : id), "function", new FunctionCall(name, argsJson), null);
+    }
+
+    /** Returns the index of the brace matching the opening {@code {}} at {@code open}, or -1. */
+    private static int closingBrace(final String s, final int open) {
+        var depth = 0;
+        var inString = false;
+        for (var i = open; i < s.length(); i++) {
+            final var c = s.charAt(i);
+            if (inString) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == '"') {
+                    inString = false;
+                }
+            } else if (c == '"') {
+                inString = true;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
     }
 
     private List<String> blocks(final String raw) {

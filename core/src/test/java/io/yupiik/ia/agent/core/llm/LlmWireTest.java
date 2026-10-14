@@ -59,6 +59,18 @@ class LlmWireTest {
     }
 
     /**
+     * Item 3: the non-streaming {@code toChatResult} path must apply the same reasoning strip as the
+     * streaming one, so a stored / resumed assistant message never carries inline GLM/Qwen reasoning.
+     */
+    @Test
+    void toMessageStripsInlineReasoningOnTheNonStreamPath() {
+        final var wire = new io.yupiik.llm.client.model.LlmMessage(
+                "assistant", "head\n think reasoning here\n response tail", null, null, null, Map.of());
+        final var message = LlmWire.toMessage(wire);
+        org.junit.jupiter.api.Assertions.assertEquals("head\n response tail", message.content());
+    }
+
+    /**
      * An interrupt pressed while the provider delivers no further frame (silent generation / a long
      * single chunk) must abandon the stream through the bounded-wait path: {@code pump} must cancel
      * the subscription before returning a partial result, so the caller's concurrency permit release

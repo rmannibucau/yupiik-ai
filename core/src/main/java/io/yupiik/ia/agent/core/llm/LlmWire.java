@@ -15,6 +15,7 @@
  */
 package io.yupiik.ia.agent.core.llm;
 
+import io.yupiik.ia.agent.core.configuration.ReasoningFormat;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
@@ -126,9 +127,15 @@ final class LlmWire {
     }
 
     static Message toMessage(final LlmMessage message) {
+        // Strip inline reasoning (GLM/Qwen whole-line ` think` tags) from assistant output so the
+        // non-streaming path persists and resends the same view the streaming path does: reasoning
+        // must never leak into the stored history (and thus never re-enter the next request).
+        final var content = "assistant".equals(message.role()) && message.content() instanceof final String s
+                ? ReasoningStripper.strip(s, ReasoningFormat.thinkTags())
+                : message.content();
         return new Message(
                 message.role(),
-                message.content(),
+                content,
                 message.name(),
                 message.toolCalls() == null
                         ? null
@@ -322,26 +329,7 @@ final class LlmWire {
      * UI still renders the thinking live, only the stored/resent message loses it.
      */
     static String visibleText(final StringBuilder text) {
-        final var raw = text.toString();
-        if (raw.indexOf("think") < 0) {
-            return raw; // fast path: no thinking marker at all
-        }
-        // GLM/Qwen templates stream the reasoning inline as whole lines " think ... \n think"
-        // (indented markdown-ish tags). Drop those lines; keep everything else.
-        final var out = new StringBuilder(raw.length());
-        for (final var line : raw.split("\n", -1)) {
-            final var trimmed = line.strip();
-            final var isThinkingLine = trimmed.equals("think") || trimmed.startsWith("think ");
-            if (isThinkingLine || trimmed.contains("<think")) {
-                continue; // a whole thinking line: drop it
-            }
-            out.append(line).append('\n');
-        }
-        // the split loop adds a trailing newline: drop it when the raw text had none
-        if (!raw.endsWith("\n") && !out.isEmpty() && out.charAt(out.length() - 1) == '\n') {
-            out.setLength(out.length() - 1);
-        }
-        return out.toString();
+        return ReasoningStripper.strip(text == null ? "" : text.toString(), ReasoningFormat.thinkTags());
     }
 
     private static List<ToolCall> toNull(final List<ToolCall> calls) {

@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
@@ -357,6 +358,85 @@ class ProviderManagerTest {
         assertFalse(
                 autoOnly.repairToolCallArguments(provider4, "gpt-5-mini"),
                 "auto must stay disabled for non-qwen-27B models");
+    }
+
+    @Test
+    void inBandToolCallsCascade() {
+        // behavior wins over provider tuning
+        final var withBehaviorEnabled = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "deepseek-v4"),
+                Map.entry("yca.provider.providers.0.tuning.inBandToolCalls", "disabled"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "deepseek*"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.inBandToolCalls", "enabled")));
+        final var provider = withBehaviorEnabled.providers().get(0);
+        assertTrue(
+                withBehaviorEnabled.inBandToolCalls(provider, "deepseek-v4"),
+                "model behavior enabled must win over provider disabled");
+
+        // provider tuning wins over auto
+        final var withProviderDisabled = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "deepseek-v4"),
+                Map.entry("yca.provider.providers.0.tuning.inBandToolCalls", "disabled")));
+        final var provider2 = withProviderDisabled.providers().get(0);
+        assertFalse(
+                withProviderDisabled.inBandToolCalls(provider2, "deepseek-v4"), "provider disabled must win over auto");
+
+        // no config at all: auto enables (extract when no native call was produced)
+        final var autoOnly = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "gpt-5-mini")));
+        final var provider3 = autoOnly.providers().get(0);
+        assertTrue(autoOnly.inBandToolCalls(provider3, "gpt-5-mini"), "auto must enable extraction by default");
+    }
+
+    @Test
+    void reasoningFormatCascadeFollowsBehaviorThenProviderThenAuto() {
+        // behavior wins over provider tuning
+        final var withBehavior = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "deepseek-v4"),
+                Map.entry("yca.provider.providers.0.tuning.reasoningFormat", "qwen"),
+                Map.entry("yca.provider.providers.0.models.length", "1"),
+                Map.entry("yca.provider.providers.0.models.0.model", "deepseek*"),
+                Map.entry("yca.provider.providers.0.models.0.behavior.reasoningFormat", "deepseek_r1")));
+        final var provider = withBehavior.providers().get(0);
+        assertEquals(
+                ReasoningFormatMode.DEEPSEEK_R1,
+                withBehavior.reasoningFormat(provider, "deepseek-v4"),
+                "model behavior must win over provider tuning");
+
+        // provider tuning applies when the model behavior is unset
+        final var withProvider = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "qwen3-coder"),
+                Map.entry("yca.provider.providers.0.tuning.reasoningFormat", "qwen")));
+        final var provider2 = withProvider.providers().get(0);
+        assertEquals(
+                ReasoningFormatMode.QWEN,
+                withProvider.reasoningFormat(provider2, "qwen3-coder"),
+                "provider tuning must apply when no model behavior is set");
+
+        // no config at all: auto
+        final var autoOnly = manager(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "p0"),
+                Map.entry("yca.provider.providers.0.model", "gpt-5-mini")));
+        final var provider3 = autoOnly.providers().get(0);
+        assertEquals(ReasoningFormatMode.AUTO, autoOnly.reasoningFormat(provider3, "gpt-5-mini"));
     }
 
     @Test

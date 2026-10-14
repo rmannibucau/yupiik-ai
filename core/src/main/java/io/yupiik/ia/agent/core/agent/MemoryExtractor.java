@@ -30,7 +30,9 @@ import java.io.IOException;
 import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -110,6 +112,29 @@ public class MemoryExtractor {
                 || message.toolCalls().isEmpty();
     }
 
+    /** Imperative recall phrasings that mark the surrounding fact as an explicit directive (p>=4). */
+    private static final List<Pattern> RECALL_PATTERNS = List.of(
+            Pattern.compile("\\bremember that\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\bremember to\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\b(and|also) remember\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\bdon'?t forget\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\bnote (down )?that\\b", Pattern.CASE_INSENSITIVE),
+            Pattern.compile("\\b(please )?keep in mind\\b", Pattern.CASE_INSENSITIVE));
+
+    /** Whether the excerpt (rendered delta) contains user imperative recall intent. */
+    static boolean hasRecallIntent(final String excerpt) {
+        if (excerpt == null) {
+            return false;
+        }
+        final var lower = excerpt.toLowerCase(Locale.ROOT);
+        for (final var pattern : RECALL_PATTERNS) {
+            if (pattern.matcher(lower).find()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private final ChatClient chatClient;
     private final CodingAgentConfiguration configuration;
     private final ProviderManager providerManager;
@@ -173,11 +198,24 @@ public class MemoryExtractor {
      * are applied on the executor task, keeping the idle-hook itself a near-free call.
      */
     public void asyncExtractNow(final List<Message> messages) {
-        asyncExtractNow(messages, ChatSettings.EMPTY);
+        asyncExtractNow(messages, ChatSettings.EMPTY, true);
     }
 
     public void asyncExtractNow(final List<Message> messages, final ChatSettings settings) {
-        if (!enabled()) {
+        asyncExtractNow(messages, settings, true);
+    }
+
+    /**
+     * End-of-turn hook with the eligibility decision computed by {@code AgentLoop}:
+     * {@code eligible} is the turn-cadence/todo-completion flush decision
+     * ({@code memory.extractEveryTurns} / {@code memory.extractOnTodosDone}). When not
+     * eligible, the turn's delta is left pending (the watermark is NOT advanced), so it is
+     * picked up by the next eligible turn or the forced session-close pass - nothing is lost
+     * and nothing is re-processed. Direct callers (tests, close paths) use the overloads above
+     * which default to eligible=true (legacy every-turn behavior).
+     */
+    public void asyncExtractNow(final List<Message> messages, final ChatSettings settings, final boolean eligible) {
+        if (!enabled() || !eligible) {
             return;
         }
         final var effective = settings == null ? ChatSettings.EMPTY : settings;
@@ -278,7 +316,7 @@ public class MemoryExtractor {
                                     : memoryModel(settings),
                             List.of(
                                     Message.system(
-                                            "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\"}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\"."),
+                                            "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\", \"p\": integer 1-5, \"path\": string or null, \"topic\": string or null}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\". Set p to 5 for an explicit directive the user must keep (eg. they said \"remember\", \"don't forget\" or \"always\"), 4 for strong durable user preferences, else 2. Fill path with the relative file/package the fact is about when obvious (else null), and topic with 1-3 short domain keywords (eg. maven build) to aid retrieval."),
                                     Message.user(excerpt)),
                             null,
                             null,
@@ -288,7 +326,11 @@ public class MemoryExtractor {
                             null,
                             null,
                             null)
-                    .withSettings(settings);
+                    .withSettings(settings)
+                    .withTuning(
+                            providerManager == null
+                                    ? null
+                                    : providerManager.resolvedBackgroundTuning(settings, "memory"));
             final var res = chatClient.chatStructured(request, "memory_facts", factsSchema());
             if (usageTracker != null && res.result() != null) {
                 usageTracker.recordAuxiliary(res.result().usage());
@@ -313,13 +355,21 @@ public class MemoryExtractor {
                                 : String.valueOf(res.result().message().content());
                 final var facts = parseFacts(content);
                 if (!facts.isEmpty()) {
+                    // a user imperative recall ("remember that...", "don't forget...") in the delta
+                    // upgrades the mined facts to at least p4 so they are treated as directives
+                    final var recall = hasRecallIntent(excerpt);
                     final var global = new ArrayList<String>();
                     final var project = new ArrayList<String>();
                     for (final var fact : facts) {
+                        final var p = Math.max(fact.p(), recall ? 4 : 2);
+                        final var stored = MemoryStore.withMeta(p, fact.topic(), fact.path(), fact.text());
+                        if (stored == null) {
+                            continue;
+                        }
                         if ("global".equals(fact.scope())) {
-                            global.add(fact.text());
+                            global.add(stored);
                         } else {
-                            project.add(fact.text());
+                            project.add(stored);
                         }
                     }
                     if (!global.isEmpty()) {
@@ -500,7 +550,15 @@ public class MemoryExtractor {
     public static Map<String, Object> factsSchema() {
         final var itemProperties = Map.<String, Object>of(
                 "text", Map.of("type", "string"),
-                "scope", Map.of("type", "string", "enum", List.of("global", "project")));
+                "scope", Map.of("type", "string", "enum", List.of("global", "project")),
+                "p",
+                        Map.of(
+                                "type",
+                                "integer",
+                                "description",
+                                "Importance weight 1..5 (5 = explicit keep directive, default 2)."),
+                "path", Map.of("type", "string", "description", "Relative code path/package the fact is anchored to."),
+                "topic", Map.of("type", "string", "description", "Space-separated topic keywords for retrieval."));
         final var item = Map.<String, Object>of(
                 "type",
                 "object",
@@ -524,7 +582,7 @@ public class MemoryExtractor {
                 false);
     }
 
-    private record Fact(String text, String scope) {}
+    private record Fact(String text, String scope, int p, String path, List<String> topic) {}
 
     private List<Fact> parseFacts(final String content) {
         try {
@@ -537,9 +595,29 @@ public class MemoryExtractor {
                 if (raw instanceof Map<?, ?> f) {
                     final var text = String.valueOf(f.get("text"));
                     final var scope = "global".equals(f.get("scope")) ? "global" : "project";
-                    if (text != null && !text.equals("null") && !text.isBlank()) {
-                        out.add(new Fact(text.strip(), scope));
+                    if (text == null || text.equals("null") || text.isBlank()) {
+                        continue;
                     }
+                    int p = 2;
+                    final var rawP = f.get("p");
+                    if (rawP instanceof Number n) {
+                        final var v = n.intValue();
+                        if (v >= 1 && v <= 5) {
+                            p = v;
+                        }
+                    } else if (rawP != null) {
+                        try {
+                            final var v = Integer.parseInt(rawP.toString().strip());
+                            if (v >= 1 && v <= 5) {
+                                p = v;
+                            }
+                        } catch (final NumberFormatException ignored) {
+                            // keep default
+                        }
+                    }
+                    final var path = f.get("path") instanceof String s && !s.isBlank() ? s.strip() : null;
+                    final var topic = topicTokens(f.get("topic"));
+                    out.add(new Fact(text.strip(), scope, p, path, topic));
                 }
             }
             return out;
@@ -549,10 +627,18 @@ public class MemoryExtractor {
         }
     }
 
+    private static List<String> topicTokens(final Object raw) {
+        if (!(raw instanceof String s) || s.isBlank()) {
+            return List.of();
+        }
+        final var parts = s.trim().split("\\s+");
+        return parts.length == 0 ? List.of() : List.of(parts);
+    }
+
     /**
-     * Minimal {@code {"facts":[{"text":"...","scope":"..."}]} parser used when no {@link JsonMapper} is
-     * wired (unit tests, defensive): enough for the small, model-produced facts payload. Falls back to
-     * an empty map when the shape is unexpected.
+     * Minimal {@code {"facts":[{"text":"...","scope":"...","p":N,"path":"...","topic":"..."}]} parser used when
+     * no {@link JsonMapper} is wired (unit tests, defensive): enough for the small, model-produced facts payload.
+     * Falls back to an empty map when the shape is unexpected. {@code p}/{@code path}/{@code topic} are optional.
      */
     private static Object parseFactsMinimal(final String content) {
         if (content == null || content.isBlank()) {
@@ -560,10 +646,24 @@ public class MemoryExtractor {
         }
         final var facts = new ArrayList<Map<String, String>>();
         final var matcher = Pattern.compile(
-                        "\\{\\s*\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*,\\s*\"scope\"\\s*:\\s*\"([^\"]*)\"\\s*}")
+                        "\\{\\s*\"text\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"\\s*,\\s*\"scope\"\\s*:\\s*\"([^\"]*)\""
+                                + "(?:\\s*,\\s*\"p\"\\s*:\\s*(\\d+))?(?:\\s*,\\s*\"path\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\")?"
+                                + "(?:\\s*,\\s*\"topic\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\")?\\s*}")
                 .matcher(content);
         while (matcher.find()) {
-            facts.add(Map.of("text", matcher.group(1).replace("\\\"", "\""), "scope", matcher.group(2)));
+            final var m = new LinkedHashMap<String, String>();
+            m.put("text", matcher.group(1).replace("\\\"", "\""));
+            m.put("scope", matcher.group(2));
+            if (matcher.group(3) != null) {
+                m.put("p", matcher.group(3));
+            }
+            if (matcher.group(4) != null) {
+                m.put("path", matcher.group(4).replace("\\\"", "\""));
+            }
+            if (matcher.group(5) != null) {
+                m.put("topic", matcher.group(5).replace("\\\"", "\""));
+            }
+            facts.add(m);
         }
         return Map.of("facts", facts);
     }

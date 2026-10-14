@@ -31,6 +31,7 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 public class SystemPromptBuilder {
     private static final List<String> SIBLING_CONTEXT_FILES = List.of("CLAUDE.md", "README.md");
@@ -232,9 +233,10 @@ public class SystemPromptBuilder {
         // durable memory lives in the stable prefix (message[0], built once per turn) so it is never
         // re-sent at every tool-call round; only a mid-turn memory_write refreshes it via the tail
         if (memoryStore != null) {
+            final var paths = currentPaths(prompt);
             final var memory = workdir != null
-                    ? memoryStore.promptSection(prompt, resolvedMemoryBudget(), workdir)
-                    : memoryStore.promptSection(prompt, resolvedMemoryBudget());
+                    ? memoryStore.promptSection(prompt, resolvedMemoryBudget(), workdir, paths)
+                    : memoryStore.promptSection(prompt, resolvedMemoryBudget(), null, paths);
             if (!memory.isBlank()) {
                 sb.append('\n').append(memory).append('\n');
             }
@@ -328,7 +330,37 @@ public class SystemPromptBuilder {
                 query.append(' ').append(todos);
             }
         }
-        return memoryStore.promptSection(query.toString(), resolvedMemoryBudget());
+        return memoryStore.promptSection(
+                query.toString(), resolvedMemoryBudget(), workdir, currentPaths(query.toString()));
+    }
+
+    /**
+     * Extracts candidate code-path hints (relative {@code src/...} paths, {@code .java}/etc. file
+     * names, package segments) from the current turn's text, passed to the memory ranker so bullets
+     * anchored to the code being worked on are surfaced. Best-effort: a turn with no obvious paths
+     * yields an empty list (ranking falls back to topic/sentence relevance).
+     */
+    private static List<String> currentPaths(final String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return List.of();
+        }
+        final var out = new ArrayList<String>();
+        final var p = prompt;
+        final var matcher = PathRef.PATTERN.matcher(p);
+        while (matcher.find()) {
+            final var hit = matcher.group().strip();
+            if (hit.length() >= 4 && !hit.contains("://") && !hit.contains(" ") && !hit.endsWith(".")) {
+                out.add(hit.startsWith("/") || hit.startsWith("./") ? hit.replaceFirst("^\\.?/", "") : hit);
+            }
+        }
+        return out.stream().distinct().limit(8).toList();
+    }
+
+    private static final class PathRef {
+        // matches relative source paths / file names (src/main/App.java, package/Thing.java, build.xml),
+        // with a word-boundary start and a known source extension; avoids URLs and quoted prose.
+        private static final Pattern PATTERN = Pattern.compile(
+                "(?<![\\w/.])(?:\\./)?(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\\.(?:java|kt|kts|scala|groovy|xml|properties|yml|yaml|json|js|ts|tsx|jsx|css|scss|md|gradle|toml|adoc|sql)");
     }
 
     /**

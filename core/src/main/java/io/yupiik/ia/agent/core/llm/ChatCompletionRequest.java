@@ -115,4 +115,28 @@ public record ChatCompletionRequest(
                 others,
                 value);
     }
+
+    /**
+     * Apply a background-path tuning payload (from {@code yca.model.*} compact/prune/memory)
+     * put-if-absent: only fields the request does not already set (temperature, maxTokens,
+     * reasoningEffort) are taken from the tuning, so the session selection still wins.
+     */
+    public ChatCompletionRequest withTuning(
+            final io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration tuning) {
+        if (tuning == null) {
+            return this;
+        }
+        return new ChatCompletionRequest(
+                model,
+                messages,
+                temperature == null ? tuning.temperature() : temperature,
+                topP,
+                stream,
+                tools,
+                toolChoice,
+                maxTokens == null ? tuning.maxTokens() : maxTokens,
+                (reasoningEffort == null || reasoningEffort.isBlank()) ? tuning.reasoningEffort() : reasoningEffort,
+                others,
+                settings);
+    }
 }

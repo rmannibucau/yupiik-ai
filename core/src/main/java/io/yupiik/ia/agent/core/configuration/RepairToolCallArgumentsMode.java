@@ -16,7 +16,6 @@
 package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
-import java.util.List;
 import java.util.Locale;
 
 /**
@@ -38,9 +37,6 @@ public enum RepairToolCallArgumentsMode {
     ENABLED,
     /** Repair when the effective model looks like a Qwen 27B (contains {@code qwen} and {@code 27b}); else disabled. */
     AUTO;
-
-    /** User-facing string forms accepted by configuration parsing, matching {@link #fromConfigurationString}. */
-    public static final List<String> VALUES = List.of("enabled", "disabled", "auto");
 
     public static RepairToolCallArgumentsMode fromConfigurationString(final String value) {
         if (value == null || value.isBlank()) {

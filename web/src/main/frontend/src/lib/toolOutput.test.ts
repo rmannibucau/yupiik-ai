@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { guessToolLanguage, guessPathLanguage } from './toolOutput';
+import { guessToolLanguage, guessPathLanguage, summarizeArgs } from './toolOutput';
 
 describe('guessPathLanguage', () => {
   it('maps code file extensions to Prism grammars', () => {
@@ -71,5 +71,44 @@ describe('guessToolLanguage', () => {
     expect(guessToolLanguage('')).toBeNull();
     expect(guessToolLanguage('   ')).toBeNull();
     expect(guessToolLanguage(null)).toBeNull();
+  });
+});
+
+describe('summarizeArgs', () => {
+  it('extracts the bash command of a tool', () => {
+    expect(summarizeArgs('{"command":"ls --color=none","workdir":"/x"}')).toBe('ls --color=none /x');
+  });
+
+  it('extracts the path (and lines range) of a file tool', () => {
+    expect(summarizeArgs('{"path":"src/main/java/demo/Foo.java","lines":"1-20"}')).toBe(
+      'src/main/java/demo/Foo.java 1-20',
+    );
+  });
+
+  it('accepts a numeric or array lines field', () => {
+    expect(summarizeArgs('{"path":"a.py","lines":5}')).toBe('a.py 5');
+    expect(summarizeArgs('{"path":"a.py","lines":[10,20]}')).toBe('a.py 10-20');
+  });
+
+  it('orders command before path before workdir before lines', () => {
+    expect(summarizeArgs('{"path":"p","command":"c","workdir":"w","lines":"3"}')).toBe('c p w 3');
+  });
+
+  it('returns empty for missing, blank or trivial args', () => {
+    expect(summarizeArgs(undefined)).toBe('');
+    expect(summarizeArgs(null)).toBe('');
+    expect(summarizeArgs('')).toBe('');
+    expect(summarizeArgs('{}')).toBe('');
+    expect(summarizeArgs('{"question":"what up"}')).toBe('');
+  });
+
+  it('returns empty for malformed JSON', () => {
+    expect(summarizeArgs('{not json')).toBe('');
+  });
+
+  it('ignores non-string values for the known keys', () => {
+    expect(summarizeArgs('{"command":42}')).toBe('');
+    expect(summarizeArgs('{"path":null}')).toBe('');
+    expect(summarizeArgs('{"command":"ok","path":null}')).toBe('ok');
   });
 });

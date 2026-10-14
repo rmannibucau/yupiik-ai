@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
+import io.yupiik.fusion.http.server.spi.Endpoint;
 import io.yupiik.fusion.httpserver.jre.JreHttpServer;
 import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
@@ -67,12 +68,15 @@ public class WebCommand implements Runnable, AutoCloseable {
 
     @Override
     public void run() {
+        final var endpoints = List.of(
+                new JsonRpcEndpoint(jsonRpc, mapper, "/api/rpc", true),
+                new SseExchangeHandler(broker, sessionManager::snapshotFor),
+                new StaticAssetsExchangeHandler());
+        // when access logging is enabled the logger becomes the single dispatcher in front of the
+        // real endpoints: it replicates the JRE matching and logs one CLF line per request
+        final List<Endpoint> served = conf.accessLogEnabled() ? List.of(new JreAccessLogger(endpoints)) : endpoints;
         final var http = new JreHttpServer(
-                new JreHttpServerConfiguration(conf.host(), conf.port(), conf.virtualThreads()),
-                List.of(
-                        new JsonRpcEndpoint(jsonRpc, mapper, "/api/rpc", true),
-                        new SseExchangeHandler(broker, sessionManager::snapshotFor),
-                        new StaticAssetsExchangeHandler()));
+                new JreHttpServerConfiguration(conf.host(), conf.port(), conf.virtualThreads()), served);
         this.server = http;
         http.start();
 
@@ -160,5 +164,11 @@ public class WebCommand implements Runnable, AutoCloseable {
                     defaultValue = "true",
                     documentation =
                             "Use a virtual-thread-per-task executor (the default); when false a plain cached pool is used.")
-            boolean virtualThreads) {}
+            boolean virtualThreads,
+
+            @Property(
+                    defaultValue = "false",
+                    documentation = "Enable Common Log Format access logging: each request is logged at INFO on the "
+                            + "io.yupiik.ia.agent.web.JreAccessLogger logger (one line per request).")
+            boolean accessLogEnabled) {}
 }

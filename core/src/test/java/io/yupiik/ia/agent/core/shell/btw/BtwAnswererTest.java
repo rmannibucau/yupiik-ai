@@ -25,6 +25,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
 import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
@@ -132,8 +133,7 @@ class BtwAnswererTest {
                 sessionStore,
                 configuration,
                 btwExecutor,
-                new ToolCallMarkupStripper(),
-                new ToolCallMarkupParser(),
+                new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper()),
                 toolRegistry,
                 new ToolExecutionService(configuration, NOOP, List.of()),
                 mapper,
@@ -479,7 +479,7 @@ class BtwAnswererTest {
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(answer.startsWith("> "), answer);
-        assertTrue(answer.contains(DSML_BLOCK), answer);
+        assertTrue(answer.contains("Attempted tools: read_file"), answer);
         // the round cap was reached: six model round-trips, all tool-only
         assertEquals(6, bodies.size(), bodies.toString());
         // a broken exchange is never replayed into the next side question

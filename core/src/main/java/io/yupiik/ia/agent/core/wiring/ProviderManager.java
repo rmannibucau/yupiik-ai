@@ -18,12 +18,14 @@ package io.yupiik.ia.agent.core.wiring;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.InBandToolCallsMode;
 import io.yupiik.ia.agent.core.configuration.ModelConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelTuningConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderModelConfiguration;
+import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.configuration.RepairToolCallArgumentsMode;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import java.util.Collections;
@@ -196,8 +198,10 @@ public class ProviderManager {
     public String resolvedCompact(final ChatSettings settings) {
         return resolveBackground(
                 settings,
-                configuration.model() == null ? null : configuration.model().compact(),
-                overrides -> overrides.compact());
+                configuration.model() == null
+                        ? null
+                        : modelName(configuration.model().compact()),
+                ModelConfiguration::compact);
     }
 
     /**
@@ -208,7 +212,7 @@ public class ProviderManager {
         return resolveBackground(
                 settings,
                 configuration.model() == null ? null : configuration.model().resolvedPrune(),
-                overrides -> overrides.prune());
+                ModelConfiguration::prune);
     }
 
     /**
@@ -219,7 +223,54 @@ public class ProviderManager {
         return resolveBackground(
                 settings,
                 configuration.model() == null ? null : configuration.model().resolvedMemory(),
-                overrides -> overrides.memory());
+                ModelConfiguration::memory);
+    }
+
+    /**
+     * The tuning payload (temperature / maxTokens / reasoningEffort / topP / topK / extra) resolved
+     * for a background path, following the same provider -> inherit -> global chain as the model
+     * name. Returns the effective {@link ModelVariantConfiguration} (may be null when nothing is
+     * configured for the path and it falls back to the provider default).
+     */
+    public ModelVariantConfiguration resolvedBackgroundTuning(final ChatSettings settings, final String path) {
+        final var override = settings == null ? null : settings.providerId();
+        final var provider = provider(override == null || override.isBlank() ? currentProviderId() : override);
+        final var overrides = provider == null ? null : provider.backgroundModelOverrides();
+        if (overrides != null
+                && (hasModelName(overrides.compact())
+                        || hasModelName(overrides.prune())
+                        || hasModelName(overrides.memory()))) {
+            // the effective provider configured a background model group: its path tuning wins
+            final var t = tuningFor(overrides, path);
+            if (t != null) {
+                return t;
+            }
+        }
+        // fall back to the global yca.model.* chain (memory/prune fall back to compact)
+        return configuration.model() == null ? null : tuningFor(configuration.model(), path);
+    }
+
+    private static ModelVariantConfiguration tuningFor(final ModelConfiguration mc, final String path) {
+        return switch (path) {
+            case "memory" -> mc.memoryTuning();
+            case "prune" -> mc.pruneTuning();
+            default -> mc.compactTuning();
+        };
+    }
+
+    private static String modelName(final ModelVariantConfiguration v) {
+        if (v == null || v.name() == null) {
+            return null;
+        }
+        final var name = v.name().strip();
+        // "default" is the implicit ModelVariantConfiguration sentinel: on the background paths the
+        // value is the MODEL name, so an unset field carries "default" and must fall back, not route
+        // to a literal $provider/default model.
+        return name.isBlank() || "default".equalsIgnoreCase(name) ? null : name;
+    }
+
+    private static boolean hasModelName(final ModelVariantConfiguration v) {
+        return modelName(v) != null;
     }
 
     /**
@@ -231,16 +282,19 @@ public class ProviderManager {
      * when identifiable.
      */
     private String resolveBackground(
-            final ChatSettings settings, final String global, final Function<ModelConfiguration, String> field) {
+            final ChatSettings settings,
+            final String global,
+            final Function<ModelConfiguration, ModelVariantConfiguration> field) {
         final var override = settings == null ? null : settings.providerId();
         final var provider = provider(override == null || override.isBlank() ? currentProviderId() : override);
         final var overrides = provider == null ? null : provider.backgroundModelOverrides();
-        if (overrides != null
-                && ((overrides.compact() != null && !overrides.compact().isBlank())
-                        || (overrides.prune() != null && !overrides.prune().isBlank())
-                        || (overrides.memory() != null && !overrides.memory().isBlank()))) {
+        final var groupPresent = overrides != null
+                && (hasModelName(overrides.compact())
+                        || hasModelName(overrides.prune())
+                        || hasModelName(overrides.memory()));
+        if (groupPresent) {
             // the group is present (at least one field configured): the requested field decides
-            final var raw = field.apply(overrides);
+            final var raw = modelName(field.apply(overrides));
             if (raw != null && !raw.isBlank()) {
                 if (ProviderConfiguration.isInheritKeyword(raw)) {
                     return toRoutedReference(global);
@@ -340,6 +394,50 @@ public class ProviderManager {
         final var auto =
                 perModel != null ? perModel : providerMode != null ? providerMode : RepairToolCallArgumentsMode.AUTO;
         return auto.isAutoCandidate(model);
+    }
+
+    /**
+     * Resolve whether in-band tool-call markup should be extracted for a model of a provider: the
+     * {@code behavior.inBandToolCalls} of the first matching model entry when not AUTO, else the
+     * provider-level {@code tuning.inBandToolCalls} when not AUTO, else the AUTO default (extract
+     * only when the provider produced no native tool call).
+     */
+    public boolean inBandToolCalls(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        final var perModel = entry == null || entry.behavior() == null
+                ? null
+                : entry.behavior().inBandToolCalls();
+        if (perModel != null && perModel != InBandToolCallsMode.AUTO) {
+            return perModel == InBandToolCallsMode.ENABLED;
+        }
+        final var tuning = providerTuning(provider);
+        final var providerMode = tuning == null ? null : tuning.inBandToolCalls();
+        if (providerMode != null && providerMode != InBandToolCallsMode.AUTO) {
+            return providerMode == InBandToolCallsMode.ENABLED;
+        }
+        final var auto = perModel != null ? perModel : providerMode != null ? providerMode : InBandToolCallsMode.AUTO;
+        return auto == InBandToolCallsMode.AUTO;
+    }
+
+    /**
+     * Resolve the reasoning wire format for a model of a provider: the {@code behavior.reasoningFormat}
+     * of the first matching model entry when not AUTO, else the provider-level {@code tuning.reasoningFormat}
+     * when not AUTO, else the AUTO default (GLM/Qwen whole-line think handling).
+     */
+    public ReasoningFormatMode reasoningFormat(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        final var perModel = entry == null || entry.behavior() == null
+                ? null
+                : entry.behavior().reasoningFormat();
+        if (perModel != null && perModel != ReasoningFormatMode.AUTO) {
+            return perModel;
+        }
+        final var tuning = providerTuning(provider);
+        final var providerMode = tuning == null ? null : tuning.reasoningFormat();
+        if (providerMode != null && providerMode != ReasoningFormatMode.AUTO) {
+            return providerMode;
+        }
+        return ReasoningFormatMode.AUTO;
     }
 
     /**

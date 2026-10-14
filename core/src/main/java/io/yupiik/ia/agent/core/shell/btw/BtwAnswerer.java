@@ -31,11 +31,10 @@ import io.yupiik.ia.agent.core.events.hooks.EventContextBuilder;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Tool;
 import io.yupiik.ia.agent.core.llm.ToolCall;
-import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
-import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.permissions.ApprovalGate;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.session.SessionStore;
@@ -49,8 +48,10 @@ import java.time.Clock;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -85,8 +86,7 @@ public class BtwAnswerer {
     private final SessionStore sessionStore;
     private final CodingAgentConfiguration configuration;
     private final ExecutorService executor;
-    private final ToolCallMarkupStripper toolCallMarkup;
-    private final ToolCallMarkupParser toolCallMarkupParser;
+    private final InBandToolCallExtractor inBandToolCallExtractor;
     private final ToolRegistry toolRegistry;
     private final ToolExecutionService toolExecutionService;
     private final JsonMapper mapper;
@@ -103,8 +103,7 @@ public class BtwAnswerer {
             final SessionStore sessionStore,
             final CodingAgentConfiguration configuration,
             final ExecutorService executor,
-            final ToolCallMarkupStripper toolCallMarkup,
-            final ToolCallMarkupParser toolCallMarkupParser,
+            final InBandToolCallExtractor inBandToolCallExtractor,
             final ToolRegistry toolRegistry,
             final ToolExecutionService toolExecutionService,
             final JsonMapper mapper,
@@ -116,8 +115,7 @@ public class BtwAnswerer {
         this.sessionStore = sessionStore;
         this.configuration = configuration;
         this.executor = executor;
-        this.toolCallMarkup = toolCallMarkup;
-        this.toolCallMarkupParser = toolCallMarkupParser;
+        this.inBandToolCallExtractor = inBandToolCallExtractor;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
         this.mapper = mapper;
@@ -189,6 +187,7 @@ public class BtwAnswerer {
                 : toolRegistry.toWireTools(t -> t.category() == ToolCategory.READ || t.category() == ToolCategory.BASH);
         var retried = false;
         String raw = "";
+        final var attemptedTools = new LinkedHashSet<String>();
         for (var round = 0; round < MAX_TOOL_ROUNDS; round++) {
             if (cancelled.getAsBoolean()) {
                 throw new InterruptedException("cancelled");
@@ -220,9 +219,9 @@ public class BtwAnswerer {
             raw = content == null ? "" : String.valueOf(content);
             final var nativeCalls = res.message() == null ? null : res.message().toolCalls();
             final var calls =
-                    nativeCalls != null && !nativeCalls.isEmpty() ? nativeCalls : toolCallMarkupParser.parse(raw);
+                    nativeCalls != null && !nativeCalls.isEmpty() ? nativeCalls : inBandToolCallExtractor.parse(raw);
             if (calls.isEmpty()) {
-                final var answer = toolCallMarkup.strip(raw);
+                final var answer = inBandToolCallExtractor.strip(raw);
                 if (!answer.isBlank()) {
                     remember(conf, new BtwExchange(question, answer));
                     return answer;
@@ -235,15 +234,18 @@ public class BtwAnswerer {
                 }
                 return "The model returned an empty answer. Check the output budget or retry the side question.";
             }
-            final var prose = toolCallMarkup.strip(raw);
+            final var prose = inBandToolCallExtractor.strip(raw);
             messages.add(Message.assistant(prose.isBlank() ? null : prose, calls));
             for (final var call : calls) {
+                if (call != null && call.function() != null && call.function().name() != null) {
+                    attemptedTools.add(call.function().name());
+                }
                 final var outcome = runTool(target, call, sessionId, usage, cancelled, permissions);
                 messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
             }
         }
         // round cap reached while the model kept calling tools: surface the glitch.
-        return glitchNote(raw);
+        return glitchNote(raw, attemptedTools);
     }
 
     /** Executes a single /btw tool call, mirroring the main loop's authorisation and bounding. */
@@ -330,8 +332,11 @@ public class BtwAnswerer {
     }
 
     /** Renders a tool-call-only answer as a note plus the raw output, in markdown. */
-    private String glitchNote(final String raw) {
-        return "> The model kept calling tools instead of answering this side question. Raw output:\n\n"
+    private String glitchNote(final String raw, final Set<String> attemptedTools) {
+        final var toolsList =
+                attemptedTools.isEmpty() ? "" : " Attempted tools: " + String.join(", ", attemptedTools) + ".";
+        return "> The model kept calling tools instead of answering this side question." + toolsList
+                + " Raw output:\n\n"
                 + "```\n"
                 + raw
                 + "\n```";

@@ -80,7 +80,7 @@ class BackgroundModelRoutingTest {
         entries.put("yca.provider.providers.1.contextWindow", "128000");
         entries.put("yca.provider.providers.1.timeoutSeconds", "120");
         if (compactModel != null) {
-            entries.put("yca.model.compact", compactModel);
+            entries.put("yca.model.compact.name", compactModel);
         }
         entries.put("yca.compaction.tailBudgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
@@ -93,7 +93,7 @@ class BackgroundModelRoutingTest {
         entries.put("yca.storageHome", "x");
         entries.put("yca.workingDir", ".");
         if (compact != null) {
-            entries.put("yca.model.compact", compact);
+            entries.put("yca.model.compact.name", compact);
         }
         entries.put("yca.provider.providers.length", "2");
         entries.put("yca.provider.providers.0.id", "main");
@@ -104,7 +104,7 @@ class BackgroundModelRoutingTest {
         entries.put("yca.provider.providers.0.contextWindow", "128000");
         entries.put("yca.provider.providers.0.timeoutSeconds", "120");
         if (mainCompact != null) {
-            entries.put("yca.provider.providers.0.backgroundModelOverrides.compact", mainCompact);
+            entries.put("yca.provider.providers.0.backgroundModelOverrides.compact.name", mainCompact);
         }
         entries.put("yca.provider.providers.1.id", "cheap");
         entries.put("yca.provider.providers.1.baseUrl", "https://cheap.example/v1/chat/completions");
@@ -114,7 +114,7 @@ class BackgroundModelRoutingTest {
         entries.put("yca.provider.providers.1.contextWindow", "128000");
         entries.put("yca.provider.providers.1.timeoutSeconds", "120");
         if (cheapMemory != null) {
-            entries.put("yca.provider.providers.1.backgroundModelOverrides.memory", cheapMemory);
+            entries.put("yca.provider.providers.1.backgroundModelOverrides.memory.name", cheapMemory);
         }
         entries.put("yca.compaction.tailBudgetTokens", "1");
         entries.put("yca.pruning.keepRecent", "1");
@@ -126,8 +126,12 @@ class BackgroundModelRoutingTest {
     void backgroundModelOverridesParsePerProvider() {
         final var cfg = jsonConfig("global-compact", "main-mini", "inherit");
         final var pm = providerManager(cfg);
-        assertEquals("main-mini", pm.provider("main").backgroundModelOverrides().compact());
-        assertEquals("inherit", pm.provider("cheap").backgroundModelOverrides().memory());
+        assertEquals(
+                "main-mini",
+                pm.provider("main").backgroundModelOverrides().compact().name());
+        assertEquals(
+                "inherit",
+                pm.provider("cheap").backgroundModelOverrides().memory().name());
     }
 
     @Test
@@ -147,7 +151,7 @@ class BackgroundModelRoutingTest {
         final var withPrune = TestConfigs.codingAgent(new HashMap<>(Map.ofEntries(
                 Map.entry("yca.storageHome", "x"),
                 Map.entry("yca.workingDir", "."),
-                Map.entry("yca.model.compact", "global-compact"),
+                Map.entry("yca.model.compact.name", "global-compact"),
                 Map.entry("yca.provider.providers.length", "2"),
                 Map.entry("yca.provider.providers.0.id", "main"),
                 Map.entry("yca.provider.providers.0.baseUrl", "https://main.example/v1/chat/completions"),
@@ -156,7 +160,7 @@ class BackgroundModelRoutingTest {
                 Map.entry("yca.provider.providers.0.api", "auto"),
                 Map.entry("yca.provider.providers.0.contextWindow", "128000"),
                 Map.entry("yca.provider.providers.0.timeoutSeconds", "120"),
-                Map.entry("yca.provider.providers.0.backgroundModelOverrides.prune", "main-mini"),
+                Map.entry("yca.provider.providers.0.backgroundModelOverrides.prune.name", "main-mini"),
                 Map.entry("yca.provider.providers.1.id", "cheap"),
                 Map.entry("yca.provider.providers.1.baseUrl", "https://cheap.example/v1/chat/completions"),
                 Map.entry("yca.provider.providers.1.apiKey", ""),

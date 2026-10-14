@@ -39,6 +39,24 @@ public record ModelTuningConfiguration(
         RepairToolCallArgumentsMode repairToolCallArguments,
 
         @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.InBandToolCallsMode.AUTO",
+                documentation =
+                        "Whether in-band tool-call markup that the model leaks into the text content channel is extracted into structured tool calls when the provider emitted no native tool_calls. AUTO (the default) extracts only when no native tool call was produced; ENABLED always attempts extraction from the text channel; DISABLED never does. Structured tool_calls always win over in-band markup regardless of this knob. Extracted markup is stripped from the stored/resent content. This is the fallback for local backends (llama.cpp/ollama/ninfer) serving models that write DSML-style tool calls in the text channel even when structured tools are declared.")
+        InBandToolCallsMode inBandToolCalls,
+
+        @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.ReasoningFormatMode.AUTO",
+                documentation =
+                        "How this model embeds its reasoning in the text content channel, so the parser can strip it before persistence / replay. AUTO (the default) keeps the GLM/Qwen whole-line `think` handling; DEEPSEEK_R1 treats the output as reasoning from the start until the ` response` marker (no opening tag); QWEN strips ` think ... response` blocks and ends reasoning at an unclosed `<tool_call>`. Models that send reasoning through a dedicated channel (reasoning_content/thinking) are not affected: those never enter the text content.")
+        ReasoningFormatMode reasoningFormat,
+
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "When a truncated completion produced only reasoning and no visible content, surface the reasoning tail as the answer instead of dropping it. Off (the default) is the safe behaviour: an all-reasoning, truncated turn yields an empty completion. On is a remedy for models that spend their whole output budget thinking and then hit the token cap. A nullable Boolean lets a per-model value override (including an explicit false) the provider-level one.")
+        Boolean forceNonEmptyContent,
+
+        @Property(
                 documentation =
                         "Default output token budget override for this model (put-if-absent too). Unset or zero/negative keeps the provider outputTokens default.")
         Integer outputTokens,

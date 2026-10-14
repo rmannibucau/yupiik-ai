@@ -141,6 +141,53 @@ export function guessToolLanguage(output: string | null | undefined, argsJson?: 
   return fromKeywords(head);
 }
 
+/**
+ * Builds a short, human-readable input summary for a tool card from its raw arguments JSON. Mirrors the
+ * TUI's condensed tool line ({@code ToolCard.keyCommand} / {@code ConversationTranscript.toolCommand}): the
+ * significant `command` for bash-style tools, and the `path` (+ optional `lines` range) for file tools such
+ * as read_file. Returns '' (an empty string) when there is nothing meaningful to show (missing/blank/malformed
+ * args or none of the known keys), in which case the card header falls back to the bare tool name.
+ */
+export function summarizeArgs(argsJson?: string | null): string {
+  const parsed = parseArgs(argsJson);
+  if (!parsed) return '';
+  return String(joinArgsParts(commandPart(parsed), pathPart(parsed), workdirPart(parsed), linesPart(parsed)));
+}
+
+function commandPart(parsed: Record<string, unknown>): string {
+  for (const key of ['command', 'cmd', 'script', 'args']) {
+    const v = parsed[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+}
+
+function pathPart(parsed: Record<string, unknown>): string {
+  for (const key of ['path', 'file', 'uri', 'target']) {
+    const v = parsed[key];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+}
+
+function workdirPart(parsed: Record<string, unknown>): string {
+  const v = parsed['workdir'];
+  return typeof v === 'string' && v.trim() ? v.trim() : '';
+}
+
+function linesPart(parsed: Record<string, unknown>): string {
+  const v = parsed['lines'];
+  if (v == null) return '';
+  if (typeof v === 'string') return v.trim() ? v.trim() : '';
+  if (typeof v === 'number') return String(v);
+  if (Array.isArray(v)) return v.filter((x) => typeof x === 'number').join('-');
+  return '';
+}
+
+function joinArgsParts(...parts: string[]): string {
+  return parts.filter((p) => p).join(' ');
+}
+
 /** Language of the program the command line actually runs, following `sh -c "..."`. */
 function fromCommand(command: string, depth: number): string | null {
   if (!command || !command.trim() || depth > 2) return null;

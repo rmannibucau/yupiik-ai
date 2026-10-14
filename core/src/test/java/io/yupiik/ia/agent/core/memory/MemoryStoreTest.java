@@ -135,6 +135,145 @@ class MemoryStoreTest {
         assertTrue(store.drainPendingDiff(null).isEmpty(), "null session drains nothing");
     }
 
+    @Test
+    void withMetaRoundTripsAndIsStrippedFromPrompt() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        final var stored = MemoryStore.withMeta(5, List.of("maven", "build"), "src/main/App.java", "always run mvn -o");
+        assertTrue(stored.startsWith("- 5|"), "stored bullet carries the p5 envelope: " + stored);
+        store.append(true, List.of(stored));
+        final var section = store.promptSection(null);
+        assertTrue(section.contains("- always run mvn -o"), "fact text must be injected: " + section);
+        assertFalse(section.contains("5|"), "the envelope must never leak into the prompt: " + section);
+        assertFalse(section.contains("maven|build"), "topic must not leak: " + section);
+        // the stored bullet must keep its metadata on read
+        assertEquals(5, MemoryStore.metaOf(stored).p(), "priority must survive the round-trip");
+        assertEquals("src/main/App.java", MemoryStore.metaOf(stored).path(), "path anchor must survive");
+        assertEquals(List.of("maven", "build"), MemoryStore.metaOf(stored).topic(), "topic must survive");
+    }
+
+    @Test
+    void plainHandWrittenLineIsCompatible() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        Files.createDirectories(store.globalFile().getParent());
+        final var original = "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n"
+                + "- user prefers tabs\n"
+                + "- a hand-written line with | pipe characters in it\n";
+        Files.writeString(store.globalFile(), original);
+        // reading must not rewrite or touch a compat line
+        final var section = store.promptSection(null);
+        assertTrue(section.contains("- user prefers tabs"), "plain line must be injected: " + section);
+        assertTrue(
+                section.contains("- a hand-written line with | pipe characters in it"),
+                "pipe-heavy prose is plain content, not an envelope: " + section);
+        assertEquals(original, Files.readString(store.globalFile()), "a read must not rewrite compat lines");
+        // the compat line is treated as p2 plain metadata
+        assertEquals(2, MemoryStore.metaOf("- user prefers tabs").p(), "a plain line defaults to p2");
+    }
+
+    @Test
+    void keepSurvivesMaxLinesEvictionWhilePlainPeersDrop() throws Exception {
+        final var store =
+                new MemoryStore(config(home, Map.of("yca.memory.maxLines", "3", "yca.memory.maxKeepLines", "2")));
+        // two keep (p5) + two plain (p2) - over the 3-line cap
+        store.append(
+                true,
+                List.of(
+                        MemoryStore.withMeta(5, null, null, "never edit generated files"),
+                        MemoryStore.withMeta(5, null, null, "always run mvn -o"),
+                        "an ordinary observation one",
+                        "an ordinary observation two"));
+        final var file = Files.readString(store.globalFile());
+        assertTrue(file.contains("never edit generated files"), "keep bullets must survive eviction: " + file);
+        assertTrue(file.contains("always run mvn -o"), "keep bullets must survive eviction: " + file);
+        // only one plain bullet may remain (2 keep + 1 plain = 3 = maxLines)
+        long plain = file.lines()
+                .filter(l -> l.startsWith("- "))
+                .filter(l -> MemoryStore.metaOf(l).p() == 2)
+                .count();
+        assertTrue(plain <= 1, "plain low-priority bullets drop first: " + file);
+    }
+
+    @Test
+    void keepIsDemotedPastMaxKeepLines() throws Exception {
+        final var store =
+                new MemoryStore(config(home, Map.of("yca.memory.maxLines", "10", "yca.memory.maxKeepLines", "1")));
+        store.append(
+                true,
+                List.of(
+                        MemoryStore.withMeta(5, null, null, "first directive"),
+                        MemoryStore.withMeta(5, null, null, "second directive")));
+        final var file = Files.readString(store.globalFile());
+        // with maxKeepLines=1 and two keep bullets, one keep is demoted to p4 (kept, not dropped)
+        assertEquals(1, keepCount(file, 5), "exactly one keep bullet may remain: " + file);
+        assertEquals(1, keepCount(file, 4), "the other keep must be demoted to p4: " + file);
+        assertTrue(
+                file.contains("first directive") && file.contains("second directive"),
+                "neither directive is dropped: " + file);
+    }
+
+    @Test
+    void pathAnchoredBulletIsBoostedForCurrentPath() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        Files.createDirectories(MemoryStore.projectFile(home).getParent());
+        Files.writeString(
+                MemoryStore.projectFile(home),
+                "# Memory\n\nDurable facts, decisions and preferences. One bullet per line.\n\n"
+                        + MemoryStore.withMeta(
+                                2, null, "src/main/CartTotals.java", "rounding lives in CartTotals.total")
+                        + "\n"
+                        + MemoryStore.withMeta(2, null, null, "the sky is blue unrelated fact")
+                        + "\n");
+        // a prompt about rounding, with the current path present: the anchored bullet must surface
+        final var section = store.promptSection("refactor rounding", 1200, home, List.of("src/main/CartTotals.java"));
+        assertTrue(
+                section.contains("CartTotals"),
+                "the path-anchored bullet must be retrieved for the current path: " + section);
+    }
+
+    private static long keepCount(final String content, final int priority) {
+        return content.lines()
+                .filter(l -> l.startsWith("- "))
+                .filter(l -> MemoryStore.metaOf(l).p() == priority)
+                .count();
+    }
+
+    @Test
+    void memoryWriteToolStoresAnExplicitKeepEnvelopeByDefault() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        final var tool = new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(store);
+        final var result = tool.execute(Map.of("fact", "always use tabs", "scope", "global"));
+        assertTrue(result.output().contains("Remembered"), "the write must report success: " + result.output());
+        final var file = Files.readString(store.globalFile());
+        // memory_write defaults to an explicit keep directive (p5) with no path/topic, stamped today
+        final var storedKeep = file.lines()
+                .filter(l -> MemoryStore.metaOf(l).p() == 5)
+                .findFirst()
+                .orElse(null);
+        assertTrue(storedKeep != null, "a memory_write fact must be stored as a keep (p5) directive: " + file);
+        assertEquals("always use tabs", MemoryStore.textOf(storedKeep), "the fact text is preserved");
+    }
+
+    @Test
+    void memoryWriteToolHonorsKeepFalseAndPathTopic() throws Exception {
+        final var store = new MemoryStore(config(home, Map.of()));
+        final var tool = new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(store);
+        tool.execute(Map.of(
+                "fact", "the discount rule",
+                "scope", "global",
+                "keep", "false",
+                "path", "src/main/CartTotals.java",
+                "topic", "rounding discount"));
+        final var file = Files.readString(store.globalFile());
+        final var line = file.lines()
+                .filter(l -> MemoryStore.textOf(l).equals("the discount rule"))
+                .findFirst()
+                .orElse(null);
+        assertTrue(line != null, "the fact must be stored: " + file);
+        assertEquals(2, MemoryStore.metaOf(line).p(), "keep=false stores an ordinary p2 fact");
+        assertEquals("src/main/CartTotals.java", MemoryStore.metaOf(line).path(), "path anchor must be stored");
+        assertEquals(List.of("rounding", "discount"), MemoryStore.metaOf(line).topic(), "topic must be stored");
+    }
+
     private static int count(final String haystack, final String needle) {
         var out = 0;
         var from = 0;

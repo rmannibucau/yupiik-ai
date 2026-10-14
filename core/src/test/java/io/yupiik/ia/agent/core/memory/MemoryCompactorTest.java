@@ -147,7 +147,7 @@ class MemoryCompactorTest {
         map.put("yca.storageHome", home.toString());
         map.put("yca.workingDir", home.toString());
         map.put("yca.projectDir", home.toString());
-        map.put("yca.model.compact", "compact-model");
+        map.put("yca.model.compact.name", "compact-model");
         return TestConfigs.codingAgent(map);
     }
 

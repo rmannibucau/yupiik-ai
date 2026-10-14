@@ -279,7 +279,6 @@ public class AgentLoop {
     private int turnToolsRun;
     private boolean thinkingActive;
     private long thinkingStartNanos;
-    private long turnStartNanos;
     // output throughput: tokens produced vs. time actually spent producing them
     private long turnLlmActiveMs;
     private long turnLlmPausedMs;
@@ -305,6 +304,23 @@ public class AgentLoop {
      * finally: only a turn the user actually saw an answer from is worth mining.
      */
     private volatile boolean lastTurnEndedWithContent;
+
+    /**
+     * Per-session count of completed user turns (incremented in {@code doRun}'s finally when
+     * the turn had a real user prompt). Drives the {@code memory.extractEveryTurns} cadence:
+     * extraction runs when ({@code turnCount % extractEveryTurns == 0} with
+     * {@code extractEveryTurns > 0}) or when a todo completed this turn. Resumed/initial turns
+     * without a user message do not advance the counter.
+     */
+    private int turnCount;
+
+    /**
+     * Snapshot of the finished-todo set (content of items in completed/cancelled status) at the
+     * end of the previous user turn, used to detect that at least one todo transitioned into
+     * finished during the current turn (membership diff - mid-turn todo additions cannot fake a
+     * completion). Reset to empty on a new session/tab.
+     */
+    private Set<String> lastFinishedTodos = Set.of();
 
     /**
      * Doom-loop breaker state for the current turn: counts repeated tool calls (normalized args)
@@ -445,6 +461,12 @@ public class AgentLoop {
                 new PrecisionDurationMarkerProvider());
     }
 
+    protected AgentLoop() {
+        this(
+                null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, null, null);
+    }
+
     /**
      * Full wiring for a session (tab) instance: the per-session services
      * ({@code permissionService}, {@code usageTracker}, {@code statusReporter},
@@ -505,35 +527,6 @@ public class AgentLoop {
         this.subagentId = subagentId;
         this.subagentName = subagentName;
         this.userFeedbackService = userFeedbackService;
-    }
-
-    protected AgentLoop() {
-        this.chatClient = null;
-        this.toolRegistry = null;
-        this.toolExecutionService = null;
-        this.configuration = null;
-        this.permissionService = null;
-        this.usageTracker = null;
-        this.contextManager = null;
-        this.contextView = null;
-        this.sessionStore = null;
-        this.systemPromptBuilder = null;
-        this.memoryExtractor = null;
-        this.statusReporter = null;
-        this.emitter = null;
-        this.mapper = null;
-        this.structuralCodeGraph = null;
-        this.providerManager = null;
-        this.agentProvider = null;
-        this.clock = null;
-        this.precisionDurationMarker = null;
-        this.snapshotStore = null;
-        this.todoStore = null;
-        this.executor = null;
-        this.sessionId = null;
-        this.subagentId = null;
-        this.subagentName = null;
-        this.userFeedbackService = null;
     }
 
     /**
@@ -836,8 +829,48 @@ public class AgentLoop {
             // would filter empty deltas anyway), and extraction while the app is already idle
             // waiting for the next input means the close paths never need to block on it.
             if (memoryExtractor != null && lastTurnEndedWithContent) {
-                memoryExtractor.asyncExtractNow(messages, chatSettings);
+                // cadence + todo-completion gating: extract every extractEveryTurns user turns
+                // (0/negative = never periodic), or immediately when a todo just finished.
+                // A resume counts as a user turn here too (it re-mines the pending delta; the
+                // conservative effect is slightly more frequent extraction, never less).
+                if (userMessage != null) {
+                    turnCount++;
+                    final var cfg = configuration.memory();
+                    final var every = cfg.extractEveryTurns();
+                    final var finishedNow = finishedTodos();
+                    final var todoFlush = cfg.extractOnTodosDone()
+                            && !finishedNow.isEmpty()
+                            && !lastFinishedTodos.containsAll(finishedNow);
+                    lastFinishedTodos = finishedNow;
+                    final var cadence = every > 0 && turnCount % every == 0;
+                    memoryExtractor.asyncExtractNow(messages, chatSettings, cadence || todoFlush);
+                } else {
+                    // no user message at all (empty replay): keep the legacy every-turn behavior
+                    // so the pending delta is still mined when eligible
+                    memoryExtractor.asyncExtractNow(messages, chatSettings, true);
+                }
             }
+        }
+    }
+
+    /**
+     * Content of the finished-todo set for the memory cadence: contents of items whose status is
+     * completed or cancelled (membership-based so mid-turn todo additions cannot fake a flush).
+     */
+    private Set<String> finishedTodos() {
+        if (todoStore == null) {
+            return Set.of();
+        }
+        try {
+            final var done = new HashSet<String>();
+            for (final var item : todoStore.all()) {
+                if ("completed".equals(item.status()) || "cancelled".equals(item.status())) {
+                    done.add(item.content());
+                }
+            }
+            return done;
+        } catch (final RuntimeException e) {
+            return Set.of();
         }
     }
 
@@ -1086,7 +1119,7 @@ public class AgentLoop {
         turnLlmReportedMs = 0L;
         thinkingActive = false;
         thinkingStartNanos = 0;
-        turnStartNanos = precisionDurationMarker.now();
+        final var turnStartNanos = precisionDurationMarker.now();
         lastTurnEndedWithContent = false;
         // A "window" is one bounded run of the round loop. Every todo auto-continuation starts a fresh
         // window with a new maxIterations budget - yca.todos.maxContinues bounds the number of windows -

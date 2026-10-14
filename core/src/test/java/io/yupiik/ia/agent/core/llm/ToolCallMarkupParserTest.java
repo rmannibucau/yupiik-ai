@@ -129,4 +129,50 @@ class ToolCallMarkupParserTest {
         assertEquals("grep", calls.get(0).function().name());
         assertEquals("{\"pattern\":\"say \\\"hi\\\"\"}", calls.get(0).function().arguments());
     }
+
+    @Test
+    void parsesQwenJsonInTagWithArgumentsObject() {
+        final var raw =
+                "Answering now.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\", \"limit\": 40}}\n</tool_call>";
+        final var calls = parser.parse(raw);
+        assertEquals(1, calls.size(), calls.toString());
+        assertEquals("read_file", calls.get(0).function().name());
+        // the arguments object is preserved verbatim
+        assertEquals(
+                "{\"path\": \"a.txt\", \"limit\": 40}", calls.get(0).function().arguments());
+    }
+
+    @Test
+    void parsesQwenJsonInTagWithoutArguments() {
+        final var raw = "<tool_call>\n{\"name\": \"list_dir\"}\n</tool_call>";
+        final var calls = parser.parse(raw);
+        assertEquals(1, calls.size(), calls.toString());
+        assertEquals("list_dir", calls.get(0).function().name());
+        assertEquals("{}", calls.get(0).function().arguments());
+    }
+
+    @Test
+    void parsesHermesFunctionCallJsonTag() {
+        final var raw =
+                "<tool_call>\n{\"name\": \"get_current_weather\", \"arguments\": {\"location\": \"Boston\", \"unit\": \"fahrenheit\"}}\n</tool_call>";
+        final var calls = parser.parse(raw);
+        assertEquals(1, calls.size(), calls.toString());
+        assertEquals("get_current_weather", calls.get(0).function().name());
+        assertEquals(
+                "{\"location\": \"Boston\", \"unit\": \"fahrenheit\"}",
+                calls.get(0).function().arguments());
+    }
+
+    @Test
+    void parsesGlmKvTag() {
+        final var raw =
+                "<tool_call>search_web<arg_key>search_terms</arg_key><arg_value>fusion json mapper</arg_value><arg_key>max_results</arg_key><arg_value>5</arg_value></tool_call>";
+        final var calls = parser.parse(raw);
+        assertEquals(1, calls.size(), calls.toString());
+        assertEquals("search_web", calls.get(0).function().name());
+        // GLM kv values are marshalled as JSON strings
+        assertEquals(
+                "{\"search_terms\":\"fusion json mapper\",\"max_results\":\"5\"}",
+                calls.get(0).function().arguments());
+    }
 }

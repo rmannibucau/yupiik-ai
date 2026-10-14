@@ -3,7 +3,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { normalizeMarkdown } from './markdown';
+import { normalizeMarkdown, hasOpenInlineSpan } from './markdown';
 
 // render the normalized source through the same markdown pipeline ChatPage uses and return the
 // static HTML, so the assertions cover the user-visible outcome (not just the normalizer).
@@ -105,5 +105,142 @@ describe('normalizeMarkdown', () => {
     expect(html).not.toContain('<strong>before</strong>the');
     // inline code stays plain, not folded into any bogus span (three intended tokens)
     expect(html.match(/<code>/g)).toHaveLength(3);
+  });
+});
+
+describe('hasOpenInlineSpan', () => {
+  it('reports no open span for balanced prose and closed code spans', () => {
+    expect(hasOpenInlineSpan('')).toBe(false);
+    expect(hasOpenInlineSpan('plain prose')).toBe(false);
+    expect(hasOpenInlineSpan('`balanced` inline code')).toBe(false);
+    expect(hasOpenInlineSpan('`a` and `b` and `c`')).toBe(false);
+    expect(hasOpenInlineSpan('a ``double`` span')).toBe(false);
+  });
+
+  it('reports an open span when an inline-code closer has not streamed yet', () => {
+    expect(hasOpenInlineSpan('verify `hop-transform-drools` and `plugins')).toBe(true);
+    expect(hasOpenInlineSpan('still open `foo')).toBe(true);
+    // a 2-backtick span left open
+    expect(hasOpenInlineSpan('open ``double')).toBe(true);
+  });
+
+  it('never treats a 3+ backtick run at line start as an inline span (fenced block)', () => {
+    // fully-streamed fence: opening + closing (even count) is never "unbalanced"
+    expect(hasOpenInlineSpan('```java\nint x = 1; // ` not inline\n```')).toBe(false);
+    // HALF-streamed fence: only the opener has arrived; it must NOT look like an open inline span,
+    // otherwise the whole fenced block would be held from streaming (the regression to avoid).
+    expect(hasOpenInlineSpan('```java\nint x = 1; // streaming…')).toBe(false);
+    // tilde fence too (remark-gfm)
+    expect(hasOpenInlineSpan('~~~bash\necho hi\n~~~')).toBe(false);
+  });
+
+  it('does not span open/close across a fenced block boundary', () => {
+    // a single backtick before the fence and the close after the fence are separate, not one span
+    expect(hasOpenInlineSpan('`x` then\n```\n`literal`\n```\nthen `y`')).toBe(false);
+    expect(hasOpenInlineSpan('`x` then\n```\ncode\n```\nend `y')).toBe(true); // y's closer not streamed
+  });
+});
+
+describe('live-streaming inline-code hold (freeinference fragment pattern)', () => {
+  // A deterministic fragment stream shaped like what deepseek-v4-flash on freeinference actually
+  // sends: tiny chunks (2-25 chars) that split INSIDE inline-code spans ~40% of the time (backticks
+  // arrive fragmented across several SSE text-delta events). Historically yca rendered every
+  // intermediate fragment through ReactMarkdown, so any fragment ending mid-span produced an
+  // inverted pairing (prose swallowed into one oversized <code>). This test drives the same
+  // fragments through the hold-on-open-span renderer used by useDebouncedMarkdown and asserts the
+  // user-visible result never shows that regression, while the settled text stays byte-perfect.
+  const realStream = [
+    'To verify ',
+    '`hop-transform-drools` ',
+    'resolves, run ',
+    '`mvn clean install` ',
+    'with the ',
+    '`build` ',
+    'goal',
+    "'s ",
+    '`plugins`',
+    '/',
+    '`transforms` ',
+    'param, then check ',
+    '`plugins/transforms/<id>/` ',
+    'contains the ',
+    '`<transforms><transform>',
+    'org.apache.hop:',
+    'hop-transform-drools:',
+    '2.19.0',
+    '</transform></transforms>`',
+    ' ',
+    'XML snippet',
+    ' ',
+    'and its ',
+    '`jandex` ',
+    'is present.',
+  ];
+
+  // mirror the hook decision: while `writing`, keep the last render unless the fragment's inline
+  // backticks are balanced (no open span) - then advance; the final settled content always renders.
+  function writingView(): string[] {
+    const held: string[] = [];
+    let stable = '';
+    let acc = '';
+    const candidate = (s: string) => s; // would be normalizeMarkdown(render source)
+    for (const frag of realStream) {
+      acc += frag;
+      if (hasOpenInlineSpan(acc)) {
+        held.push(stable); // hold the last balanced render
+      } else {
+        stable = candidate(acc);
+        held.push(stable);
+      }
+    }
+    // settled: always render the full accumulated content
+    held.push(candidate(acc));
+    return held;
+  }
+
+  it('never draws prose swallowed into an oversized inline <code> at any writing boundary', () => {
+    const views = writingView();
+    for (const v of views) {
+      const html = renderMd(v);
+      const codes = [...html.matchAll(/<code>([^<]*)<\/code>/g)].map((m) => m[1]);
+      for (const c of codes) {
+        // a token swallowed into code spans a sentence boundary or mixes prose with the token;
+        // legit tokens are compact (no 'either ... or' prose run, at most a handful of words), while
+        // a mispair is long prose. The one long legit token here is the ~86-char <transforms> snippet.
+        expect(c.length).toBeLessThan(120);
+        expect(c.includes(' either ') || c.split(' ').length > 6).toBe(false);
+      }
+      // no trailing dangling backtick floats in the rendered output at a writing boundary
+      expect(codes.filter((c) => c.trim() === '`' || /^\w+$/.test(c) && c.includes('`')).length).toBe(0);
+    }
+  });
+
+  it('shows the full settled text with every intended code span when writing stops', () => {
+    const settled = realStream.join('');
+    const html = renderMd(settled);
+    expect(html).toContain('<code>hop-transform-drools</code>');
+    expect(html).toContain('<code>build</code>');
+    expect(html).toContain('<code>plugins</code>');
+    expect(html).toContain('<code>transforms</code>');
+    expect(html).toContain('<code>plugins/transforms/&lt;id&gt;/</code>');
+    expect(html).toContain('<code>jandex</code>');
+    // the XML snippet is one inline code span, and "param, then check" stays plain prose
+    expect(html).toContain('<code>&lt;transforms&gt;&lt;transform&gt;org.apache.hop:hop-transform-drools:2.19.0&lt;/transform&gt;&lt;/transforms&gt;</code>');
+    expect(html).toContain('param, then check <code>');
+    // exactly the eight intended tokens render as their own <code> span - no prose folded in
+    // (hop-transform-drools, mvn clean install, build, plugins, transforms, plugins/transforms/<id>/,
+    //  the <transforms> XML snippet, and jandex)
+    expect(html.match(/<code>/g)).toHaveLength(8);
+  });
+
+  it('still streams a fenced code block live instead of holding it blank', () => {
+    // a fenced block whose opener has arrived but the closer has not: hasOpenInlineSpan must be false
+    // (fence excluded from inline balancing), so the renderer advances rather than freezes the stream.
+    const halfFence = '```java\npublic void run() {\n  log.info("streaming");\n';
+    expect(hasOpenInlineSpan(halfFence)).toBe(false);
+    const html = renderMd(halfFence);
+    // the fence must render (not be held until the closing ``` arrives)
+    expect(html).not.toBe('');
+    expect(html.length).toBeGreaterThan(0);
   });
 });

@@ -23,33 +23,63 @@ import org.junit.jupiter.api.Test;
 
 class ModelConfigurationTest {
 
+    private static ModelVariantConfiguration variant(final String name) {
+        return new ModelVariantConfiguration(name, null, null, null, null, null, null);
+    }
+
     @Test
     void resolvedPruneFallsBackToCompactWhenBlank() {
-        assertEquals("compact-model", new ModelConfiguration("compact-model", "", "").resolvedPrune());
-        assertEquals("compact-model", new ModelConfiguration("compact-model", null, null).resolvedPrune());
+        assertEquals("compact-model", new ModelConfiguration(variant("compact-model"), null, null).resolvedPrune());
+        assertEquals(
+                "compact-model", new ModelConfiguration(variant("compact-model"), variant(null), null).resolvedPrune());
     }
 
     @Test
     void resolvedPruneKeepsItsOwnValue() {
-        assertEquals("prune-model", new ModelConfiguration("compact-model", "prune-model", "").resolvedPrune());
+        assertEquals(
+                "prune-model",
+                new ModelConfiguration(variant("compact-model"), variant("prune-model"), variant("")).resolvedPrune());
     }
 
     @Test
     void resolvedPruneCanBeBlankWhenBothAreBlank() {
-        assertEquals("", new ModelConfiguration("", "", "").resolvedPrune());
+        assertEquals("", new ModelConfiguration(variant(""), variant(""), variant("")).resolvedPrune());
     }
 
     @Test
     void resolvedMemoryFallsBackToTheCompactModelThenTheProviderDefault() {
         // memory empty -> compact model
-        assertEquals("compact-model", new ModelConfiguration("compact-model", "", "").resolvedMemory());
-        assertEquals("compact-model", new ModelConfiguration("compact-model", "prune-model", "").resolvedMemory());
+        assertEquals("compact-model", new ModelConfiguration(variant("compact-model"), null, null).resolvedMemory());
+        assertEquals(
+                "compact-model",
+                new ModelConfiguration(variant("compact-model"), variant("prune-model"), variant("")).resolvedMemory());
         // memory set -> its own value
         assertEquals(
                 "memory-model",
-                new ModelConfiguration("compact-model", "prune-model", "memory-model").resolvedMemory());
+                new ModelConfiguration(variant("compact-model"), variant("prune-model"), variant("memory-model"))
+                        .resolvedMemory());
         // both blank -> blank (the provider default model applies at resolve time)
-        assertEquals("", new ModelConfiguration("", "", "").resolvedMemory());
+        assertEquals("", new ModelConfiguration(variant(""), variant(""), variant("")).resolvedMemory());
+    }
+
+    @Test
+    void tuningFallsBackToCompactWhenPathUnset() {
+        final var compact = new ModelVariantConfiguration("m1", null, null, null, 1024, "none", null);
+        // memory path unset -> compact tuning (maxTokens 1024, reasoningEffort none)
+        assertEquals(
+                1024, new ModelConfiguration(compact, null, null).memoryTuning().maxTokens());
+        assertEquals(
+                "none",
+                new ModelConfiguration(compact, null, null).memoryTuning().reasoningEffort());
+        assertEquals(
+                1024, new ModelConfiguration(compact, null, null).pruneTuning().maxTokens());
+        // a dedicated memory tuning wins
+        final var mem = new ModelVariantConfiguration("m2", null, null, null, 512, "low", null);
+        final var cfg = new ModelConfiguration(compact, null, mem);
+        assertEquals(512, cfg.memoryTuning().maxTokens());
+        assertEquals("low", cfg.memoryTuning().reasoningEffort());
+        assertEquals("m2", cfg.resolvedMemory());
+        assertEquals(1024, cfg.compactTuning().maxTokens());
     }
 
     @Test
@@ -70,6 +100,9 @@ class ModelConfigurationTest {
         final var tuning = new ModelTuningConfiguration(
                 "",
                 RepairToolCallArgumentsMode.AUTO,
+                InBandToolCallsMode.AUTO,
+                ReasoningFormatMode.AUTO,
+                null,
                 null,
                 null,
                 null,
@@ -85,6 +118,8 @@ class ModelConfigurationTest {
         assertNull(tuning.repeatSuccessThreshold());
         assertEquals(PlateauFeedbackMode.NUDGE_2, tuning.plateauFeedback());
         assertEquals(RepairToolCallArgumentsMode.AUTO, tuning.repairToolCallArguments());
+        assertEquals(InBandToolCallsMode.AUTO, tuning.inBandToolCalls());
+        assertEquals(ReasoningFormatMode.AUTO, tuning.reasoningFormat());
         assertEquals(List.of(), tuning.variants());
     }
 }

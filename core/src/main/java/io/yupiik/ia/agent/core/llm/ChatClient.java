@@ -26,6 +26,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
+import io.yupiik.ia.agent.core.configuration.ReasoningFormatMode;
 import io.yupiik.ia.agent.core.context.ContextWindowCache;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
@@ -85,6 +86,7 @@ public class ChatClient implements AutoCloseable {
     private final ProviderManager providerManager;
     private final Clock clock;
     private final ToolCallArgumentsRepairer toolCallArgumentsRepairer;
+    private final InBandToolCallExtractor inBandToolCallExtractor;
     private final ContextWindowCache contextWindowCache;
     private final ExtendedHttpClient httpClient;
     private final boolean ownsHttpClient;
@@ -110,6 +112,7 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
+            final InBandToolCallExtractor inBandToolCallExtractor,
             final ScheduledExecutorService scheduler,
             final ExecTemplateHelper execTemplateHelper) {
         this(
@@ -119,6 +122,7 @@ public class ChatClient implements AutoCloseable {
                 clock,
                 httpClient,
                 toolCallArgumentsRepairer,
+                inBandToolCallExtractor,
                 false,
                 scheduler,
                 execTemplateHelper);
@@ -131,7 +135,17 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer) {
-        this(configuration, mapper, providerManager, clock, httpClient, toolCallArgumentsRepairer, false, null, null);
+        this(
+                configuration,
+                mapper,
+                providerManager,
+                clock,
+                httpClient,
+                toolCallArgumentsRepairer,
+                null,
+                false,
+                null,
+                null);
     }
 
     /**
@@ -152,6 +166,7 @@ public class ChatClient implements AutoCloseable {
                 clock,
                 httpClient,
                 new ToolCallArgumentsRepairer(mapper),
+                null,
                 false,
                 null,
                 null);
@@ -174,6 +189,7 @@ public class ChatClient implements AutoCloseable {
                 clock,
                 defaultClient(configuration),
                 new ToolCallArgumentsRepairer(mapper),
+                null,
                 true,
                 null,
                 null);
@@ -186,6 +202,7 @@ public class ChatClient implements AutoCloseable {
             final Clock clock,
             final ExtendedHttpClient httpClient,
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
+            final InBandToolCallExtractor inBandToolCallExtractor,
             final boolean ownsHttpClient,
             final ScheduledExecutorService scheduler,
             final ExecTemplateHelper execTemplateHelper) {
@@ -194,6 +211,9 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = providerManager;
         this.clock = clock;
         this.toolCallArgumentsRepairer = toolCallArgumentsRepairer;
+        this.inBandToolCallExtractor = inBandToolCallExtractor == null
+                ? new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper())
+                : inBandToolCallExtractor;
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
         this.httpClient = httpClient;
         this.ownsHttpClient = ownsHttpClient;
@@ -243,6 +263,8 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = null;
         this.clock = null;
         this.toolCallArgumentsRepairer = null;
+        this.inBandToolCallExtractor =
+                new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper());
         this.contextWindowCache = null;
         this.httpClient = null;
         this.ownsHttpClient = false;
@@ -1761,27 +1783,61 @@ public class ChatClient implements AutoCloseable {
 
     /**
      * Applies the configured tool call arguments repair to an assistant message when the effective
-     * provider/model enable it. Never changes the message when nothing was repaired.
+     * provider/model enable it, and hoists in-band tool-call markup (DSML and its manglings) leaked
+     * into the text channel into structured tool calls when the provider produced no native one.
+     * Never changes the message when nothing was repaired.
      */
     private Message repairToolCalls(
             final Message message, final ChatCompletionRequest effective, final ProviderConfiguration provider) {
-        final var toolCalls = message.toolCalls();
-        if (toolCalls == null || toolCalls.isEmpty()) {
-            return message;
-        }
         final var model = effective.model();
-        if (provider == null || providerManager == null || !providerManager.repairToolCallArguments(provider, model)) {
-            return message;
+        var toolCalls = message.toolCalls();
+        Object content = message.content();
+        // Reasoning strip (single source of truth with the display): remove the model's inline
+        // reasoning from the stored/resent content so it is never replayed on the next turn. The
+        // resolved format drives how reasoning is delimited; the default think-tags handling is
+        // idempotent on the stream path (which already stripped via visibleText) and fixes the
+        // non-stream gap.
+        if (content instanceof String s && providerManager != null) {
+            final var format = provider == null
+                    ? ReasoningFormatMode.AUTO.resolve()
+                    : providerManager.reasoningFormat(provider, model).resolve();
+            final var stripped = ReasoningStripper.strip(s, format);
+            if (!stripped.isEmpty() && !stripped.equals(s)) {
+                content = stripped;
+            }
         }
-        var changed = false;
+        // In-band markup hoist: when the provider emitted no native tool call but the model wrote
+        // one in the text channel (DSML-style), extract it and strip the markup from the stored
+        // content. Structured calls always win; the extractor's fast path makes a clean prose
+        // answer free (parse returns empty and nothing changes).
+        if ((toolCalls == null || toolCalls.isEmpty()) && inBandEnabled(provider, model)) {
+            final var raw = content instanceof String s ? s : content == null ? "" : content.toString();
+            final var inBand = inBandToolCallExtractor.parse(raw);
+            if (!inBand.isEmpty()) {
+                toolCalls = inBand;
+                final var stripped = inBandToolCallExtractor.strip(raw);
+                if (!stripped.equals(raw)) {
+                    content = stripped.isBlank() ? null : stripped;
+                }
+            }
+        }
+        if (toolCalls == null || toolCalls.isEmpty()) {
+            // probe-only answer: the only possible change is the reasoning strip, surfaced here so a
+            // prose-only completion still gets its inline reasoning removed from the stored content
+            return content == message.content() ? message : newMessage(message, content, null);
+        }
+        var changed = content != message.content();
         final var repaired = new ArrayList<ToolCall>(toolCalls.size());
+        final var repairArgs =
+                provider != null && providerManager != null && providerManager.repairToolCallArguments(provider, model);
         for (final var call : toolCalls) {
             final var fn = call == null ? null : call.function();
             if (call == null || fn == null) {
                 repaired.add(call);
                 continue;
             }
-            final var arguments = toolCallArgumentsRepairer.repair(fn.arguments(), true, model);
+            final var arguments =
+                    repairArgs ? toolCallArgumentsRepairer.repair(fn.arguments(), true, model) : fn.arguments();
             if (arguments.equals(fn.arguments())) {
                 repaired.add(call);
             } else {
@@ -1790,15 +1846,28 @@ public class ChatClient implements AutoCloseable {
                         call.id(), call.type(), new ToolCall.FunctionCall(fn.name(), arguments), call.index()));
             }
         }
-        return changed
-                ? new Message(
-                        message.role(),
-                        message.content(),
-                        message.name(),
-                        repaired,
-                        message.toolCallId(),
-                        message.others())
-                : message;
+        return changed ? newMessage(message, content, repaired) : message;
+    }
+
+    /**
+     * Whether in-band tool-call markup should be extracted for the effective provider/model. The
+     * AUTO mode (default) always attempts extraction when no native call was produced; it is a pure
+     * safety net that leaves clean prose untouched (the extractor returns empty and the message is
+     * byte-identical).
+     */
+    private boolean inBandEnabled(final ProviderConfiguration provider, final String model) {
+        return provider == null || providerManager == null || providerManager.inBandToolCalls(provider, model);
+    }
+
+    /** Rebuilds an assistant message with a (possibly null) content and tool-call list, preserving identity metadata. */
+    private static Message newMessage(final Message message, final Object content, final List<ToolCall> toolCalls) {
+        return new Message(
+                message.role(),
+                content,
+                message.name(),
+                toolCalls == null || toolCalls.isEmpty() ? null : toolCalls,
+                message.toolCallId(),
+                message.others());
     }
 
     private ChatResult repairToolCalls(

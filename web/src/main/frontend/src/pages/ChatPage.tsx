@@ -24,8 +24,8 @@ import {
   type Block,
 } from '../api/eventLog';
 import { useSlashCompletion, applySuggestion, type SlashSuggestion } from '../api/useSlashCompletion';
-import { normalizeMarkdown } from '../lib/markdown';
-import { guessToolLanguage } from '../lib/toolOutput';
+import { normalizeMarkdown, hasOpenInlineSpan } from '../lib/markdown';
+import { guessToolLanguage, summarizeArgs } from '../lib/toolOutput';
 
 // register the language grammars the TUI highlights (java, ts/js, python, shell, sql, xml/json)
 // plus a generic fallback, so fenced code blocks get syntax highlighting
@@ -1453,6 +1453,10 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
     // A wrong guess only costs colors, never layout; unknown languages fall back to the plain <pre>.
     const shownOutputLang = guessToolLanguage(shownOutput, 'args' in block ? block.args : undefined);
     const shownOutputIsCode = shownOutputLang != null;
+    // condensed tool input for the card header (bash command, read_file path/lines...) so the user always
+    // sees WHAT the tool was asked to do, not just its name - mirrors the TUI's condensed tool line.
+    // Visible in both the collapsed and expanded states (the header row is always rendered).
+    const argsSummary = summarizeArgs('args' in block ? block.args : undefined);
     return (
       <div
         className="rounded border px-3 py-1 text-[15px]"
@@ -1484,6 +1488,15 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
             <span className="shrink-0">✓</span>
           )}
           <span className="truncate">{block.name}</span>
+          {argsSummary && (
+            <span
+              className="truncate text-xs"
+              style={{ color: 'var(--yca-muted)' }}
+              title={argsSummary}
+            >
+              {argsSummary}
+            </span>
+          )}
           {failed && (
             <span className="rounded px-1 text-xs" style={{ background: 'rgba(255,85,85,0.15)', color: '#ff6b6b' }}>
               failed
@@ -1544,6 +1557,16 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
 });
 
 /**
+ * How long (ms) a live block may lag the stream while an inline-code span stays open before we
+ * force-render the latest fragment anyway. Real inline-code tokens run up to a few dozen chars
+ * (`org.apache.hop:hop-transform-drools:2.19.0` is 42) and stream in within a few hundred ms, so
+ * the cap is never hit in normal streaming; it only guards the pathological case where the model
+ * stalls mid-span (or streams a single enormous code token slowly), so the UI is never frozen
+ * behind the stream for more than ~2s.
+ */
+const INLINE_SPAN_HOLD_CAP_MS = 2000;
+
+/**
  * Debounces the markdown source of a live-streaming block so intermediate fragments with a half-open
  * span (an inline-code backtick whose closer is still streaming) are never parsed into a bogus pairing
  * ("inversed" wording). Scope is the whole text block: a backtick pair spans the fragments arriving
@@ -1551,28 +1574,48 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
  * flushes immediately when {@code writing} flips false (i.e. the block settled - a tool call followed,
  * the turn ended, or the source was replayed with no live stream). Non-writing blocks (user input,
  * replayed history) render immediately.
+ *
+ * While {@code writing} and the latest fragment has an OPEN inline-code span (its closing backtick
+ * has not streamed yet - see {@link hasOpenInlineSpan}), the previous balanced render is kept instead
+ * of the fragment: rendering the unbalanced fragment would make CommonMark mis-pair the backticks and
+ * swallow the surrounding prose into one oversized {@code <code>}. This is the fix for the iceboxes
+ * whose provider streams in tiny fragments that split inside code spans ~40% of the time (freeinference
+ * deepseek-v4-flash): the live view now never shows the inverted pairing, it simply lags the stream up
+ * to {@link INLINE_SPAN_HOLD_CAP_MS} until the span closes, and the settled content is always rendered.
  */
 function useDebouncedMarkdown(content: string, writing: boolean): string {
   const [stable, setStable] = useState(() => content);
-  const timer = useRef<number>(0);
+  const timer = useRef<number>(0); // normal 60ms debounce after a balanced burst of fragments
+  const capTimer = useRef<number>(0); // ~2s fallback: force-render even if an inline span stays open
   // keep the latest incoming content for the immediate flush (setStable below never reads a stale closure)
   const latest = useRef(content);
   latest.current = content;
 
   useEffect(() => {
     if (!writing) {
-      // settled (or never live): render the exact content now, cancel any pending debounce
+      // settled (or never live): render the exact content now, cancel any pending debounce/cap
       window.clearTimeout(timer.current);
+      window.clearTimeout(capTimer.current);
       setStable(content);
       return;
     }
-    // still streaming: hold back the re-parse until the burst pauses (~60ms) so a half-open backtick
-    // at a fragment boundary is never shown as an inverted/mis-paired inline-code span.
+    // still streaming: re-arm the debounce and the cap against the newest fragment, cancelling prior ones.
     window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => {
-      setStable(latest.current);
-    }, 60);
-    return () => window.clearTimeout(timer.current);
+    window.clearTimeout(capTimer.current);
+    const cur = latest.current;
+    if (!hasOpenInlineSpan(cur)) {
+      // backticks balanced (no inline span mid-stream): render once the burst pauses (~60ms), as before.
+      timer.current = window.setTimeout(() => setStable(cur), 60);
+    } else {
+      // an inline-code span is still open (its closer hasn't streamed yet): hold the last balanced
+      // render so no inverted/mis-paired span is ever drawn; the cap timer force-renders the latest
+      // if the model stalls mid-span, so the UI never lags the stream by more than the cap.
+      capTimer.current = window.setTimeout(() => setStable(cur), INLINE_SPAN_HOLD_CAP_MS);
+    }
+    return () => {
+      window.clearTimeout(timer.current);
+      window.clearTimeout(capTimer.current);
+    };
   }, [content, writing]);
 
   return stable;

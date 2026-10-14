@@ -29,10 +29,7 @@ public enum PermissionMode {
     public static final List<String> VALUES = List.of("ask", "auto_edit", "yolo");
 
     public static boolean isValue(final String value) {
-        if (value == null) {
-            return false;
-        }
-        return fromConfigurationString(value) != ASK || "ask".equals(strip(value));
+        return value != null && (fromConfigurationString(value) != ASK || "ask".equals(strip(value)));
     }
 
     private static String strip(final String value) {

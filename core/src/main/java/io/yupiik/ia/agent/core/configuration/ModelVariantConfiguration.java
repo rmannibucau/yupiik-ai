@@ -28,7 +28,11 @@ import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 public record ModelVariantConfiguration(
         @Property(
                 defaultValue = "\"default\"",
-                documentation = "Unique name of the variant, referenced by the {code /model <name> <variant>} command.")
+                documentation = "Name of this variant, referenced by the {code /model <name> <variant>} command. "
+                        + "On the background compact/prune/memory paths of yca.model the value is the "
+                        + "MODEL name (not a display qualifier): the other fields then tune that "
+                        + "background model (reasoningEffort, maxTokens, temperature). Elsewhere it is "
+                        + "the variant qualifier of the selected model.")
         String name,
 
         @Property(

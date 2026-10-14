@@ -156,13 +156,42 @@ public class MemoryCompactor {
             if (rewritten == null || rewritten.isBlank()) {
                 return manual ? "memory compaction produced no output; left untouched" : null;
             }
-            // normalize and re-parse the model output into bullets; keep the ones that are not blank
-            final var bullets = rewritten
+            // normalize and re-parse the model output into plain bullets; keep the ones that are not blank
+            final var rawBullets = rewritten
                     .lines()
                     .map(String::strip)
                     .filter(l -> !l.isEmpty() && !l.startsWith("#"))
                     .map(l -> l.startsWith("-") ? l : "- " + l)
                     .collect(toList());
+            // re-attach metadata: each returned bullet inherits the higher priority / path / topic of the
+            // pre-existing bullet it most closely matches, so a p5 directive that survives the rewrite
+            // keeps its protection; genuinely new bullets get the plain default. A compat file with no
+            // envelope anywhere stays plain, so compaction never balloons a legacy file with metadata.
+            final var existing = content.lines().filter(l -> !l.isBlank()).toList();
+            final var useEnvelope = existing.stream().anyMatch(MemoryStore::isEnvelopedLine);
+            final var bullets = new java.util.ArrayList<String>(rawBullets.size());
+            for (final var raw : rawBullets) {
+                final var text = MemoryStore.textOf(raw);
+                if (text.isBlank() || MemoryStore.HEADER_LINE.equals(text)) {
+                    continue;
+                }
+                final var match = MemoryStore.bestMatch(text, existing);
+                bullets.add(
+                        useEnvelope
+                                ? (match == null
+                                        ? MemoryStore.withMeta(2, null, null, text)
+                                        : MemoryStore.keepMeta(match, text))
+                                : "- " + text);
+            }
+            // p5 guard: never accept a rewrite that dropped an explicit keep directive
+            final var keepLines = content.lines()
+                    .map(String::strip)
+                    .filter(l -> MemoryStore.metaOf(l).p() == MemoryStore.Meta.KEEP_P)
+                    .toList();
+            final var droppedKeep = !keepLines.isEmpty() && keepLines.stream().anyMatch(l -> !bestExists(l, bullets));
+            if (droppedKeep) {
+                return manual ? "memory compaction kept the file (an explicit keep directive was dropped)" : null;
+            }
             final var beforeBytes = content.length();
             final var afterBytes =
                     bullets.stream().mapToInt(l -> l.length() + 1).sum() + MemoryStore.HEADER.length();
@@ -189,6 +218,15 @@ public class MemoryCompactor {
         // chain) then the global resolvedMemory chain, kept routable so the rewrite is not
         // routed to a session's provider that does not host the model
         final var model = providerManager == null ? null : providerManager.resolvedMemory(settings);
+        // strip the metadata envelope before the model sees the content: p|date|@path|topic| is
+        // file-internal; the model compacts plain bullets and we re-attach metadata by text match
+        final var stripped = content.lines()
+                .map(String::strip)
+                .filter(l -> !l.isEmpty() && !l.startsWith("#"))
+                .map(MemoryStore::textOf)
+                .filter(t -> !t.isBlank())
+                .map(l -> l.startsWith("-") || MemoryStore.HEADER_LINE.equals(l) ? l : "- " + l)
+                .collect(java.util.stream.Collectors.joining("\n"));
         try {
             final var res = chatClient.chat(new ChatCompletionRequest(
                             model,
@@ -200,10 +238,12 @@ public class MemoryCompactor {
                                                     + "supersede or contradict older ones, drop one-off session observations "
                                                     + "(benchmarks, sandbox paths, single-run findings) and drop non-facts (plans, "
                                                     + "\"must be fixed\", implementation details). Keep one short bullet per fact, "
-                                                    + "each at most 200 characters. Keep the same information density; only remove "
-                                                    + "the noise. Reply with only the new bullet list, one per line, '-' prefixed, "
-                                                    + "no preamble, no markdown fences."),
-                                    Message.user(content)),
+                                                    + "each at most 200 characters. Always KEEP verbatim any bullet that reads as an "
+                                                    + "explicit user directive (eg. starts with \"never\", \"always\", \"don't forget\", "
+                                                    + "\"remember\", \"must\"): such directives must never be merged, reworded or dropped. "
+                                                    + "Keep the same information density; only remove the noise. Reply with only the "
+                                                    + "new bullet list, one per line, '-' prefixed, no preamble, no markdown fences."),
+                                    Message.user(stripped)),
                             null,
                             null,
                             false,
@@ -212,7 +252,11 @@ public class MemoryCompactor {
                             null,
                             null,
                             null)
-                    .withSettings(settings));
+                    .withSettings(settings)
+                    .withTuning(
+                            providerManager == null
+                                    ? null
+                                    : providerManager.resolvedBackgroundTuning(settings, "memory")));
             if (usageTracker != null) {
                 usageTracker.recordAuxiliary(res.usage());
             }
@@ -234,6 +278,17 @@ public class MemoryCompactor {
         if (emitter != null) {
             emitter.emit(AgentEvent.Notice.warn(message, sessionId));
         }
+    }
+
+    /** Whether any {@code bullets} still closely carries a keep line whose text matches {@code keepLine}. */
+    private static boolean bestExists(final String keepLine, final java.util.List<String> bullets) {
+        final var text = MemoryStore.textOf(keepLine);
+        for (final var b : bullets) {
+            if (MemoryStore.textOf(b).equals(text) || (MemoryStore.bestMatch(text, List.of(b)) != null)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void writeState(final long beforeBytes, final long afterBytes) {

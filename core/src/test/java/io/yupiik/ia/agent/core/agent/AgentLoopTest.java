@@ -5140,6 +5140,10 @@ class AgentLoopTest {
 
                     @Override
                     public void asyncExtractNow(final List<Message> messages, final ChatSettings settings) {}
+
+                    @Override
+                    public void asyncExtractNow(
+                            final List<Message> messages, final ChatSettings settings, final boolean eligible) {}
                 },
                 new StatusReporter(),
                 new Emitter() {

@@ -73,12 +73,19 @@ public class ToolCallMarkupStripper {
             "<" + PIPE + "tool_calls" + PIPE + ">" + ".*?(?:</" + PIPE + "tool_calls" + PIPE + ">" + "|\\z)",
             Pattern.DOTALL);
 
+    /** Qwen/Hermes JSON-in-tag: cut a full {@code <tool_call>...</tool_call>} block. */
+    private static final Pattern JSON_TAG_BLOCK = Pattern.compile("<tool_call>.*?</tool_call>", Pattern.DOTALL);
+
+    /** GLM kv: cut a full {@code <tool_call>name<arg_key>...</arg_key>...</tool_call>} block. */
+    private static final Pattern GLM_TAG_BLOCK = Pattern.compile("<tool_call>.*?</tool_call>", Pattern.DOTALL);
+
     private static final Pattern ORPHAN_CLOSERS =
             Pattern.compile("</" + MAYBE_PIPE + "DSML" + PIPE + "(?:tool_calls|invoke)\\s*>"
                     + "|<" + MAYBE_PIPE + "DSML" + PIPE + "end_tools\\s*>"
                     + "|</" + MAYBE_PIPE + "tool_calls" + MAYBE_PIPE + ">"
                     + "|<" + MAYBE_PIPE + "tool" + LOW_LINE + "calls" + LOW_LINE + "end" + MAYBE_PIPE + ">"
-                    + "|<" + MAYBE_PIPE + "tool" + LOW_LINE + "call" + LOW_LINE + "end" + MAYBE_PIPE + ">");
+                    + "|<" + MAYBE_PIPE + "tool" + LOW_LINE + "call" + LOW_LINE + "end" + MAYBE_PIPE + ">"
+                    + "|</tool_call>");
 
     private static final Pattern BLANK_LINES = Pattern.compile("\n{3,}");
 
@@ -95,8 +102,12 @@ public class ToolCallMarkupStripper {
         }
         // Fast path: when no marker family is present at all, the regexes below are pure
         // overhead - the DSML blocks all carry "DSML", the V3.1 markers the lower-one
-        // eighth block glyph, and the ASCII-mangled form still keeps "tool_calls".
-        if (raw.indexOf("DSML") < 0 && raw.indexOf(LOW_LINE) < 0 && raw.indexOf("tool_calls") < 0) {
+        // eighth block glyph, the ASCII-mangled form still keeps "tool_calls", and the
+        // Qwen/Hermes/GLM forms all open with the literal "<tool_call>".
+        if (raw.indexOf("DSML") < 0
+                && raw.indexOf(LOW_LINE) < 0
+                && raw.indexOf("tool_calls") < 0
+                && raw.indexOf("<tool_call>") < 0) {
             return raw;
         }
         var text = raw;
@@ -105,6 +116,8 @@ public class ToolCallMarkupStripper {
         text = LEGACY_TOOL_CALLS_BLOCK.matcher(text).replaceAll("");
         text = LEGACY_TOOL_CALL_BLOCK.matcher(text).replaceAll("");
         text = ASCII_TOOL_CALLS_BLOCK.matcher(text).replaceAll("");
+        text = JSON_TAG_BLOCK.matcher(text).replaceAll("");
+        text = GLM_TAG_BLOCK.matcher(text).replaceAll("");
         text = ORPHAN_CLOSERS.matcher(text).replaceAll("");
         return BLANK_LINES.matcher(text).replaceAll("\n\n").strip();
     }

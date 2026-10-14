@@ -66,6 +66,17 @@
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <!-- allow tests to set the "Host" header explicitly (JreAccessLogger reads it as the CLF client field);
+               java.net.http.HttpClient blocks it by default. Merged with the parent's UTC/locale argLine. -->
+          <systemPropertyVariables>
+            <jdk.httpclient.allowRestrictedHeaders>host</jdk.httpclient.allowRestrictedHeaders>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-compiler-plugin</artifactId>
         <configuration>
           <compilerArgs>
