@@ -151,7 +151,10 @@ public record CodingAgentConfiguration(
         LoggingConfiguration logging,
 
         @Property(documentation = "External-program hook callbacks bound to events (see the hooks reference).")
-        HooksConfiguration hooks) {
+        HooksConfiguration hooks,
+
+        @Property(documentation = "Secret redaction: detect local secrets and keep them off the LLM wire.")
+        SecretRedactionConfiguration secrets) {
 
     /** Whether the typed input is a resume alias (see {@code yca.resumeAliases}). */
     public boolean isResumeAlias(final String input) {
@@ -170,12 +173,26 @@ public record CodingAgentConfiguration(
         return false;
     }
 
+    /**
+     * Expands a leading {@code ~/} to the JVM user home ({@link System#getProperty user.home}),
+     * leaving the value unchanged otherwise. Central home expansion for every configured path that
+     * accepts a {@code ~/...} shorthand (storage home, home root, env files, Maven settings, local
+     * repository, agent/secret files): call this instead of re-implementing the expansion inline. A
+     * bare {@code ~} (no trailing slash) or null/blank is returned as-is.
+     *
+     * @param value the configured path, may be null
+     * @return {@code value} with a leading {@code ~/} replaced by {@code user.home}, else {@code value}
+     */
+    public static String expandHome(final String value) {
+        if (value != null && value.startsWith("~/")) {
+            return System.getProperty("user.home") + value.substring(1);
+        }
+        return value;
+    }
+
     public String resolveStorageHome() {
         var home = storageHome == null || storageHome.isBlank() ? "~/.yupiik/coding-agent" : storageHome;
-        if (home.startsWith("~/")) {
-            home = System.getProperty("user.home") + home.substring(1);
-        }
-        return home;
+        return expandHome(home);
     }
 
     public Path resolveWorkingDir() {
@@ -191,10 +208,7 @@ public record CodingAgentConfiguration(
     }
 
     public String resolveHome() {
-        var value = home == null || home.isBlank() ? System.getProperty("user.home") : home;
-        if (value.startsWith("~/")) {
-            value = System.getProperty("user.home") + value.substring(1);
-        }
-        return value;
+        final var value = home == null || home.isBlank() ? System.getProperty("user.home") : home;
+        return expandHome(value);
     }
 }

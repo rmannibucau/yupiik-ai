@@ -57,6 +57,14 @@ import java.util.regex.Pattern;
  * {@code forceExtractNow()} (session close) is then a watermark no-op, so a
  * clean exit never blocks on the memory call.</p>
  *
+ * <p>Mined facts are written directly to the durable store
+ * ({@link MemoryStore#append}/{@link MemoryStore#appendText}) - live and crash-safe.
+ * The prompt prefix is a session-frozen snapshot (built once, never re-read
+ * mid-session), so the current session already has the facts conversationally and
+ * its frozen memory section never reflects them; they are picked up by the
+ * <em>next</em> session (or a resume) which rebuilds the snapshot. The fact write
+ * is invisible to the current prompt, so it never invalidates the provider cache.</p>
+ *
  * <p>The watermark is an in-memory message-count: side-effect free on crash
  * (nothing to recover - a killed session simply never ran its pass), and
  * re-feeding already extracted messages on resume is harmless thanks to the
@@ -147,6 +155,7 @@ public class MemoryExtractor {
     private final UsageTracker usageTracker;
     private final String sessionId;
     private final MemoryCompactor memoryCompactor;
+    private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
     /** Number of messages already extracted (in-memory watermark). */
     private final AtomicLong watermark = new AtomicLong();
 
@@ -161,7 +170,8 @@ public class MemoryExtractor {
             final Clock clock,
             final UsageTracker usageTracker,
             final String sessionId,
-            final MemoryCompactor memoryCompactor) {
+            final MemoryCompactor memoryCompactor,
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.configuration = configuration;
         this.providerManager = providerManager;
@@ -173,6 +183,7 @@ public class MemoryExtractor {
         this.usageTracker = usageTracker;
         this.sessionId = sessionId;
         this.memoryCompactor = memoryCompactor;
+        this.secretRedactor = secretRedactor;
     }
 
     protected MemoryExtractor() {
@@ -187,6 +198,7 @@ public class MemoryExtractor {
         this.usageTracker = null;
         this.sessionId = null;
         this.memoryCompactor = null;
+        this.secretRedactor = null;
     }
 
     /**
@@ -308,6 +320,8 @@ public class MemoryExtractor {
             return;
         }
         final var excerpt = buildExcerpt(delta);
+        // never let a conversation excerpt (which may carry secrets) reach the memory LLM raw
+        final var redactedExcerpt = secretRedactor == null ? excerpt : secretRedactor.redact(excerpt, sessionId);
         try {
             final var request = new ChatCompletionRequest(
                             memoryModel(settings) == null
@@ -317,7 +331,7 @@ public class MemoryExtractor {
                             List.of(
                                     Message.system(
                                             "Extract durable facts from this conversation excerpt: user preferences, project decisions, long lived knowledge. The response is constrained to the object {\"facts\": [{\"text\": string, \"scope\": \"global\" or \"project\", \"p\": integer 1-5, \"path\": string or null, \"topic\": string or null}]} by the output schema, max 3 facts. Use an empty facts array when nothing is worth remembering. EXCLUDE: transient task state, implementation details (\"X must be fixed / must round-trip\"), plans, undecided choices, and one-off session observations (benchmarks, sandbox paths, single-run results) that will be stale or superseded later. Keep each fact to one short sentence, at most 200 characters. User preferences and cross-project durable rules (\"always use tabs\", \"never edit generated files\") are scope \"global\"; project-specific decisions are scope \"project\". Set p to 5 for an explicit directive the user must keep (eg. they said \"remember\", \"don't forget\" or \"always\"), 4 for strong durable user preferences, else 2. Fill path with the relative file/package the fact is about when obvious (else null), and topic with 1-3 short domain keywords (eg. maven build) to aid retrieval."),
-                                    Message.user(excerpt)),
+                                    Message.user(redactedExcerpt)),
                             null,
                             null,
                             false,
@@ -362,7 +376,9 @@ public class MemoryExtractor {
                     final var project = new ArrayList<String>();
                     for (final var fact : facts) {
                         final var p = Math.max(fact.p(), recall ? 4 : 2);
-                        final var stored = MemoryStore.withMeta(p, fact.topic(), fact.path(), fact.text());
+                        final var safeText =
+                                secretRedactor == null ? fact.text() : secretRedactor.redact(fact.text(), sessionId);
+                        final var stored = MemoryStore.withMeta(p, fact.topic(), fact.path(), safeText);
                         if (stored == null) {
                             continue;
                         }
@@ -384,7 +400,7 @@ public class MemoryExtractor {
                 return;
             }
             // structured output unsupported or rejected: fall back to a plain compression snippet
-            final var snippet = compressExcerpt(excerpt, settings);
+            final var snippet = compressExcerpt(redactedExcerpt, settings);
             if (snippet != null && !snippet.isBlank()) {
                 memoryStore.appendText(false, snippet);
             }
@@ -400,7 +416,7 @@ public class MemoryExtractor {
             // drops the flag, or a transient HTTP failure): save memory via the plain snippet fallback
             // instead of losing the turn, and surface a soft notice with the contextual detail
             try {
-                final var snippet = compressExcerpt(excerpt, settings);
+                final var snippet = compressExcerpt(redactedExcerpt, settings);
                 if (snippet == null || snippet.isBlank()) {
                     notifyFailure("memory extraction (structured facts) failed: " + e.getMessage());
                 } else {

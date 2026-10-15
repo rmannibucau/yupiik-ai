@@ -76,6 +76,7 @@ public class SessionRuntimeFactory {
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
     private final ExecutorService executor;
     private final BashRulesRegistry bashRulesRegistry;
+    private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
 
     public SessionRuntimeFactory(
             final ChatClient chatClient,
@@ -96,7 +97,8 @@ public class SessionRuntimeFactory {
             final Clock clock,
             final PrecisionDurationMarkerProvider precisionDurationMarker,
             final ExecutorService executor,
-            final BashRulesRegistry bashRulesRegistry) {
+            final BashRulesRegistry bashRulesRegistry,
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -116,6 +118,7 @@ public class SessionRuntimeFactory {
         this.precisionDurationMarker = precisionDurationMarker;
         this.executor = executor;
         this.bashRulesRegistry = bashRulesRegistry;
+        this.secretRedactor = secretRedactor;
     }
 
     /**
@@ -147,7 +150,8 @@ public class SessionRuntimeFactory {
                 clock,
                 usage,
                 sessionId,
-                memoryCompactor);
+                memoryCompactor,
+                secretRedactor);
         final var systemPromptBuilder = new SystemPromptBuilder(
                 configuration,
                 memoryStore,
@@ -156,7 +160,8 @@ public class SessionRuntimeFactory {
                 agentProvider,
                 providerManager,
                 todoPromptResolver,
-                mavenRepositoryKnowledge);
+                mavenRepositoryKnowledge,
+                secretRedactor);
         final var loop = new AgentLoop(
                 chatClient,
                 toolRegistry,
@@ -258,5 +263,6 @@ public class SessionRuntimeFactory {
         this.executor = null;
         this.precisionDurationMarker = null;
         this.bashRulesRegistry = null;
+        this.secretRedactor = null;
     }
 }

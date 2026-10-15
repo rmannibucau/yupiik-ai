@@ -69,6 +69,7 @@ public class SubagentRunner {
     protected final PrecisionDurationMarkerProvider precisionDurationMarker;
     protected final ExecutorService executor;
     protected final SubagentRegistry subagentRegistry;
+    protected final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
 
     public SubagentRunner(
             final ChatClient chatClient,
@@ -87,7 +88,8 @@ public class SubagentRunner {
             final Clock clock,
             final ExecutorService executor,
             final SubagentRegistry subagentRegistry,
-            final PrecisionDurationMarkerProvider precisionDurationMarker) {
+            final PrecisionDurationMarkerProvider precisionDurationMarker,
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
@@ -105,6 +107,7 @@ public class SubagentRunner {
         this.executor = executor;
         this.subagentRegistry = subagentRegistry;
         this.precisionDurationMarker = precisionDurationMarker;
+        this.secretRedactor = secretRedactor;
     }
 
     protected SubagentRunner() {
@@ -125,6 +128,7 @@ public class SubagentRunner {
         this.executor = null;
         this.subagentRegistry = null;
         this.precisionDurationMarker = null;
+        this.secretRedactor = null;
     }
 
     public void runAsync(
@@ -205,7 +209,8 @@ public class SubagentRunner {
                 agentProvider,
                 providerManager,
                 todoPromptResolver,
-                mavenRepositoryKnowledge);
+                mavenRepositoryKnowledge,
+                secretRedactor);
         final var subagentContextView = new ContextView();
         final var subagentCompactionCoordinator = new CompactionCoordinator(
                 configuration, chatClient, subagentUsageTracker, providerManager, emitter, state.parentSessionId());

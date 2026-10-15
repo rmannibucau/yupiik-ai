@@ -53,15 +53,22 @@ import java.util.function.Function;
 public class SseExchangeHandler implements Endpoint {
     private final SseBroker broker;
     private final Function<String, List<WebEventDto>> snapshotSource;
+    private final int windowBlocks;
 
     /**
      * @param broker the per-session SSE fan-out hub
      * @param snapshotSource builds the replay event list for a session id from its persisted
      *               messages; called once per SSE connection
+     * @param windowBlocks how many of the most recent replayed events the initial snapshot carries;
+     *               older history is fetched on demand via the session.loadEarlier JSON-RPC so a large
+     *               session loads tail-first (transcript pagination window) instead of shipping its whole
+     *               history in one SSE frame
      */
-    public SseExchangeHandler(final SseBroker broker, final Function<String, List<WebEventDto>> snapshotSource) {
+    public SseExchangeHandler(
+            final SseBroker broker, final Function<String, List<WebEventDto>> snapshotSource, final int windowBlocks) {
         this.broker = broker;
         this.snapshotSource = snapshotSource;
+        this.windowBlocks = Math.max(1, windowBlocks);
     }
 
     @Override
@@ -235,8 +242,21 @@ public class SseExchangeHandler implements Endpoint {
             // the async writer - any agent frame broadcast after registration lands behind it, so the
             // frontend always seeds history before live events. Pushed directly to this subscription,
             // never broadcast, so other tabs keep their live log.
-            subscription.push(broker.snapshotFrame(Map.of("events", snapshotSource.apply(sessionId))));
+            subscription.push(broker.snapshotFrame(snapshotPayload(sessionId)));
             broker.subscribe(sessionId, subscription);
+        }
+
+        /** Builds the tail-first snapshot payload: the last {@code windowBlocks} events plus a cursor hint. */
+        private Map<String, Object> snapshotPayload(final String sessionId) {
+            final var events = snapshotSource.apply(sessionId);
+            final var size = events.size();
+            final var from = Math.max(0, size - windowBlocks);
+            final var tail = events.subList(from, size);
+            return Map.of(
+                    "events", tail,
+                    // total replayed event count so the client knows how much older history remains and
+                    // can call session.loadEarlier with the right cursor.
+                    "total", size);
         }
 
         private void teardown() {

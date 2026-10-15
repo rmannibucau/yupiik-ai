@@ -22,6 +22,7 @@ import io.yupiik.fusion.framework.api.scope.DefaultScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.order.Order;
 import io.yupiik.fusion.json.configuration.JsonConfigurationSource;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -59,8 +60,8 @@ public class YcaConfigurationProducer {
         var home = System.getProperty(PREFIX + "storage.home", System.getenv("YCA_STORAGE_HOME"));
         if (home == null || home.isBlank()) {
             home = System.getProperty("user.home") + "/.yupiik/coding-agent";
-        } else if (home.startsWith("~/")) {
-            home = System.getProperty("user.home") + home.substring(1);
+        } else {
+            home = CodingAgentConfiguration.expandHome(home);
         }
         return Path.of(home, "configuration.json").toString();
     }

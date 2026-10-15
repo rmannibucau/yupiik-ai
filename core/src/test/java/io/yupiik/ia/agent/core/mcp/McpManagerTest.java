@@ -303,7 +303,8 @@ class McpManagerTest {
                 base.prompt(),
                 base.labels(),
                 base.logging(),
-                base.hooks());
+                base.hooks(),
+                null); // secrets (default redaction)
     }
 
     private static void respond(

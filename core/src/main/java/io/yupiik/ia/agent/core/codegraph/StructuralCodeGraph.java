@@ -53,12 +53,12 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
@@ -130,8 +130,17 @@ public class StructuralCodeGraph implements AutoCloseable {
     private volatile List<String> pendingRefreshPaths = List.of();
     private final AtomicBoolean readyStarted = new AtomicBoolean();
     private volatile CompletableFuture<Void> readyFuture;
-    /** Lazily-built read-only query indexes for non-default (per-session) roots, keyed by absolute root. */
-    private final ConcurrentHashMap<Path, CodeGraphIndex> rootIndexes = new ConcurrentHashMap<>();
+    /**
+     * Bounded, refresh-aware query indexes for non-default (per-session) roots, keyed by absolute root. Each entry
+     * caches the read-only {@link CodeGraphIndex} plus the {@code rel -> lastModified} snapshot of the indexed files,
+     * so a later query for the same root re-validates against the live tree (cheap mtime compare) instead of serving
+     * a stale snapshot forever. The cache is bounded (least-recently-used eviction): many distinct web session roots
+     * no longer grow unboundedly.
+     */
+    private final RootIndexCache rootIndexes = new RootIndexCache(16);
+
+    /** A cached per-root index and the mtime snapshot it was built from; {@code builtAt} is the graph clock. */
+    record RootCacheEntry(CodeGraphIndex index, Map<String, Long> mtimes, long builtAt) {}
 
     private final ConcurrentLinkedQueue<PersistJob> persistQueue = new ConcurrentLinkedQueue<>();
     private final AtomicBoolean persistScheduled = new AtomicBoolean();
@@ -485,17 +494,52 @@ public class StructuralCodeGraph implements AutoCloseable {
      * default {@link #queryIndex()} (byte-identical behaviour, one shared index). For any other root
      * a read-only {@link CodeGraphIndex} is built lazily from that root's files (a fresh parse, no
      * persistence, no file watcher) and cached per root, so sessions working on different projects
-     * resolve symbols against their own tree without disturbing the default graph.
+     * resolve symbols against their own tree without disturbing the default graph. Unlike the plain
+     * default graph, the per-root cache has no live file watcher, so each distinct staged root is
+     * re-validated on access: the cached index is served only while its {@code rel -> lastModified}
+     * snapshot still matches the live tree, otherwise the root is re-indexed so edits made under a
+     * per-session root (web {@code session.setProject} / on-the-fly switches) become visible on the
+     * next query instead of an ever-stale snapshot.
      */
     public CodeGraphIndex queryIndex(final Path root) {
         if (root == null || root.equals(projectDir)) {
             return queryIndex();
         }
         final var normalized = root.toAbsolutePath().normalize();
-        if (Files.isDirectory(normalized)) {
-            return rootIndexes.computeIfAbsent(normalized, this::indexRoot);
+        if (!Files.isDirectory(normalized)) {
+            return queryIndex();
         }
-        return queryIndex();
+        var entry = rootIndexes.get(normalized);
+        if (entry == null || isRootStale(normalized, entry)) {
+            entry = indexRoot(normalized);
+            rootIndexes.put(normalized, entry);
+        }
+        return entry.index();
+    }
+
+    /**
+     * True when the cached per-root index no longer reflects the live tree: a timestamp-first, stat-only
+     * comparison between the snapshot the index was built from and the root files on disk now (same fast
+     * guard as the default root's {@link #indexIsFresh()}). Files added or deleted offline change the
+     * indexed-file count; edits advance a {@code lastModified}; either invalidates so the caller rebuilds.
+     * A transient walk failure returns {@code true} (conservative: re-index) rather than serving a stale graph.
+     */
+    private boolean isRootStale(final Path root, final RootCacheEntry entry) {
+        final var walk = new RootMtimes(root);
+        if (walk.snapshot == null) {
+            return true; // a failed walk cannot prove freshness: re-index (idempotent, bounded)
+        }
+        final var now = walk.snapshot;
+        if (now.size() != entry.mtimes().size()) {
+            return true;
+        }
+        for (final var e : now.entrySet()) {
+            final var before = entry.mtimes().get(e.getKey());
+            if (before == null || before.longValue() != e.getValue().longValue()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** Root-aware project directory: the per-session root when one is given, else the process default. */
@@ -520,10 +564,12 @@ public class StructuralCodeGraph implements AutoCloseable {
     /**
      * Builds a fresh read-only {@link CodeGraphIndex} for an arbitrary root without touching the
      * default graph's state: a full watch-free, persistence-free parse of that root's indexable
-     * files, relativized against the root. Used to answer per-session code-graph queries for roots
-     * other than the process default.
+     * files, relativized against the root, plus the {@code rel -> lastModified} snapshot those files
+     * were built from (used by {@link #isRootStale} to detect later edits and re-index on access).
+     * Used to answer per-session code-graph queries for roots other than the process default.
      */
-    private CodeGraphIndex indexRoot(final Path root) {
+    private RootCacheEntry indexRoot(final Path root) {
+        final var snapshot = new HashMap<String, Long>();
         try {
             final var symbols = new ArrayList<GraphModel.Symbol>();
             final var edges = new ArrayList<GraphModel.Edge>();
@@ -544,6 +590,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                             && sizeOk(file)
                             && !isRootIgnored(root, ignore, file)) {
                         files.add(file);
+                        snapshot.put(rootRelative(root, file), lastModified(file));
                     }
                     return FileVisitResult.CONTINUE;
                 }
@@ -588,10 +635,63 @@ public class StructuralCodeGraph implements AutoCloseable {
             }
             final var store = new GraphStore(
                     List.copyOf(symbols), List.copyOf(edges), Map.of(), clock == null ? 0 : clock.millis());
-            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(store)));
+            return new RootCacheEntry(
+                    CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(store))),
+                    Map.copyOf(snapshot),
+                    store.builtAt());
         } catch (final IOException e) {
             LOGGER.warning("Cannot index per-session root " + root + ": " + e.getMessage());
-            return CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(GraphStore.empty())));
+            return new RootCacheEntry(
+                    CodeGraphIndex.load(CodeGraphIndexWriter.toBytes(toIndexGraph(GraphStore.empty()))),
+                    Map.copyOf(snapshot),
+                    clock == null ? 0 : clock.millis());
+        }
+    }
+
+    /**
+     * Stat-only snapshot of a per-session root's indexable files ({@code rel -> lastModified}), used by
+     * {@link #isRootStale} as a cheap freshness guard. Reuses exactly the file selection of
+     * {@link #indexRoot} (parser, size and ignore-filtered). A failed walk leaves {@link #snapshot} null so
+     * callers can treat the root as stale and re-index instead of serving a possibly-incomplete graph.
+     */
+    private final class RootMtimes {
+        private Map<String, Long> snapshot;
+
+        private RootMtimes(final Path root) {
+            final var collect = new HashMap<String, Long>();
+            try {
+                final var ignore = FileIgnore.of(
+                                root, configuration.structuralCodeGraph().effectiveIgnoreGlobs())
+                        .rules();
+                Files.walkFileTree(root, new SimpleFileVisitor<>() {
+                    @Override
+                    public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
+                        return isRootIgnored(root, ignore, dir)
+                                ? FileVisitResult.SKIP_SUBTREE
+                                : FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
+                        if (attrs.isRegularFile()
+                                && parserFor(file) != null
+                                && sizeOk(file)
+                                && !isRootIgnored(root, ignore, file)) {
+                            collect.put(rootRelative(root, file), lastModified(file));
+                        }
+                        return FileVisitResult.CONTINUE;
+                    }
+
+                    @Override
+                    public FileVisitResult visitFileFailed(final Path file, final IOException exc) {
+                        LOGGER.fine(() -> "Skipping unreadable path in per-session root " + root + ": " + file);
+                        return FileVisitResult.CONTINUE;
+                    }
+                });
+                snapshot = Map.copyOf(collect);
+            } catch (final IOException | RuntimeException e) {
+                snapshot = null;
+            }
         }
     }
 
@@ -683,6 +783,31 @@ public class StructuralCodeGraph implements AutoCloseable {
         graph = rebuilt;
         assignIndexFrom(rebuilt);
         return freshness();
+    }
+
+    /**
+     * Root-aware re-sync: for the process default root (or {@code null}) this is exactly {@link #resync()}; for any
+     * other root it force-rebuilds that root's cached per-session index (invalidate + re-parse) regardless of the
+     * mtime freshness gate, so a web caller can explicitly refresh a session's active project root on demand. The
+     * default root keeps its full persisted+watched path; only the per-root cache entry is touched here.
+     *
+     * @return a short human-readable status describing the resync.
+     */
+    public String resync(final Path root) {
+        if (!enabled()) {
+            return "disabled (enable yca.structural-code-graph.enabled)";
+        }
+        if (root == null || root.equals(projectDir)) {
+            return resync();
+        }
+        final var normalized = root.toAbsolutePath().normalize();
+        if (!Files.isDirectory(normalized)) {
+            return "not a directory: " + normalized;
+        }
+        final var entry = indexRoot(normalized);
+        rootIndexes.put(normalized, entry);
+        return "resynced per-session root " + normalized + ": symbols="
+                + entry.index().symbolCount() + " edges=" + entry.index().edgeCount();
     }
 
     public void onBeforeTool(@OnEvent final BeforeToolExecutionEvent event) {
@@ -1491,5 +1616,38 @@ public class StructuralCodeGraph implements AutoCloseable {
             return;
         }
         WiringGraphWriter.write(mapper, storeRoot, g, docEnricher.cache());
+    }
+
+    /**
+     * A small bounded, access-ordered cache of per-root code graph indexes. Reads refresh LRU recency; the oldest
+     * entry (by last access) is evicted once the size exceeds the bound, so a web server switching many sessions
+     * across distinct project roots never accumulates an unbounded set of in-memory indexes. Lookups/builds that
+     * read the disk are done by the caller outside the lock; only the map get/put is synchronized (contention is a
+     * single cache slot touch per tool call, negligible compared with the index builds themselves).
+     */
+    static final class RootIndexCache {
+        private final int max;
+        private final LinkedHashMap<Path, RootCacheEntry> map;
+
+        RootIndexCache(final int max) {
+            this.max = Math.max(1, max);
+            this.map = new LinkedHashMap<>(16, 0.75f, true);
+        }
+
+        synchronized RootCacheEntry get(final Path root) {
+            return map.get(root);
+        }
+
+        synchronized void put(final Path root, final RootCacheEntry entry) {
+            map.put(root, entry);
+            while (map.size() > max) {
+                final var eldest = map.keySet().iterator().next();
+                map.remove(eldest);
+            }
+        }
+
+        synchronized int size() {
+            return map.size();
+        }
     }
 }

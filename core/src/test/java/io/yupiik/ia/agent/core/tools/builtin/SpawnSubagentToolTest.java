@@ -108,7 +108,8 @@ class SpawnSubagentToolTest {
                 null,
                 null,
                 registry,
-                new PrecisionDurationMarkerProvider()) {
+                new PrecisionDurationMarkerProvider(),
+                null) {
             @Override
             public void runAsync(
                     final SubagentRegistry.SubagentState state,
@@ -233,7 +234,8 @@ class SpawnSubagentToolTest {
                         null,
                         null,
                         reg,
-                        new PrecisionDurationMarkerProvider()) {
+                        new PrecisionDurationMarkerProvider(),
+                        null) {
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,
@@ -297,7 +299,8 @@ class SpawnSubagentToolTest {
                         null,
                         null,
                         reg,
-                        new PrecisionDurationMarkerProvider()) {
+                        new PrecisionDurationMarkerProvider(),
+                        null) {
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,
@@ -341,7 +344,8 @@ class SpawnSubagentToolTest {
                         null,
                         null,
                         reg,
-                        new PrecisionDurationMarkerProvider()) {
+                        new PrecisionDurationMarkerProvider(),
+                        null) {
                     @Override
                     public void runAsync(
                             final SubagentRegistry.SubagentState state,

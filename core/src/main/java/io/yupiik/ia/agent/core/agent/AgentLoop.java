@@ -44,6 +44,7 @@ import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
@@ -295,6 +296,76 @@ public class AgentLoop {
      * by the truncation/empty-completion branches.
      */
     private volatile boolean lastRequestProducedReasoning;
+
+    /**
+     * Streaming splitter for models that inline their reasoning in the text channel (GLM/Qwen /
+     * deepseek-flash served with {@code think} tags inside {@code content} rather than a dedicated
+     * {@code reasoning_content}). Every wire {@code TextDelta} is fed through it and emitted as
+     * pre-classified {@link AgentEvent.ThinkingDelta} / {@link AgentEvent.TextDelta} events, so ALL
+     * frontends (TUI, web SSE, subagent transcripts) receive the same classification from this one
+     * shared parser - the web frontend never has to re-parse. Reset per stream attempt (a retry is a
+     * fresh generation). Null-safe no-op for providers that stream reasoning through the dedicated
+     * channel (a clean {@code content} passes straight through as visible).
+     */
+    private ThinkTagSplitter.Parser inlineSplitter;
+
+    /**
+     * Reserved {@code others} key on a persisted assistant {@link Message} carrying the reasoning
+     * text produced alongside the answer (dedicated channel or inline think-tags). Stored only for
+     * replay rendering ({@code WebReplay} reconstructs {@code thinking-delta} events from it); never
+     * sent to the LLM - {@code others} is stripped at every wire boundary.
+     */
+    static final String THINKING_KEY = "thinking";
+
+    /** Reasoning text accumulated for the current LLM request, attached to the persisted message. */
+    private final StringBuilder accumulatedThinking = new StringBuilder();
+
+    /** Resets the inline-reasoning splitter for a fresh stream attempt (a retry is a new generation). */
+    private void resetInlineSplitter() {
+        inlineSplitter = new ThinkTagSplitter().create();
+        accumulatedThinking.setLength(0);
+    }
+
+    /**
+     * Feeds a wire {@code TextDelta} through the inline-reasoning splitter and emits the classified
+     * segments as separate {@link AgentEvent.ThinkingDelta} / {@link AgentEvent.TextDelta} events.
+     * When the model streams reasoning through a dedicated channel the splitter sees a clean
+     * {@code content} and emits a single visible {@code TextDelta} - a no-op aside from the one
+     * extra parser pass.
+     */
+    private void dispatchTextDelta(final String text) {
+        final var parsed = inlineSplitter == null ? null : inlineSplitter.feed(text);
+        // an empty return only happens when the whole delta was absorbed into the parser's bounded
+        // hold-tail (a candidate delimiter fragment): emit nothing now, the content surfaces when the
+        // parser emits it as part of a later feed/flush. Emitting the raw text here would both leak a
+        // partial think-tag AND duplicate the tail once the parser drains it.
+        if (parsed == null || parsed.isEmpty()) {
+            return;
+        }
+        for (final var segment : parsed) {
+            if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
+                accumulatedThinking.append(segment.text());
+                emit(thinkingDelta(segment.text()));
+            } else {
+                emit(textDelta(segment.text()));
+            }
+        }
+    }
+
+    /** Flushes the bounded hold-tail of the inline splitter at stream end so no answer tail is lost. */
+    private void dispatchInlineSplitterFlush() {
+        if (inlineSplitter == null) {
+            return;
+        }
+        for (final var segment : inlineSplitter.flush()) {
+            if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
+                accumulatedThinking.append(segment.text());
+                emit(thinkingDelta(segment.text()));
+            } else {
+                emit(textDelta(segment.text()));
+            }
+        }
+    }
 
     /**
      * Whether the turn just ended on a real, non-empty model reply (a {@code TurnDone} with
@@ -599,6 +670,30 @@ public class AgentLoop {
     }
 
     /**
+     * Background (auxiliary) LLM spend: calls and tokens that never appear as conversation turns
+     * (memory extraction, compaction summarizer, sub-agent fold-in). The middleware measures these
+     * too, so exposing them lets the app self-report match the middleware and makes background cost
+     * visible instead of hidden. Returns all zeros when no usage tracker is wired.
+     */
+    public AuxiliaryUsage auxiliaryUsage() {
+        if (usageTracker == null) {
+            return AuxiliaryUsage.ZERO;
+        }
+        return new AuxiliaryUsage(
+                usageTracker.auxiliaryRequests(),
+                usageTracker.auxiliaryPromptTokens(),
+                usageTracker.auxiliaryCompletionTokens(),
+                usageTracker.auxiliaryCacheReadTokens(),
+                usageTracker.auxiliaryFreshTokens());
+    }
+
+    /** Background (auxiliary) LLM spend counters, captured read-only for metrics/reporting. */
+    public record AuxiliaryUsage(
+            long calls, long promptTokens, long completionTokens, long cacheReadTokens, long freshTokens) {
+        static final AuxiliaryUsage ZERO = new AuxiliaryUsage(0, 0, 0, 0, 0);
+    }
+
+    /**
      * Rebuilds - without calling the provider - the request the next round would carry right now:
      * the same system prefix {@code doRun} assembles, the persisted transcript and a freshly
      * computed volatile tail. It is a preview and not a history: the memory refresh, the context
@@ -614,7 +709,7 @@ public class AgentLoop {
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(prompt, null) + snapshotBlock(sessionId)));
         messages.addAll(history);
-        appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart(), toolsTokens);
+        appendStateIfChanged(sessionId, messages, prompt, toolsTokens);
         final var resolved = resolvedModel();
         return new LlmPayload(
                 sessionId,
@@ -801,7 +896,7 @@ public class AgentLoop {
         }
 
         try {
-            return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt, memoryVersionAtStart());
+            return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt);
         } catch (final IOException e) {
             if ("Cancelled".equals(e.getMessage())) {
                 // user interrupt surfaced through the stream/backoff paths: a normal end,
@@ -829,27 +924,67 @@ public class AgentLoop {
             // would filter empty deltas anyway), and extraction while the app is already idle
             // waiting for the next input means the close paths never need to block on it.
             if (memoryExtractor != null && lastTurnEndedWithContent) {
-                // cadence + todo-completion gating: extract every extractEveryTurns user turns
-                // (0/negative = never periodic), or immediately when a todo just finished.
-                // A resume counts as a user turn here too (it re-mines the pending delta; the
-                // conservative effect is slightly more frequent extraction, never less).
-                if (userMessage != null) {
-                    turnCount++;
-                    final var cfg = configuration.memory();
-                    final var every = cfg.extractEveryTurns();
-                    final var finishedNow = finishedTodos();
-                    final var todoFlush = cfg.extractOnTodosDone()
-                            && !finishedNow.isEmpty()
-                            && !lastFinishedTodos.containsAll(finishedNow);
-                    lastFinishedTodos = finishedNow;
-                    final var cadence = every > 0 && turnCount % every == 0;
-                    memoryExtractor.asyncExtractNow(messages, chatSettings, cadence || todoFlush);
+                // Mode-driven extraction cadence. The prompt prefix is built once per session and
+                // never re-read mid-session, so the memory.mode governs only the durability cadence,
+                // not what the current turn sees. LAZY extracts only at a natural milestone (all
+                // todos done) or session close; FULL keeps the every-N-turns cadence plus the
+                // todo-completion flush; AUTO picks LAZY when the memory model is the main model
+                // (extraction is then expensive), FULL when it routes to a distinct/cheaper model.
+                final var mode = configuration.memory().mode();
+                final var regimeLazy =
+                        switch (mode) {
+                            case FULL -> false;
+                            case LAZY -> true;
+                            case AUTO -> providerManager != null && providerManager.memoryUsesMainModel(chatSettings);
+                        };
+                final boolean eligible;
+                if (regimeLazy) {
+                    // LAZY: extract only when all todos are done (empty of pending items;
+                    // completed/cancelled allowed). A resume counts as a user turn here too.
+                    eligible = userMessage != null && !hasPendingTodos();
                 } else {
-                    // no user message at all (empty replay): keep the legacy every-turn behavior
-                    // so the pending delta is still mined when eligible
-                    memoryExtractor.asyncExtractNow(messages, chatSettings, true);
+                    // FULL/AUTO-full: cadence + todo-completion gating kept as-is (extract every
+                    // extractEveryTurns user turns, or immediately when a todo just finished).
+                    if (userMessage != null) {
+                        turnCount++;
+                        final var cfg = configuration.memory();
+                        final var every = cfg.extractEveryTurns();
+                        final var finishedNow = finishedTodos();
+                        final var todoFlush = cfg.extractOnTodosDone()
+                                && !finishedNow.isEmpty()
+                                && !lastFinishedTodos.containsAll(finishedNow);
+                        lastFinishedTodos = finishedNow;
+                        final var cadence = every > 0 && turnCount % every == 0;
+                        eligible = cadence || todoFlush;
+                    } else {
+                        // no user message at all (empty replay): keep the legacy every-turn behavior
+                        // so the pending delta is still mined when eligible
+                        eligible = true;
+                    }
+                }
+                memoryExtractor.asyncExtractNow(messages, chatSettings, eligible);
+            }
+        }
+    }
+
+    /**
+     * Whether the todo store still has at least one pending item (not completed/cancelled). The
+     * LAZY memory regime extracts only when this is false - a natural milestone with no open task.
+     * An empty or absent todo list (or a store that throws) reports no pending items.
+     */
+    private boolean hasPendingTodos() {
+        if (todoStore == null) {
+            return false;
+        }
+        try {
+            for (final var item : todoStore.all()) {
+                if (!"completed".equals(item.status()) && !"cancelled".equals(item.status())) {
+                    return true;
                 }
             }
+            return false;
+        } catch (final RuntimeException e) {
+            return false;
         }
     }
 
@@ -1073,8 +1208,7 @@ public class AgentLoop {
             final List<Message> messages,
             final String prompt,
             final BooleanSupplier cancelled,
-            final Supplier<String> queuedPrompt,
-            final int memoryVersionAtStart)
+            final Supplier<String> queuedPrompt)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         // iteration window cap cascade: per-model behavior > per-provider tuning > global default;
@@ -1106,6 +1240,10 @@ public class AgentLoop {
         // it, so its text-only end answers that message and must not be treated as "stopped early"
         var userInjected = false;
         final var staleReads = new StaleReads(readsFromHistory(messages));
+        // heal interrupted/cancelled history before the first request: an assistant tool_use whose
+        // result never landed (turn ended mid-tool via cancel/interrupt/error) must be answered by a
+        // lost-result marker so Anthropic's tool_use -> tool_result contiguity rule holds on the wire.
+        repairInterruptedToolCalls(sessionId, messages);
 
         // Reset per-turn metrics
         turnLlmCalls = 0;
@@ -1197,7 +1335,7 @@ public class AgentLoop {
                 // exact bytes plus the tokens appended since. Nothing previously sent is ever moved or
                 // rewritten, so provider-side prefix caches (llama.cpp slot LCP with f_keep ~ 1.0,
                 // token-level gateways) keep matching instead of diverging mid-conversation.
-                appendStateIfChanged(sessionId, messages, prompt, memoryVersionAtStart, toolsTokens);
+                appendStateIfChanged(sessionId, messages, prompt, toolsTokens);
                 // snapshot of what goes on the wire, for /context llm-payload: taken here so it
                 // carries the pruned/compacted list and the volatile tail, and copied because the
                 // live list keeps growing (messages/tools are immutable, so a shallow copy is enough)
@@ -1206,14 +1344,20 @@ public class AgentLoop {
                 // while busy lands on this round instead of only on the next turn
                 attachSessionSettings();
                 final var model = requestModel(resolved);
+                // secret redaction: let observer(s) (the default SecretRedactor, or custom
+                // extensions) transform the outgoing messages before they reach the provider
+                final var outbound =
+                        new io.yupiik.ia.agent.core.security.OutboundLlmFilter(messages, chatSettings, sessionId);
+                emitter.emit(outbound);
+                final var wireMessages = outbound.messages();
                 lastLlmPayload = new LlmPayload(
-                        sessionId, model, List.copyOf(messages), List.copyOf(tools), "auto", toolsTokens);
+                        sessionId, model, List.copyOf(wireMessages), List.copyOf(tools), "auto", toolsTokens);
                 final var request = new ChatCompletionRequest(
-                                model, messages, null, null, null, tools, "auto", null, null, null)
+                                model, wireMessages, null, null, null, tools, "auto", null, null, null)
                         .withSettings(chatSettings);
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
                 final var finishReason = new String[] {null};
-                final Message assistant;
+                Message assistant;
                 final long llmStartNanos;
                 final long pausedBeforeMs = turnLlmPausedMs;
                 try {
@@ -1250,6 +1394,21 @@ public class AgentLoop {
                     throw e;
                 }
                 usageTracker.record(usage[0]);
+                // inbound restore: replace provenance fakes in the assistant reply with the real
+                // values (only what we emitted outbound; model-invented token shapes stay as-is)
+                final var inbound = new io.yupiik.ia.agent.core.security.InboundLlmResponse(
+                        assistant.content() instanceof String s ? s : str(assistant.content()), sessionId);
+                emitter.emit(inbound);
+                final var restored = inbound.restored();
+                if (!restored.equals(str(assistant.content()))) {
+                    assistant = new Message(
+                            assistant.role(),
+                            restored,
+                            assistant.name(),
+                            assistant.toolCalls(),
+                            assistant.toolCallId(),
+                            assistant.others());
+                }
                 // throughput: time spent generating, idle time excluded. A request refused because the
                 // context window is too small contributes nothing (it is a preflight, not a generation).
                 recordThroughput(
@@ -1270,10 +1429,18 @@ public class AgentLoop {
                                 assistant.toolCalls(),
                                 null,
                                 null,
-                                identityOthers(currentAgentName)));
+                                identityAndThinking(currentAgentName)));
                 emitUsage(messages, toolsTokens);
 
-                if (integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
+                // When the reply carries tool calls, do NOT absorb a queued prompt here (before the
+                // tools run): injecting a plain user text message between the assistant tool_use and
+                // its tool_result blocks would break Anthropic's strict pairing rule ("tool_use ids
+                // were found without tool_result blocks immediately after"), a hard 400 on
+                // Anthropic/Azure AI Gateway. Fall through to executeToolCalls first so the tool_result
+                // blocks stay contiguous; the queued prompt is then absorbed at the next top-of-iteration
+                // check (integrateQueuedPrompt at the loop head) once the tool round has landed.
+                if ((assistant.toolCalls() == null || assistant.toolCalls().isEmpty())
+                        && integrateQueuedPrompt(sessionId, messages, queuedPrompt)) {
                     userInjected = true;
                     continue;
                 }
@@ -1504,17 +1671,12 @@ public class AgentLoop {
      * gateways) keep matching with f_keep ~ 1.0 like opencode instead of diverging mid-conversation.
      */
     private void appendStateIfChanged(
-            final String sessionId,
-            final List<Message> messages,
-            final String prompt,
-            final int memoryVersionAtTurnStart,
-            final int toolsTokens) {
+            final String sessionId, final List<Message> messages, final String prompt, final int toolsTokens) {
         // The tail keeps a stable compact shape across every request so the prefix (system +
         // user + tail) stays byte-identical and provider prompt caches keep hitting; only the
         // todo list (delta of what changed) and the usage line move between requests.
         final var state = "<session-state>\n"
                 + systemPromptBuilder.sessionStateDelta()
-                + memoryRefresh(prompt, memoryVersionAtTurnStart)
                 + contextUsageLine(messages, toolsTokens)
                 + nudgeBlock(messages, toolsTokens)
                 + snapshotBlock(sessionId)
@@ -1534,48 +1696,6 @@ public class AgentLoop {
 
     private static boolean isVolatileTail(final Message message) {
         return message.others() != null && Boolean.TRUE.equals(message.others().get("volatileTail"));
-    }
-
-    /**
-     * Memory version captured once at turn start (see {@code doRun}): the durable memory already
-     * sits in the stable system prefix built by {@code SystemPromptBuilder.build}, so the volatile
-     * tail only re-appends the memory section when a mid-turn {@code memory_write} changed it.
-     */
-    private int memoryVersionAtStart() {
-        return systemPromptBuilder.memoryVersion();
-    }
-
-    /**
-     * The memory section to append to the volatile tail: empty when memory did not change since the
-     * turn started (it is already in the stable prefix), the fresh section otherwise (a mid-turn
-     * {@code memory_write} must be visible to the next rounds).
-     */
-    private String memoryRefresh(final String prompt, final int memoryVersionAtTurnStart) {
-        if (systemPromptBuilder.memoryVersion() == memoryVersionAtTurnStart) {
-            return "";
-        }
-        // Mid-turn memory write: re-send only the facts that changed since the last tail
-        // (the durable full memory sits in the stable system prefix, built once per turn).
-        final var store = memoryStoreAccess();
-        if (store == null) {
-            return "";
-        }
-        final var diff = store.drainPendingDiff(currentSessionId);
-        if (diff.isEmpty()) {
-            // version bumped but nothing drained yet (external edit): fall back to full section
-            final var section = systemPromptBuilder.memorySection(prompt);
-            return section.isBlank() ? "" : "\n" + section + "\n";
-        }
-        final var sb = new StringBuilder("\n<memory-diff>\n");
-        for (final var fact : diff) {
-            sb.append(fact).append('\n');
-        }
-        sb.append("</memory-diff>\n");
-        return sb.toString();
-    }
-
-    private io.yupiik.ia.agent.core.memory.MemoryStore memoryStoreAccess() {
-        return systemPromptBuilder.memoryStore();
     }
 
     private void emitTurnMetrics(final String content, final long turnStartNanos) {
@@ -1796,6 +1916,29 @@ public class AgentLoop {
             // (unit tests, bootstrapping) must never break a turn
             return null;
         }
+    }
+
+    /**
+     * The {@code others} map persisted with an assistant message: the producer identity (as
+     * {@link #identityOthers}) merged with the accumulated reasoning text (under {@link #THINKING_KEY}),
+     * so a later replay can re-render the thought blocks. The identity members are captured at write
+     * time; the thinking is whatever streamed for this request. Never sent to the LLM ({@code others}
+     * is stripped at every wire boundary). Returns {@code null} when there is nothing to persist.
+     */
+    private Map<String, Object> identityAndThinking(final String agentName) {
+        final var identity = identityOthers(agentName);
+        final var thinking = accumulatedThinking.toString().strip();
+        if (identity == null && (thinking.isEmpty() || thinking.isBlank())) {
+            return null;
+        }
+        final var others = new LinkedHashMap<String, Object>();
+        if (identity != null) {
+            others.putAll(identity);
+        }
+        if (thinking != null && !thinking.isEmpty() && !thinking.isBlank()) {
+            others.put(THINKING_KEY, thinking);
+        }
+        return others;
     }
 
     private void persistContext(final String sessionId, final List<Message> messages) {
@@ -2109,6 +2252,7 @@ public class AgentLoop {
         // a fresh generation starts here: whether it produces reasoning (and may burn its whole
         // output budget thinking) is observed per-attempt by dispatch()
         lastRequestProducedReasoning = false;
+        resetInlineSplitter();
         for (var attempt = 1; attempt <= maxAttempts; attempt++) {
             if (cancelled.getAsBoolean()) {
                 throw new IOException("Cancelled");
@@ -3182,6 +3326,60 @@ public class AgentLoop {
     }
 
     /**
+     * Heals history where an assistant {@code tool_use} never got an answer (the turn ended mid-tool via
+     * cancel/interrupt/error). Anthropic requires every {@code tool_use} to be immediately answered by a
+     * {@code tool_result}; a dangling one makes the gateway reject the whole request with "tool_use ids
+     * were found without tool_result blocks immediately after". A synthetic lost-result marker is inserted
+     * IN-MEMORY immediately after each dangling assistant message - so whatever follows (a freshly appended
+     * user prompt, later turns) never sits between the {@code tool_use} and its result on the wire - and
+     * persisted via the append-only session store. Idempotent: ids that already carry a {@code tool}-role
+     * result anywhere in the history are skipped, so a repaired history is not re-repaired.
+     *
+     * @param sessionId the session being resumed.
+     * @param messages the working conversation, rebuilt per {@code loop()}, repaired in place.
+     */
+    private void repairInterruptedToolCalls(final String sessionId, final List<Message> messages) {
+        if (messages == null || messages.isEmpty()) {
+            return;
+        }
+        final var answered = new HashSet<String>();
+        for (final var message : messages) {
+            if ("tool".equals(message.role()) && message.toolCallId() != null) {
+                answered.add(message.toolCallId());
+            }
+        }
+        final var repaired = new ArrayList<Message>(messages.size() + 8);
+        final var persistedIds = new LinkedHashSet<String>();
+        final var text = "[tool result lost: the model's tool call was interrupted before it could complete this turn]";
+        for (final var message : messages) {
+            repaired.add(message);
+            if (!"assistant".equals(message.role()) || message.toolCalls() == null) {
+                continue;
+            }
+            for (final var call : message.toolCalls()) {
+                if (call == null || call.id() == null || answered.contains(call.id())) {
+                    continue;
+                }
+                // drop the now-answered id so a later duplicate assistant call of the same id is not answered twice
+                answered.add(call.id());
+                repaired.add(Message.tool(call.id(), text, true));
+                if (persistedIds.add(call.id())) {
+                    sessionStore.append(
+                            sessionId,
+                            SessionEntry.of(
+                                    clock.millis(), "tool", text, null, call.id(), null, Map.of("is_error", true)));
+                }
+            }
+        }
+        if (persistedIds.isEmpty()) {
+            return;
+        }
+        messages.clear();
+        messages.addAll(repaired);
+        emit(status("repaired " + persistedIds.size() + " interrupted tool call(s) whose result never landed"));
+    }
+
+    /**
      * Compact stale-read suffix appended to a successful write tool's own result message.
      * Directs the model to NOT re-read now (the write just applied and the model knows what it
      * wrote), but TO re-read before any later edit of the same file — so a future edit is never
@@ -3238,7 +3436,7 @@ public class AgentLoop {
                 turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
                 thinkingActive = false;
             }
-            emit(textDelta(text));
+            dispatchTextDelta(text);
         } else if (delta instanceof ReasoningDelta(final String text)) {
             if (!thinkingActive) {
                 thinkingActive = true;
@@ -3248,8 +3446,13 @@ public class AgentLoop {
             // completion after reasoning means the output budget was spent thinking, and a
             // context-identical retry would only re-derive the same thoughts (P3)
             lastRequestProducedReasoning = true;
+            accumulatedThinking.append(text);
             emit(thinkingDelta(text));
         } else if (delta instanceof End(final String reason, final Usage upper)) {
+            // drain whatever the inline splitter still held for this generation (a trailing
+            // inline-code backtick, a fence tail or an unclosed think delimiter split across the
+            // last chunks), so no partial answer tail is lost at stream end
+            dispatchInlineSplitterFlush();
             if (thinkingActive) {
                 turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
                 thinkingActive = false;

@@ -97,10 +97,6 @@ public class MemoryWriteTool implements EmbeddedTool {
             return ToolResult.error("fact is required");
         }
         final var added = memoryStore.append(global, List.of(stored));
-        if (!added.isEmpty() && context != null) {
-            // record the per-session diff so the wire tail can re-send only what changed
-            memoryStore.recordDiff(context.sessionId(), added);
-        }
         return added.isEmpty()
                 ? ToolResult.ok("Already remembered (or skipped).")
                 : ToolResult.ok("Remembered (" + (global ? "global" : "project") + "): " + added.get(0));

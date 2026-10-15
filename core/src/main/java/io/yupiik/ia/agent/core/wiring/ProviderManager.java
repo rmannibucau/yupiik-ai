@@ -227,6 +227,33 @@ public class ProviderManager {
     }
 
     /**
+     * True when the memory background model resolves to the same effective model id as the
+     * session's main model. When the models are identical, extraction is as expensive as a
+     * main-turn call, so the AUTO memory mode picks the LAZY (rare) extraction regime; a
+     * distinct (usually cheaper) memory model makes eager FULL extraction the default. If
+     * either side resolves to the provider default/blank, it is treated as the same model
+     * (conservative -> LAZY). Uses only the {@link #resolveModel} / {@link #resolvedMemory}
+     * resolution helpers.
+     */
+    public boolean memoryUsesMainModel(final ChatSettings settings) {
+        final var effective = settings == null ? ChatSettings.EMPTY : settings;
+        final var provider = provider(effective.providerId());
+        final var mainRef = effective.model() != null
+                ? effective.model()
+                : (provider == null || provider.model() == null ? null : provider.model());
+        final var main = mainRef == null ? null : resolveModel(mainRef);
+        if (main == null || main.isBlank()) {
+            return true; // no explicit main model -> default; treat as same to be safe
+        }
+        final var mem = resolvedMemory(effective);
+        if (mem == null || mem.isBlank()) {
+            return true; // memory falls back to the default model -> same
+        }
+        final var resolvedMem = resolve(mem);
+        return main.equals(resolvedMem == null ? mem : resolvedMem.model());
+    }
+
+    /**
      * The tuning payload (temperature / maxTokens / reasoningEffort / topP / topK / extra) resolved
      * for a background path, following the same provider -> inherit -> global chain as the model
      * name. Returns the effective {@link ModelVariantConfiguration} (may be null when nothing is

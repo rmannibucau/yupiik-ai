@@ -165,6 +165,118 @@ class StructuralCodeGraphTest {
     }
 
     @Test
+    void perSessionRootReflectsEditsTouchedFilesOnNextQuery() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(
+                project.resolve("root-only.java"), "package demo;\npublic class RootOnly { public void run() {} }\n");
+
+        final var config = config(project, Map.of());
+        final var graph = newGraph(config, mapper);
+
+        // a distinct per-session root (web could point a session here)
+        final var work = Files.createDirectory(temp.resolve("work"));
+        Files.writeString(work.resolve("pom.xml"), "<project/>");
+        Files.writeString(work.resolve("Foo.java"), """
+                package work;
+                public class Foo {
+                    public void a() {}
+                }
+                """);
+
+        // first query builds the per-root index lazily
+        final var idx1 = graph.queryIndex(work);
+        assertNotNull(idx1, "expected a lazily built per-root index");
+        assertNotNull(idx1.resolve("work.Foo"), "first query should resolve the freshly built symbol");
+        assertTrue(idx1.resolve("work.Baz") == null, "Baz not yet present");
+
+        // a later edit under the root must be visible on the NEXT query (refresh-on-access),
+        // not served from an ever-stale snapshot. Force a distinct mtime to be filesystem-agnostic.
+        final var foo = work.resolve("Foo.java");
+        Files.writeString(foo, """
+                package work;
+                public class Foo {
+                    public void a() {}
+                    public void baz() {}
+                }
+                """);
+        Files.setLastModifiedTime(foo, FileTime.fromMillis(System.currentTimeMillis() + 5000));
+        final var idx2 = graph.queryIndex(work);
+        assertNotNull(idx2.resolve("work.Foo.baz"), "edited symbol must be visible after refresh-on-access");
+    }
+
+    @Test
+    void perSessionRootTracksAddedAndDeletedFiles() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+
+        final var config = config(project, Map.of());
+        final var graph = newGraph(config, mapper);
+
+        final var work = Files.createDirectory(temp.resolve("work"));
+        Files.writeString(work.resolve("Bar.java"), "package work;\npublic class Bar { public void run() {} }\n");
+
+        final var idx1 = graph.queryIndex(work);
+        assertNotNull(idx1.resolve("work.Bar"));
+        assertTrue(idx1.resolve("work.NewBar") == null);
+
+        // adding an indexed file offline changes the file count -> next query re-indexes
+        Files.writeString(work.resolve("NewBar.java"), "package work;\npublic class NewBar { public void run() {} }\n");
+        final var idx2 = graph.queryIndex(work);
+        assertNotNull(idx2.resolve("work.NewBar"), "a file added offline must be indexed on the next query");
+
+        // deleting an indexed file offline changes the count -> next query drops it
+        Files.delete(work.resolve("Bar.java"));
+        final var idx3 = graph.queryIndex(work);
+        assertTrue(idx3.resolve("work.Bar") == null, "a deleted file must be dropped on the next query");
+        assertNotNull(idx3.resolve("work.NewBar"), "the surviving file must still be indexed");
+    }
+
+    @Test
+    void perSessionRootResyncForcesFreshIndex() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project/>");
+        Files.writeString(project.resolve("Foo.java"), "package demo;\npublic class Foo { public void run() {} }\n");
+
+        final var config = config(project, Map.of());
+        final var graph = newGraph(config, mapper);
+
+        final var work = Files.createDirectory(temp.resolve("work"));
+        Files.writeString(work.resolve("pom.xml"), "<project/>");
+        Files.writeString(work.resolve("A.java"), "package work;\npublic class A { public void run() {} }\n");
+
+        final var idx1 = graph.queryIndex(work);
+        assertNotNull(idx1.resolve("work.A"));
+        assertTrue(idx1.resolve("work.B") == null);
+
+        // resync(root) must re-index the per-session root regardless of the mtime freshness gate
+        Files.writeString(work.resolve("B.java"), "package work;\npublic class B { public void run() {} }\n");
+        final var status = graph.resync(work);
+        assertTrue(status.contains("symbols="), "resync(root) should report a symbol count");
+        final var idx2 = graph.queryIndex(work);
+        assertTrue(idx2.symbolCount() >= 2, "resync(root) must surface newly added files");
+        assertNotNull(idx2.resolve("work.B"));
+    }
+
+    @Test
+    void perRootCacheIsBoundedByLru() {
+        final var cache = new StructuralCodeGraph.RootIndexCache(2);
+        final var a = new StructuralCodeGraph.RootCacheEntry(null, Map.of("a", 1L), 1L);
+        final var b = new StructuralCodeGraph.RootCacheEntry(null, Map.of("b", 2L), 2L);
+        final var c = new StructuralCodeGraph.RootCacheEntry(null, Map.of("c", 3L), 3L);
+        cache.put(Path.of("/r/a"), a);
+        cache.put(Path.of("/r/b"), b);
+        // access /a so /b becomes the least-recently used
+        assertEquals(a, cache.get(Path.of("/r/a")));
+        cache.put(Path.of("/r/c"), c);
+        assertEquals(2, cache.size(), "cache must stay within its bound");
+        assertNotNull(cache.get(Path.of("/r/a")));
+        assertNotNull(cache.get(Path.of("/r/c")));
+        assertTrue(cache.get(Path.of("/r/b")) == null, "the least-recently used entry must be evicted");
+    }
+
+    @Test
     void buildsRefreshAndPersists() throws Exception {
         final var project = Files.createDirectory(temp.resolve("project"));
         Files.writeString(project.resolve("pom.xml"), "<project/>");

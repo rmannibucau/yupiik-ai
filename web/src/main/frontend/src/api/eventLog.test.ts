@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { eventsToBlocks, renderWindow, latestDrainBoundary } from './eventLog';
+import { eventsToBlocks, renderWindow, latestDrainBoundary, lossySupersedes } from './eventLog';
 import type { WebEvent } from './useSessionStream';
 
 function ev(partial: Partial<WebEvent> & { type: string; sessionId: string }): WebEvent {
@@ -38,6 +38,105 @@ describe('eventsToBlocks', () => {
     // btw frames must not create a block nor disturb the transcript graph
     expect(blocks.map((b) => b.kind)).toEqual(['user', 'text']);
     expect(blocks[1]).toMatchObject({ kind: 'text', content: 'the main answer' });
+  });
+});
+
+describe('lossySupersedes', () => {
+  it('is true for exact equality', () => {
+    expect(lossySupersedes('same words', 'same words')).toBe(true);
+  });
+
+  it('is true when candidate adds words in between (candidate is a superset)', () => {
+    // the real observed difference: the streamed tail dropped mid-text words
+    expect(lossySupersedes('was emitted and validated', 'was and validated')).toBe(true);
+    expect(lossySupersedes('No assistant-with-toolCalls found', 'Noalls found')).toBe(true);
+    expect(lossySupersedes('No assistant-with-toolCalls found', 'No assistant found')).toBe(true);
+  });
+
+  it('is false when base has words absent from candidate (candidate is a subset)', () => {
+    expect(lossySupersedes('shorter', 'a much longer base that candidate lacks')).toBe(false);
+    expect(lossySupersedes('there were and validated', 'there were emitted and validated')).toBe(false);
+  });
+
+  it('handles empty inputs safely', () => {
+    expect(lossySupersedes('', '')).toBe(false);
+    expect(lossySupersedes('anything', '')).toBe(false);
+    expect(lossySupersedes('', 'base')).toBe(false);
+  });
+});
+
+describe('eventsToBlocks - replayed full-text supersedes the streamed tail (never duplicates)', () => {
+  const streamedLossy = 'One because two Noalls found then three.';
+  const complete = 'One because two No assistant-with-toolCalls found then three.';
+
+  it('collapses a replayed full-text delta onto the same-turn streamed block and drops the replayed tool card', () => {
+    const blocks = eventsToBlocks([
+      // streamed live first (lossy, mid-text gap) + one tool card from that live round
+      ev({ type: 'user', sessionId: 's1', message: 'bound it?' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: streamedLossy }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 5 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 5, output: 'ok', success: true } }),
+      // reconnect snapshot re-delivers the same turn complete + a reconstructed tool card copy
+      ev({ type: 'text-delta', sessionId: 's1', message: complete }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 1 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 1, output: 'ok', success: true } }),
+    ]);
+    const texts = blocks.filter((b) => b.kind === 'text');
+    const tools = blocks.filter((b) => b.kind === 'tool');
+    // exactly one assistant answer, healed to the complete text
+    expect(texts).toHaveLength(1);
+    expect((texts[0] as { content: string }).content).toBe(complete);
+    // and exactly one tool card (the replayed duplicate copy is dropped)
+    expect(tools).toHaveLength(1);
+  });
+
+  it('does not collapse a genuinely new assistant answer in a multi-round turn', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'step it' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'Round one outcome.' }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'bash', data: { ordinal: 1 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'bash', data: { ordinal: 1, output: 'ok', success: true } }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'Round two final answer.' }),
+    ]);
+    const texts = blocks.filter((b) => b.kind === 'text').map((b) => b.content);
+    expect(texts).toEqual(['Round one outcome.', 'Round two final answer.']);
+  });
+
+  it('collapses an identical replayed text (equal superset) and drops the duplicate card', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'q' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'same answer' }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 2 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 2, output: 'ok', success: true } }),
+      ev({ type: 'text-delta', sessionId: 's1', message: 'same answer' }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 1 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 1, output: 'ok', success: true } }),
+    ]);
+    const texts = blocks.filter((b) => b.kind === 'text');
+    const tools = blocks.filter((b) => b.kind === 'tool');
+    expect(texts).toHaveLength(1);
+    expect((texts[0] as { content: string }).content).toBe('same answer');
+    expect(tools).toHaveLength(1);
+  });
+
+  it('heals the exact observed lossy stream vs complete replay (s1a1402bcbbc)', () => {
+    const limiter = 'Old bursts (before the last user prompt) were and validated when they were the current burst.';
+    const full = 'Old bursts (before the last user prompt) were emitted and validated when they were the current burst.';
+    const blocks = eventsToBlocks([
+      ev({ type: 'user', sessionId: 's1', message: 'the O(n) matchedToolCallIds' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: limiter }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 9 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 9, output: 'ok', success: true } }),
+      ev({ type: 'text-delta', sessionId: 's1', message: full }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 1 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 1, output: 'ok', success: true } }),
+    ]);
+    const texts = blocks.filter((b) => b.kind === 'text');
+    const tools = blocks.filter((b) => b.kind === 'tool');
+    expect(texts).toHaveLength(1);
+    // the lossy streamed block healed to the complete replayed text
+    expect((texts[0] as { content: string }).content).toBe(full);
+    expect(tools).toHaveLength(1);
   });
 });
 

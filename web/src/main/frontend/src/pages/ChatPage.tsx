@@ -19,7 +19,6 @@ import {
   eventsToBlocks,
   renderWindow,
   latestDrainBoundary,
-  DEFAULT_WINDOW_BLOCKS,
   LOAD_EARLIER_CHUNK,
   type Block,
 } from '../api/eventLog';
@@ -95,15 +94,18 @@ export function ChatPage({
   openSession,
   onModeChange,
   onTitleChange,
+  windowBlocks = 1024,
 }: {
   activeSession?: string;
   openSession: (id: string, title: string) => void;
   onModeChange?: (id: string, mode: 'plan' | 'build') => void;
   onTitleChange?: (id: string, title: string) => void;
+  windowBlocks?: number;
 }) {
   const { id } = useParams<{ id: string }>();
   const sessionId = id ?? activeSession;
-  const { events, connected, bootstrapped, reconnecting, status } = useSessionStream(sessionId);
+  const { events, connected, bootstrapped, reconnecting, status, moreReplayExists, loadEarlier: loadServerEarlier } =
+    useSessionStream(sessionId);
   // true while a session page has mounted but its persisted history (the SSE snapshot) has not been
   // delivered yet: the pane is still empty and chat must stay locked so the user never races the
   // load. False once bootstrapped, or when there is no session at all.
@@ -229,6 +231,16 @@ export function ChatPage({
   const completionRef = useRef(completion);
   completionRef.current = completion;
   const { pending, answer } = useInteractiveRequests(sessionId);
+
+  // Auto-focus the prompt when this chat tab opens (create-session, tab switch, deep-link) so the
+  // user can type immediately without clicking. ChatPage remounts per session via App's
+  // key={activeSession}, so a single ready-gated effect covers every tab-open path. It fires once
+  // the snapshot is in (!initializing) because the textarea is readOnly while booting; the
+  // initializing flip makes it run exactly once per mount even on a near-instant load.
+  useEffect(() => {
+    if (!sessionId || initializing) return;
+    textareaRef.current?.focus();
+  }, [sessionId, initializing]);
 
   // the /btw modal open flag: it never auto-opens; clicking the btw pill opens it. It stays open
   // across a /btw override (the modal then shows the new question) and auto-closes when the btw is
@@ -797,7 +809,15 @@ export function ChatPage({
           onPointerDown={markUserScroll}
           className="relative flex-1 overflow-y-auto p-4"
         >
-          <EventLog ref={eventLogRef} events={events} toolVisibility={toolVisibility} thinkingVisible={thinkingVisible} />
+          <EventLog
+            ref={eventLogRef}
+            events={events}
+            toolVisibility={toolVisibility}
+            thinkingVisible={thinkingVisible}
+            windowBlocks={windowBlocks}
+            hasServerHistory={moreReplayExists}
+            onLoadServerEarlier={loadServerEarlier}
+          />
           {initializing && (
             // Full-pane, blocking "restoring session" veil while the persisted snapshot is still being
             // fetched/replayed server-side. It paints over the ENTIRE transcript area (a translucent
@@ -1540,31 +1560,51 @@ function TodoRow({ todo }: { todo: TodoItem }) {
 export type EventLogHandle = { loadEarlier: () => void; canLoadEarlier: () => boolean };
 
 const EventLog = memo(
-  forwardRef<EventLogHandle, { events: WebEvent[]; toolVisibility: 'shown' | 'collapsed'; thinkingVisible: boolean }>(
-    function EventLog({ events, toolVisibility, thinkingVisible }, ref) {
+  forwardRef<
+    EventLogHandle,
+    {
+      events: WebEvent[];
+      toolVisibility: 'shown' | 'collapsed';
+      thinkingVisible: boolean;
+      windowBlocks: number;
+      hasServerHistory: boolean;
+      onLoadServerEarlier: () => void;
+    }
+  >(
+    function EventLog(
+      { events, toolVisibility, thinkingVisible, windowBlocks, hasServerHistory, onLoadServerEarlier },
+      ref,
+    ) {
       // reducer is pure and O(events); it runs once per rAF-batched events array, and the blocks are
       // memoized below so a scrolling/pagination re-render never re-derives the whole conversation.
       const blocks = useMemo(() => eventsToBlocks(events), [events]);
-      // pagination: the tail (DEFAULT_WINDOW_BLOCKS) is always rendered; "load earlier" grows the
+      // pagination: the tail (windowBlocks) is always rendered; "load earlier" grows the
       // window backward in LOAD_EARLIER_CHUNK steps (block boundaries, so tool cards stay atomic).
-      const [loadedBlocks, setLoadedBlocks] = useState(DEFAULT_WINDOW_BLOCKS);
+      const [loadedBlocks, setLoadedBlocks] = useState(windowBlocks);
       useEffect(() => {
-        setLoadedBlocks((n) => Math.max(n, DEFAULT_WINDOW_BLOCKS));
-      }, [events.length]);
-      const requested = Math.max(loadedBlocks, DEFAULT_WINDOW_BLOCKS);
+        setLoadedBlocks((n) => Math.max(n, windowBlocks));
+      }, [events.length, windowBlocks]);
+      const requested = Math.max(loadedBlocks, windowBlocks);
       const { start, extended } = renderWindow(blocks, requested);
+      // "load earlier" first pulls the next slice from the server (tail-first snapshot pagination) when
+      // more persisted history exists, falling back to growing the local render window over what is already
+      // loaded once the server has nothing left to give.
       const loadEarlier = useCallback(() => {
-        setLoadedBlocks((n) => n + LOAD_EARLIER_CHUNK);
-      }, []);
+        if (hasServerHistory) {
+          onLoadServerEarlier();
+        } else {
+          setLoadedBlocks((n) => n + LOAD_EARLIER_CHUNK);
+        }
+      }, [hasServerHistory, onLoadServerEarlier]);
       // expose the pagination controls so the scroll container can auto-load-early when the user
       // scrolls back to the top (else a long conversation stops at a hard wall mid-history).
       useImperativeHandle(
         ref,
         () => ({
           loadEarlier,
-          canLoadEarlier: () => extended,
+          canLoadEarlier: () => extended || hasServerHistory,
         }),
-        [loadEarlier, extended],
+        [loadEarlier, extended, hasServerHistory],
       );
       // thinking blocks are filtered at render time (never dropped from the log) so toggling back
       // restores them instantly - mirrors the TUI /thinking toggle. The log-driven pagination/keys
@@ -1574,7 +1614,7 @@ const EventLog = memo(
         : blocks.slice(start).filter((b) => b.kind !== 'thought');
       return (
         <div className="space-y-2">
-          {extended && (
+          {(extended || hasServerHistory) && (
             <button onClick={loadEarlier} className="rounded border px-2 py-1 text-sm hover:bg-white/5" style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}>
               ↑ Load earlier ({start} blocks)
             </button>

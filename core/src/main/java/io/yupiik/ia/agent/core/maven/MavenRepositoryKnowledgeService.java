@@ -829,8 +829,9 @@ public class MavenRepositoryKnowledgeService {
         final var value = raw == null || raw.isBlank()
                 ? (override == null || override.isBlank() ? "~/.m2/repository" : override)
                 : raw;
-        final var home = value.startsWith("~/") ? System.getProperty("user.home") + value.substring(1) : value;
-        return Path.of(home).toAbsolutePath().normalize();
+        return Path.of(CodingAgentConfiguration.expandHome(value))
+                .toAbsolutePath()
+                .normalize();
     }
 
     /**

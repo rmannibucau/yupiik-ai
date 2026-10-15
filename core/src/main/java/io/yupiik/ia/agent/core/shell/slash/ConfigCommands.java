@@ -63,6 +63,9 @@ public class ConfigCommands implements SlashCommandSet {
     /** /permissions accepted values: the permission-mode enum plus the toggle extras. */
     private static final List<String> PERMISSION_OPTIONS = permissionOptions();
 
+    /** /secrets accepted values. */
+    private static final List<String> SECRET_OPTIONS = List.of("redact", "passthrough", "fail", "show");
+
     private static List<String> permissionOptions() {
         final var out = new ArrayList<String>(PermissionMode.VALUES);
         out.add("none");
@@ -74,12 +77,19 @@ public class ConfigCommands implements SlashCommandSet {
             final AgentSessionService agentSessionService,
             final ChatClient chatClient,
             final ProviderManager providerManager,
-            final AgentProvider agentProvider) {
+            final AgentProvider agentProvider,
+            final io.yupiik.ia.agent.core.security.SecretSessionModes secretModes,
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.agentSessionService = agentSessionService;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
+        this.secretModes = secretModes;
+        this.secretRedactor = secretRedactor;
     }
+
+    private final io.yupiik.ia.agent.core.security.SecretSessionModes secretModes;
+    private final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
 
     @Override
     public List<SlashCommand> commands() {
@@ -127,6 +137,15 @@ public class ConfigCommands implements SlashCommandSet {
                                 SlashGroup.CONFIG),
                         PERMISSION_OPTIONS,
                         SlashAction.sync(this::permissions)),
+                SlashCommand.of(
+                        new SlashCommandSpec(
+                                "/secrets",
+                                String.join("|", SECRET_OPTIONS),
+                                "redact secrets outbound / restore inbound, passthrough (send raw, per-session), "
+                                        + "fail (block if a secret would ship), or show the current state",
+                                SlashGroup.CONFIG),
+                        SECRET_OPTIONS,
+                        SlashAction.sync(this::secrets)),
                 SlashCommand.of(
                         new SlashCommandSpec(
                                 "/thinking",
@@ -550,6 +569,56 @@ public class ConfigCommands implements SlashCommandSet {
         }
         return ShellOutcome.status(
                 mode == PermissionMode.ASK ? "permissions: asking for approval" : "permissions: " + mode.name());
+    }
+
+    private ShellOutcome secrets(final String arg, final ShellEnv env) {
+        final var value = arg == null ? "" : arg.strip().toLowerCase(Locale.ROOT);
+        final var sessionId = env.session().sessionId();
+        if (value.equals("show")) {
+            final var mode = secretRedactor.modeFor(sessionId);
+            final var svc = new StringBuilder("**secrets status**\n\n");
+            svc.append("- effective mode: ")
+                    .append(mode == null ? "disabled" : mode.name().toLowerCase(Locale.ROOT));
+            final var cfg = secretRedactor.registry() == null
+                    ? null
+                    : secretRedactor.registry().config();
+            if (cfg != null) {
+                svc.append(" (global default: ")
+                        .append(cfg.mode().name().toLowerCase(Locale.ROOT))
+                        .append(')');
+            }
+            svc.append('\n');
+            final var harvested = secretRedactor.registry() == null
+                    ? 0
+                    : secretRedactor.registry().harvestedValues().size();
+            final var matchers = secretRedactor.registry() == null
+                    ? 0
+                    : secretRedactor.registry().matchers().size();
+            svc.append("- harvested local secret values: ").append(harvested).append('\n');
+            svc.append("- secret matchers (built-in + configured + extensions): ")
+                    .append(matchers)
+                    .append('\n');
+            final var vault = secretRedactor.registry() == null
+                    ? null
+                    : secretRedactor.registry().vault();
+            if (vault != null) {
+                svc.append("- provenance entries (emitted+restorable this process): ")
+                        .append(vault.count(sessionId))
+                        .append('\n');
+            }
+            return ShellOutcome.transcript(svc.toString());
+        }
+        if (value.isEmpty()) {
+            return ShellOutcome.status("usage: /secrets " + String.join("|", SECRET_OPTIONS)
+                    + " ; current effective mode: "
+                    + (secretRedactor.modeFor(sessionId) == null
+                            ? "disabled"
+                            : secretRedactor.modeFor(sessionId).name().toLowerCase(Locale.ROOT)));
+        }
+        final var mode = io.yupiik.ia.agent.core.configuration.SecretRedactionMode.fromConfigurationString(value);
+        final var prev = secretModes.set(sessionId, mode);
+        return ShellOutcome.status("secrets: " + mode.name().toLowerCase(Locale.ROOT)
+                + (prev == null ? " (session override)" : " (was " + prev.name().toLowerCase(Locale.ROOT) + ")"));
     }
 
     private static ShellOutcome thinking(final String arg, final ShellEnv env) {

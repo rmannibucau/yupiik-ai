@@ -145,12 +145,14 @@ class UsageTrackerTest {
     void auxiliarySpendIsCountedGloballyAndSeparately() {
         final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
         tracker.record(new Usage(100, 20, 120));
-        tracker.recordAuxiliary(new Usage(11, 7, 18));
+        tracker.recordAuxiliary(new Usage(11, 7, 18)); // no cache-read
         assertEquals(111, tracker.promptTokens());
         assertEquals(27, tracker.completionTokens());
         assertEquals(2, tracker.requests());
         assertEquals(11, tracker.auxiliaryPromptTokens());
         assertEquals(7, tracker.auxiliaryCompletionTokens());
+        assertEquals(0, tracker.auxiliaryCacheReadTokens());
+        assertEquals(11, tracker.auxiliaryFreshTokens(), "fresh = prompt - cache-read, all prompt is fresh");
         assertEquals(1, tracker.auxiliaryRequests());
         tracker.reset();
         assertEquals(0, tracker.promptTokens());
@@ -158,7 +160,21 @@ class UsageTrackerTest {
         assertEquals(0, tracker.requests());
         assertEquals(0, tracker.auxiliaryPromptTokens());
         assertEquals(0, tracker.auxiliaryCompletionTokens());
+        assertEquals(0, tracker.auxiliaryCacheReadTokens());
+        assertEquals(0, tracker.auxiliaryFreshTokens());
         assertEquals(0, tracker.auxiliaryRequests());
+    }
+
+    @Test
+    void auxiliaryFreshTokensSubtractTheAuxCacheRead() {
+        final var tracker = new UsageTracker(providerManager, null, null, Clock.systemUTC());
+        // (prompt, completion, total, cacheRead, cacheWrite, reasoning, ...)
+        tracker.recordAuxiliary(new Usage(100, 8, 108, 60, 0, 0, 0));
+        assertEquals(100, tracker.auxiliaryPromptTokens());
+        assertEquals(60, tracker.auxiliaryCacheReadTokens());
+        assertEquals(40, tracker.auxiliaryFreshTokens(), "background fresh excludes the cached prefix");
+        assertEquals(100, tracker.promptTokens(), "aux prompt also counts toward the global total");
+        assertEquals(60, tracker.cacheReadTokens(), "aux cache-read also counts toward the global total");
     }
 
     @Test

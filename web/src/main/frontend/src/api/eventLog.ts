@@ -43,10 +43,85 @@ const EMPTY_TOOL_STACK: number[] = [];
 export const INTERRUPTED = 'interrupted' as const;
 
 /**
+ * Whether {@code candidate} is a "lossy superset" of {@code base}: every whitespace-delimited word of
+ * {@code base} appears in {@code candidate} in the same order, with {@code candidate} allowed to contain
+ * extra words in between. This models a streamed copy that lost tokens mid-text (fragments dropped while
+ * live) where the replayed/final copy is the complete authoritative text - in the observed duplication
+ * the streamed tail read "Noalls found" while the final read "No assistant-with-toolCalls found".
+ *
+ * <p>A plain {@code startWith} comparison (what {@code turn-done} used) misses these mid-text gaps, which
+ * is exactly why the replayed final was previously appended as a new block instead of superseding. Word
+ * subsequence (not the identity of a {@code startWith} prefix) tolerates the dropped tokens.
+ */
+export function lossySupersedes(candidate: string, base: string): boolean {
+  if (candidate === base) return !!base;
+  if (!candidate || !base) return false;
+  if (candidate.length < base.length) return false;
+  // greedy character-subsequence: is base a (possibly non-contiguous) subsequence of candidate? This
+  // tolerates the streaming-loss signature where the live tail dropped/fragmented tokens (e.g. base
+  // "Noalls found" is a subsequence of "No assistant-with-toolCalls found"). Linear, so it stays cheap
+  // even for long assistant answers.
+  let b = 0;
+  for (let c = 0; c < candidate.length && b < base.length; c++) {
+    if (candidate[c] === base[b]) b++;
+  }
+  return b === base.length;
+}
+
+/**
+ * Collapses a replayed full-text delta that duplicates an already-rendered same-turn text block.
+ *
+ * <p>When an SSE reconnect re-delivers a completed assistant turn, the snapshot carries the turn's full
+ * final text as one {@code text-delta} (plus reconstructed tool cards) that lossy-supersedes the text
+ * already streamed live earlier in the same turn - the streamed copy may have lost tokens mid-stream
+ * (e.g. {@code "Noalls found"} vs {@code "No assistant-with-toolCalls found"}). Without this guard, the
+ * full-text would be rendered as a second assistant block and the reconstructed tool cards as duplicate
+ * cards (the observed web duplication). When the incoming text lossy-supersedes a same-turn earlier text
+ * block (nothing but tool cards between, no user boundary), we heal that block with the complete text,
+ * drop the replayed tool cards, and skip pushing a duplicate - so there is exactly one assistant answer
+ * and one set of cards per turn.</p>
+ *
+ * <p>A genuinely new assistant answer (a different turn / a new reasoning round) is not a superset of the
+ * earlier text, so it is never collapsed - it falls through to be pushed normally.</p>
+ *
+ * @return true when a duplicate was collapsed (the caller must not push a new text block), false to push normally.
+ */
+function collapseReplayDuplicate(blocks: Block[], runningTools: Map<string, number[]>, msg: string): boolean {
+  // walk back over tool cards only (a replayed turn chunk's cards) to the last same-turn text block
+  let i = blocks.length - 1;
+  while (i >= 0) {
+    const b = blocks[i];
+    if (b.kind === 'user') return false; // different turn - not a duplicate
+    if (b.kind === 'text') {
+      if (lossySupersedes(msg, b.content)) {
+        // heal the streamed block with the authoritative complete text
+        b.content = msg;
+        b.writing = true;
+        // drop the replayed tool cards between the healed text and the current tail
+        const removed = blocks.splice(i + 1, blocks.length - i - 1);
+        for (const card of removed) {
+          if (card.kind === 'tool') {
+            const stack = runningTools.get(card.name);
+            if (stack) {
+              const j = stack.indexOf(i + 1);
+              if (j >= 0) stack.splice(j, 1);
+              if (stack.length === 0) runningTools.delete(card.name);
+            }
+          }
+        }
+        return true;
+      }
+      return false; // a same-turn text that the incoming does NOT supersede - distinct content, push normally
+    }
+    i--;
+  }
+  return false; // no same-turn text found - nothing to duplicate
+}
+
+/**
  * Reduces the ordered event log into transcript blocks. Appends never mutate earlier blocks
  * (text-delta only touches the LAST block), so a memoized BlockView keyed by block index sees
  * stable content for everything except the live tail.
- *
  * Running tools are tracked per name (a deque of block indices), mirroring the core
  * ConversationTranscript's runningTools: BOTH tool-stream and tool-finished bind to the most
  * recently started card with that tool name, so they can never "finish" the wrong card (which
@@ -88,7 +163,15 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         last.content += ev.message ?? '';
         last.writing = true;
       } else {
-        blocks.push({ kind: 'text', content: ev.message ?? '', writing: true });
+        // A replay-duplicate guard: on an SSE reconnect the snapshot re-delivers a completed assistant
+        // turn as one full-text delta that lossy-supersedes the already-streamed (and possibly token-lossy)
+        // same-turn text block, with the replayed tool card(s) re-created between them. Collapse instead of
+        // duplicating: heal the earlier streamed block with the complete text and drop the replayed cards.
+        const msg = ev.message ?? '';
+        const collapsed = collapseReplayDuplicate(blocks, runningTools, msg);
+        if (!collapsed) {
+          blocks.push({ kind: 'text', content: msg, writing: true });
+        }
       }
     } else if (ev.type === 'thinking-delta') {
       if (last?.kind === 'thought') {
@@ -212,9 +295,6 @@ function ordinalBlock(blocks: Block[], runningTools: Map<string, number[]>, ev: 
   }
   return blocks[stack[stack.length - 1]];
 }
-
-/** How many blocks are always rendered from the tail before pagination kicks in. */
-export const DEFAULT_WINDOW_BLOCKS = 4096;
 
 /**
  * Computes the signature of the most recent "queue/sidebar drain" boundary in an event log:

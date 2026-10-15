@@ -59,6 +59,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
+import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import java.io.IOException;
 import java.lang.reflect.Method;
 import java.nio.file.Path;
@@ -618,8 +619,12 @@ class AgentLoopTest {
         // 100 output tokens including 40 spent on internal reasoning
         final var reply = new ScriptedReply(
                 "done", "stop", false, new io.yupiik.llm.client.model.Usage(10L, 100L, 110L, null, null, 40L, 0L));
-        loop(chatClient(new ArrayDeque<>(List.of(reply)), new ArrayList<>()), null, configuration(true))
-                .run("do it", null, "s1", null, () -> false);
+        // the instant chatClient stub returns in a few ms of real wall-clock, so the client-measured
+        // activeMs is nonzero-but-garbage and reasoningTokensPerSecond() would report a huge spurious
+        // rate. Drive activeMs deterministically to 0 with a throttle that outweighs the work (same
+        // trick as turnThroughputIgnoresTheIdleTimeOfThrottlesAndRetries) so the "no generation time
+        // measured" assertion is stable.
+        loop(timedChatClient(reply, 5, 1_000), null, configuration(true)).run("do it", null, "s1", null, () -> false);
 
         final var throughput = lastTurnMetrics().throughput();
         assertEquals(100, throughput.outputTokens(), "the aggregate stays the completion tokens, reasoning included");
@@ -1180,6 +1185,76 @@ class AgentLoopTest {
                                 && n.message().contains("empty completion")
                                 && n.message().contains("retrying")),
                 "the retry notice must still be emitted: " + notices);
+    }
+
+    /**
+     * Inline reasoning (models that stream {@code think} tags inside the text {@code content} channel,
+     * GLM/Qwen/deepseek-flash style) must be classified by the ONE shared backend splitter and emitted
+     * as {@link AgentEvent.ThinkingDelta} events BEFORE the visible answer - so every frontend (TUI,
+     * web SSE, subagent transcript) receives the same pre-split stream and no frontend re-implements the
+     * parser. The persisted assistant message must carry the thinking under the reserved {@code others}
+     * key so a later web replay can re-render the thought blocks.
+     */
+    @Test
+    void inlineThinkTagsAreSplitIntoThinkingDeltaAndPersistedAsThinking() {
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                requests.add(List.copyOf(request.messages()));
+                // the close tag arrives in a separate chunk from the open tag, exercising the
+                // splitter's chunk-boundary state machine
+                onDelta.accept(new TextDelta("hello "));
+                onDelta.accept(new TextDelta("my name is \u003cthink\u003ele"));
+                onDelta.accept(new TextDelta("t me reason "));
+                onDelta.accept(new TextDelta("carefully\u003c/think\u003eworld!"));
+                onDelta.accept(new End("stop", null));
+                return Message.assistant("world!", null);
+            }
+        };
+        final var sessionStore = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+
+        final var result = loop(client, null, configuration(true), noContextManager(), sessionStore, null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("world!", result);
+        // a ThinkingDelta event must have been emitted to the shared stream (what frontends consume),
+        // with the thinking portion, and a visible TextDelta for the answer alone
+        final var thinking = events.stream()
+                .filter(AgentEvent.ThinkingDelta.class::isInstance)
+                .map(AgentEvent.ThinkingDelta.class::cast)
+                .map(AgentEvent.ThinkingDelta::delta)
+                .reduce("", String::concat);
+        assertEquals("let me reason carefully", thinking, "inline think must be split out as ThinkingDelta events");
+        final var text = events.stream()
+                .filter(AgentEvent.TextDelta.class::isInstance)
+                .map(AgentEvent.TextDelta.class::cast)
+                .map(AgentEvent.TextDelta::delta)
+                .reduce("", String::concat);
+        assertEquals("hello my name is world!", text, "visible stream must have the think tags stripped");
+        // the persisted assistant entry must carry the thinking so WebReplay can re-emit it
+        final var assistant = persisted.stream()
+                .filter(e -> "assistant".equals(e.role()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(assistant, "an assistant entry must be persisted");
+        final var persistedThinking =
+                assistant.others() == null ? null : assistant.others().get("thinking");
+        assertEquals("let me reason carefully", persistedThinking, "thinking must be persisted for replay");
+        assertFalse(
+                String.valueOf(assistant.content()).contains("think"),
+                "the persisted content must not contain the thinking tags");
     }
 
     /**
@@ -2496,6 +2571,36 @@ class AgentLoopTest {
                         null);
             }
         };
+    }
+
+    /**
+     * Asserts the Anthropic pairing invariant on a request's neutral messages: every assistant tool
+     * call is immediately answered by a {@code tool}-role result carrying the same id, before any
+     * non-{@code tool} message intervenes. A violation would make Anthropic/Azure AI Gateway reject
+     * the request ("tool_use ids were found without tool_result blocks immediately after").
+     */
+    private static void assertAllToolCallsAreAnsweredByContiguousResults(final List<Message> messages) {
+        final var pendingIds = new java.util.HashSet<String>();
+        for (final var message : messages) {
+            if ("assistant".equals(message.role())) {
+                pendingIds.clear();
+                if (message.toolCalls() != null) {
+                    for (final var call : message.toolCalls()) {
+                        if (call != null && call.id() != null) {
+                            pendingIds.add(call.id());
+                        }
+                    }
+                }
+            } else if ("tool".equals(message.role())) {
+                pendingIds.remove(message.toolCallId());
+            } else {
+                pendingIds.clear();
+            }
+        }
+        assertTrue(
+                pendingIds.isEmpty(),
+                "some assistant tool calls were never answered contiguously by their tool_result: " + pendingIds
+                        + " in request " + messages);
     }
 
     /** A registry exposing a read-only {@code read_file} tool (coverage-keyed for the plateau guard). */
@@ -4427,6 +4532,11 @@ class AgentLoopTest {
         final var injected = requests.get(1);
         assertEquals("user", injected.get(injected.size() - 1).role());
         assertEquals("follow up!", injected.get(injected.size() - 1).content());
+        // the deferred queued prompt must never break the tool_use -> tool_result pairing: every
+        // assistant tool call of the previous round has its result landed contiguously in this request,
+        // otherwise Anthropic/Azure AI Gateway rejects it ("tool_use ids ... without tool_result blocks
+        // immediately after")
+        assertAllToolCallsAreAnsweredByContiguousResults(injected);
         assertTrue(
                 injected.stream()
                         .anyMatch(m -> m.others() != null
@@ -4439,6 +4549,97 @@ class AgentLoopTest {
         assertTrue(
                 appended.stream().anyMatch(e -> "user".equals(e.role()) && "follow up!".equals(e.content())),
                 "the injected prompt must be persisted as a user entry");
+    }
+
+    @Test
+    void repairsInterruptedToolCallFromHistoryBeforeSending() {
+        // a previous turn ended mid-tool (cancel/interrupt): history holds an assistant tool_use with
+        // no result. Before the first request, the loop must answer it with a lost-result marker so
+        // Anthropic's tool_use -> tool_result contiguity rule holds on the wire, and must persist it.
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply("done", "stop", false)));
+        final var client = chatClient(replied, requests);
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        final var history = new ArrayList<Message>();
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("lost-1", "function", new ToolCall.FunctionCall("grep", "{}"), 0)),
+                null,
+                null));
+        final var loop = loop(client, new TodoStore() {}, configuration(true), noPruningManager(), store, null);
+        loop.run("do it", null, "s1", history, () -> false);
+
+        // the request must carry the assistant tool_use immediately followed by its synthetic result
+        final var request = requests.getFirst();
+        assertEquals("assistant", request.get(1).role());
+        assertFalse(request.get(1).toolCalls().isEmpty(), "the assistant tool_use is preserved");
+        assertEquals("tool", request.get(2).role(), "the synthetic result lands immediately after the tool_use");
+        assertEquals("lost-1", request.get(2).toolCallId());
+        assertEquals(
+                "[tool result lost: the model's tool call was interrupted before it could complete this turn]",
+                request.get(2).content(),
+                "the synthetic result must carry the lost-result message");
+        assertAllToolCallsAreAnsweredByContiguousResults(request);
+        // the repair is persisted as an error tool entry
+        assertTrue(
+                persisted.stream()
+                        .anyMatch(e -> "tool".equals(e.role())
+                                && "lost-1".equals(e.toolCallId())
+                                && e.others() != null
+                                && Boolean.TRUE.equals(e.others().get("is_error"))),
+                "the synthetic lost-result marker must be persisted as an is_error tool entry: " + persisted);
+        assertTrue(
+                events.stream()
+                        .anyMatch(candidate -> candidate instanceof AgentEvent.Status s
+                                && s.message().contains("repaired 1 interrupted tool call")),
+                "a repair notice must be emitted");
+    }
+
+    @Test
+    void doesNotDoubleRepairAlreadyAnsweredHistory() {
+        // history where the tool_use already has a contiguous result: the repair must NOT add another,
+        // and the session store must not grow with a duplicate marker.
+        final var requests = new ArrayList<List<Message>>();
+        final var persisted = new ArrayList<SessionEntry>();
+        final var replied = new ArrayDeque<ScriptedReply>(List.of(new ScriptedReply("done", "stop", false)));
+        final var client = chatClient(replied, requests);
+        final var store = new SessionStore() {
+            @Override
+            public void append(final String id, final SessionEntry entry) {
+                persisted.add(entry);
+            }
+        };
+        final var history = new ArrayList<Message>();
+        history.add(new Message(
+                "assistant",
+                null,
+                null,
+                List.of(new ToolCall("ok-1", "function", new ToolCall.FunctionCall("grep", "{}"), 0)),
+                null,
+                null));
+        history.add(new Message("tool", "matched", null, null, "ok-1", null));
+        final var loop = loop(client, new TodoStore() {}, configuration(true), noPruningManager(), store, null);
+        loop.run("do it", null, "s1", history, () -> false);
+
+        final var request = requests.getFirst();
+        assertEquals(
+                1,
+                request.stream().filter(m -> "tool".equals(m.role())).count(),
+                "only the original result, no synthetic duplicate: " + request);
+        assertAllToolCallsAreAnsweredByContiguousResults(request);
+        assertTrue(
+                persisted.stream()
+                        .noneMatch(e -> "tool".equals(e.role())
+                                && e.content().toString().contains("tool result lost")),
+                "no synthetic marker may be persisted for an already-answered history: " + persisted);
     }
 
     @Test
@@ -4514,7 +4715,7 @@ class AgentLoopTest {
                 return ToolResult.ok("file content");
             }
         });
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null) {
+        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null) {
             @Override
             public String build(final String prompt, final AgentConfiguration agent) {
                 return "system\n\n" + memorySection(prompt);
@@ -4542,7 +4743,7 @@ class AgentLoopTest {
     }
 
     @Test
-    void memoryWriteMidTurnRefreshesTheTail() {
+    void memoryWriteMidTurnPersistsToDiskButDoesNotRefreshTheTail() {
         final var cfg = configuration(true);
         final var memory = new io.yupiik.ia.agent.core.memory.MemoryStore(cfg);
         memory.append(true, List.of("fact before"));
@@ -4555,7 +4756,7 @@ class AgentLoopTest {
                         new ToolCall.FunctionCall("memory_write", "{\"fact\":\"fact after\",\"scope\":\"global\"}"),
                         0)));
         final var registry = registryOf(new io.yupiik.ia.agent.core.tools.builtin.MemoryWriteTool(memory));
-        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null) {
+        final var builder = new SystemPromptBuilder(cfg, memory, null, null, null, null, null, null, null) {
             @Override
             public String build(final String prompt, final AgentConfiguration agent) {
                 return "system\n\n" + memorySection(prompt);
@@ -4574,14 +4775,28 @@ class AgentLoopTest {
                 builder);
         loop.run("work", null, "s1", null, () -> false);
         assertEquals(2, requests.size(), "prompt round + 1 tool round: " + requests);
-        final var secondTail =
-                String.valueOf(requests.get(1).get(requests.get(1).size() - 1).content());
+        final var secondRequest = requests.get(1);
+        // the frozen-prefix design: the memory prefix is built once per session and never re-appended
+        // mid-session, so a mid-turn memory_write (which persists directly to disk) must NOT refresh
+        // the volatile tail (no <memory-diff> / no memory section) - the current session already has
+        // the fact if it is relevant, the next session reads it from disk.
+        final var tail = secondRequest.stream()
+                .filter(m ->
+                        m.others() != null && Boolean.TRUE.equals(m.others().get("volatileTail")))
+                .map(m -> String.valueOf(m.content()))
+                .findFirst()
+                .orElse(null);
+        assertTrue(tail != null, "the second request must carry the volatile session-state tail");
+        assertFalse(tail.contains("<memory-diff>"), "no memory refresh in the tail: " + tail);
+        assertFalse(tail.contains("<memory>"), "the tail must not re-send the memory section: " + tail);
+        assertFalse(tail.contains("fact after"), "the tail must not carry the mid-turn fact: " + tail);
+        // no message at all may carry the memory-diff refresh marker
         assertTrue(
-                secondTail.contains("fact after"),
-                "a mid-turn memory_write must refresh the volatile tail: " + secondTail);
-        assertTrue(
-                secondTail.contains("<memory-diff>"),
-                "the refreshed tail must carry the memory diff, not the whole section: " + secondTail);
+                secondRequest.stream()
+                        .noneMatch(m -> String.valueOf(m.content()).contains("<memory-diff>")),
+                "no request message may carry a memory-diff refresh");
+        // the fact IS durable on disk for the next session
+        assertTrue(memory.readGlobal().contains("fact after"), "memory_write must persist to disk");
     }
 
     /** A registry exposing one wire tool, so a captured payload has a non-empty tools list. */
@@ -5167,6 +5382,13 @@ class AgentLoopTest {
                         return providerManagerOverride == null
                                 ? new ResolvedModel(null, "test-model")
                                 : providerManagerOverride.resolveDefault();
+                    }
+
+                    @Override
+                    public boolean memoryUsesMainModel(final io.yupiik.ia.agent.core.llm.ChatSettings settings) {
+                        // the bare fixture has no configuration: only a test-provided override can
+                        // resolve the models; a null override conservatively reads as same-model (LAZY)
+                        return providerManagerOverride == null || providerManagerOverride.memoryUsesMainModel(settings);
                     }
 
                     @Override

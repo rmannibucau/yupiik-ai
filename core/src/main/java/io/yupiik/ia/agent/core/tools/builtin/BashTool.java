@@ -27,6 +27,8 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.tools.builtin.bashoverride.BashOverride;
+import io.yupiik.ia.agent.core.tools.builtin.bashoverride.JavaCommandRegistry;
 import io.yupiik.maven.knowledge.process.ProcessService;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -34,7 +36,9 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -46,12 +50,33 @@ public class BashTool implements EmbeddedTool {
     /** Configured default working directory process, used when neither a workdir arg nor a session root apply. */
     private final java.nio.file.Path fallbackDir;
 
+    private final BashOverride bashOverride;
+    private final ShellResolver shellResolver;
+
     public BashTool(
-            final Emitter emitter, final ProcessService processes, final CodingAgentConfiguration configuration) {
+            final Emitter emitter,
+            final ProcessService processes,
+            final CodingAgentConfiguration configuration,
+            final BashOverride bashOverride) {
         this.emitter = emitter;
         this.processes = processes;
         this.maxOutputChars = configuration.tools().maxOutputChars();
         this.fallbackDir = configuration.resolveWorkingDir().toAbsolutePath().normalize();
+        this.bashOverride = bashOverride;
+        this.shellResolver = new ShellResolver(
+                configuration.tools() == null ? null : configuration.tools().shell());
+    }
+
+    public BashTool(
+            final Emitter emitter, final ProcessService processes, final CodingAgentConfiguration configuration) {
+        this(
+                emitter,
+                processes,
+                configuration,
+                new BashOverride(
+                        new JavaCommandRegistry(List.of()),
+                        configuration,
+                        Executors.newVirtualThreadPerTaskExecutor()));
     }
 
     public BashTool(final Emitter emitter, final ProcessService processes) {
@@ -59,6 +84,8 @@ public class BashTool implements EmbeddedTool {
         this.processes = processes;
         this.maxOutputChars = 65536;
         this.fallbackDir = null; // no configuration: inherit the JVM working directory
+        this.bashOverride = null; // no config -> no overrides
+        this.shellResolver = new ShellResolver(null);
     }
 
     protected BashTool() {
@@ -66,6 +93,8 @@ public class BashTool implements EmbeddedTool {
         this.processes = null;
         this.maxOutputChars = 65536;
         this.fallbackDir = null;
+        this.bashOverride = null;
+        this.shellResolver = new ShellResolver(null);
     }
 
     @Override
@@ -75,7 +104,8 @@ public class BashTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Run a shell command (sh -c) and return its combined stdout/stderr "
+        return "Run a shell command (real bash when available, /bin/sh otherwise) and return its combined "
+                + "stdout/stderr "
                 + "(truncated at maxOutputChars, " + toolOutputCapHuman() + "). "
                 + "For terminal operations (git, mvn, npm, docker...); file ops use the dedicated "
                 + "read_file/grep/glob/list_dir tools. Use the workdir parameter instead of `cd <dir> && <cmd>`.";
@@ -115,7 +145,13 @@ public class BashTool implements EmbeddedTool {
         }
         final var timeout = optInt(args, "timeout_seconds", 120);
         final var workdir = arg(args, "workdir");
-        final var pb = new ProcessBuilder("sh", "-c", command);
+        // Real bash by default (yca.tools.shell=auto): the tool is licensed as "bash" so the model may rely on
+        // bash-isms (PIPESTATUS, ${VAR:-x}, [[ ]], =~ ...) that a minimal /bin/sh (dash on Debian/Ubuntu) would
+        // reject with 'Bad substitution'. When bash is absent (alpine, Windows without Git Bash/WSL) or when the
+        // user pinned an unavailable shell, it falls back to /bin/sh and the deviation is surfaced in the output.
+        final var shell = shellResolver.resolve();
+        final var pbNotice = new StringBuilder(shell.notice());
+        final var pb = new ProcessBuilder(shell.binary().toString(), "-c", command);
         pb.redirectErrorStream(true);
         // A workdir chosen by the model this turn is a fact it can act on: reject it if it does not
         // exist rather than silently running elsewhere (which would contradict what the model expects).
@@ -124,11 +160,10 @@ public class BashTool implements EmbeddedTool {
         final var workdirNotice = new StringBuilder();
         if (workdir != null && !workdir.isBlank()) {
             final var dir = Path.of(workdir).toAbsolutePath().normalize();
-            if (Files.isDirectory(dir)) {
-                pb.directory(dir.toFile());
-            } else {
+            if (!Files.isDirectory(dir)) {
                 return ToolResult.error("workdir '" + workdir + "' does not exist");
             }
+            pb.directory(dir.toFile());
         } else {
             // no explicit workdir: honour the session's project root, else the configured working dir,
             // rather than silently inheriting the JVM launch directory (which may differ from both).
@@ -158,6 +193,20 @@ public class BashTool implements EmbeddedTool {
                         .append("workdir '")
                         .append(skipped)
                         .append("' not found, using the JVM working directory");
+            }
+        }
+        // In-process read-only survey rewrite (yca.tools.bashOverrides): when the command is entirely made
+        // of supported read-only survey commands, run it through the Java* reimplementations instead of a
+        // real shell - output stays byte-faithful (only capped) and does not spawn a subprocess. Anything
+        // not confidently recognized falls back to the real shell below.
+        if (bashOverride != null && !command.isBlank()) {
+            final var baseDir = pb.directory() == null
+                    ? java.nio.file.Path.of(".").toAbsolutePath().normalize()
+                    : pb.directory().toPath().toAbsolutePath().normalize();
+            final var rewritten = bashOverride.tryRewrite(command, baseDir);
+            if (rewritten.isPresent()) {
+                final var output = rewritten.get();
+                return ToolResult.ok(withNotice(joinNotices(pbNotice, workdirNotice), output));
             }
         }
         final Process process;
@@ -221,8 +270,7 @@ public class BashTool implements EmbeddedTool {
                 break;
             }
             try {
-                finished =
-                        process.waitFor(Math.min(100, Math.max(1, remainingNanos / 1_000_000)), TimeUnit.MILLISECONDS);
+                finished = process.waitFor(Math.clamp(remainingNanos / 1_000_000, 1, 100), TimeUnit.MILLISECONDS);
                 if (finished) {
                     break;
                 }
@@ -236,15 +284,16 @@ public class BashTool implements EmbeddedTool {
         if (!finished) {
             dispose(process);
             return ToolResult.error("Command timed out after " + timeout + "s\n"
-                    + withNotice(workdirNotice, snapshot(out, maxOutputChars)));
+                    + withNotice(joinNotices(pbNotice, workdirNotice), snapshot(out, maxOutputChars)));
         }
         try {
-            reader.join(2000);
+            reader.join(2_000);
         } catch (final InterruptedException e) {
             Thread.currentThread().interrupt();
         }
         final var code = process.exitValue();
-        return ToolResult.ok(withNotice(workdirNotice, snapshot(out, maxOutputChars)) + "\nExit code: " + code);
+        return ToolResult.ok(withNotice(joinNotices(pbNotice, workdirNotice), snapshot(out, maxOutputChars))
+                + "\nExit code: " + code);
     }
 
     /**
@@ -263,9 +312,20 @@ public class BashTool implements EmbeddedTool {
         return candidates;
     }
 
-    /** Prepends the workdir-deviation notice (when any) as the first line of the tool output. */
+    /** Prepends the (shell/workdir) deviation notice (when any) as the first line of the tool output. */
     private static String withNotice(final StringBuilder notice, final String output) {
         return notice.length() == 0 ? output : notice + "\n" + output;
+    }
+
+    /** Joins the shell-choice notice and the workdir-deviation notice into a single leading notice block. */
+    private static StringBuilder joinNotices(final StringBuilder shell, final StringBuilder workdir) {
+        if (shell.length() == 0) {
+            return workdir;
+        }
+        if (workdir.length() == 0) {
+            return shell;
+        }
+        return shell.append('\n').append(workdir);
     }
 
     /** Kills and reaps the whole process tree through the service (null-safe for standalone tests). */

@@ -15,8 +15,27 @@ export type Tab = { id: string; title: string; mode: 'plan' | 'build' };
 export function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeSession, setActiveSession] = useState<string | undefined>();
+  const [windowBlocks, setWindowBlocks] = useState(1024);
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Fetch the web command's tunable frontend settings on boot (transcript pagination window size).
+  useEffect(() => {
+    let cancelled = false;
+    call<{ windowBlocks?: number }>('web.config')
+      .then((cfg) => {
+        if (cancelled) return;
+        if (typeof cfg?.windowBlocks === 'number' && cfg.windowBlocks > 0) {
+          setWindowBlocks(cfg.windowBlocks);
+        }
+      })
+      .catch(() => {
+        // keep the built-in default if the config call fails
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const openSession = (id: string, title: string) => {
     setTabs((prev) => {
@@ -185,6 +204,7 @@ export function App() {
                 openSession={openSession}
                 onModeChange={setTabMode}
                 onTitleChange={setTabTitle}
+                windowBlocks={windowBlocks}
               />
             }
           />

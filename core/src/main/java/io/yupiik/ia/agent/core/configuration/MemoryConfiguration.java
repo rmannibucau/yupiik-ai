@@ -26,6 +26,17 @@ public record MemoryConfiguration(
         boolean enabled,
 
         @Property(
+                defaultValue = "io.yupiik.ia.agent.core.configuration.MemoryMode.AUTO",
+                documentation = "When the durable memory is flushed to disk for the next session. AUTO picks from the "
+                        + "routing: the memory model resolving to the same model as the current turn selects "
+                        + "LAZY (extraction is expensive: only at a todo milestone or session close), a "
+                        + "distinct/cheaper memory model selects FULL (the every-N-turns cadence plus the "
+                        + "todo-completion flush). FULL and LAZY force either extreme. The prompt prefix is "
+                        + "built once per session and never re-read mid-session, so this governs only the "
+                        + "durability cadence, not what the current turn sees.")
+        MemoryMode mode,
+
+        @Property(
                 defaultValue = "2000",
                 documentation = "Maximum number of characters of memory injected in the system prompt.")
         int maxChars,

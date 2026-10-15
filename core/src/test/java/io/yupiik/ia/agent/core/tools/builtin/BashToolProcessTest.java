@@ -172,6 +172,49 @@ class BashToolProcessTest {
                 "the JVM-cwd fallback must be reported: " + result.output());
     }
 
+    @Test
+    void bashIsmsWorkUnderAutoResolution(@TempDir final Path tmp) throws Exception {
+        // The tool resolves to real bash by default (auto), so bash-only syntax must work rather than being
+        // rejected by a POSIX /bin/sh (dash): PIPESTATUS is the reported regression.
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        Assumptions.assumeTrue(
+                Files.isExecutable(Path.of("/bin/bash")) || Files.isExecutable(Path.of("/usr/bin/bash")),
+                "needs a real bash so auto resolves to it");
+        final var bash = new BashTool(NOOP, new ProcessService());
+        final var result = bash.execute(
+                Map.of("command", "false | true; echo code=${PIPESTATUS[0]}", "workdir", tmp.toString()), context());
+        assertTrue(result.success(), "the bash-ism command must run: " + result.output());
+        assertTrue(result.output().contains("code=1"), "PIPESTATUS[0] must be 1 (false|true), got: " + result.output());
+    }
+
+    @Test
+    void pinnedShStillRunsPosixCommands(@TempDir final Path tmp) throws Exception {
+        // Pinning to sh is honored: the configured escape hatch keeps strict-POSIX /bin/sh behavior.
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        Assumptions.assumeTrue(Files.isExecutable(Path.of("/bin/sh")), "needs /bin/sh (POSIX)");
+        final var config = TestConfigs.codingAgent(Map.of("yca.tools.shell", "sh"));
+        final var bash = new BashTool(NOOP, new ProcessService(), config);
+        final var result = bash.execute(Map.of("command", "echo ok", "workdir", tmp.toString()), context());
+        assertTrue(result.success(), "a pinned-sh command must run: " + result.output());
+        assertTrue(result.output().contains("ok"), "echo output expected under pinned sh: " + result.output());
+    }
+
+    @Test
+    void missingPinnedShellFallsBackToShWithANotice(@TempDir final Path tmp) throws Exception {
+        // An unavailable pinned shell cannot hard-fail the tool: it degrades to /bin/sh and reports the deviation
+        // so the model can see the command did not run under the requested shell.
+        Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"));
+        Assumptions.assumeTrue(Files.isExecutable(Path.of("/bin/sh")), "needs /bin/sh (POSIX)");
+        final var config = TestConfigs.codingAgent(Map.of("yca.tools.shell", "/nope/nope"));
+        final var bash = new BashTool(NOOP, new ProcessService(), config);
+        final var result = bash.execute(Map.of("command", "echo hi", "workdir", tmp.toString()), context());
+        assertTrue(result.success(), "the fallback command must still run: " + result.output());
+        assertTrue(result.output().contains("hi"), "fallback output expected: " + result.output());
+        assertTrue(
+                result.output().contains("not found") && result.output().contains("yca.tools.shell"),
+                "the missing-pin deviation must be reported: " + result.output());
+    }
+
     private static io.yupiik.ia.agent.core.tools.ToolContext contextWithProjectDir(final String projectDir) {
         final var dir = java.nio.file.Path.of(projectDir).toAbsolutePath().normalize();
         return new io.yupiik.ia.agent.core.tools.ToolContext(

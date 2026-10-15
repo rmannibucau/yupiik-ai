@@ -92,7 +92,8 @@ class WebSessionManagerFeedbackGateTest {
                 Clock.systemUTC(),
                 new PrecisionDurationMarkerProvider(),
                 null,
-                null);
+                null,
+                null); // SecretRedactor
         this.manager = new WebSessionManager(
                 runtimeFactory,
                 new NoopShellRegistry(),

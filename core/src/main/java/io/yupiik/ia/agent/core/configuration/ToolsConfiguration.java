@@ -66,4 +66,18 @@ public record ToolsConfiguration(
                                 + " symbol was found in the local code graph. Disabled by default: with graph hits the"
                                 + " note is skipped to keep resolve output lean. Requires the Maven repository knowledge"
                                 + " feature to be enabled.")
-        boolean alwaysSuggestMavenKnowledge) {}
+        boolean alwaysSuggestMavenKnowledge,
+
+        @Property(
+                documentation =
+                        "Which shell binary the bash tool launches with `-c`. When unset or `auto` (default) it uses a"
+                                + " real bash when one is found in the well-known locations (/bin/bash, /usr/bin/bash)"
+                                + " so the model can rely on bash-isms (PIPESTATUS, ${VAR:-x}, [[ ]], =~ ...) that a"
+                                + " minimal /bin/sh (dash on Debian/Ubuntu) would reject with 'Bad substitution'; it"
+                                + " falls back to /bin/sh when no bash is present (alpine, Windows without Git Bash/WSL)."
+                                + " Explicit `bash`, `sh` or `dash` pins the binary; when the pinned one cannot be found"
+                                + " the tool falls back to /bin/sh and reports the deviation in the output.")
+        String shell,
+
+        @Property(documentation = "In-process reimplementation of a safe subset of read-only bash survey commands.")
+        BashOverridesConfiguration bashOverrides) {}

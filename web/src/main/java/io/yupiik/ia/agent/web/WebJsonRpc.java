@@ -56,6 +56,7 @@ public class WebJsonRpc {
     private final ChatClient chatClient;
     private final ProviderManager providerManager;
     private final CompletionEngine completionEngine;
+    private final WebCommand.WebConf webConf;
 
     public WebJsonRpc(
             final SessionStore sessionStore,
@@ -68,7 +69,8 @@ public class WebJsonRpc {
             final SlashRegistry slashRegistry,
             final ChatClient chatClient,
             final ProviderManager providerManager,
-            final AgentProvider agentProvider) {
+            final AgentProvider agentProvider,
+            final WebCommand.WebConf webConf) {
         this.sessionStore = sessionStore;
         this.agentSessionService = agentSessionService;
         this.sessions = sessions;
@@ -79,6 +81,7 @@ public class WebJsonRpc {
         this.slashRegistry = slashRegistry;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
+        this.webConf = webConf;
         this.completionEngine = new CompletionEngine(slashRegistry, new ArgCompletion.Env() {
             @Override
             public List<String> models() {
@@ -151,6 +154,37 @@ public class WebJsonRpc {
                                 && s.title().toLowerCase(Locale.ROOT).contains(needle)
                         || s.id().toLowerCase(Locale.ROOT).contains(needle))
                 .toList();
+    }
+
+    @JsonRpc(
+            value = "web.config",
+            documentation =
+                    "Returns the web command's tunable frontend settings (e.g. the transcript pagination window size).")
+    public Map<String, Object> webConfig() {
+        return Map.of("windowBlocks", webConf.windowBlocks());
+    }
+
+    @JsonRpc(
+            value = "session.loadEarlier",
+            documentation =
+                    "Returns an earlier slice of a session's replayed transcript events, for tail-first snapshot"
+                            + " pagination. excludeFromTail is how many of the most recent events the client already holds"
+                            + " (the snapshot tail plus anything loaded so far); the returned list is the chunk of up to"
+                            + " windowBlocks events immediately before that, plus the new cumulative loaded count the"
+                            + " client should treat as the refreshed cursor.")
+    public Map<String, Object> loadEarlier(
+            @JsonRpcParam(required = true, documentation = "Session id.") final String sessionId,
+            @JsonRpcParam(
+                            required = true,
+                            documentation =
+                                    "How many of the most recent replayed events are already loaded client-side (exclusive cursor).")
+                    final int excludeFromTail) {
+        final var events = WebReplay.replay(sessionId, sessionStore.load(sessionId));
+        final var total = events.size();
+        final var end = Math.max(0, total - excludeFromTail);
+        final var from = Math.max(0, end - webConf.windowBlocks());
+        final var slice = events.subList(from, end);
+        return Map.of("events", slice, "loaded", total - from);
     }
 
     @JsonRpc(value = "sessions.create", documentation = "Creates a new empty session and returns its id.")
@@ -451,9 +485,10 @@ public class WebJsonRpc {
             @JsonRpcParam(required = true, documentation = "The pending request id from the SSE rpc frame.")
                     final String requestId,
             @JsonRpcParam(
-                            required = true,
                             documentation =
-                                    "The resolution: true/false for approvals, a string for asks, null to cancel.")
+                                    "The resolution: true/false for approvals, a string for asks, null (or absent) to cancel. "
+                                            + "Optional because null is a valid cancel resolution and fusion's required "
+                                            + "flag treats null as missing, which would reject the cancel path.")
                     final Object result) {
         return Map.of("resolved", sessions.resolve(id, requestId, result));
     }
@@ -560,9 +595,15 @@ public class WebJsonRpc {
         return parts;
     }
 
-    @JsonRpc(value = "codeGraph.resync", documentation = "Forces a resync of the structural code graph.")
-    public Map<String, String> codeGraphResync() {
-        return Map.of("status", codeGraph.resync());
+    @JsonRpc(
+            value = "codeGraph.resync",
+            documentation = "Forces a resync of the structural code graph. With the "
+                    + "optional session project root the refresh targets that per-session root's cached index instead of the "
+                    + "default project's persisted+watched graph.")
+    public Map<String, String> codeGraphResync(
+            @JsonRpcParam(documentation = "Optional session project root to resync (defaults to the process project).")
+                    final String root) {
+        return Map.of("status", codeGraph.resync(root == null || root.isBlank() ? null : java.nio.file.Path.of(root)));
     }
 
     @JsonRpc(

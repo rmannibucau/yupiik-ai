@@ -33,7 +33,6 @@ import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -126,16 +125,13 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-test",
+                null,
                 null);
         extractor.asyncExtractNow(List.of(Message.user("user said: the project now uses tabs")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
-        // the notice fires before the snippet write: wait for the file to be updated
-        final var projectFile = store.projectFile();
-        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while ((!Files.exists(projectFile) || !Files.readString(projectFile).contains("a durable fact"))
-                && System.nanoTime() < deadline) {
-            Thread.sleep(20);
-        }
+        // extraction is buffered on the background executor (never touches the live on-disk store):
+        // poll for it to land in the pending buffer, flushing to MEMORY.md so it can be asserted.
+        awaitFlushedFact(store, "a durable fact");
 
         assertEquals(1, events.size(), "one warning expected");
         final var notice = (AgentEvent.Notice) events.get(0);
@@ -150,7 +146,7 @@ class MemoryExtractorTest {
         assertTrue(
                 notice.message().contains("saving a plain snippet instead"),
                 "the notice must mention the fallback: " + notice.message());
-        // the fallback snippet path must still save memory
+        // the fallback snippet path must still save memory (after the flush boundary)
         final var project = store.readProject();
         assertTrue(project.contains("a durable fact"), "the fallback snippet must be saved: " + project);
     }
@@ -197,15 +193,11 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-test",
+                null,
                 null);
         extractor.asyncExtractNow(List.of(Message.user("user said: we use tabs now")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
-        final var projectFile = store.projectFile();
-        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while ((!Files.exists(projectFile) || !Files.readString(projectFile).contains("the team standard is tabs"))
-                && System.nanoTime() < deadline) {
-            Thread.sleep(20);
-        }
+        awaitFlushedFact(store, "the team standard is tabs");
 
         assertEquals(1, events.size(), "one warning expected");
         final var notice = (AgentEvent.Notice) events.get(0);
@@ -257,6 +249,7 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-delta",
+                null,
                 null);
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("first message: use tabs"));
@@ -308,6 +301,7 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-min",
+                null,
                 null);
         // re-enable the default 1000-char gate for this test: config() sets it to 0 so the
         // async extraction tests fire, but this test wants the gate active
@@ -334,6 +328,7 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-min",
+                null,
                 null);
         // tiny delta below the default 1000-char gate: no call (end-of-turn path only)
         gated.asyncExtractNow(List.of(Message.user("hi")), ChatSettings.EMPTY);
@@ -386,6 +381,7 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-forced",
+                null,
                 null);
         // a below-threshold delta must still be extracted when forced (session close)
         final var messages = new ArrayList<Message>();
@@ -429,6 +425,7 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-async",
+                null,
                 null);
         // the end-of-turn hook is not debounced: the first call must run right away
         extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
@@ -474,6 +471,7 @@ class MemoryExtractorTest {
                 Clock.systemUTC(),
                 null,
                 "s-gating",
+                null,
                 null);
         final var one = List.of(Message.user("one"));
         final var two = List.of(Message.user("one"), Message.user("two"));
@@ -561,6 +559,21 @@ class MemoryExtractorTest {
         assertFalse(MemoryExtractor.hasRecallIntent("[user] the build now uses Maven\n"), "no recall phrasings");
         assertFalse(MemoryExtractor.hasRecallIntent(null), "null excerpt never triggers recall");
         assertFalse(MemoryExtractor.hasRecallIntent(""), "blank excerpt never triggers recall");
+    }
+
+    /**
+     * Polls until the asynchronous extraction of {@code factText} has been committed to an on-disk
+     * memory file. Extraction runs on a background executor and writes the store directly, so this
+     * poll-re-reads until the fact shows up (or the deadline passes).
+     */
+    private void awaitFlushedFact(final MemoryStore store, final String factText) throws Exception {
+        final var deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (System.nanoTime() < deadline) {
+            if (store.readGlobal().contains(factText) || store.readProject().contains(factText)) {
+                return;
+            }
+            Thread.sleep(20);
+        }
     }
 
     @AfterAll

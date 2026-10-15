@@ -86,7 +86,7 @@ class SessionRuntimeFactoryTest {
     void noStoreNorConfigReturnsNull() {
         final var factory = new SessionRuntimeFactory(
                 null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
         assertNull(factory.resolveSessionWorkdir("s1"), "with no session store nothing can be resolved");
     }
 
@@ -102,6 +102,6 @@ class SessionRuntimeFactoryTest {
     private static SessionRuntimeFactory factory(final CodingAgentConfiguration config, final SessionStore store) {
         return new SessionRuntimeFactory(
                 null, null, null, config, null, store, null, null, null, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 }

@@ -94,15 +94,22 @@ final class LlmWire {
                 stripIdentity(message.others()));
     }
 
-    /** The {@code others} map without the reserved speaker-identity key (UI metadata never reaches the LLM). */
+    /** The {@code others} map without the reserved UI metadata keys (speaker identity + persisted thinking)
+     * that never reach the LLM. */
     static Map<String, Object> stripIdentity(final Map<String, Object> others) {
-        if (others == null || others.isEmpty() || !others.containsKey(Message.IDENTITY_KEY)) {
+        if (others == null
+                || others.isEmpty()
+                || (!others.containsKey(Message.IDENTITY_KEY) && !others.containsKey(THINKING_KEY))) {
             return others == null ? Map.of() : others;
         }
         final var out = new LinkedHashMap<>(others);
         out.remove(Message.IDENTITY_KEY);
+        out.remove(THINKING_KEY);
         return out;
     }
+
+    /** Reserved {@code others} key on an assistant message holding persisted reasoning for web replay. */
+    static final String THINKING_KEY = "thinking";
 
     static LlmTool toLlmTool(final Tool tool) {
         final var fn = tool.function();

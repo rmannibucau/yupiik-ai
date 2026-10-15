@@ -150,6 +150,11 @@ public class SubagentUsageTracker extends UsageTracker {
     }
 
     @Override
+    public long auxiliaryCacheReadTokens() {
+        return 0;
+    }
+
+    @Override
     public long auxiliaryRequests() {
         return 0;
     }

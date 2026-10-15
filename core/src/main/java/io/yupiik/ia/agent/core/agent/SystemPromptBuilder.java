@@ -52,6 +52,7 @@ public class SystemPromptBuilder {
     private final ProviderManager providerManager;
     private final TodoPromptResolver todoPromptResolver;
     private final MavenRepositoryKnowledgeService mavenRepositoryKnowledge;
+    private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
     /** The session's per-tab selection (provider/model); when set the prompt caps follow it. */
     protected volatile ChatSettings settings;
 
@@ -62,6 +63,18 @@ public class SystemPromptBuilder {
      * ({@code configuration.resolveWorkingDir()/resolveProjectDir()}) is used.
      */
     protected volatile java.nio.file.Path workdir;
+
+    /**
+     * The durable {@code <memory>} section of the system prompt, computed once per session - lazily
+     * on the first {@link #build(String, String)} - and reused verbatim on every subsequent turn.
+     * The current session never re-reads {@code MEMORY.md} after this snapshot is taken: mid-session
+     * file writes ({@code memory_write}, extraction) are durable for the <em>next</em> session but
+     * never rewrite this section, so the system-prompt prefix stays byte-identical across turns and
+     * provider prefix caches keep hitting. A fresh {@link SystemPromptBuilder} is created for every
+     * session runtime - including a resume - so the snapshot is naturally rebuilt on reopen.
+     * {@code null} until the first build; {@code ""} when memory is disabled or empty.
+     */
+    private String cachedMemorySection;
 
     /** Attach the owning session's working directory; called once at runtime creation. */
     public void workdir(final java.nio.file.Path dir) {
@@ -95,7 +108,8 @@ public class SystemPromptBuilder {
             final AgentProvider agentProvider,
             final ProviderManager providerManager,
             final TodoPromptResolver todoPromptResolver,
-            final MavenRepositoryKnowledgeService mavenRepositoryKnowledge) {
+            final MavenRepositoryKnowledgeService mavenRepositoryKnowledge,
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.configuration = configuration;
         this.memoryStore = memoryStore;
         this.todoStore = todoStore;
@@ -104,6 +118,7 @@ public class SystemPromptBuilder {
         this.providerManager = providerManager;
         this.todoPromptResolver = todoPromptResolver;
         this.mavenRepositoryKnowledge = mavenRepositoryKnowledge;
+        this.secretRedactor = secretRedactor;
     }
 
     protected SystemPromptBuilder() {
@@ -115,6 +130,7 @@ public class SystemPromptBuilder {
         this.providerManager = null;
         this.todoPromptResolver = null;
         this.mavenRepositoryKnowledge = null;
+        this.secretRedactor = null;
     }
 
     public String build() {
@@ -163,7 +179,10 @@ public class SystemPromptBuilder {
                     "- When <session-state> shows context usage near the thresholds, proactively call manage_context (action=prune or action=compact) instead of waiting for the hard limit.\n");
         }
         sb.append("- Persist durable facts/decisions with memory_write.\n");
-        sb.append("- Verify your work (compile/test) when feasible. Be concise in final answers.\n");
+        sb.append("- Verify your work (compile/test) when feasible.\n");
+        sb.append("- Answer directly and concisely in markdown from what you already know. Prefer terse, "
+                + "single-line bullets over prose paragraphs or nested lists; do not restate what is obvious "
+                + "or already in context, and do not pad with preamble or closing remarks.\n");
         sb.append(
                 "- Work with absolute paths; resolve relative paths against their intended root before using a tool.\n");
         sb.append(
@@ -176,9 +195,21 @@ public class SystemPromptBuilder {
                 + "and propose the closest available tool instead of calling an unknown one.\n");
         sb.append('\n');
         sb.append("Tool usage policy:\n");
-        sb.append(
-                "- Use the dedicated search tools for code exploration (grep, glob, read_file, list_dir); do NOT use "
-                        + "bash for grep/rg/find/cat/ls/head/tail/sed - reserve bash for real system commands (git, mvn, npm, docker...).\n");
+        sb.append("- Use the dedicated search tools for code exploration (grep, glob, read_file, list_dir); do NOT use "
+                + "bash for grep/rg/find. Reserve other bash for real system commands (git, mvn, npm, docker...).\n");
+        // when the read-only survey rewrite is enabled, invite the batched bash survey form (it is executed
+        // in-process, safely and capped) instead of fragmenting the exploration into many isolated tool reads.
+        if (configuration.tools().bashOverrides() != null
+                && configuration.tools().bashOverrides().enabled()) {
+            final var enabled = enabledOverrideCommands();
+            if (!enabled.isEmpty()) {
+                sb.append("- Prefer one bash call that batches read-only survey commands (")
+                        .append(String.join(", ", enabled))
+                        .append(") when you can, e.g. `ls -la && cat README.md && cat pom.xml` - it runs "
+                                + "in-process, safely, and costs far fewer round-trips than many isolated reads. "
+                                + "For a one-off or deep search, the dedicated tools still work.\n");
+            }
+        }
         sb.append("- Batch independent tool calls in one reply: consecutive read-only calls run concurrently, so N "
                 + "independent calls cost one round-trip. Only sequence calls that need previous results.\n");
         sb.append(
@@ -230,16 +261,16 @@ public class SystemPromptBuilder {
         // mode tail last: only a mode switch rewrites this suffix, so every turn within a mode keeps
         // the whole system prompt byte-stable and provider caches keep hitting
         final var plan = permissionService != null && permissionService.mode() == AgentMode.PLAN;
-        // durable memory lives in the stable prefix (message[0], built once per turn) so it is never
-        // re-sent at every tool-call round; only a mid-turn memory_write refreshes it via the tail
-        if (memoryStore != null) {
-            final var paths = currentPaths(prompt);
-            final var memory = workdir != null
-                    ? memoryStore.promptSection(prompt, resolvedMemoryBudget(), workdir, paths)
-                    : memoryStore.promptSection(prompt, resolvedMemoryBudget(), null, paths);
-            if (!memory.isBlank()) {
-                sb.append('\n').append(memory).append('\n');
-            }
+        // durable memory lives in the stable prefix (message[0]) as a session-frozen snapshot built
+        // once on the first build and reused verbatim on every turn. The current session never
+        // re-reads MEMORY.md after this snapshot, so mid-session file writes (memory_write, extraction)
+        // are durable for the next session but never rewrite this section - the system-prompt prefix,
+        // and the provider prompt cache over it, stay byte-identical across turns. There is no
+        // mid-session memory refresh: a memory_write persists directly to disk and is already present
+        // in this turn's conversation.
+        final var memory = cachedMemorySection(prompt);
+        if (memory != null && !memory.isBlank()) {
+            sb.append('\n').append(memory).append('\n');
         }
         if (plan) {
             sb.append('\n');
@@ -269,8 +300,9 @@ public class SystemPromptBuilder {
      * per-request signal: it is re-rendered fresh regardless of how the mode was reached (slash
      * command, startup flag or session restore), so the model never has to infer it from stale
      * conversation artifacts. The durable memory is {@link #memorySection(String) part of the
-     * stable system prefix} and is only re-appended here (as a caller-side refresh) when a
-     * mid-turn {@code memory_write} changed it. Callers enclose the result in {@code <session-state>} tags.
+     * stable system prefix}, built once per session and never re-appended mid-session: it is
+     * invisible to the current session after the prefix is assembled, so nothing is re-sent
+     * here. Callers enclose the result in {@code <session-state>} tags.
      *
      * @param prompt the current user prompt used to select relevant memories; may be null
      * @return the rendered session state, without the enclosing tags
@@ -293,9 +325,10 @@ public class SystemPromptBuilder {
 
     /**
      * Renders only the part of the session state that is likely to have changed since the last
-     * request: the todo list. Date, mode and the memory version are stable within a turn/session
-     * and are already covered by the stable prefix or the dedup of {@code appendStateIfChanged};
-     * callers that want the full state use {@link #sessionState(String)} (first tail of a turn).
+     * request: the todo list. Date and mode are stable within a turn/session and are already
+     * covered by the stable prefix or the dedup of {@code appendStateIfChanged}; the memory is
+     * part of the session-initial stable prefix and never re-appended, so it is absent here too.
+     * Callers that want the full state use {@link #sessionState(String)} (first tail of a turn).
      */
     public String sessionStateDelta() {
         final var sb = new StringBuilder();
@@ -335,6 +368,23 @@ public class SystemPromptBuilder {
     }
 
     /**
+     * The session-frozen {@code <memory>} section: computed once on the first {@link #build} call
+     * (with that turn's prompt) and cached for the session lifetime. Every subsequent turn reuses
+     * this exact section - {@code MEMORY.md} is never re-read after the snapshot, so mid-session
+     * writes cannot rewrite the prompt's memory. Returns the cached section or {@code ""}.
+     * Thread-safe: only the first caller computes; concurrent first calls may both compute, the
+     * winner wins (idempotent - same store, deterministic ranking).
+     */
+    private String cachedMemorySection(final String prompt) {
+        var cached = cachedMemorySection;
+        if (cached == null) {
+            cached = memorySection(prompt);
+            cachedMemorySection = cached;
+        }
+        return cached;
+    }
+
+    /**
      * Extracts candidate code-path hints (relative {@code src/...} paths, {@code .java}/etc. file
      * names, package segments) from the current turn's text, passed to the memory ranker so bullets
      * anchored to the code being worked on are surfaced. Best-effort: a turn with no obvious paths
@@ -364,14 +414,8 @@ public class SystemPromptBuilder {
     }
 
     /**
-     * Content fingerprint of the memory files, stable across reads and bumped on every write.
-     * The agent loop compares it to the turn-start value to detect a mid-turn {@code memory_write}
-     * and refresh the tail without re-reading the files at every round.
+     * The underlying memory store, or {@code null} when memory is disabled.
      */
-    public int memoryVersion() {
-        return memoryStore == null ? -1 : memoryStore.version();
-    }
-    /** The underlying memory store, or {@code null} when memory is disabled. */
     public MemoryStore memoryStore() {
         return memoryStore;
     }
@@ -497,7 +541,11 @@ public class SystemPromptBuilder {
 
     private void append(final StringBuilder sb, final String label, final Path path) {
         try {
-            final var content = Files.readString(path);
+            var content = Files.readString(path);
+            if (secretRedactor != null) {
+                // never let a hardcoded key in AGENTS.md/README/skills reach the provider
+                content = secretRedactor.redact(content, null);
+            }
             sb.append("<project-file name=\"")
                     .append(label)
                     .append("\" path=\"")
@@ -544,6 +592,22 @@ public class SystemPromptBuilder {
         addIfRegular(list, Path.of(configuration.resolveStorageHome()).resolve("AGENTS.md"));
         addIfRegular(list, Path.of(home, ".claude", "AGENTS.md"));
         return list;
+    }
+
+    /** The read-only survey commands actually enabled by {@code yca.tools.bashOverrides.commands}. */
+    private List<String> enabledOverrideCommands() {
+        final var overrides = configuration.tools().bashOverrides();
+        if (overrides == null || !overrides.enabled()) {
+            return java.util.List.of();
+        }
+        final var enabled = new java.util.ArrayList<String>();
+        for (final var candidate :
+                List.of("cat", "ls", "head", "tail", "echo", "pwd", "cd", "sed", "wc", "grep", "find", "rg")) {
+            if (overrides.keeps(candidate)) {
+                enabled.add(candidate);
+            }
+        }
+        return enabled;
     }
 
     private static void addIfRegular(final List<Path> list, final Path path) {

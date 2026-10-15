@@ -85,6 +85,14 @@ final class WebReplay {
             }
             if ("assistant".equals(role)) {
                 final var text = str(message.content());
+                // reasoning persisted with the answer (see AgentLoop.THINKING_KEY) is replayed as a
+                // thinking-delta BEFORE the answer's text-delta, so the reducer groups it as a thought
+                // block above the answer - otherwise past thoughts vanish on reload (TUI keeps them in
+                // its transcript, the web rebuilds from persisted messages only).
+                final var thinking = thinkingOf(message);
+                if (thinking != null && !thinking.isBlank()) {
+                    out.add(new WebEventDto("thinking-delta", sessionId, null, null, thinking, Map.of()));
+                }
                 if (text != null && !text.isBlank()) {
                     out.add(new WebEventDto("text-delta", sessionId, null, null, text, Map.of()));
                 }
@@ -141,5 +149,14 @@ final class WebReplay {
 
     private static String str(final Object value) {
         return value == null ? null : String.valueOf(value);
+    }
+
+    /** The reasoning text persisted on an assistant message under {@code AgentLoop.THINKING_KEY}, or null. */
+    private static String thinkingOf(final Message message) {
+        if (message == null || message.others() == null) {
+            return null;
+        }
+        final var raw = message.others().get("thinking");
+        return raw == null ? null : String.valueOf(raw);
     }
 }

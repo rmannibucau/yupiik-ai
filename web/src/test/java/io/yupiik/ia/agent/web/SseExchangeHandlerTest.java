@@ -64,13 +64,21 @@ class SseExchangeHandlerTest {
     }
 
     private JreHttpServer start(final SseBroker broker) {
+        return start(
+                broker,
+                1024,
+                id -> List.of(
+                        new WebEventDto("user", id, null, null, "hello", Map.of()),
+                        new WebEventDto("text-delta", id, null, null, "world", Map.of())));
+    }
+
+    private JreHttpServer start(
+            final SseBroker broker,
+            final int windowBlocks,
+            final java.util.function.Function<String, List<WebEventDto>> snapshotSource) {
         final var instance = new JreHttpServer(
                 new JreHttpServerConfiguration(null, 0, true),
-                List.of(new SseExchangeHandler(
-                        broker,
-                        id -> List.of(
-                                new WebEventDto("user", id, null, null, "hello", Map.of()),
-                                new WebEventDto("text-delta", id, null, null, "world", Map.of())))));
+                List.of(new SseExchangeHandler(broker, snapshotSource, windowBlocks)));
         instance.start();
         server = instance;
         return instance;
@@ -118,6 +126,36 @@ class SseExchangeHandlerTest {
         assertTrue(
                 framesPeek(frames).stream().anyMatch(l -> l.startsWith("data:") && l.contains("\"events\"")),
                 "snapshot should carry an events array, got: " + framesPeek(frames));
+    }
+
+    @Test
+    void snapshotIsTailSlicedAndCarriesTheTotal(final JsonMapper mapper) throws Exception {
+        final var broker = new SseBroker(mapper);
+        // a 5-event history with a 2-event window must seed only the last 2 events but report total=5 so
+        // the client knows session.loadEarlier can fetch the rest (tail-first pagination).
+        final var s = start(
+                broker,
+                2,
+                id -> List.of(
+                        new WebEventDto("user", id, null, null, "m1", Map.of()),
+                        new WebEventDto("text-delta", id, null, null, "m2", Map.of()),
+                        new WebEventDto("user", id, null, null, "m3", Map.of()),
+                        new WebEventDto("text-delta", id, null, null, "m4", Map.of()),
+                        new WebEventDto("text-delta", id, null, null, "m5", Map.of())));
+        final var frames = stream(url(s, "/api/stream?session=s1"));
+
+        await(
+                () -> framesPeek(frames).stream().anyMatch(l -> l.startsWith("data:") && l.contains("\"total\"")),
+                3,
+                TimeUnit.SECONDS);
+        // the snapshot carries exactly the tail window and the authoritative total
+        final var data = framesPeek(frames).stream()
+                .filter(l -> l.startsWith("data:"))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(data.contains("\"total\":5"), "expected the total count in the snapshot, got: " + data);
+        assertTrue(!data.contains("m1"), "tail-first snapshot must not ship m1, got: " + data);
+        assertTrue(data.contains("m4") && data.contains("m5"), "snapshot should carry the tail m4/m5, got: " + data);
     }
 
     @Test

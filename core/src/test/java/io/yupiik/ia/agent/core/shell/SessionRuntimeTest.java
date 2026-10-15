@@ -81,6 +81,7 @@ class SessionRuntimeTest {
                 Clock.systemUTC(),
                 new PrecisionDurationMarkerProvider(),
                 null,
+                null,
                 null);
     }
 

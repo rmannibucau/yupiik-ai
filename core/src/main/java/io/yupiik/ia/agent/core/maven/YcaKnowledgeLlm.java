@@ -104,8 +104,7 @@ public class YcaKnowledgeLlm implements KnowledgeLlm {
         final var cfg = configuration.mavenRepositoryKnowledge();
         final var raw = cfg == null || cfg.localRepository() == null ? null : cfg.localRepository();
         final var value = raw == null || raw.isBlank() ? "~/.m2/repository" : raw;
-        final var home = System.getProperty("user.home");
-        return Path.of(value.startsWith("~") && home != null ? home + value.substring(1) : value);
+        return Path.of(CodingAgentConfiguration.expandHome(value));
     }
 
     @Override

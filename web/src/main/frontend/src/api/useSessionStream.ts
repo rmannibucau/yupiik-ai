@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { dispatchServerRequest } from './rpc';
+import { call, dispatchServerRequest } from './rpc';
 
 export type WebEvent = {
   type: string;
@@ -125,6 +125,17 @@ export function useSessionStream(sessionId: string | undefined) {
   // Kept in a ref, incremented O(1) per SSE frame in append(), so the fold never has to rescan
   // the whole event array to derive it (which would be O(n) per rAF during a long answer).
   const liveOutCharsRef = useRef(0);
+  // cumulative count of replayed transcript events the client currently holds (snapshot tail + any
+  // session.loadEarlier slices). Serves as the exclusive-from-tail cursor for fetching even earlier
+  // history, so a tail-first snapshot never loses access to a long session's older messages.
+  const loadedEventsRef = useRef(0);
+  // the full replayed event count the server reported in the latest snapshot; more history is available
+  // (and the "Load earlier" affordance should show) while loadedEventsRef is below it.
+  const totalReplayRef = useRef(0);
+  // populated by the connection effect with a callable that fetches the next earlier slice of the
+  // persisted history (the effect owns the in-memory event log it mutates). Kept in a ref so the
+  // hook can expose a stable wrapper without re-registering on every render.
+  const loadEarlierRef = useRef<() => void>(() => {});
 
   useEffect(() => {
     sessionRef.current = sessionId;
@@ -191,6 +202,34 @@ export function useSessionStream(sessionId: string | undefined) {
       }
     };
 
+    // Fetches the next-earlier slice of the persisted history (tail-first snapshot pagination) and
+    // PREPENDS it to the ordered log, so a long session stays browseable after the windowed snapshot.
+    const loadEarlier = async () => {
+      if (closed) return;
+      try {
+        const before = loadedEventsRef.current;
+        if (before <= 0) return;
+        const r = await call<{ events: WebEvent[]; loaded: number }>('session.loadEarlier', {
+          sessionId,
+          excludeFromTail: before,
+        });
+        if (closed || !Array.isArray(r?.events) || r.events.length === 0) return;
+        // older events go at the FRONT of the log, preserving conversation order; new keys are
+        // registered so a reconnect's snapshot never re-appends a just-loaded slice.
+        for (const ev of r.events) {
+          const key = dedupKey(ev, STATE_CARRYING.has(ev.type) ? ++seq : seq);
+          if (keys.has(key)) continue;
+          keys.add(key);
+          history.unshift(ev);
+        }
+        loadedEventsRef.current = typeof r.loaded === 'number' ? r.loaded : before + r.events.length;
+        publish();
+      } catch {
+        // a failed earlier-slice fetch is non-fatal: the already-rendered tail remains, the user retries
+      }
+    };
+    loadEarlierRef.current = loadEarlier;
+
     let source: EventSource | null = null;
     let closed = false;
     let retry = 0;
@@ -244,10 +283,19 @@ export function useSessionStream(sessionId: string | undefined) {
 
       es.addEventListener('snapshot', (ev) => {
         try {
-          const snap = JSON.parse((ev as MessageEvent).data) as { events?: WebEvent[] };
+          const snap = JSON.parse((ev as MessageEvent).data) as { events?: WebEvent[]; total?: number };
           // merge history into the live log: NEVER replace, otherwise a reconnect during a
           // turn drops everything streamed in memory and the pane "refreshes" and loses content.
           mergeSnapshot(snap.events ?? []);
+          // the snapshot is tail-first (bounded by the configured window): record the full replayed
+          // event count so the client knows how much older history session.loadEarlier can still fetch.
+          // loadedEventsRef is cumulative and NOT reset here on a reconnect (the log is append-only
+          // across connections); it is initialised to the first snapshot's tail length so "more history
+          // exists" is true only while older slices remain.
+          if (typeof snap.total === 'number') totalReplayRef.current = snap.total;
+          if (loadedEventsRef.current === 0 && snap.events?.length) {
+            loadedEventsRef.current = snap.events.length;
+          }
           lastEventAt = Date.now();
           if (snap.events && snap.events.length > 0) deliveredContent = true;
           // the persisted history has been delivered and seeded - the loader can clear and chat
@@ -317,7 +365,18 @@ export function useSessionStream(sessionId: string | undefined) {
     return s;
   }, [events]);
 
-  return { events, connected, bootstrapped, reconnecting, status };
+  // whether the server still has older persisted history the client has not fetched (tail-first snapshot).
+  const moreReplayExists = totalReplayRef.current > loadedEventsRef.current;
+
+  return {
+    events,
+    connected,
+    bootstrapped,
+    reconnecting,
+    status,
+    moreReplayExists,
+    loadEarlier: () => loadEarlierRef.current(),
+  };
 }
 
 export function foldStatus(events: WebEvent[]): SessionStatus {

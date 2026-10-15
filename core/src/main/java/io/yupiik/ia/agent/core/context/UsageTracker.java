@@ -49,6 +49,7 @@ public class UsageTracker {
     private final AtomicLong requests = new AtomicLong();
     private final AtomicLong auxiliaryPromptTokens = new AtomicLong();
     private final AtomicLong auxiliaryCompletionTokens = new AtomicLong();
+    private final AtomicLong auxiliaryCacheReadTokens = new AtomicLong();
     private final AtomicLong auxiliaryRequests = new AtomicLong();
     // rtk-style output-optimization counters: how many good tool outputs were trimmed and by how much.
     private final AtomicLong optimizedOutputs = new AtomicLong();
@@ -121,6 +122,7 @@ public class UsageTracker {
         requests.incrementAndGet();
         auxiliaryPromptTokens.addAndGet(usage.promptTokens());
         auxiliaryCompletionTokens.addAndGet(usage.completionTokens());
+        auxiliaryCacheReadTokens.addAndGet(usage.cacheReadTokens());
         auxiliaryRequests.incrementAndGet();
     }
 
@@ -264,6 +266,16 @@ public class UsageTracker {
         return auxiliaryCompletionTokens.get();
     }
 
+    /** Background (auxiliary) prompt tokens that were served from the provider cache. */
+    public long auxiliaryCacheReadTokens() {
+        return auxiliaryCacheReadTokens.get();
+    }
+
+    /** Background (auxiliary) billed prompt tokens: prompt minus cache-read. */
+    public long auxiliaryFreshTokens() {
+        return Math.max(0, auxiliaryPromptTokens.get() - auxiliaryCacheReadTokens.get());
+    }
+
     public long auxiliaryRequests() {
         return auxiliaryRequests.get();
     }
@@ -275,6 +287,7 @@ public class UsageTracker {
         requests.set(0);
         auxiliaryPromptTokens.set(0);
         auxiliaryCompletionTokens.set(0);
+        auxiliaryCacheReadTokens.set(0);
         auxiliaryRequests.set(0);
         optimizedOutputs.set(0);
         optimizedCharsBefore.set(0);

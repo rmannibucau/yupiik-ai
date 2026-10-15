@@ -76,7 +76,7 @@ public class WebCommand implements Runnable, AutoCloseable {
         restoreSessions.sessions(conf.session());
         final var endpoints = List.of(
                 new JsonRpcEndpoint(jsonRpc, mapper, "/api/rpc", true),
-                new SseExchangeHandler(broker, sessionManager::snapshotFor),
+                new SseExchangeHandler(broker, sessionManager::snapshotFor, conf.windowBlocks()),
                 new StaticAssetsExchangeHandler());
         // when access logging is enabled the logger becomes the single dispatcher in front of the
         // real endpoints: it replicates the JRE matching and logs one CLF line per request
@@ -182,5 +182,15 @@ public class WebCommand implements Runnable, AutoCloseable {
                     documentation =
                             "Session id(s) to restore out-of-the-box on boot: a tab is opened for each. "
                                     + "Repeat the option (--session a --session b) or use the comma form. Unknown ids are ignored.")
-            List<String> session) {}
+            List<String> session,
+
+            @Property(
+                    defaultValue = "1024",
+                    documentation =
+                            "How many transcript blocks (assistant/user/tool cards) are always materialized from the"
+                                    + " tail of a session before 'Load earlier' pagination kicks in. Larger values render"
+                                    + " a longer scroll-back without paginating but cost more DOM nodes on load and during"
+                                    + " live streaming; 1024 is a good balance for large screens. The live SSE event buffer"
+                                    + " (TAIL_LIMIT) is a separate, independent cap.")
+            int windowBlocks) {}
 }

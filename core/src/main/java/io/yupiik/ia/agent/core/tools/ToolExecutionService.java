@@ -85,6 +85,10 @@ public class ToolExecutionService {
         final var startNanos = System.nanoTime();
         ToolResult result;
         try {
+            // secret redaction: restore provenance fakes in the tool args back to the real values
+            // right before execution so commands that need a credential still work (the provider
+            // never saw the real value). Only registry-tracked fakes are restored.
+            emitter.emit(new io.yupiik.ia.agent.core.security.ToolExecutionPrepare(tool.name(), args, ctx.sessionId()));
             result = tool.execute(args, ctx);
         } catch (final RuntimeException | Error e) {
             result = ToolResult.error("Tool " + tool.name() + " failed: " + e);

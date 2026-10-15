@@ -25,10 +25,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -56,18 +54,6 @@ public class MemoryStore {
      * a mid-turn {@code memory_write} without re-hashing the files at every LLM round.
      */
     private volatile int contentVersion = -1;
-
-    /**
-     * Facts appended since the last time the wire diff was drained for each session
-     * (mid-turn memory_write): keyed by session id so parallel sessions never see each
-     * other's memory deltas. A small LRU guard prevents unbounded growth.
-     */
-    private final Map<String, Deque<String>> pendingDiffs = new LinkedHashMap<>(8, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(final Map.Entry<String, Deque<String>> eldest) {
-            return size() > 64;
-        }
-    };
 
     private volatile long globalMtime = Long.MIN_VALUE;
     private volatile long globalSize = Long.MIN_VALUE;
@@ -765,6 +751,13 @@ public class MemoryStore {
 
     private record ScopeSelection(String global, String project) {}
 
+    /**
+     * Direct, crash-safe on-disk write of facts into the given scope's file. Used by both the
+     * {@code memory_write} TOOL (an explicit user "remember" directive must persist immediately)
+     * and the automatic extractor. The session's prompt snapshot is frozen once, so writing the
+     * file mid-session never rewrites the memory shown in the current prompt - it is durable for
+     * the <em>next</em> session (or a resume) which rebuilds the snapshot.
+     */
     public synchronized List<String> append(final boolean global, final List<String> facts) {
         if (facts == null || facts.isEmpty()) {
             return List.of();
@@ -773,38 +766,7 @@ public class MemoryStore {
         try {
             Files.createDirectories(file.getParent());
             final var existing = new LinkedHashSet<String>(existingLines(file));
-            final var added = new ArrayList<String>();
-            for (final var fact : facts) {
-                final var line = fact.strip();
-                if (line.isEmpty()) {
-                    continue;
-                }
-                // A fact may arrive either as plain text (-> default priority/today envelope) or already
-                // carrying an envelope (from memory_write / the extractor). Existing plain lines in
-                // the file are never treated as legacy: they round-trip untouched until a real write.
-                final var meta = envelopeFrom(line);
-                final var bareText = textOf(line);
-                // Long durable facts are wrapped across bullets rather than silently dropped, so no
-                // extracted knowledge is lost to the 500-char line cap. The envelope rides on the
-                // first wrapped piece only.
-                final var wrapped = wrapLine(bareText, 480);
-                for (var i = 0; i < wrapped.size(); i++) {
-                    final var piece = wrapped.get(i);
-                    final var metaForPiece = i == 0 ? meta : Meta.plain();
-                    final var stored = format(metaForPiece, piece);
-                    final var replaced = fuzzyReplace(existing, stored);
-                    if (replaced != null) {
-                        // a near-duplicate bullet was superseded by the new wording: keep the higher
-                        // priority and any existing anchor/topic so a p5 directive is not demoted
-                        existing.remove(replaced);
-                        existing.add(stored);
-                        added.add(stored);
-                    } else if (existing.add(stored)) {
-                        added.add(stored);
-                    }
-                    // exact duplicate: already present, nothing to do
-                }
-            }
+            final var added = addFacts(global, existing, facts);
             if (!added.isEmpty()) {
                 write(file, existing);
             }
@@ -815,6 +777,48 @@ public class MemoryStore {
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    /**
+     * Shared inner loop behind {@link #append}: normalizes, wraps and
+     * fuzzy-dedups each fact against {@code existingBase} (in place) and returns the lines that
+     * were genuinely added. Never touches the filesystem.
+     */
+    private List<String> addFacts(
+            final boolean global, final LinkedHashSet<String> existingBase, final List<String> facts) {
+        final var added = new ArrayList<String>();
+        for (final var fact : facts) {
+            final var line = fact.strip();
+            if (line.isEmpty()) {
+                continue;
+            }
+            // A fact may arrive either as plain text (-> default priority/today envelope) or already
+            // carrying an envelope (from memory_write / the extractor). Existing plain lines in
+            // the file are never treated as legacy: they round-trip untouched until a real write.
+            final var meta = envelopeFrom(line);
+            final var bareText = textOf(line);
+            // Long durable facts are wrapped across bullets rather than silently dropped, so no
+            // extracted knowledge is lost to the 500-char line cap. The envelope rides on the
+            // first wrapped piece only.
+            final var wrapped = wrapLine(bareText, 480);
+            for (var i = 0; i < wrapped.size(); i++) {
+                final var piece = wrapped.get(i);
+                final var metaForPiece = i == 0 ? meta : Meta.plain();
+                final var stored = format(metaForPiece, piece);
+                final var replaced = fuzzyReplace(existingBase, stored);
+                if (replaced != null) {
+                    // a near-duplicate bullet was superseded by the new wording: keep the higher
+                    // priority and any existing anchor/topic so a p5 directive is not demoted
+                    existingBase.remove(replaced);
+                    existingBase.add(stored);
+                    added.add(stored);
+                } else if (existingBase.add(stored)) {
+                    added.add(stored);
+                }
+                // exact duplicate: already present, nothing to do
+            }
+        }
+        return added;
     }
 
     /** The metadata to attach to a fact being appended: preserved when it already carries an envelope. */
@@ -975,55 +979,6 @@ public class MemoryStore {
         } catch (final IOException e) {
             throw new UncheckedIOException(e);
         }
-    }
-
-    /**
-     * Drains and returns the facts appended since the last call (mid-turn memory_write diff).
-     * Used by the volatile session tail so a memory refresh only re-sends what changed
-     * instead of the whole section. Returns the facts in insertion order.
-     */
-    /**
-     * Records the facts just written by {@code sessionId} so the next wire tail of that session
-     * can re-send only what changed. Call from the session-aware execution path.
-     */
-    public void recordDiff(final String sessionId, final List<String> facts) {
-        if (sessionId == null || sessionId.isBlank() || facts == null || facts.isEmpty()) {
-            return;
-        }
-        final Deque<String> queue;
-        synchronized (pendingDiffs) {
-            queue = pendingDiffs.computeIfAbsent(sessionId, k -> new ArrayDeque<>());
-        }
-        synchronized (queue) {
-            queue.addAll(facts);
-        }
-    }
-
-    /** Drains and returns this session's pending memory diff (facts written since the last tail). */
-    public List<String> drainPendingDiff(final String sessionId) {
-        if (sessionId == null || sessionId.isBlank()) {
-            return List.of();
-        }
-        final Deque<String> queue;
-        synchronized (pendingDiffs) {
-            queue = pendingDiffs.get(sessionId);
-            if (queue == null) {
-                return List.of();
-            }
-        }
-        final var out = new ArrayList<String>();
-        synchronized (queue) {
-            String fact;
-            while ((fact = queue.poll()) != null) {
-                out.add(fact);
-            }
-            if (queue.isEmpty()) {
-                synchronized (pendingDiffs) {
-                    pendingDiffs.remove(sessionId);
-                }
-            }
-        }
-        return out;
     }
 
     private void write(final Path file, final LinkedHashSet<String> lines) throws IOException {

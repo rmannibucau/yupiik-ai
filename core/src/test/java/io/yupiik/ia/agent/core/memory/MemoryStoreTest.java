@@ -120,22 +120,6 @@ class MemoryStoreTest {
     }
 
     @Test
-    void pendingDiffIsIsolatedPerSession() {
-        final var store = new MemoryStore(config(home, Map.of()));
-        store.append(true, List.of("base fact"));
-        store.recordDiff("session-a", List.of("a's new fact"));
-        store.recordDiff("session-b", List.of("b's new fact"));
-
-        final var a1 = store.drainPendingDiff("session-a");
-        assertEquals(List.of("a's new fact"), a1, "session a must see its own diff");
-        assertTrue(store.drainPendingDiff("session-a").isEmpty(), "session a must not see the same diff twice");
-
-        assertEquals(List.of("b's new fact"), store.drainPendingDiff("session-b"), "session b sees its own");
-        assertTrue(store.drainPendingDiff("unknown").isEmpty(), "unknown session has no diff");
-        assertTrue(store.drainPendingDiff(null).isEmpty(), "null session drains nothing");
-    }
-
-    @Test
     void withMetaRoundTripsAndIsStrippedFromPrompt() throws Exception {
         final var store = new MemoryStore(config(home, Map.of()));
         final var stored = MemoryStore.withMeta(5, List.of("maven", "build"), "src/main/App.java", "always run mvn -o");

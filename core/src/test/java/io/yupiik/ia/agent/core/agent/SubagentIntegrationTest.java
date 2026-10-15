@@ -465,7 +465,8 @@ class SubagentIntegrationTest {
                     delegate.clock,
                     delegate.executor,
                     delegate.subagentRegistry,
-                    delegate.precisionDurationMarker);
+                    delegate.precisionDurationMarker,
+                    null);
         }
 
         @Override
@@ -587,7 +588,8 @@ class SubagentIntegrationTest {
                 Clock.systemUTC(),
                 EXECUTOR,
                 reg,
-                new PrecisionDurationMarkerProvider());
+                new PrecisionDurationMarkerProvider(),
+                null);
         return new TestSubagentRunner(baseRunner);
     }
 

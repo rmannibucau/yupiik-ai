@@ -79,10 +79,7 @@ public class AgentProvider {
     }
 
     private static Path expandPath(final String value) {
-        var result = value.strip();
-        if (result.startsWith("~/")) {
-            result = System.getProperty("user.home") + result.substring(1);
-        }
-        return Path.of(result).toAbsolutePath().normalize();
+        final var result = CodingAgentConfiguration.expandHome(value == null ? null : value.strip());
+        return result == null ? null : Path.of(result).toAbsolutePath().normalize();
     }
 }
