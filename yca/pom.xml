@@ -50,7 +50,7 @@
               <createDependencyReducedPom>false</createDependencyReducedPom>
               <filters>
                 <filter>
-                  <artifact>io.yupiik.ia.agent:core</artifact>
+                  <artifact>io.yupiik.ia.agent:*</artifact>
                   <excludes>
                     <exclude>META-INF/fusion/configuration/documentation.json</exclude>
                     <exclude>META-INF/native-image/**</exclude>

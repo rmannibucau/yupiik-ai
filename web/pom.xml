@@ -133,6 +133,18 @@
               <arguments>run build</arguments>
             </configuration>
           </execution>
+          <execution>
+            <id>npm-test</id>
+            <goals>
+              <goal>npm</goal>
+            </goals>
+            <phase>test</phase>
+            <configuration>
+              <!-- runs the frontend vitest suite (package.json "test": "vitest run"); gated by
+                   the plugin-level <skip>${skip.frontend}</skip> for offline builds -->
+              <arguments>test</arguments>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
     </plugins>
