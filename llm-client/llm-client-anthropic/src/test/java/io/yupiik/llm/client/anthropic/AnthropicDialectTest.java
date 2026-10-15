@@ -516,6 +516,146 @@ class AnthropicDialectTest {
     }
 
     @Test
+    void modelsSinglePageHasNoCursorParams(final JsonMapper mapper) throws Exception {
+        final var queries = new CopyOnWriteArrayList<String>();
+        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/v1/models", exchange -> {
+            try {
+                hits.incrementAndGet();
+                final var query = exchange.getRequestURI().getQuery();
+                queries.add(query == null ? "" : query);
+                respond(
+                        exchange,
+                        200,
+                        "{\"data\":[{\"type\":\"model\",\"id\":\"a\"},{\"type\":\"model\",\"id\":\"b\"}],\"has_more\":false,\"last_id\":\"b\"}");
+            } catch (final IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("a", "b"), models.ids());
+        assertEquals(1, hits.get(), "single page must be a single fetch");
+        assertTrue(queries.get(0).contains("limit=1000"), "page size must be requested, got query: " + queries.get(0));
+        assertTrue(
+                !queries.get(0).startsWith("limit=") || !queries.get(0).contains("after_id"),
+                "first page must not carry an after_id cursor, got query: " + queries.get(0));
+    }
+
+    @Test
+    void modelsFollowsCursorAcrossTwoPages(final JsonMapper mapper) throws Exception {
+        final var queries = new CopyOnWriteArrayList<String>();
+        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/v1/models", exchange -> {
+            try {
+                final var query = exchange.getRequestURI().getQuery();
+                queries.add(query == null ? "" : query);
+                final int n = hits.incrementAndGet();
+                if (n == 1) {
+                    respond(
+                            exchange,
+                            200,
+                            "{\"data\":[{\"type\":\"model\",\"id\":\"a\"},{\"type\":\"model\",\"id\":\"b\"}],\"has_more\":true,\"last_id\":\"b\"}");
+                } else {
+                    respond(
+                            exchange,
+                            200,
+                            "{\"data\":[{\"type\":\"model\",\"id\":\"c\"},{\"type\":\"model\",\"id\":\"d\"}],\"has_more\":false,\"last_id\":\"d\"}");
+                }
+            } catch (final IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("a", "b", "c", "d"), models.ids());
+        assertEquals(2, hits.get(), "two pages must be fetched");
+        final var page2 = queries.get(1);
+        assertTrue(page2.contains("after_id=b"), "page 2 must carry after_id=b cursor, got query: " + page2);
+    }
+
+    @Test
+    void modelsStopsWhenNextPageIsEmptyDespiteHasMore(final JsonMapper mapper) throws Exception {
+        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/v1/models", exchange -> {
+            try {
+                final int n = hits.incrementAndGet();
+                if (n == 1) {
+                    respond(
+                            exchange,
+                            200,
+                            "{\"data\":[{\"type\":\"model\",\"id\":\"a\"}],\"has_more\":true,\"last_id\":\"a\"}");
+                } else {
+                    respond(exchange, 200, "{\"data\":[],\"has_more\":true,\"last_id\":\"a\"}");
+                }
+            } catch (final IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("a"), models.ids());
+        assertEquals(2, hits.get(), "must stop after the empty next page");
+    }
+
+    @Test
+    void modelsStopsWhenCursorFailsToAdvance(final JsonMapper mapper) throws Exception {
+        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/v1/models", exchange -> {
+            try {
+                final int n = hits.incrementAndGet();
+                final String body =
+                        switch (n) {
+                            case 1 ->
+                                "{\"data\":[{\"type\":\"model\",\"id\":\"a\"}],\"has_more\":true,\"last_id\":\"a\"}";
+                            default -> // backend echoes the same cursor instead of advancing
+                                "{\"data\":[{\"type\":\"model\",\"id\":\"a\"}],\"has_more\":true,\"last_id\":\"a\"}";
+                        };
+                respond(exchange, 200, body);
+            } catch (final IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("a"), models.ids());
+        assertEquals(2, hits.get(), "must stop when the cursor does not advance");
+    }
+
+    @Test
+    void modelsDeduplicatesAcrossPagesKeepingOrder(final JsonMapper mapper) throws Exception {
+        final var hits = new java.util.concurrent.atomic.AtomicInteger();
+        server.createContext("/v1/models", exchange -> {
+            try {
+                final int n = hits.incrementAndGet();
+                if (n == 1) {
+                    respond(
+                            exchange,
+                            200,
+                            "{\"data\":[{\"type\":\"model\",\"id\":\"a\"},{\"type\":\"model\",\"id\":\"b\"}],\"has_more\":true,\"last_id\":\"b\"}");
+                } else {
+                    // page 2 overlaps page 1 on "b" and "a"
+                    respond(
+                            exchange,
+                            200,
+                            "{\"data\":[{\"type\":\"model\",\"id\":\"b\"},{\"type\":\"model\",\"id\":\"c\"},{\"type\":\"model\",\"id\":\"a\"}],\"has_more\":false,\"last_id\":\"a\"}");
+                }
+            } catch (final IOException e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        final LlmModels models = dialect.models().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        assertEquals(List.of("a", "b", "c"), models.ids(), "duplicates must be dropped keeping fetched order");
+        assertEquals(2, hits.get());
+    }
+
+    @Test
     void modelsMaps404ToDialectNotSupported(final JsonMapper mapper) {
         server.createContext("/v1/models", exchange -> {
             try {

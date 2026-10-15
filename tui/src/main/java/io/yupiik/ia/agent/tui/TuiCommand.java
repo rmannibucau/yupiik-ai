@@ -1353,9 +1353,14 @@ public class TuiCommand implements Runnable {
             modelError(state, error.message());
             state.model.onEvent(event);
             state.model.status("ready");
-        } else if (event instanceof AgentEvent.Notice notice && notice.level() == AgentEvent.Notice.Level.ERROR) {
-            // ERROR notices (truncation give-up, compaction exhaustion...) are failures too:
-            // same red right slot, keeping the leading agent state (working) untouched
+        } else if (event instanceof AgentEvent.Notice notice
+                && (notice.level() == AgentEvent.Notice.Level.ERROR
+                        || notice.level() == AgentEvent.Notice.Level.WARN)) {
+            // ERROR/WARN notices (truncation give-up, compaction exhaustion, memory extraction
+            // failure, model/prompt rejection...) are failures the user must not miss: render them in
+            // the trailing error slot (same as the web renders WARN prominently in red), keeping the
+            // leading agent state (working) untouched. WARNs were previously only a muted inline
+            // transcript line, which made background failures (eg. memory extraction) easy to miss.
             modelError(state, notice.message());
             final var leading = state.model.status();
             state.model.onEvent(event);

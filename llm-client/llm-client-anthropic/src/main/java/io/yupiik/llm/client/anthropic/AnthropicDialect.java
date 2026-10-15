@@ -21,9 +21,11 @@ import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.anthropic.model.AnthropicMessage;
 import io.yupiik.llm.client.anthropic.model.AnthropicMessagesRequest;
 import io.yupiik.llm.client.anthropic.model.AnthropicMessagesResponse;
+import io.yupiik.llm.client.anthropic.model.AnthropicModels;
 import io.yupiik.llm.client.anthropic.model.AnthropicStreamEvent;
 import io.yupiik.llm.client.anthropic.model.AnthropicTool;
 import io.yupiik.llm.client.model.LlmMessage;
+import io.yupiik.llm.client.model.LlmModel;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
@@ -39,6 +41,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -381,16 +384,74 @@ public final class AnthropicDialect extends AbstractDialect {
     @Override
     public CompletionStage<LlmModels> models() {
         try {
-            return getModels().thenCompose(response -> {
-                try {
-                    return CompletableFuture.completedFuture(toModels(parseResponse(Map.class, response)));
-                } catch (final LlmResponseParseException e) {
-                    return failed(e);
-                }
-            });
+            return collectModels(null);
         } catch (final RuntimeException e) {
             return failed(e);
         }
+    }
+
+    /**
+     * Paged models collection using the Anthropic cursor contract ({@code after_id}/{@code last_id},
+     * page size capped at the provider maximum) to avoid truncating backends that paginate. It stops
+     * as soon as a page reports {@code has_more == false}, has no data, carries no {@code last_id},
+     * or fails to advance the cursor relative to the requested page. The requested cursor is the
+     * {@code after_id} of the current page.
+     */
+    private CompletionStage<LlmModels> collectModels(final String afterId) {
+        return getModels(afterId, "1000").thenCompose(response -> {
+            try {
+                final var page = parseResponse(AnthropicModels.class, response);
+                final var models = toModels(page);
+                if (!Boolean.TRUE.equals(page.hasMore())
+                        || page.data() == null
+                        || page.data().isEmpty()
+                        || page.lastId() == null
+                        || page.lastId().isBlank()
+                        || page.lastId().equals(afterId)) { // no cursor progress -> stop, even if has_more
+                    return CompletableFuture.completedFuture(models);
+                }
+                return collectModels(page.lastId()).thenApply(models::appendDistinct);
+            } catch (final LlmResponseParseException e) {
+                return failed(e);
+            }
+        });
+    }
+
+    /**
+     * Maps a typed Anthropic models page into the neutral model listing, carrying the known
+     * capability fields ({@code max_input_tokens}, {@code max_tokens}, {@code display_name}, ...) so
+     * the downstream heuristics (context window, output budget) keep working.
+     */
+    private static LlmModels toModels(final AnthropicModels page) {
+        final var data = page.data();
+        if (data == null || data.isEmpty()) {
+            return new LlmModels(List.of());
+        }
+        final var models = new ArrayList<LlmModel>(data.size());
+        final var seen = new HashSet<String>(data.size());
+        for (final var model : data) {
+            if (model == null || model.id() == null || model.id().isBlank() || !seen.add(model.id())) {
+                continue;
+            }
+            final var others = new LinkedHashMap<String, Object>();
+            if (model.type() != null) {
+                others.put("type", model.type());
+            }
+            if (model.displayName() != null) {
+                others.put("display_name", model.displayName());
+            }
+            if (model.createdAt() != null) {
+                others.put("created_at", model.createdAt());
+            }
+            if (model.maxInputTokens() != null) {
+                others.put("max_input_tokens", model.maxInputTokens());
+            }
+            if (model.maxTokens() != null) {
+                others.put("max_tokens", model.maxTokens());
+            }
+            models.add(new LlmModel(model.id(), null, null, null, others));
+        }
+        return new LlmModels(models);
     }
 
     @Override

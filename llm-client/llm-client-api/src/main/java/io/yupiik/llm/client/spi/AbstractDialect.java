@@ -92,8 +92,22 @@ public abstract class AbstractDialect implements Dialect {
      * @return a stage completing with the successful HTTP response.
      */
     protected CompletionStage<HttpResponse<String>> getModels() {
+        return getModels(null, null);
+    }
+
+    /**
+     * Send a GET models request with optional cursor pagination query parameters
+     * ({@code after_id} / {@code limit}) and classify non-2xx responses as exceptional completion.
+     * Implementations that loop over a paginated models endpoint pass the {@code lastId} cursor of
+     * the previous page as {@code afterId} to fetch the next page.
+     *
+     * @param afterId model id cursor for the next page, {@code null} for the first page.
+     * @param limit   page size, {@code null} to let the provider default apply.
+     * @return a stage completing with the successful HTTP response.
+     */
+    protected CompletionStage<HttpResponse<String>> getModels(final String afterId, final String limit) {
         try {
-            return client.sendAsync(modelsRequest(), HttpResponse.BodyHandlers.ofString())
+            return client.sendAsync(modelsRequest(afterId, limit), HttpResponse.BodyHandlers.ofString())
                     .thenCompose(this::classify);
         } catch (final RuntimeException e) {
             return failed(e);
@@ -215,14 +229,48 @@ public abstract class AbstractDialect implements Dialect {
      * @return the HTTP request.
      */
     protected HttpRequest modelsRequest() {
+        return modelsRequest(null, null);
+    }
+
+    /**
+     * Build a GET models request with optional cursor pagination query parameters
+     * ({@code after_id} / {@code limit}) and authentication applied. When both are {@code null}
+     * (non-paginated providers) the request is exactly the legacy {@link #modelsRequest()} one.
+     *
+     * @param afterId model id cursor for the next page, {@code null} for the first page.
+     * @param limit   page size, {@code null} to let the provider default apply.
+     * @return the HTTP request.
+     */
+    protected HttpRequest modelsRequest(final String afterId, final String limit) {
+        final var endpoint = deriveModelsEndpoint(provider.baseUrl(), chatRouteSuffix());
         final var builder = HttpRequest.newBuilder()
-                .uri(URI.create(deriveModelsEndpoint(provider.baseUrl(), chatRouteSuffix())))
+                .uri(modelsUri(endpoint, afterId, limit))
                 .timeout(provider.timeout())
                 .header("accept", "application/json")
                 .GET();
         authenticate(builder);
         provider.headersCustomizer().accept(builder);
         return builder.build();
+    }
+
+    /**
+     * Build the models request URI, appending the cursor pagination query parameters when present.
+     */
+    private static URI modelsUri(final String endpoint, final String afterId, final String limit) {
+        if (afterId == null && limit == null) {
+            return URI.create(endpoint);
+        }
+        final var sb = new StringBuilder(endpoint).append('?');
+        if (limit != null && !limit.isBlank()) {
+            sb.append("limit=").append(limit);
+        }
+        if (afterId != null && !afterId.isBlank()) {
+            if (sb.charAt(sb.length() - 1) != '?') {
+                sb.append('&');
+            }
+            sb.append("after_id=").append(afterId);
+        }
+        return URI.create(sb.toString());
     }
 
     /** Derive the models endpoint from the chat endpoint by stripping {@code suffix} and appending {@code /models}. */

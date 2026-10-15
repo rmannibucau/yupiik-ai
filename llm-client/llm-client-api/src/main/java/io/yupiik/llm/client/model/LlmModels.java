@@ -15,6 +15,8 @@
  */
 package io.yupiik.llm.client.model;
 
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 
 /**
@@ -36,5 +38,33 @@ public record LlmModels(List<LlmModel> data) {
      */
     public List<String> ids() {
         return data.stream().map(LlmModel::id).toList();
+    }
+
+    /**
+     * Appends the models of {@code next}, keeping the first occurrence of each model id (deduplicated
+     * by id) and preserving the fetched order. Used to merge paginated pages while tolerating
+     * gateways that overlap page boundaries.
+     *
+     * @param next the models of a subsequent page, may be {@code null} or empty.
+     * @return a new listing containing {@code this} models followed by the previously unseen
+     *         {@code next} models, in order.
+     */
+    public LlmModels appendDistinct(final LlmModels next) {
+        if (next == null || next.data().isEmpty()) {
+            return this;
+        }
+        final var seen = new HashSet<String>(data.size() + next.data().size());
+        final var out = new ArrayList<LlmModel>(data.size() + next.data().size());
+        for (final var model : data) {
+            if (seen.add(model.id())) {
+                out.add(model);
+            }
+        }
+        for (final var model : next.data()) {
+            if (seen.add(model.id())) {
+                out.add(model);
+            }
+        }
+        return new LlmModels(out);
     }
 }
