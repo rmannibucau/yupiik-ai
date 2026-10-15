@@ -111,6 +111,13 @@ const LIVENESS_STALE_MS = 45_000;
 export function useSessionStream(sessionId: string | undefined) {
   const [events, setEvents] = useState<WebEvent[]>([]);
   const [connected, setConnected] = useState(false);
+  // whether the persisted history (snapshot frame) has been delivered and seeded into the log.
+  // Distinct from `connected`: onopen fires as soon as the socket opens, but the snapshot (loaded
+  // from disk server-side) may take much longer for a large session. Until bootstrapped flips true
+  // the UI has an empty pane and must show a loader + keep chat disabled instead of an active blank
+  // page. Stays true across reconnects (a /backoff reconnect re-sends the snapshot and merges it);
+  // only reset when the sessionId changes.
+  const [bootstrapped, setBootstrapped] = useState(false);
   const sessionRef = useRef(sessionId);
   // a reconnecting flag so the UI can show "reconnecting…" distinctly from "connected".
   const [reconnecting, setReconnecting] = useState(false);
@@ -128,9 +135,12 @@ export function useSessionStream(sessionId: string | undefined) {
       setEvents([]);
       setConnected(false);
       setReconnecting(false);
+      setBootstrapped(false);
       return;
     }
-    // reset for the new session
+    // reset for the new session: a fresh mount must show the loader until THIS session's snapshot
+    // arrives - the previous session's bootstrapped state must not leak onto it.
+    setBootstrapped(false);
     const history: WebEvent[] = [];
     const tail: WebEvent[] = [];
     const keys = new Set<string>();
@@ -240,6 +250,10 @@ export function useSessionStream(sessionId: string | undefined) {
           mergeSnapshot(snap.events ?? []);
           lastEventAt = Date.now();
           if (snap.events && snap.events.length > 0) deliveredContent = true;
+          // the persisted history has been delivered and seeded - the loader can clear and chat
+          // unlocks. Flips true even for an empty session (the server still sends {events:[]}),
+          // so an empty/fresh session never shows an infinite loader.
+          setBootstrapped(bootstrapFromSnapshot(snap));
           setConnected(true);
           setReconnecting(false);
         } catch {
@@ -303,7 +317,7 @@ export function useSessionStream(sessionId: string | undefined) {
     return s;
   }, [events]);
 
-  return { events, connected, reconnecting, status };
+  return { events, connected, bootstrapped, reconnecting, status };
 }
 
 export function foldStatus(events: WebEvent[]): SessionStatus {
@@ -433,4 +447,18 @@ export function foldLiveOutChars(prev: number, ev: WebEvent): number {
     return 0;
   }
   return prev;
+}
+
+/**
+ * Whether receiving a {@code snapshot} frame marks the session as bootstrapped (persisted history
+ * delivered). Pure so it is unit-testable without a DOM/EventSource harness.
+ *
+ * The invariant that matters: bootstrapping is signaled by <em>receiving</em> the snapshot frame, not
+ * by it carrying content. A genuinely empty session still gets a {@code snapshot {events:[]}} from the
+ * server, so it must also clear the loader — otherwise a fresh/empty session would show an infinite
+ * spinner and stay chat-locked forever. Hence this always returns {@code true} for any parsed
+ * snapshot payload (unknown/malformed payloads returning false keep the loader up).
+ */
+export function bootstrapFromSnapshot(snap: unknown): boolean {
+  return typeof snap === 'object' && snap !== null && 'events' in (snap as { events?: unknown });
 }

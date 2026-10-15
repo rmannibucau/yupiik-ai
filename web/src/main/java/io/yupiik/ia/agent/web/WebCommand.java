@@ -44,6 +44,7 @@ public class WebCommand implements Runnable, AutoCloseable {
     private final WebConf conf;
     private final SseBroker broker;
     private final WebSessionManager sessionManager;
+    private final WebRestoreSessions restoreSessions;
     private final JsonRpcHandler jsonRpc;
     private final JsonMapper mapper;
     private final ScheduledExecutorService scheduler;
@@ -55,12 +56,14 @@ public class WebCommand implements Runnable, AutoCloseable {
             final WebConf conf,
             final SseBroker broker,
             final WebSessionManager sessionManager,
+            final WebRestoreSessions restoreSessions,
             final JsonRpcHandler jsonRpc,
             final JsonMapper mapper,
             final ScheduledExecutorService scheduler) {
         this.conf = conf;
         this.broker = broker;
         this.sessionManager = sessionManager;
+        this.restoreSessions = restoreSessions;
         this.jsonRpc = jsonRpc;
         this.mapper = mapper;
         this.scheduler = scheduler;
@@ -68,6 +71,9 @@ public class WebCommand implements Runnable, AutoCloseable {
 
     @Override
     public void run() {
+        // publish the sessions the user asked to restore OOTB; the frontend reads them (sessions.restore)
+        // on boot and opens a tab for each, so `yca web --session a --session b` restores those tabs.
+        restoreSessions.sessions(conf.session());
         final var endpoints = List.of(
                 new JsonRpcEndpoint(jsonRpc, mapper, "/api/rpc", true),
                 new SseExchangeHandler(broker, sessionManager::snapshotFor),
@@ -170,5 +176,11 @@ public class WebCommand implements Runnable, AutoCloseable {
                     defaultValue = "false",
                     documentation = "Enable Common Log Format access logging: each request is logged at INFO on the "
                             + "io.yupiik.ia.agent.web.JreAccessLogger logger (one line per request).")
-            boolean accessLogEnabled) {}
+            boolean accessLogEnabled,
+
+            @Property(
+                    documentation =
+                            "Session id(s) to restore out-of-the-box on boot: a tab is opened for each. "
+                                    + "Repeat the option (--session a --session b) or use the comma form. Unknown ids are ignored.")
+            List<String> session) {}
 }

@@ -111,4 +111,51 @@ describe('summarizeArgs', () => {
     expect(summarizeArgs('{"path":null}')).toBe('');
     expect(summarizeArgs('{"command":"ok","path":null}')).toBe('ok');
   });
+
+  it('shows the glob pattern ahead of the base path (Issue #3)', () => {
+    expect(summarizeArgs('{"pattern":"**/*.java","path":"."}')).toBe('**/*.java .');
+    expect(summarizeArgs('{"pattern":"src/**","path":"/repo/src"}')).toBe('src/** /repo/src');
+  });
+
+  it('shows the grep pattern (and keeps path) ahead of the include filter (Issue #3)', () => {
+    expect(summarizeArgs('{"pattern":"foo","include":"*.java","path":"."}')).toBe('foo .');
+    // a bare include (no pattern) still gets a tiny label
+    expect(summarizeArgs('{"include":"*.java"}')).toBe('in *.java');
+  });
+
+  it('shows web_search query and web_fetch url (Issue #3)', () => {
+    expect(summarizeArgs('{"query":"maven shade plugin"}')).toBe('maven shade plugin');
+    expect(summarizeArgs('{"url":"https://yupiik.io/","format":"markdown"}')).toBe('https://yupiik.io/');
+  });
+
+  it('shows maven, subagent, skill, memory and action primaries (Issue #3)', () => {
+    expect(summarizeArgs('{"gav":"org.group:art:1.0"}')).toBe('org.group:art:1.0');
+    expect(summarizeArgs('{"operation":"index"}')).toBe('index');
+    expect(summarizeArgs('{"action":"poll"}')).toBe('poll');
+    expect(summarizeArgs('{"name":"my-skill"}')).toBe('my-skill');
+    expect(summarizeArgs('{"fact":"the build needs JDK 21"}')).toBe('the build needs JDK 21');
+    // spawn_subagent: name leads over task
+    expect(summarizeArgs('{"name":"builder","task":"compile everything"}')).toBe('builder');
+  });
+
+  it('renders a diff-style old → new hint for edit_file instead of the body (Issue #3)', () => {
+    expect(summarizeArgs('{"path":"a.java","oldString":"int a","newString":"long a"}')).toBe('a.java int a → long a');
+  });
+
+  it('caps long old/new snippets so the one-line header stays short (Issue #3)', () => {
+    const long = 'x'.repeat(120);
+    const sum = summarizeArgs(`{"path":"f.js","oldString":"${long}","newString":"y"}`);
+    expect(sum).toMatch(/^f\.js x{24}… → y$/);
+    expect(sum.length).toBeLessThan(80);
+  });
+
+  it('renders a diff header for apply_patch and a content marker for write_file (Issue #3)', () => {
+    const patch = '--- a/A.txt\n+++ b/A.txt\n@@ -1 +1 @@\n-old\n+new';
+    expect(summarizeArgs(JSON.stringify({ patch }))).toBe('--- a/A.txt');
+    expect(summarizeArgs('{"path":"conf/x.json","content":"{\\"a\\":1}"}')).toBe('conf/x.json content');
+  });
+
+  it('falls back to the diff header when a rewrite tool carries only patch (Issue #3)', () => {
+    expect(summarizeArgs('{"patch":"+++ b/A.txt"}')).toBe('+++ b/A.txt');
+  });
 });

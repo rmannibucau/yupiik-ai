@@ -36,6 +36,9 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -289,6 +292,35 @@ class ChatClientFlavorTest {
         final var failure = assertThrows(
                 IOException.class, () -> client.chatStructured(request(), "todo_steps", Map.of("type", "object")));
         assertEquals(1, hits.get(), "a non-schema 400 must not trigger a fallback request");
+        assertTrue(failure.getMessage().contains("LLM request failed (400)"), failure.getMessage());
+    }
+
+    @Test
+    void chatStructuredBodyParse400IsNotTreatedAsSchemaRejection() throws Exception {
+        // freeinference rejects a request body it cannot validate (eg. max_tokens:-1) with exactly
+        // "Invalid JSON or schema in request body" - the word 'schema' is a false positive for the
+        // structured-output JSON-Schema rejection markers. It must NOT degrade to a plain fallback:
+        // the plain request reuses the same invalid body and would fail identically, wasting a round-trip.
+        // The 400 surfaces directly.
+        stop();
+        final var hits = new AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
+        server.createContext("/v1/chat/completions", exchange -> {
+            hits.incrementAndGet();
+            respond(
+                    exchange,
+                    400,
+                    "{\"error\":{\"type\":\"unknown\",\"message\":\"Invalid JSON or schema in request body\",\"code\":400}}",
+                    "application/json");
+        });
+        server.start();
+        final var cfg = configuration();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        final var failure = assertThrows(
+                IOException.class, () -> client.chatStructured(request(), "memory_facts", Map.of("type", "object")));
+        assertEquals(1, hits.get(), "a body-JSON-parse 400 must not trigger a plain fallback request");
         assertTrue(failure.getMessage().contains("LLM request failed (400)"), failure.getMessage());
     }
 
@@ -761,5 +793,80 @@ class ChatClientFlavorTest {
         client.setProvider("default");
         assertEquals(List.of("model-a", "model-b"), client.models().ids());
         assertEquals(2, modelsHits.get(), "changing the provider must refresh the cached model list");
+    }
+
+    @Test
+    void chatStructuredRejectionMemoExpiresAndIsRetried() throws Exception {
+        // the structured-output rejection memoization must be time-bounded: a provider/model that
+        // failed once (a transient 400, or a short outage) must be retried after the TTL instead of
+        // being permanently degraded to the plain path - the memory extraction structured call is
+        // the main consumer and would otherwise silently lose its JSON mode forever.
+        stop();
+        final var clock = new MutableClock(1_000_000_000L);
+        final var structHits = new AtomicInteger();
+        final var plainHits = new AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> respond(exchange, 404, "not found", "text/plain"));
+        server.createContext("/v1/chat/completions", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            if (body.contains("response_format") || body.contains("json_schema")) {
+                structHits.incrementAndGet();
+                respond(exchange, 400, "{\"error\":{\"message\":\"json was malformed\"}}", "application/json");
+            } else {
+                plainHits.incrementAndGet();
+                respond(exchange, 200, """
+                        {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"plain"},"finish_reason":"stop"}]}""", "application/json");
+            }
+        });
+        server.start();
+        final var cfg = configuration();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), clock);
+
+        // first call: structured rejected -> degrades once to plain, remembered
+        final var first = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
+        assertEquals(false, first.structured());
+        assertEquals(1, structHits.get());
+        assertEquals(1, plainHits.get());
+
+        // while the memo is fresh, the structured path is skipped (straight to plain)
+        final var second = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
+        assertEquals(false, second.structured());
+        assertEquals(1, structHits.get(), "memoized rejection must skip the structured request");
+        assertEquals(2, plainHits.get());
+
+        // after the TTL the structured path is retried (and rejected again, degrading once more)
+        clock.advance(20 * 60 * 1000L);
+        final var third = client.chatStructured(request(), "todo_steps", Map.of("type", "object"));
+        assertEquals(false, third.structured());
+        assertEquals(2, structHits.get(), "the expiration must re-enable the structured attempt");
+        assertEquals(3, plainHits.get());
+    }
+
+    /** A tiny controllable clock so the structured-rejection TTL can be advanced in tests. */
+    private static final class MutableClock extends Clock {
+        private long millis;
+
+        private MutableClock(final long millis) {
+            this.millis = millis;
+        }
+
+        void advance(final long deltaMillis) {
+            this.millis += deltaMillis;
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(final ZoneId zone) {
+            return this;
+        }
+
+        @Override
+        public Instant instant() {
+            return Instant.ofEpochMilli(millis);
+        }
     }
 }

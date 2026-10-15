@@ -48,6 +48,7 @@ public class WebJsonRpc {
     private final SessionStore sessionStore;
     private final AgentSessionService agentSessionService;
     private final WebSessionManager sessions;
+    private final WebRestoreSessions restoreSessions;
     private final StructuralCodeGraph codeGraph;
     private final McpManager mcpManager;
     private final CodingAgentConfiguration configuration;
@@ -60,6 +61,7 @@ public class WebJsonRpc {
             final SessionStore sessionStore,
             final AgentSessionService agentSessionService,
             final WebSessionManager sessions,
+            final WebRestoreSessions restoreSessions,
             final StructuralCodeGraph codeGraph,
             final McpManager mcpManager,
             final CodingAgentConfiguration configuration,
@@ -70,6 +72,7 @@ public class WebJsonRpc {
         this.sessionStore = sessionStore;
         this.agentSessionService = agentSessionService;
         this.sessions = sessions;
+        this.restoreSessions = restoreSessions;
         this.codeGraph = codeGraph;
         this.mcpManager = mcpManager;
         this.configuration = configuration;
@@ -153,6 +156,25 @@ public class WebJsonRpc {
     @JsonRpc(value = "sessions.create", documentation = "Creates a new empty session and returns its id.")
     public Map<String, String> createSession() {
         return Map.of("id", sessionStore.create());
+    }
+
+    @JsonRpc(
+            value = "sessions.restore",
+            documentation = "Returns the session ids the web command was configured to restore out-of-the-box "
+                    + "(its --session option(s)), filtered to the ones that actually exist - a stale or "
+                    + "deleted id is never handed back, so the UI opens a tab only for live sessions. Returns "
+                    + "an empty list when the command started without --session.")
+    public List<String> restoreSessions() {
+        final var existing = sessionStore.list();
+        if (existing == null || existing.isEmpty()) {
+            return List.of();
+        }
+        final var ids = new java.util.HashSet<String>();
+        existing.forEach(i -> ids.add(i.id()));
+        return restoreSessions.sessions().stream()
+                .filter(ids::contains)
+                .distinct()
+                .toList();
     }
 
     @JsonRpc(value = "sessions.currentProject", documentation = "Returns the current working/project directory.")

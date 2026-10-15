@@ -103,7 +103,11 @@ export function ChatPage({
 }) {
   const { id } = useParams<{ id: string }>();
   const sessionId = id ?? activeSession;
-  const { events, connected, reconnecting, status } = useSessionStream(sessionId);
+  const { events, connected, bootstrapped, reconnecting, status } = useSessionStream(sessionId);
+  // true while a session page has mounted but its persisted history (the SSE snapshot) has not been
+  // delivered yet: the pane is still empty and chat must stay locked so the user never races the
+  // load. False once bootstrapped, or when there is no session at all.
+  const initializing = !!sessionId && !bootstrapped;
   const [prompt, setPrompt] = useState('');
   const [cursor, setCursor] = useState(0);
   // transient flag set only while the fire-and-forget session.prompt/session.slash RPC is in flight
@@ -189,13 +193,22 @@ export function ChatPage({
   // (after accepting an entry or pressing Escape), until typing changes the prompt again.
   const [completionDismissed, setCompletionDismissed] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const followTailRef = useRef(true);
-  // set while we programmatically scroll to the tail: the browser fires a scroll event for our own
-  // jump, and onScroll must not treat it as the user scrolling away (that flipped followTail to false
-  // on a tab-switch remount, whose long smooth jump emitted intermediate scroll events far from the
-  // bottom, stranding the view mid-transcript and stopping live follow). Cleared on the first scroll
-  // event the guard absorbs.
-  const programmaticScrollRef = useRef(false);
+  // Explicit "Follow" mode (mirrors the `Follow` toggle in the top bar): when ON the view is
+  // continuously trailed to the tail as events stream. Defaults to ON per mount. Unlike the old
+  // distance heuristic (follow while within 48px of the bottom, which re-armed as live reflow grew
+  // the container and made the view wobble up/down when reading near the tail), this is a strict
+  // two-state toggle: any genuine user scroll away from the tail disables it for good, and only the
+  // toggle button / "jump to latest" re-enables it. Kept as React state so the button and the
+  // "↓ latest" affordance re-render when it flips.
+  const [follow, setFollow] = useState(true);
+  // Programmatic scrolls (the tail jump on mount, the smooth re-follows during snapshot replay or a
+  // live turn) must NEVER disable Follow - only a genuine user scroll-away from the tail may, per the
+  // two explicit conditions (intentional toggle, or scrolling up to read). The browser fires the same
+  // `scroll` events for a programmatic scrollIntoView as for a real one, so onScroll alone cannot tell
+  // them apart: this flag is set true only when a real user scroll INPUT (wheel / touch / scroll-drag
+  // pointer / navigation keys) has just fired on the transcript, and reset false by every programmatic
+  // scrollToTail. onScroll then disables Follow only when a user-scroll intent is present.
+  const userScrollIntentRef = useRef(false);
   // true once this mount has auto-scrolled to a populated tail. The FIRST such jump is done instantly
   // (scrollTop = scrollHeight, no animation) so remounting a long session cannot produce intermediate
   // scroll events; later live follows stay smooth because they are tiny handoffs near the bottom.
@@ -228,10 +241,27 @@ export function ChatPage({
     await call('session.btwClear', { id: sessionId }).catch(() => {});
   }, [sessionId]);
 
-  // auto-focus/attach: ensure the session is served by the backend
+  // Issue #1: ensure the session is served by the backend AND its tab is registered. App normally
+  // registers the tab on /session/:id navigation; this is the safety net for any mount that skipped it
+  // (e.g. openSession dedup is a no-op when App already added the tab). We only register when the
+  // session actually EXISTS: a bogus/typo/deleted id must never pollute the TabBar, so a failure here
+  // is intentionally silent (the chat pane stays empty; the user gets no phantom tab).
   useEffect(() => {
     if (!sessionId) return;
-    void call('sessions.get', { id: sessionId }).catch(() => openSession(sessionId, sessionId));
+    // The health-check fires an async round-trip; drop it once this page unmounts or moves to
+    // another session. Without this guard a pending sessions.get could resolve AFTER the user
+    // closed the tab, and openSession would silently re-add the just-closed tab (as a raw/session-id
+    // tab) and navigate back onto it - making a closed tab "stay open".
+    let cancelled = false;
+    void call('sessions.get', { id: sessionId })
+      .then(() => {
+        if (cancelled) return;
+        openSession(sessionId, sessionId);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [sessionId]);
 
   // sidebar info: project, git branch, todos, mode
@@ -299,17 +329,22 @@ export function ChatPage({
     prevPendingRef.current = pending;
   }, [pending, loadSidebar]);
 
-  // Sticky auto-scroll: only follow the tail when the user is already at/near the bottom.
-  // When they scroll up to read, stop forcing the view down; resume when they return to the tail.
+  // Follow mode: only the user controls when it turns off. Every genuine scroll that moves the view
+  // up away from the tail disables Follow (no auto-re-arm near the bottom - that is what made the
+  // old heuristic wobble); returning to the tail never re-enables it, only the toggle / jump-to-latest
+  // re-enables it, so the view stays put wherever the user left it while reading.
   const onScroll = () => {
-    // absorb the single scroll event our own scroll-to-tail jump fires, so it never looks like the
-    // user scrolled away (which cancelled live follow mid-jump on a tab-switch remount).
-    if (programmaticScrollRef.current) {
-      programmaticScrollRef.current = false;
-      return;
-    }
+    // Only a scroll that follows a genuine user scroll input counts as "user scrolled away".
+    // The tail jump and any smooth re-follow (snapshot replay, live turn) are programmatic:
+    // scrollToTail resets the flag, so their scroll events never disable Follow.
+    if (!userScrollIntentRef.current) return;
     const el = scrollRef.current;
-    followTailRef.current = el ? el.scrollHeight - el.scrollTop - el.clientHeight < 48 : true;
+    // disable Follow when the user is genuinely not at the tail anymore. `follow` is a state, so
+    // React bails on the redundant set (same value) and we do not re-render on every scroll frame.
+    if (follow && el) {
+      const atTail = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+      if (!atTail) setFollow(false);
+    }
     // auto-load earlier history when the user scrolls back to the very top (while more history
     // exists). Debounced so a fast fling doesn't fire one chunk per frame; each invocation grows
     // the rendered window by one LOAD_EARLIER_CHUNK, so repeated rests at the top keep revealing
@@ -324,12 +359,14 @@ export function ChatPage({
 
   // Programmatic scroll-to-tail. The FIRST time this mount reaches a populated tail the jump is
   // instant (no smooth animation) so the potentially long distance from the top cannot emit the
-  // intermediate scroll events that used to flip followTailRef to false and strand the view. Later
-  // live follows hand off tiny deltas near the bottom, so they keep the smooth animation.
+  // intermediate scroll events that used to disable Follow and strand the view. Later
+  // live follows hand off tiny deltas near the bottom, so they keep the smooth animation. Every
+  // programmatic jump clears the user-scroll-intent flag (it is NOT a user scrolling away).
   const scrollToTail = (smooth: boolean) => {
     const el = scrollRef.current;
     if (!el) return;
-    programmaticScrollRef.current = true;
+    userScrollIntentRef.current = false;
+    tailScrolledRef.current = true;
     if (smooth) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     } else {
@@ -337,21 +374,38 @@ export function ChatPage({
     }
   };
 
+  // Mark the next scroll event(s) as user-driven so onScroll can disable Follow when the user really
+  // scrolls away from the tail (wheel, touch, a scrollbar drag press, or a navigation key). Programmatic
+  // scrolls (scrollToTail) clear this flag, so they never disable Follow. Keyboard-driven scrolling is
+  // wired as a native listener because the scroll container rarely has focus and React's onKeyDown would
+  // miss keys pressed while focus is elsewhere; the navigation keys are the only ones that move the view.
+  const markUserScroll = () => {
+    userScrollIntentRef.current = true;
+  };
   useEffect(() => {
-    if (!followTailRef.current) return;
-    if (events.length === 0) return;
-    if (!tailScrolledRef.current) {
-      // first populated jump on this mount: instant, so no intermediate scroll events can cancel it
-      scrollToTail(false);
-      tailScrolledRef.current = true;
-    } else {
-      scrollToTail(true);
-    }
-  }, [events.length]);
+    const el = scrollRef.current;
+    if (!el) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(e.key)) {
+        userScrollIntentRef.current = true;
+      }
+    };
+    el.addEventListener('keydown', onKeyDown);
+    return () => el.removeEventListener('keydown', onKeyDown);
+  }, []);
 
-  // reseed followTail to true when the tail re-approaches (the user clicks "jump to latest").
+  useEffect(() => {
+    if (!follow) return;
+    if (events.length === 0) return;
+    // first populated jump on this mount is instant (scrollToTail(false)), so no intermediate
+    // smooth-scroll events can leak; later live follows stay smooth (tiny handoffs near the tail).
+    // scrollToTail itself records the "already jumped" marker and resets the user-scroll-intent flag.
+    scrollToTail(tailScrolledRef.current);
+  }, [events.length, follow]);
+
+  // re-enable Follow (toggle button or the "jump to latest" affordance) and jump to the tail.
   const jumpToLatest = () => {
-    followTailRef.current = true;
+    setFollow(true);
     scrollToTail(true);
   };
 
@@ -409,7 +463,7 @@ export function ChatPage({
   };
 
   const send = async () => {
-    if (!sessionId || !prompt.trim()) return;
+    if (!sessionId || initializing || !prompt.trim()) return;
     setSending(true);
     const text = prompt.trim();
     setPrompt('');
@@ -441,7 +495,7 @@ export function ChatPage({
   // Issue #9: explicitly continue a resumed/paused session only when the user asks,
   // instead of auto-running straight into an unresolved approval on tab open.
   const resume = async () => {
-    if (!sessionId) return;
+    if (!sessionId || initializing) return;
     setSending(true);
     try {
       await call('session.resume', { id: sessionId });
@@ -454,7 +508,7 @@ export function ChatPage({
   // /mode slash command so it runs through the exact same backend path as typing it,
   // then the sidebar/tab are re-synced from the authoritative result.
   const cycleMode = async () => {
-    if (!sessionId) return;
+    if (!sessionId || initializing) return;
     const next = sidebar.mode === 'build' ? 'plan' : 'build';
     await call('session.slash', { id: sessionId, text: `/mode ${next}` }).catch(() => undefined);
     loadSidebar();
@@ -502,8 +556,9 @@ export function ChatPage({
     return <div className="p-6 text-sm" style={{ color: 'var(--yca-muted)' }}>Select a session.</div>;
   }
 
-  // Issue #8: the dropdown is suppressed after an accept/Escape until typing resumes.
-  const showCompletion = completion.items.length > 0 && !completionDismissed;
+  // Issue #8: the dropdown is suppressed after an accept/Escape until typing resumes. It is also
+  // suppressed while the session is still booting (snapshot not delivered) since typing is locked.
+  const showCompletion = completion.items.length > 0 && !completionDismissed && !initializing;
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const items = completionRef.current.items;
@@ -651,6 +706,16 @@ export function ChatPage({
           {sidebar.mode === 'build' ? '◆ build' : '▪ plan'}
         </span>
         {status.model && <span className="truncate">{status.model}</span>}
+        {/* Follow mode: trails the output to the tail when ON. Any scroll up disables it; the
+            toggle (and the floating ↓ latest button) re-enables it. */}
+        <button
+          onClick={() => setFollow((f) => !f)}
+          className="rounded px-1.5 hover:bg-white/5"
+          style={follow ? { color: 'var(--yca-accent)' } : undefined}
+          title={follow ? 'Following output - click to pause (scrolling up also pauses)' : 'Paused - click to follow output to the tail'}
+        >
+          {follow ? '● Follow' : '○ Follow'}
+        </button>
         {/* global tool visibility: collapse all / open all (mirrors TUI /tool-output) */}
         <button
           onClick={() => setToolVisibility((v) => (v === 'collapsed' ? 'shown' : 'collapsed'))}
@@ -695,16 +760,46 @@ export function ChatPage({
         <div
           ref={scrollRef}
           onScroll={onScroll}
+          onWheel={markUserScroll}
+          onTouchMove={markUserScroll}
+          onPointerDown={markUserScroll}
           className="relative flex-1 overflow-y-auto p-4"
         >
           <EventLog ref={eventLogRef} events={events} toolVisibility={toolVisibility} thinkingVisible={thinkingVisible} />
+          {initializing && (
+            // Full-pane, blocking "restoring session" veil while the persisted snapshot is still being
+            // fetched/replayed server-side. It paints over the ENTIRE transcript area (a translucent
+            // backdrop dims any content beneath, pointer-events blocks interaction) and shows a prominent
+            // centered card with an animated spinner - unmissable in the chat zone, not just a status bar
+            // dot. It disappears the instant bootstrapped flips (even for an empty session).
+            <div
+              className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3"
+              style={{ background: 'rgba(0,0,0,0.35)', backdropFilter: 'blur(2px)' }}
+            >
+              <div
+                className="flex flex-col items-center gap-3 rounded-lg border px-8 py-6 shadow-xl"
+                style={{
+                  borderColor: 'var(--yca-border)',
+                  background: 'var(--yca-panel)',
+                }}
+              >
+                <div className="flex items-center gap-3 text-base" style={{ color: 'var(--yca-accent)' }}>
+                  <span className="text-2xl" style={{ animation: 'yca-spin 0.8s linear infinite', display: 'inline-block' }}>⟳</span>
+                  <span className="font-medium" style={{ color: 'var(--yca-text)' }}>Loading conversation…</span>
+                </div>
+                <div className="text-xs" style={{ color: 'var(--yca-muted)' }}>
+                  restoring session history
+                </div>
+              </div>
+            </div>
+          )}
           <div ref={bottomRef} />
-          {!followTailRef.current && events.length > 0 && (
+          {!follow && events.length > 0 && (
             <button
               onClick={jumpToLatest}
               className="absolute bottom-3 right-4 rounded border px-2 py-1 text-sm shadow-lg"
               style={{ borderColor: 'var(--yca-primary)', color: 'var(--yca-primary)', background: 'var(--yca-panel)' }}
-              title="Jump to the latest output"
+              title="Re-enable Follow and jump to the latest output"
             >
               ↓ latest
             </button>
@@ -741,7 +836,7 @@ export function ChatPage({
         )}
       </div>
       {/* bottom bar kept for live agent status + feedback (thinking/calling/working spinners) */}
-      <StatusBar status={status} busy={busy} btw={btw} onOpenBtw={() => setBtwOpen(true)} onClearBtw={clearBtw} />
+      <StatusBar status={status} busy={busy} initializing={initializing} btw={btw} onOpenBtw={() => setBtwOpen(true)} onClearBtw={clearBtw} />
       <RequestModal request={pending} onAnswer={answer as (id: number, value: unknown) => void} />
       {btwOpen && <BtwModal btw={btw} onClose={() => setBtwOpen(false)} />}
       <div className="border-t p-3" style={{ borderColor: 'var(--yca-border)' }}>
@@ -836,8 +931,9 @@ export function ChatPage({
                   onSelect={(e) => setCursor(e.currentTarget.selectionStart ?? e.currentTarget.value.length)}
                   onKeyDown={onKeyDown}
                   rows={promptHeight > 0 ? undefined : 2}
-                  placeholder="Ask the agent… (try /help, /model, /tools…) "
-                  className="min-w-0 flex-1 resize-none rounded border px-3 py-2 text-[15px] outline-none"
+                  readOnly={initializing}
+                  placeholder={initializing ? 'Loading conversation…' : 'Ask the agent… (try /help, /model, /tools…) '}
+                  className="min-w-0 flex-1 resize-none rounded border px-3 py-2 text-[15px] outline-none disabled:cursor-wait"
                   style={{
                     borderColor: 'var(--yca-border)',
                     background: 'var(--yca-panel)',
@@ -850,8 +946,9 @@ export function ChatPage({
               <button
                 onClick={send}
                 // Send stays enabled while a turn runs so an additional prompt is queued (never a
-                // concurrent turn); only the in-flight RPC and an empty prompt disable it.
-                disabled={sending || !prompt.trim()}
+                // concurrent turn); it is disabled while the session boots (snapshot not delivered)
+                // and while the in-flight RPC is pending or the prompt is empty.
+                disabled={sending || initializing || !prompt.trim()}
                 className="rounded border px-4 py-1 text-sm disabled:opacity-40"
                 style={{ borderColor: 'var(--yca-primary)', color: 'var(--yca-primary)' }}
               >
@@ -987,12 +1084,14 @@ function TurnMetrics({ status }: { status: SessionStatus }) {
 function StatusBar({
   status,
   busy,
+  initializing,
   btw,
   onOpenBtw,
   onClearBtw,
 }: {
   status: SessionStatus;
   busy: boolean;
+  initializing: boolean;
   btw?: SessionStatus['btw'];
   onOpenBtw: () => void;
   onClearBtw: () => void;
@@ -1019,7 +1118,7 @@ function StatusBar({
       className="flex items-center gap-2 overflow-hidden border-t px-4 py-1 text-sm"
       style={{ borderColor: 'var(--yca-border)', color: 'var(--yca-muted)' }}
     >
-      {busy ? (
+      {busy || initializing ? (
         // animated spinner indistinguishable from a still dot: a CSS rotation on a spinner glyph.
         <span className="shrink-0" style={{ color: 'var(--yca-accent)', animation: 'yca-spin 0.8s linear infinite' }}>
           ⟳
@@ -1029,10 +1128,12 @@ function StatusBar({
       )}
       <span
         className="min-w-0 truncate"
-        style={isError ? { color: '#ff8484' } : notice && !live ? { color: 'var(--yca-text)' } : undefined}
+        style={isError ? { color: '#ff8484' } : notice && !live && !initializing ? { color: 'var(--yca-text)' } : undefined}
       >
-        {live || notice || (busy ? 'working…' : 'ready')}
-        {busy && <span className="opacity-70"> · {elapsed}s</span>}
+        {initializing
+          ? 'Loading conversation…'
+          : live || notice || (busy ? 'working…' : 'ready')}
+        {busy && !initializing && <span className="opacity-70"> · {elapsed}s</span>}
       </span>
       {status.notice?.level && status.notice.level !== 'INFO' && (
         <span
@@ -1747,38 +1848,81 @@ function RequestModal({
             <div className="mb-2 text-sm font-semibold" style={{ color: 'var(--yca-text)' }}>
               {questions.length > 0 ? (questions[0].prompt ?? 'Question') : 'Question'}
             </div>
-            {questions.map((q) => (
-              <div key={q.id} className="mb-2">
-                <div className="mb-1 text-xs" style={{ color: 'var(--yca-muted)' }}>
-                  {q.prompt}
-                </div>
-                <div className="flex flex-col gap-1">
-                  {(q.options ?? []).map((opt) => (
-                    <label key={opt} className="flex items-center gap-2 text-xs" style={{ color: 'var(--yca-text)' }}>
+            {questions.map((q) => {
+              const opts = q.options ?? [];
+              const ownKey = `${q.id}::own`;
+              const textKey = `${q.id}::text`;
+              const ownChecked = selections[ownKey] === true;
+              const ownText = (selections[textKey] as string) ?? '';
+              return (
+                <div key={q.id} className="mb-2">
+                  <div className="mb-1 text-xs" style={{ color: 'var(--yca-muted)' }}>
+                    {q.prompt}
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    {opts.map((opt) => (
+                      <label key={opt} className="flex items-center gap-2 text-xs" style={{ color: 'var(--yca-text)' }}>
+                        <input
+                          type={q.multiple ? 'checkbox' : 'radio'}
+                          name={`q_${q.id}`}
+                          checked={selections[`${q.id}:${opt}`] === true}
+                          onChange={() =>
+                            setSelections((s) => {
+                              const key = `${q.id}:${opt}`;
+                              if (q.multiple) return { ...s, [key]: !s[key] };
+                              // radio: reset other options AND the own-answer radio for this question
+                              const next: Record<string, string | boolean> = {};
+                              Object.entries(s).forEach(([k, v]) => {
+                                if (!k.startsWith(`${q.id}:`)) next[k] = v;
+                              });
+                              next[key] = true;
+                              return next;
+                            })
+                          }
+                        />
+                        {opt}
+                      </label>
+                    ))}
+                    {/* own-answer slot, mirroring the TUI's 'Type your own answer...' entry */}
+                    <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--yca-text)' }}>
                       <input
                         type={q.multiple ? 'checkbox' : 'radio'}
                         name={`q_${q.id}`}
-                        checked={selections[`${q.id}:${opt}`] === true}
-                        onChange={() =>
-                          setSelections((s) => {
-                            const key = `${q.id}:${opt}`;
-                            if (q.multiple) return { ...s, [key]: !s[key] };
-                            // radio: reset others for this question
+                        checked={ownChecked}
+                        onChange={() => {
+                          if (q.multiple) {
+                            setSelections((s) => ({ ...s, [ownKey]: !s[ownKey] }));
+                          } else {
+                            // radio: clear options and toggle the own-answer radio
                             const next: Record<string, string | boolean> = {};
-                            Object.entries(s).forEach(([k, v]) => {
+                            Object.entries(selections).forEach(([k, v]) => {
                               if (!k.startsWith(`${q.id}:`)) next[k] = v;
                             });
-                            next[key] = true;
-                            return next;
-                          })
-                        }
+                            next[ownKey] = !ownChecked;
+                            setSelections(next);
+                          }
+                        }}
                       />
-                      {opt}
+                      <span style={ownChecked ? { color: 'var(--yca-accent)' } : undefined}>
+                        ✎ Type your own answer...
+                      </span>
                     </label>
-                  ))}
+                  </div>
+                  <textarea
+                    className="mt-1 w-full rounded border px-2 py-1 text-xs"
+                    style={{
+                      borderColor: 'var(--yca-border)',
+                      background: 'var(--yca-panel)',
+                      color: 'var(--yca-text)',
+                    }}
+                    rows={2}
+                    placeholder="Type your own answer..."
+                    value={ownText}
+                    onChange={(e) => setSelections((s) => ({ ...s, [textKey]: e.target.value }))}
+                  />
                 </div>
-              </div>
-            ))}
+              );
+            })}
             <div className="mt-3 flex justify-end gap-2">
               <button
                 className="rounded border px-3 py-1 text-xs"
@@ -1793,8 +1937,21 @@ function RequestModal({
                 onClick={() => {
                   const answers: Record<string, unknown> = {};
                   questions.forEach((q) => {
-                    const picked = (q.options ?? []).filter((opt) => selections[`${q.id}:${opt}`] === true);
-                    answers[q.id ?? ''] = q.multiple === false || q.options && (q.options ?? []).length > 1 ? picked : picked[0];
+                    const opts = q.options ?? [];
+                    const ownChecked = selections[`${q.id}::own`] === true;
+                    const ownText = ((selections[`${q.id}::text`] as string) ?? '').trim();
+                    if (q.multiple) {
+                      const picked = opts.filter((opt) => selections[`${q.id}:${opt}`] === true);
+                      if (ownChecked && ownText) picked.push(ownText);
+                      answers[q.id ?? ''] = picked;
+                    } else {
+                      answers[q.id ?? ''] =
+                        ownChecked && ownText
+                          ? ownText
+                          : opts.length === 0
+                            ? ownText
+                            : opts.find((opt) => selections[`${q.id}:${opt}`] === true) ?? '';
+                    }
                   });
                   const value = questions.length === 1 ? answers[questions[0].id ?? ''] : answers;
                   onAnswer(request.id, value);

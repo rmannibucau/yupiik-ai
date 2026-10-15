@@ -224,4 +224,44 @@ class AskUserToolTest {
         assertFalse(result.success());
         assertEquals("each question must be an object with an id and a prompt", result.output());
     }
+
+    @Test
+    void executeReportsUserRejectionAsSuccessWithCancelSignal() {
+        // a cancelled/declined ask_user (the interactive gate returned no answer) must be a
+        // SUCCESS tool outcome carrying a clear "cancelled" signal - not an error - so the turn
+        // advances and the model adapts instead of retrying ask_user.
+        final var rejecting = new ToolContext(
+                "s1",
+                null,
+                null,
+                null,
+                new UserFeedbackService() {
+                    @Override
+                    public Map<String, Object> ask(final List<Question> questions) {
+                        return null;
+                    }
+                },
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER);
+        final var args = Map.<String, Object>of("questions", List.of(Map.of("id", "q1", "prompt", "Pick?")));
+        final ToolResult result = tool.execute(args, rejecting);
+        assertNotNull(result);
+        assertTrue(result.success(), "a user rejection is a successful outcome, not an error");
+        assertTrue(result.output().contains("\"cancelled\":true"), "must carry a cancelled marker");
+        assertTrue(result.output().contains("Do not call"), "must tell the model not to re-ask");
+    }
+
+    @Test
+    void executeReturnsErrorWhenNoFeedbackGateIsInstalled() {
+        // genuinely gate-less (no interactive feedback service): keeps the hard error.
+        final var gateLess = new ToolContext("s1", null, null, null, null, null, null, null, null, Cancellations.NEVER);
+        final var args = Map.<String, Object>of("questions", List.of(Map.of("id", "q1", "prompt", "Pick?")));
+        final ToolResult result = tool.execute(args, gateLess);
+        assertNotNull(result);
+        assertFalse(result.success());
+        assertEquals("ask_user requires an active session feedback gate.", result.output());
+    }
 }

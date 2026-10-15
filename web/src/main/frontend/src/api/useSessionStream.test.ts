@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { foldLiveOutChars, foldStatus, type WebEvent } from './useSessionStream';
+import { foldLiveOutChars, foldStatus, bootstrapFromSnapshot, type WebEvent } from './useSessionStream';
 
 function ev(type: string, message?: string | null): WebEvent {
   return { type, sessionId: 's1', message: message ?? null } as WebEvent;
@@ -187,5 +187,26 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
     const s = foldStatus([statusEv('working', true)]);
     expect(s.liveOutTokens).toBeUndefined();
     expect(s.liveReasoningTokens).toBeUndefined();
+  });
+});
+
+describe('bootstrapFromSnapshot - bootstrapped (history-loaded) transition', () => {
+  it('a snapshot with history bootstraps', () => {
+    expect(bootstrapFromSnapshot({ events: [ev('user', 'hi')] })).toBe(true);
+  });
+
+  it('an EMPTY snapshot ({events:[]}) still bootstraps - a fresh/empty session must clear the loader, never spin forever', () => {
+    expect(bootstrapFromSnapshot({ events: [] })).toBe(true);
+  });
+
+  it('a snapshot frame missing the events key does NOT bootstrap (keeps the loader up)', () => {
+    expect(bootstrapFromSnapshot({})).toBe(false);
+  });
+
+  it('malformed / non-object payloads do NOT bootstrap', () => {
+    expect(bootstrapFromSnapshot(null)).toBe(false);
+    expect(bootstrapFromSnapshot(undefined)).toBe(false);
+    expect(bootstrapFromSnapshot('events')).toBe(false);
+    expect(bootstrapFromSnapshot(7)).toBe(false);
   });
 });

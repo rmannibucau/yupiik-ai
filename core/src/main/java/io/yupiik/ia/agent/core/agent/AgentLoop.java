@@ -2640,8 +2640,8 @@ public class AgentLoop {
 
     private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file", "apply_patch");
 
-    private static final String STALE_READ_MARKER =
-            "[stale read cleared: the file changed after this read; re-read it to get the current content]";
+    /** Stable prefix every stale-read note carries; used to skip already-noted reads (see {@link StaleReads}). */
+    private static final String STALE_READ_MARKER = "[stale read cleared:";
 
     /**
      * Tracks which {@code read_file} results sit in the conversation and by which path, so a later
@@ -3181,11 +3181,17 @@ public class AgentLoop {
         turnToolSumMs += outcome.durationMs();
     }
 
-    /** Compact stale-read suffix appended to a successful write tool's own result message. */
+    /**
+     * Compact stale-read suffix appended to a successful write tool's own result message.
+     * Directs the model to NOT re-read now (the write just applied and the model knows what it
+     * wrote), but TO re-read before any later edit of the same file — so a future edit is never
+     * based on a stale snapshot. The explicit negative+conditional phrasing matters for small
+     * models that act on in-band instructions literally.
+     */
     private static String staleNote(final List<Path> paths) {
         return "\n[stale read cleared: "
                 + String.join(", ", paths.stream().map(Path::toString).toList())
-                + " changed after an earlier read, so that read's content is stale; re-read it to get the current content]";
+                + " - don't re-read now; re-read only before a future edit]";
     }
 
     /** Head+tail ingestion cap applied to tool outputs before they enter the conversation. */

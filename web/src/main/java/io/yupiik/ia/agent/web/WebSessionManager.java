@@ -46,6 +46,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /**
@@ -61,6 +62,16 @@ import java.util.stream.Collectors;
  */
 @ApplicationScoped
 public class WebSessionManager implements AutoCloseable {
+
+    private static final Logger LOGGER = Logger.getLogger(WebSessionManager.class.getName());
+
+    /**
+     * Upper bound on how long an interactive request (approval/question) waits for the browser
+     * before it self-recovers as a rejected/cancelled answer. A lost or unanswered modal (browser
+     * closed, SSE reconnect, missed resolve) then unblocks the turn promptly instead of pinning it
+     * for many minutes.
+     */
+    private static final int RPC_TIMEOUT_MINUTES = 2;
 
     private final SessionRuntimeFactory sessionRuntimeFactory;
     private final ShellRegistry shellRegistry;
@@ -406,6 +417,9 @@ public class WebSessionManager implements AutoCloseable {
         }
         final var pending = session.io.pendingRequests.remove(id);
         if (pending == null) {
+            // already resolved/completed (e.g. the turn was cancelled or the request timed out):
+            // not a hard error, but log it so a spurious late resolve is diagnosable.
+            LOGGER.fine(() -> "resolve for unknown pending request " + id + " on session " + sessionId);
             return false;
         }
         pending.complete(result);
@@ -655,6 +669,12 @@ public class WebSessionManager implements AutoCloseable {
                                 "multiple", q.multiple()))
                         .collect(Collectors.toList());
                 final var result = awaitRpc(Map.of("method", "session.ask", "params", Map.of("questions", serialized)));
+                if (result == null) {
+                    // the user rejected/cancelled the ask (modal Cancel or Stop): report a clean
+                    // "cancelled" answer so the tool round is a success the model can act on
+                    // instead of collapsing to a null/headless error that makes the turn spin.
+                    return Map.of("cancelled", true);
+                }
                 @SuppressWarnings("unchecked")
                 final var answers = result instanceof Map<?, ?> m
                         ? (Map<String, Object>) m
@@ -679,11 +699,14 @@ public class WebSessionManager implements AutoCloseable {
                             "params",
                             request.get("params")));
             try {
-                return future.get(10, TimeUnit.MINUTES);
+                return future.get(RPC_TIMEOUT_MINUTES, TimeUnit.MINUTES);
             } catch (final InterruptedException e) {
                 Thread.currentThread().interrupt();
+                LOGGER.fine(() -> "interrupted awaiting " + request.get("method") + " (" + id + ")");
                 return null;
             } catch (final ExecutionException | TimeoutException e) {
+                LOGGER.fine(() -> request.get("method") + " (" + id + ") unresolved after " + RPC_TIMEOUT_MINUTES
+                        + " min; treating as rejected");
                 return null;
             } finally {
                 pendingRequests.remove(String.valueOf(id));

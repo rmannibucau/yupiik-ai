@@ -130,7 +130,16 @@ public class AskUserTool implements EmbeddedTool {
         }
         final var answers = service.ask(questions);
         if (answers == null) {
-            return ToolResult.error("ask_user is not available in headless mode (no interactive gate).");
+            // the user rejected/cancelled the question (the interactive gate returned no
+            // answer): a successful, informative outcome - not an error - so the turn keeps
+            // advancing and the model adapts instead of retrying ask_user forever.
+            return ToolResult.ok(mapper.toString(Map.of(
+                    "cancelled",
+                    true,
+                    "message",
+                    "The user rejected/cancelled this question without answering. Do not call "
+                            + "ask_user again for it; proceed with a sensible default or state exactly "
+                            + "what input would be needed to continue.")));
         }
         return ToolResult.ok(mapper.toString(answers));
     }

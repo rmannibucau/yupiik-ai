@@ -102,7 +102,12 @@ public class ChatClient implements AutoCloseable {
     // provider-scoped facts. With per-session providers (one per tab) a single process-wide slot would
     // leak a tab A provider observation (AUTO fell back to completions, structured unsupported) to tab B
     private final ConcurrentHashMap<String, ApiFlavor> resolvedFlavors = new ConcurrentHashMap<>();
-    private final Set<String> structuredOutputRejected = ConcurrentHashMap.newKeySet();
+    // structured-output rejection memoization: key (provider:model:schema) -> wall-clock millis of the
+    // rejection. Bounded in time so a single transient 400 (a gateway hiccup, a body-JSON/max_tokens
+    // slip) can never permanently cripple the structured path for an otherwise structured-capable
+    // provider/model - after the TTL the structured request is retried.
+    private static final long STRUCTURED_REJECTION_TTL_MILLIS = 10L * 60 * 1000;
+    private final Map<String, Long> structuredOutputRejected = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ModelsResponse> cachedModelsByProvider = new ConcurrentHashMap<>();
 
     public ChatClient(
@@ -642,7 +647,9 @@ public class ChatClient implements AutoCloseable {
         this.dialectClients.clear();
         // the new provider never observed the response route or structured output yet
         this.resolvedFlavors.remove(providerId);
-        this.structuredOutputRejected.remove(providerId);
+        // clear the structured-output memoization entries of this provider (keys are
+        // "provider:model:schema", so a plain remove(providerId) would never match)
+        this.structuredOutputRejected.keySet().removeIf(k -> k.startsWith(providerId + ":"));
         this.cachedModelsByProvider.remove(providerId);
     }
 
@@ -1565,7 +1572,7 @@ public class ChatClient implements AutoCloseable {
                 request.settings());
         final var providerId = providerIdFor(request);
         final var rejectionKey = providerId + ":" + model + ":" + schemaName;
-        if (structuredOutputRejected.contains(rejectionKey)) {
+        if (isStructuredRejected(rejectionKey)) {
             return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
         }
         try {
@@ -1575,8 +1582,10 @@ public class ChatClient implements AutoCloseable {
                 // the provider rejected the JSON Schema (e.g. Anthropic 400 'json was malformed' or a
                 // response-parse failure of the structured attempt): degrade once to the plain request
                 // and remember it per (provider, model, schema) so a model that does not support
-                // structured output stops burning a rejection round-trip per call
-                structuredOutputRejected.add(rejectionKey);
+                // structured output stops burning a rejection round-trip per call. The memory is
+                // time-bounded (see STRUCTURED_REJECTION_TTL_MILLIS): a transient 400 can never
+                // permanently disable structured output for a working provider/model.
+                structuredOutputRejected.put(rejectionKey, nowMillis());
                 return new StructuredResult(chatInternal(withPromotedExtras(applyModelDefaults(plainReq))), false);
             }
             throw first;
@@ -1586,22 +1595,69 @@ public class ChatClient implements AutoCloseable {
     /**
      * Whether an {@link IOException} from the structured attempt is a JSON-Schema rejection (the plain
      * fallback is the right recovery) rather than a transport/config failure that must surface.
+     *
+     * <p>A 400 whose body talks about the request body JSON being unparseable, a missing/malformed
+     * {@code max_tokens}, or a generic gateway "Invalid JSON or schema" must NOT be treated as a
+     * structured-output schema rejection: the plain fallback reuses the same (invalid) request, so
+     * degrading cannot help and only hides the real cause. Only the markers that specifically name a
+     * JSON-Schema/structured-output incompatibility trigger the plain fallback.</p>
      */
     private static boolean isSchemaRejection(final IOException e) {
         if (isStatus400(e)) {
             final var m = e.getMessage();
             final var lower = m == null ? "" : m.toLowerCase(Locale.ROOT);
-            // body markers of a schema rejection; 'invalid_request_error' is deliberately absent as
-            // Anthropic classifies every 400 under it, including max_tokens/thinking config errors
-            // that must surface instead of being hidden by the plain fallback
-            return lower.contains("json was malformed")
+            // body markers of a schema/structured-output rejection (Anthropic 'json was malformed',
+            // output_config/output_format, an explicit json_schema/invalid-schema marker).
+            final var schemaRejection = lower.contains("json was malformed")
                     || lower.contains("output_config")
                     || lower.contains("output_format")
-                    || lower.contains("schema");
+                    || lower.contains("json_schema")
+                    || lower.contains("invalid schema")
+                    || lower.contains("not a valid json schema")
+                    || lower.contains("unsupported schema");
+            if (schemaRejection) {
+                // guard: the generic "Invalid JSON or schema in request body" (a body-JSON parse /
+                // max_tokens / config error, e.g. freeinference rejecting max_tokens:-1) contains the
+                // word 'schema' but is NOT a structured-output schema rejection. Exclude the body-parse
+                // and token-budget phrases explicitly.
+                return !isBodyParseOrBudgetError(lower);
+            }
+            return false;
         }
         // a response-parse failure (e.g. the gateway answered SSE with no usable frame) is also a
         // structured-output failure of this provider/model/schema: degrade once
         return e instanceof LlmResponseParseException;
+    }
+
+    /** Whether a 400 message reflects an unparseable/malformed request body or a token-budget/config error. */
+    private static boolean isBodyParseOrBudgetError(final String lower) {
+        return lower.contains("invalid json")
+                || lower.contains("not valid json")
+                || lower.contains("body is not valid")
+                || lower.contains("max_tokens")
+                || lower.contains("max tokens");
+    }
+
+    /**
+     * Whether the structured-output rejection memoization currently holds {@code key}. Entries older
+     * than {@link #STRUCTURED_REJECTION_TTL_MILLIS} are forgotten on read, so a provider/model whose
+     * structured support recovers (or which was transiently rejected) is retried instead of being
+     * permanently degraded.
+     */
+    private boolean isStructuredRejected(final String key) {
+        final var recorded = structuredOutputRejected.get(key);
+        if (recorded == null) {
+            return false;
+        }
+        if (nowMillis() - recorded >= STRUCTURED_REJECTION_TTL_MILLIS) {
+            structuredOutputRejected.remove(key, recorded);
+            return false;
+        }
+        return true;
+    }
+
+    private long nowMillis() {
+        return clock == null ? System.currentTimeMillis() : clock.millis();
     }
 
     private static boolean isStatus400(final IOException e) {

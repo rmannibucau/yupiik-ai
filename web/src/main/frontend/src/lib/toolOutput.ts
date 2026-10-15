@@ -145,15 +145,48 @@ export function guessToolLanguage(output: string | null | undefined, argsJson?: 
  * Builds a short, human-readable input summary for a tool card from its raw arguments JSON. Mirrors the
  * TUI's condensed tool line ({@code ToolCard.keyCommand} / {@code ConversationTranscript.toolCommand}): the
  * significant `command` for bash-style tools, and the `path` (+ optional `lines` range) for file tools such
- * as read_file. Returns '' (an empty string) when there is nothing meaningful to show (missing/blank/malformed
+ * as read_file. Beyond those, every built-in tool gets a meaningful one-liner: glob/grep show their
+ * `pattern`, web_fetch its `url`, web_search its `query`, apply_patch a diff-style header, edit_file a
+ * `path old → new` mini-diff, maven tools their `gav`, subagent/skill/check/context their name/action,
+ * etc. The segments are ordered command → path → the tool's own primary key, so the most identifying
+ * piece leads. Returns '' (an empty string) when there is nothing meaningful to show (missing/blank/malformed
  * args or none of the known keys), in which case the card header falls back to the bare tool name.
  */
 export function summarizeArgs(argsJson?: string | null): string {
   const parsed = parseArgs(argsJson);
   if (!parsed) return '';
-  return String(joinArgsParts(commandPart(parsed), pathPart(parsed), workdirPart(parsed), linesPart(parsed)));
+  const parts: string[] = [];
+  // 1. the significant run command (bash, bash-like wrappers) - the most identifying hint.
+  const command = commandPart(parsed);
+  if (command) parts.push(command);
+  // 2. tools whose identity IS a dedicated primary key (glob/grep pattern, web_search query, web_fetch
+  //    url, maven gav, subagent/skill name+task, memory fact, check/context action). These lead over a
+  //    bare base path (e.g. glob shows its pattern, not just the "." base dir). Non-string/blank ignored.
+  const primary = primaryPart(parsed);
+  if (primary) parts.push(primary);
+  // 3. the file/dir a tool reads or writes (read_file, edit_file, write_file, list_dir, ...).
+  const path = pathPart(parsed);
+  if (path) parts.push(path);
+  // 4. workdir + lines ranges qualify command/path tools.
+  const workdir = workdirPart(parsed);
+  if (workdir) parts.push(workdir);
+  const lines = linesPart(parsed);
+  if (lines) parts.push(lines);
+  if (parts.length > 0) {
+    // for the edit/rewrite tools append the diff-style "what changed" hint (edit_file old → new,
+    // apply_patch diff header, write_file content marker) instead of ever dumping the full body.
+    const hint = editDiff(parsed);
+    if (hint) parts.push(hint);
+    return joinArgsParts(...parts);
+  }
+  // 5. a rewrite tool with only patch/content (no recognized primary or path): a diff-style header
+  //    is still informative.
+  const diff = editDiff(parsed);
+  if (diff) return diff;
+  return '';
 }
 
+/** The bash-style command a tool was asked to run, or ''. */
 function commandPart(parsed: Record<string, unknown>): string {
   for (const key of ['command', 'cmd', 'script', 'args']) {
     const v = parsed[key];
@@ -162,8 +195,9 @@ function commandPart(parsed: Record<string, unknown>): string {
   return '';
 }
 
+/** The file/dir a tool acts on, or ''. */
 function pathPart(parsed: Record<string, unknown>): string {
-  for (const key of ['path', 'file', 'uri', 'target']) {
+  for (const key of ['path', 'file', 'uri', 'target', 'dir']) {
     const v = parsed[key];
     if (typeof v === 'string' && v.trim()) return v.trim();
   }
@@ -182,6 +216,72 @@ function linesPart(parsed: Record<string, unknown>): string {
   if (typeof v === 'number') return String(v);
   if (Array.isArray(v)) return v.filter((x) => typeof x === 'number').join('-');
   return '';
+}
+
+// primary identifying keys for non-command/non-path tools, in display-priority order. The card header
+// already shows the tool name (glob/grep/edit_file/...), so these are shown raw without a redundant
+// label - a shared key like `pattern` belongs to both glob and grep and the header disambiguates. Only
+// `include` (grep filter) keeps a tiny label since a bare glob is meaningless without its pattern.
+const PRIMARY_FIELDS: { keys: string[]; label?: string }[] = [
+  { keys: ['url'] }, // web_fetch
+  { keys: ['query'] }, // web_search
+  { keys: ['pattern'] }, // glob / grep (name shown by the header)
+  { keys: ['include'], label: 'in' }, // grep include filter, only when no pattern
+  { keys: ['gav'] }, // maven knowledge (text/knowledge)
+  { keys: ['operation'] }, // maven repo knowledge
+  { keys: ['action'] }, // check_subagents / manage_context
+  { keys: ['name'] }, // skill / spawn_subagent name
+  { keys: ['fact'] }, // memory_write
+  { keys: ['task'] }, // spawn_subagent task
+];
+
+/** The tool's own primary (non-command/path) field when present, labeled only when needed. */
+function primaryPart(parsed: Record<string, unknown>): string {
+  for (const field of PRIMARY_FIELDS) {
+    for (const key of field.keys) {
+      const v = parsed[key];
+      if (typeof v === 'string' && v.trim()) {
+        return field.label ? `${field.label} ${v.trim()}` : v.trim();
+      }
+    }
+  }
+  return '';
+}
+
+/**
+ * Diff-style hint for the edit/rewrite tools: shows what actually changed instead of the full body.
+ * - edit_file: a compact `old… → new…` pair (each side capped) when given explicit oldString/newString;
+ * - apply_patch: the unified-diff header (first changed file / hunk summary line);
+ * - write_file with a path but no old/new: a `content` marker rather than the full body.
+ * Returns '' when there is no meaningful change to report.
+ */
+function editDiff(parsed: Record<string, unknown>): string {
+  const oldS = strOr(parsed['oldString']);
+  const newS = strOr(parsed['newString']);
+  if (oldS != null || newS != null) {
+    return `${capHint(oldS ?? '∅')} → ${capHint(newS ?? '∅')}`;
+  }
+  const patch = strOr(parsed['patch']);
+  if (patch != null) return patchFirstLine(patch);
+  // write_file carries only path+content: signal that the body was (re)written rather than dump it
+  if (strOr(parsed['content']) != null) return 'content';
+  return '';
+}
+
+function strOr(v: unknown): string | null {
+  return typeof v === 'string' && v.trim() ? v.trim() : null;
+}
+
+/** Ellipsize a replacement/other snippet so the one-line header stays short. */
+function capHint(value: string): string {
+  const flat = value.replace(/\s+/g, ' ').trim();
+  return flat.length > 24 ? `${flat.slice(0, 24)}…` : flat;
+}
+
+/** First meaningful line of a unified-diff payload: prefers the {@code ---}/{@code +++} file or @@ hunk. */
+function patchFirstLine(patch: string): string {
+  const line = patch.split('\n').find((l) => /^(---|\+\+\+|@@)/.test(l.trim())) ?? patch.split('\n')[0];
+  return line.replace(/\s+/g, ' ').trim().slice(0, 60);
 }
 
 function joinArgsParts(...parts: string[]): string {

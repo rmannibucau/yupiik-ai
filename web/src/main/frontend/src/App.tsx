@@ -16,6 +16,7 @@ export function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeSession, setActiveSession] = useState<string | undefined>();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const openSession = (id: string, title: string) => {
     setTabs((prev) => {
@@ -32,17 +33,20 @@ export function App() {
   };
 
   const closeTab = (id: string) => {
-    setTabs((prev) => {
-      const next = prev.filter((t) => t.id !== id);
-      if (activeSession === id && next.length > 0) {
-        navigate(`/session/${next[next.length - 1].id}`);
-        setActiveSession(next[next.length - 1].id);
-      } else if (next.length === 0) {
-        setActiveSession(undefined);
-        navigate('/');
-      }
-      return next;
-    });
+    setTabs((prev) => prev.filter((t) => t.id !== id));
+    // Compute the post-close destination OUTSIDE the state updater: setTabs updaters must be pure
+    // (React may invoke them more than once / at unexpected times), so navigate/setActiveSession
+    // must never be side-effects inside it or the navigation can fire on a stale snapshot.
+    if (activeSession !== id) return;
+    const next = tabs.filter((t) => t.id !== id);
+    if (next.length > 0) {
+      const target = next[next.length - 1].id;
+      setActiveSession(target);
+      navigate(`/session/${target}`);
+    } else {
+      setActiveSession(undefined);
+      navigate('/');
+    }
   };
 
   // Clicking a tab must switch the visible session too (navigate + activate), not just the badge,
@@ -70,6 +74,93 @@ export function App() {
       document.title = `${t} — YCA`;
     }
   }, [activeSession]);
+
+  // Issue #1: a session opened by direct navigation / a page refresh / a rundown/back button on
+  // /session/:id never went through SessionsPage's openSession, so its tab was never registered in
+  // the TabBar even though the chat pane renders. Reconcile the tab list from the current route:
+  // any /session/:id that is not already open gets a tab (with its persisted title, resolved
+  // server-side), and the active session follows the route so the tab is visibly selected. Unknown
+  // ids (typo / deleted session) are NOT given a tab - ChatPage's own sessions.get guard also drops
+  // them, so a bogus deep link never pollutes the bar.
+  const resolveSessionTitle = useCallback(async (id: string): Promise<string | null> => {
+    try {
+      const sessions = await call<SessionSummary[]>('sessions.list', { query: '', project: '' });
+      const hit = sessions.find((s) => s.id === id);
+      return hit ? hit.title || id : null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const pathname = location.pathname;
+  useEffect(() => {
+    const m = /^\/session\/([^/]+)$/.exec(pathname);
+    if (!m) return;
+    const id = decodeURIComponent(m[1]);
+    setActiveSession(id);
+    // already open -> nothing to do (the tab exists; title kept fresh by setTabTitle)
+    if (tabs.some((t) => t.id === id)) return;
+    let cancelled = false;
+    resolveSessionTitle(id).then((title) => {
+      if (cancelled) return;
+      // still not open (openSession may have won the race while we awaited the title) and the
+      // session actually exists -> register the tab. Unknown id -> leave the bar untouched.
+      setTabs((prev) => {
+        if (prev.some((t) => t.id === id)) return prev;
+        if (title === null) return prev;
+        return [...prev, { id, title, mode: 'plan' }];
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // pathname only: tabs changes (mode/title) must not re-run the effect, only navigation does.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
+  // Run once on boot: restore the sessions the web command was configured with (--session ...). Each
+  // existing id gets a tab. We only navigate to a restored session when the user landed on the home
+  // page; if they are already viewing a session (deep link / refresh on /session/Y), their current
+  // route is left untouched so we never yank them away - that session's tab is still ensured.
+  const restoreRanRef = useRef(false);
+  useEffect(() => {
+    if (restoreRanRef.current) return;
+    restoreRanRef.current = true;
+    let cancelled = false;
+    (async () => {
+      const ids = await call<string[]>('sessions.restore').catch(() => [] as string[]);
+      if (cancelled || !Array.isArray(ids) || ids.length === 0) return;
+      // resolve the persisted title server-side for each id (the same source SessionsPage uses)
+      const sessions = await call<SessionSummary[]>('sessions.list', { query: '', project: '' }).catch(
+        () => [] as SessionSummary[],
+      );
+      if (cancelled) return;
+      const titleOf = new Map<string, string>();
+      for (const s of sessions) titleOf.set(s.id, s.title || s.id);
+      const atHome = /^\/?$/.test(pathname);
+      const landed = ids.filter((id) => pathname === `/session/${id}`);
+      setTabs((prev) => {
+        const next = [...prev];
+        for (const id of ids) {
+          if (!next.some((t) => t.id === id)) next.push({ id, title: titleOf.get(id) || id, mode: 'plan' });
+        }
+        return next;
+      });
+      if (atHome && !landed.length && ids.length > 0) {
+        // boot on the home page with restore configured: land on the first restored session's tab
+        setActiveSession(ids[0]);
+        navigate(`/session/${ids[0]}`);
+      } else if (landed.length) {
+        // already viewing one of the restored sessions: make sure its tab is active
+        setActiveSession(landed[0]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // run exactly once per App mount; pathname is read on mount only for the boot decision,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [navigate]);
 
   return (
     <div className="flex h-full flex-col">
