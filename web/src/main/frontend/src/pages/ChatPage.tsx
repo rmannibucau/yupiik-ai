@@ -201,6 +201,10 @@ export function ChatPage({
   // toggle button / "jump to latest" re-enables it. Kept as React state so the button and the
   // "↓ latest" affordance re-render when it flips.
   const [follow, setFollow] = useState(true);
+  // ref mirror of `follow` so the visibilitychange listener (registered once) always reads the current
+  // value without re-registering on every toggle.
+  const followRef = useRef(follow);
+  followRef.current = follow;
   // Programmatic scrolls (the tail jump on mount, the smooth re-follows during snapshot replay or a
   // live turn) must NEVER disable Follow - only a genuine user scroll-away from the tail may, per the
   // two explicit conditions (intentional toggle, or scrolling up to read). The browser fires the same
@@ -397,11 +401,30 @@ export function ChatPage({
   useEffect(() => {
     if (!follow) return;
     if (events.length === 0) return;
+    // Skip while the tab is hidden: the smooth scroll is rAF-suspended in a background tab and would
+    // never complete (and, worse, would strand the view mid-transition). The visibilitychange listener
+    // below jumps to the tail instantly when the tab returns to the foreground.
+    if (document.visibilityState !== 'visible') return;
     // first populated jump on this mount is instant (scrollToTail(false)), so no intermediate
     // smooth-scroll events can leak; later live follows stay smooth (tiny handoffs near the tail).
     // scrollToTail itself records the "already jumped" marker and resets the user-scroll-intent flag.
     scrollToTail(tailScrolledRef.current);
   }, [events.length, follow]);
+
+  // Follow must be interruption-proof: the rAF-driven smooth scroll is suspended in a background tab,
+  // so while hidden the live re-follows never complete and the view is stranded away from the tail.
+  // When the tab becomes visible again while Follow is still ON, jump straight to the tail (instant, no
+  // rAF) to close the gap. Instant rather than smooth because we may be far from the tail and an
+  // animated jump could re-suspend before completing.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible' && followRef.current) {
+        scrollToTail(false);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
 
   // re-enable Follow (toggle button or the "jump to latest" affordance) and jump to the tail.
   const jumpToLatest = () => {
@@ -441,6 +464,13 @@ export function ChatPage({
   // time the list changes; dedup on the delivered todos so only genuine changes trigger a refetch
   // (and a repeated identical write_todo does not spam the RPC endpoint).
   const lastTodoRef = useRef<string>('');
+  // collapsed-summary fallback: the human-readable "what changed" line of the most recent todo-updated
+  // diff (e.g. "☑ write tests"), used when there is no in-progress/pending "current" item to show.
+  // null when no change is recorded yet (first snapshot load).
+  const [todoSummary, setTodoSummary] = useState<string | null>(null);
+  // previous todo list (the `from` of the last change), to compute the diff client-side since the
+  // `todo-updated` SSE frame only carries the new list (`to`), not the prior one.
+  const lastTodoItemsRef = useRef<Array<{ content: string; status: string }> | null>(null);
   useEffect(() => {
     if (!sessionId || events.length === 0) return;
     for (let i = events.length - 1; i >= 0; i--) {
@@ -450,6 +480,8 @@ export function ChatPage({
       const sig = JSON.stringify(todos);
       if (lastTodoRef.current === sig) return;
       lastTodoRef.current = sig;
+      setTodoSummary(todoDiffSummary(lastTodoItemsRef.current, todos));
+      lastTodoItemsRef.current = todos;
       loadSidebar();
       return;
     }
@@ -823,6 +855,7 @@ export function ChatPage({
                 status={status}
                 sessionId={sessionId}
                 todosCollapsed={todosCollapsed}
+                todoSummary={todoSummary}
                 onToggleTodos={() => setTodosCollapsed((c) => !c)}
                 serversCollapsed={serversCollapsed}
                 onToggleServers={() => setServersCollapsed((c) => !c)}
@@ -1190,6 +1223,7 @@ function Sidebar({
   status,
   sessionId,
   todosCollapsed,
+  todoSummary,
   onToggleTodos,
   serversCollapsed,
   onToggleServers,
@@ -1202,6 +1236,7 @@ function Sidebar({
   status: SessionStatus;
   sessionId: string;
   todosCollapsed: boolean;
+  todoSummary: string | null;
   onToggleTodos: () => void;
   serversCollapsed: boolean;
   onToggleServers: () => void;
@@ -1406,6 +1441,29 @@ function Sidebar({
             </span>
           )}
         </button>
+        {todosCollapsed && sidebar.todos.length > 0 && (
+          (() => {
+            // collapsed summary: prefer the "current" item (A), else the diff of the last change (B),
+            // else a done/total count fallback - so a collapsed panel is never just a bare badge.
+            const current =
+              sidebar.todos.find((t) => t.status === 'in_progress') ??
+              sidebar.todos.find((t) => t.status === 'pending');
+            const done = sidebar.todos.filter((t) => t.status === 'completed').length;
+            let text: string;
+            if (current) text = `${todoGlyph(current.status)} ${current.content}`;
+            else if (todoSummary) text = todoSummary;
+            else text = done > 0 ? `${done}/${sidebar.todos.length} done` : `${sidebar.todos.length} pending`;
+            return (
+              <div
+                className="mb-1 flex items-start gap-1.5 truncate text-sm"
+                style={{ color: 'var(--yca-muted)' }}
+                title={text}
+              >
+                <span>{text}</span>
+              </div>
+            );
+          })()
+        )}
         {!todosCollapsed &&
           (sidebar.todos.length === 0 ? (
             <div className="text-sm" style={{ color: 'var(--yca-muted)' }}>No todos.</div>
@@ -1421,13 +1479,39 @@ function Sidebar({
   );
 }
 
+/** TUI tristate checkbox glyph: [ ] pending / [>] in_progress / [x] completed / [-] cancelled. */
+export function todoGlyph(status: string): string {
+  return status === 'in_progress' ? '◐' : status === 'completed' ? '☑' : status === 'cancelled' ? '⊘' : '☐';
+}
+
+/**
+ * Human-readable "what changed" line between two todo snapshots, used as the collapsed-summary fallback
+ * when there is no in-progress/pending "current" item to show (e.g. everything is done). Returns null
+ * when no delta is derivable (first snapshot, or an identical/empty change).
+ */
+export function todoDiffSummary(
+  prev: Array<{ content: string; status: string }> | null,
+  next: Array<{ content: string; status: string }>,
+): string | null {
+  if (prev == null) return null; // first snapshot -> no prior state to diff against
+  const nextHas = (content: string) => next.some((n) => n.content === content);
+  for (const n of next) {
+    const p = prev.find((x) => x.content === n.content);
+    if (!p) return `${todoGlyph(n.status)} ${n.content}`; // newly added
+    if (p.status !== n.status) return `${todoGlyph(n.status)} ${n.content}`; // status changed
+  }
+  for (const p of prev) {
+    if (p.status !== 'cancelled' && !nextHas(p.content)) return `☐ ${p.content}`; // dropped
+  }
+  return null;
+}
+
 /** TUI tristate checkbox: [ ] pending / [>] in_progress / [x] completed / [-] cancelled. */
 function TodoRow({ todo }: { todo: TodoItem }) {
   const status = todo.status || 'pending';
   const isDone = status === 'completed' || status === 'cancelled';
   // checkbox glyph + color per status, mirroring the TUI [ ]/[>]/[x]/[-]
-  const glyph =
-    status === 'in_progress' ? '◐' : status === 'completed' ? '☑' : status === 'cancelled' ? '⊘' : '☐';
+  const glyph = todoGlyph(status);
   const color =
     status === 'in_progress'
       ? 'var(--yca-yellow, #e5c07b)'
