@@ -193,6 +193,7 @@ public class AgentLoop {
     private final ChatClient chatClient;
     private final ToolRegistry toolRegistry;
     private final ToolExecutionService toolExecutionService;
+    private final ToolCallCoordinator toolCallCoordinator;
     private final CodingAgentConfiguration configuration;
     private final PermissionService permissionService;
     private final UsageTracker usageTracker;
@@ -593,6 +594,7 @@ public class AgentLoop {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
+        this.toolCallCoordinator = new ToolCallCoordinator();
         this.configuration = configuration;
         this.permissionService = permissionService;
         this.usageTracker = usageTracker;
@@ -2731,74 +2733,30 @@ public class AgentLoop {
             final boolean[] roundRefused,
             final Set<String> roundCoverage)
             throws InterruptedException {
-        var i = 0;
-        while (i < calls.size()) {
-            if (cancelled.getAsBoolean()) {
-                // a cancel pressed mid-batch: abort the remaining calls (the running tool stops
-                // cooperatively through its own probe); the loop sees the flag on its next
-                // iteration and unwinds the turn
-                return roundInformative[0];
-            }
-            if (isParallelizable(calls.get(i))) {
-                var end = i + 1;
-                while (end < calls.size() && isParallelizable(calls.get(end))) {
-                    end++;
-                }
-                if (end - i > 1 && executor != null && parallelReadonlyEnabled()) {
-                    // tool events (started/finished) are emitted from the worker threads as they
-                    // happen: bridges tolerate that, results order is still enforced below
-                    final var batchStartNanos = precisionDurationMarker.now();
-                    final var futures = new ArrayList<Future<ToolOutcome>>(end - i);
-                    // all calls in a parallel batch are read-only (isParallelizable), which the doom-loop
-                    // guard never refuses (reads are owned by the plateau guard): no repeat check here.
-                    for (var j = i; j < end; j++) {
-                        final var call = calls.get(j);
-                        // register on the loop thread (workers must not touch ToolRepeats maps):
-                        // every executed read call gets a callId -> signature mapping for record().
-                        repeats.register(call, this::normalizedArguments);
-                        futures.add(executor.submit(() -> runTool(call, cancelled)));
-                    }
-                    for (final var future : futures) {
-                        appendToolResult(
-                                sessionId,
-                                messages,
-                                awaitTool(future),
-                                staleReads,
-                                roundInformative,
-                                roundRefused,
-                                roundCoverage);
-                        checkRoundBudget(sessionId, messages, toolsTokens);
-                    }
-                    final var batchWallMs = (precisionDurationMarker.now() - batchStartNanos) / 1_000_000;
-                    turnToolWallMs += batchWallMs;
-                } else {
-                    for (var j = i; j < end; j++) {
-                        appendToolResult(
-                                sessionId,
-                                messages,
-                                runGuarded(calls.get(j), repeats, cancelled),
-                                staleReads,
-                                roundInformative,
-                                roundRefused,
-                                roundCoverage);
-                        checkRoundBudget(sessionId, messages, toolsTokens);
-                    }
-                }
-                i = end;
-            } else {
-                appendToolResult(
+        return toolCallCoordinator.execute(
+                calls,
+                cancelled,
+                this::isParallelizable,
+                executor != null && parallelReadonlyEnabled(),
+                call -> runGuarded(call, repeats, cancelled),
+                call -> {
+                    // Workers never touch ToolRepeats: register the signature on this loop thread first.
+                    repeats.register(call, this::normalizedArguments);
+                    return executor.submit(() -> runTool(call, cancelled));
+                },
+                outcome -> appendToolResult(
                         sessionId,
                         messages,
-                        runGuarded(calls.get(i), repeats, cancelled),
+                        outcome,
                         staleReads,
                         roundInformative,
                         roundRefused,
-                        roundCoverage);
-                checkRoundBudget(sessionId, messages, toolsTokens);
-                i++;
-            }
-        }
-        return roundInformative[0];
+                        roundCoverage),
+                this::awaitTool,
+                () -> checkRoundBudget(sessionId, messages, toolsTokens),
+                precisionDurationMarker::now,
+                elapsedMs -> turnToolWallMs += elapsedMs,
+                () -> roundInformative[0]);
     }
 
     private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats, final BooleanSupplier cancelled) {
