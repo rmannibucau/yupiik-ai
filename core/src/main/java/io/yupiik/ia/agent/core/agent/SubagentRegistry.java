@@ -23,6 +23,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
@@ -103,6 +104,10 @@ public class SubagentRegistry {
      */
     public Optional<SubagentState> start(
             final String parentSessionId, final String task, final String name, final String model) {
+        return start(new AgentRunSpec(parentSessionId, task, name, model, null, null));
+    }
+
+    public Optional<SubagentState> start(final AgentRunSpec spec) {
         if (!enabled()) {
             return Optional.empty();
         }
@@ -111,13 +116,7 @@ public class SubagentRegistry {
         }
         activeCount.incrementAndGet();
         final var id = UUID.randomUUID().toString();
-        final var state = new SubagentState(
-                id,
-                parentSessionId,
-                task,
-                name,
-                System.currentTimeMillis(),
-                model == null || model.isBlank() ? null : model);
+        final var state = new SubagentState(id, spec, System.currentTimeMillis());
         subagents.put(id, state);
         return Optional.of(state);
     }
@@ -256,10 +255,7 @@ public class SubagentRegistry {
 
     public static final class SubagentState {
         private final String id;
-        private final String parentSessionId;
-        private final String task;
-        private final String name;
-        private final String model;
+        private final AgentRunSpec spec;
         private final long startedAt;
         private volatile SubagentResult result;
         private volatile boolean cancelled;
@@ -267,7 +263,7 @@ public class SubagentRegistry {
         private volatile long completedAt;
 
         public SubagentState(final String id, final String parentSessionId, final String task, final long startedAt) {
-            this(id, parentSessionId, task, null, startedAt, null);
+            this(id, new AgentRunSpec(parentSessionId, task, null, null, null, null), startedAt);
         }
 
         public SubagentState(
@@ -276,7 +272,7 @@ public class SubagentRegistry {
                 final String task,
                 final String name,
                 final long startedAt) {
-            this(id, parentSessionId, task, name, startedAt, null);
+            this(id, new AgentRunSpec(parentSessionId, task, name, null, null, null), startedAt);
         }
 
         public SubagentState(
@@ -286,11 +282,12 @@ public class SubagentRegistry {
                 final String name,
                 final long startedAt,
                 final String model) {
+            this(id, new AgentRunSpec(parentSessionId, task, name, model, null, null), startedAt);
+        }
+
+        public SubagentState(final String id, final AgentRunSpec spec, final long startedAt) {
             this.id = id;
-            this.parentSessionId = parentSessionId;
-            this.task = task;
-            this.name = name;
-            this.model = model;
+            this.spec = spec;
             this.startedAt = startedAt;
         }
 
@@ -299,20 +296,32 @@ public class SubagentRegistry {
         }
 
         public String parentSessionId() {
-            return parentSessionId;
+            return spec.parentSessionId();
         }
 
         public String task() {
-            return task;
+            return spec.task();
         }
 
         public String name() {
-            return name;
+            return spec.name();
         }
 
         /** The raw model reference requested via {@code spawn_subagent model=}, or {@code null} when none was requested. */
         public String model() {
-            return model;
+            return spec.model();
+        }
+
+        public Integer maxTurns() {
+            return spec.maxTurns();
+        }
+
+        public Set<String> allowedTools() {
+            return spec.allowedTools();
+        }
+
+        public AgentRunSpec spec() {
+            return spec;
         }
 
         public long startedAt() {

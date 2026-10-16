@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.tools.builtin;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.agent.AgentRunSpec;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.agent.SubagentRunner;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -30,6 +31,7 @@ import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class SpawnSubagentTool implements EmbeddedTool {
@@ -124,23 +126,20 @@ public class SpawnSubagentTool implements EmbeddedTool {
         final var model = arg(args, "model");
         final var maxTurnsObj = args.get("max_turns");
         final Integer maxTurns = maxTurnsObj instanceof Number n ? n.intValue() : null;
-
-        final var stateOpt = subagentRegistry.start(null, task, name, model);
+        final Set<String> allowedTools = args.get("tools") instanceof List<?> list
+                ? list.stream()
+                        .filter(String.class::isInstance)
+                        .map(String.class::cast)
+                        .collect(java.util.stream.Collectors.toUnmodifiableSet())
+                : args.containsKey("tools") ? Set.of() : null;
+        final var stateOpt = subagentRegistry.start(new AgentRunSpec(
+                context.sessionId(), task, name, model, maxTurns, allowedTools));
         if (stateOpt.isEmpty()) {
             return ToolResult.error("Cannot start sub-agent: maximum concurrent sub-agents reached ("
                     + subagentRegistry.maxConcurrent() + ").");
         }
         final var state = stateOpt.get();
 
-        @SuppressWarnings("unchecked")
-        final List<String> allowedTools = args.get("tools") instanceof List<?> list
-                ? list.stream()
-                        .filter(String.class::isInstance)
-                        .map(String.class::cast)
-                        .toList()
-                : List.of();
-
-        // TODO: pass allowedTools to subagentRunner to filter tool registry
         // the parent's probe, so an interrupt (Ctrl+C) or a cancelled turn stops the child too:
         // it would otherwise keep burning tokens on an abandoned task. SubagentRunner also ORs the
         // registry latch, so an explicit cancel_subagent keeps working.
