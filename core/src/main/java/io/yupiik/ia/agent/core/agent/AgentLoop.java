@@ -209,6 +209,7 @@ public class AgentLoop {
     private final AgentProvider agentProvider;
     private final Clock clock;
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
+    private final TurnState turnState = new TurnState();
     private final SnapshotStore snapshotStore;
     private final TodoStore todoStore;
     private final ExecutorService executor;
@@ -284,22 +285,6 @@ public class AgentLoop {
     /** Last captured payload, {@code null} until this session sent its first request. */
     protected volatile LlmPayload lastLlmPayload;
 
-    // Per-turn metrics tracking (reset at start of each doRun)
-    private int turnLlmCalls;
-    private long turnThinkingMs;
-    private long turnToolSumMs;
-    private long turnToolWallMs;
-    private int turnToolsRun;
-    private boolean thinkingActive;
-    private long thinkingStartNanos;
-    // output throughput: tokens produced vs. time actually spent producing them
-    private long turnLlmActiveMs;
-    private long turnLlmPausedMs;
-    private int turnOutputTokens;
-    private int turnReasoningTokens;
-    private long turnLlmReportedMs;
-    // todo auto-continuation budget consumed by the current turn (bounded by yca.todos.maxContinues)
-    private int unfinishedTodoContinues;
     /**
      * Whether the last completed LLM request produced reasoning tokens (a {@code ReasoningDelta}
      * was observed before its {@code End}): an empty or truncated completion after reasoning means
@@ -307,7 +292,6 @@ public class AgentLoop {
      * re-derive the same reasoning. Reset before each request, flipped by {@link #dispatch}, read
      * by the truncation/empty-completion branches.
      */
-    private volatile boolean lastRequestProducedReasoning;
 
     /**
      * Streaming splitter for models that inline their reasoning in the text channel (GLM/Qwen /
@@ -900,7 +884,7 @@ public class AgentLoop {
         // side) without touching the leading agent state; the wait is also accumulated so the
         // throughput metric ignores it.
         this.pauseListener = pause -> {
-            turnLlmPausedMs += Math.max(0L, pause.durationMs());
+            turnState.llmPausedMs += Math.max(0L, pause.durationMs());
             emit(new AgentEvent.Pause(
                     pause.kind() == PauseEvent.Pause.THROTTLE
                             ? AgentEvent.Pause.Kind.THROTTLE
@@ -1213,7 +1197,7 @@ public class AgentLoop {
                 toolDurationWallMs,
                 toolsRun,
                 turnDurationMs,
-                new AgentEvent.Throughput(turnOutputTokens, turnReasoningTokens, turnLlmActiveMs, turnLlmReportedMs),
+                new AgentEvent.Throughput(turnState.outputTokens, turnState.reasoningTokens, turnState.llmActiveMs, turnState.llmReportedMs),
                 currentSessionId,
                 subagentId,
                 subagentName);
@@ -1255,7 +1239,6 @@ public class AgentLoop {
         var autoNoticeEmitted = false;
         var truncationContinues = 0;
         var emptyCompletionRetries = 0;
-        unfinishedTodoContinues = 0;
         var toolsRanThisTurn = false;
         var toolDirectiveApplied = false;
         // a prompt typed while the loop was running was injected in this turn: the model answered
@@ -1267,18 +1250,8 @@ public class AgentLoop {
         // lost-result marker so Anthropic's tool_use -> tool_result contiguity rule holds on the wire.
         repairInterruptedToolCalls(sessionId, messages);
 
-        // Reset per-turn metrics
-        turnLlmCalls = 0;
-        turnThinkingMs = 0L;
-        turnToolSumMs = 0L;
-        turnToolWallMs = 0L;
-        turnToolsRun = 0;
-        turnLlmActiveMs = 0L;
-        turnLlmPausedMs = 0L;
-        turnOutputTokens = 0;
-        turnLlmReportedMs = 0L;
-        thinkingActive = false;
-        thinkingStartNanos = 0;
+        // Reset turn-local counters and reasoning flags before starting this run.
+        turnState.reset();
         final var turnStartNanos = precisionDurationMarker.now();
         lastTurnEndedWithContent = false;
         // A "window" is one bounded run of the round loop. Every todo auto-continuation starts a fresh
@@ -1380,7 +1353,7 @@ public class AgentLoop {
                 final var finishReason = new String[] {null};
                 Message assistant;
                 final long llmStartNanos;
-                final long pausedBeforeMs = turnLlmPausedMs;
+                final long pausedBeforeMs = turnState.llmPausedMs;
                 try {
                     llmStartNanos = precisionDurationMarker.now();
                     assistant = modelRoundProcessor.stream(
@@ -1392,7 +1365,7 @@ public class AgentLoop {
                             new ModelRoundProcessor.Observer() {
                                 @Override
                                 public void begin() {
-                                    lastRequestProducedReasoning = false;
+                                    turnState.lastRequestProducedReasoning = false;
                                     resetInlineSplitter();
                                 }
 
@@ -1417,7 +1390,7 @@ public class AgentLoop {
 
                                 @Override
                                 public void paused(final long millis) {
-                                    turnLlmPausedMs += millis;
+                                    turnState.llmPausedMs += millis;
                                 }
                             });
                 } catch (final ContextWindowExceededException e) {
@@ -1532,12 +1505,12 @@ public class AgentLoop {
                             // part of the request), hitting the same wall. Jump straight to the
                             // change-strategy prompt instead of the verbatim continue. Without reasoning
                             // the usual progressive escalation (continue, then split) still applies.
-                            final var changeStrategy = lastRequestProducedReasoning || truncationContinues >= 2;
+                            final var changeStrategy = turnState.lastRequestProducedReasoning || truncationContinues >= 2;
                             messages.add(Message.user(
                                     changeStrategy ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
                             // the reasoning flag was consumed: a retry of this request must not re-trigger
                             // the "spent thinking" branch again on the same generation
-                            lastRequestProducedReasoning = false;
+                            turnState.lastRequestProducedReasoning = false;
                             continue;
                         }
                         if (tryTodoAutoContinue(messages, reason, toolsRanThisTurn, userInjected)) {
@@ -1566,8 +1539,8 @@ public class AgentLoop {
                             // output budget thinking (reasoning tokens are not part of the request):
                             // re-asking the identical context would re-derive the same thoughts and
                             // hit the same wall. Ask for a strategy change instead of a blind retry.
-                            if (lastRequestProducedReasoning) {
-                                lastRequestProducedReasoning = false;
+                            if (turnState.lastRequestProducedReasoning) {
+                                turnState.lastRequestProducedReasoning = false;
                                 messages.add(Message.user(EMPTY_REASONING_RETRY_PROMPT));
                             }
                             continue;
@@ -1777,10 +1750,10 @@ public class AgentLoop {
 
     private void emitTurnMetrics(final String content, final long turnStartNanos) {
         final var turnDurationMs = (precisionDurationMarker.now() - turnStartNanos) / 1_000_000;
-        if (thinkingActive) {
-            turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
+        if (turnState.thinkingActive) {
+            turnState.thinkingMs += (precisionDurationMarker.now() - turnState.thinkingStartNanos) / 1_000_000;
         }
-        emit(turnMetrics(turnLlmCalls, turnThinkingMs, turnToolSumMs, turnToolWallMs, turnToolsRun, turnDurationMs));
+        emit(turnMetrics(turnState.llmCalls, turnState.thinkingMs, turnState.toolSumMs, turnState.toolWallMs, turnState.toolsRun, turnDurationMs));
         if (content != null) {
             lastTurnEndedWithContent = !content.isBlank();
             emit(turnDone(content));
@@ -1801,19 +1774,19 @@ public class AgentLoop {
             final io.yupiik.ia.agent.core.llm.Usage usage,
             final long wallMs,
             final long pausedBeforeMs) {
-        final var pausedMs = Math.max(0L, turnLlmPausedMs - pausedBeforeMs);
-        turnLlmActiveMs += Math.max(0L, wallMs - pausedMs);
+        final var pausedMs = Math.max(0L, turnState.llmPausedMs - pausedBeforeMs);
+        turnState.llmActiveMs += Math.max(0L, wallMs - pausedMs);
         if (usage != null && usage.completionTokens() > 0) {
-            turnOutputTokens += usage.completionTokens();
+            turnState.outputTokens += usage.completionTokens();
             if (usage.reasoningTokens() > 0) {
-                turnReasoningTokens += usage.reasoningTokens();
+                turnState.reasoningTokens += usage.reasoningTokens();
             }
             if (usage.generationTimeMs() > 0) {
-                turnLlmReportedMs += usage.generationTimeMs();
+                turnState.llmReportedMs += usage.generationTimeMs();
             }
         } else {
             // no usage from the provider: estimate the produced tokens from what came back
-            turnOutputTokens += estimateOutputTokens(assistant);
+            turnState.outputTokens += estimateOutputTokens(assistant);
         }
     }
 
@@ -2498,16 +2471,16 @@ public class AgentLoop {
             final boolean userInjected) {
         final var pending = unfinishedTodos(toolsRanThisTurn);
         final var maxContinues = todoMaxContinues();
-        if (pending == null || !canAutoContinueUnfinished(userInjected) || unfinishedTodoContinues >= maxContinues) {
+        if (pending == null || !canAutoContinueUnfinished(userInjected) || turnState.unfinishedTodoContinues >= maxContinues) {
             return false;
         }
-        unfinishedTodoContinues++;
+        turnState.unfinishedTodoContinues++;
         emit(notice(
                 AgentEvent.Notice.Level.INFO,
                 "model ended its turn (finish_reason=" + finishReason + ") with " + pending.pending() + '/'
                         + pending.total() + " todos still unfinished; continuing automatically ("
-                        + unfinishedTodoContinues + '/' + maxContinues + ")."));
-        messages.add(Message.user(unfinishedTodoContinuePrompt(unfinishedTodoContinues)));
+                        + turnState.unfinishedTodoContinues + '/' + maxContinues + ")."));
+        messages.add(Message.user(unfinishedTodoContinuePrompt(turnState.unfinishedTodoContinues)));
         return true;
     }
 
@@ -2656,7 +2629,7 @@ public class AgentLoop {
                 this::awaitTool,
                 () -> checkRoundBudget(sessionId, messages, toolsTokens),
                 precisionDurationMarker::now,
-                elapsedMs -> turnToolWallMs += elapsedMs,
+                elapsedMs -> turnState.toolWallMs += elapsedMs,
                 () -> roundInformative[0]);
     }
 
@@ -3217,8 +3190,8 @@ public class AgentLoop {
         if (!stalePaths.isEmpty()) {
             emit(status("invalidated " + stalePaths.size() + " stale read(s) of modified files"));
         }
-        turnToolsRun++;
-        turnToolSumMs += outcome.durationMs();
+        turnState.toolsRun++;
+        turnState.toolSumMs += outcome.durationMs();
     }
 
     /**
@@ -3328,20 +3301,20 @@ public class AgentLoop {
     private void dispatch(
             final LlmStreamEvent delta, final io.yupiik.ia.agent.core.llm.Usage[] usage, final String[] finishReason) {
         if (delta instanceof TextDelta(final String text)) {
-            if (thinkingActive) {
-                turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
-                thinkingActive = false;
+            if (turnState.thinkingActive) {
+                turnState.thinkingMs += (precisionDurationMarker.now() - turnState.thinkingStartNanos) / 1_000_000;
+                turnState.thinkingActive = false;
             }
             dispatchTextDelta(text);
         } else if (delta instanceof ReasoningDelta(final String text)) {
-            if (!thinkingActive) {
-                thinkingActive = true;
-                thinkingStartNanos = precisionDurationMarker.now();
+            if (!turnState.thinkingActive) {
+                turnState.thinkingActive = true;
+                turnState.thinkingStartNanos = precisionDurationMarker.now();
             }
             // record that this request produced reasoning: later, a truncation or an empty
             // completion after reasoning means the output budget was spent thinking, and a
             // context-identical retry would only re-derive the same thoughts (P3)
-            lastRequestProducedReasoning = true;
+            turnState.lastRequestProducedReasoning = true;
             accumulatedThinking.append(text);
             emit(thinkingDelta(text));
         } else if (delta instanceof End(final String reason, final Usage upper)) {
@@ -3349,9 +3322,9 @@ public class AgentLoop {
             // inline-code backtick, a fence tail or an unclosed think delimiter split across the
             // last chunks), so no partial answer tail is lost at stream end
             dispatchInlineSplitterFlush();
-            if (thinkingActive) {
-                turnThinkingMs += (precisionDurationMarker.now() - thinkingStartNanos) / 1_000_000;
-                thinkingActive = false;
+            if (turnState.thinkingActive) {
+                turnState.thinkingMs += (precisionDurationMarker.now() - turnState.thinkingStartNanos) / 1_000_000;
+                turnState.thinkingActive = false;
             }
             if (reason != null) {
                 finishReason[0] = reason;
@@ -3370,7 +3343,7 @@ public class AgentLoop {
                         Math.toIntExact(upper.reasoning()),
                         upper.generationTime());
             }
-            turnLlmCalls++;
+            turnState.llmCalls++;
             // usage is recorded once per request after the stream completes (single record point,
             // otherwise requests and tokens are double counted)
         }
