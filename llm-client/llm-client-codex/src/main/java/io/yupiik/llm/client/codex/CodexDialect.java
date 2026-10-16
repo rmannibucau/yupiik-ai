@@ -1,0 +1,194 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.llm.client.codex;
+
+import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.llm.client.LlmResponseParseException;
+import io.yupiik.llm.client.codex.model.CodexModels;
+import io.yupiik.llm.client.model.LlmModel;
+import io.yupiik.llm.client.model.LlmModels;
+import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
+import io.yupiik.llm.client.spi.ProviderSpec;
+import java.net.URI;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.function.BooleanSupplier;
+
+/**
+ * The ChatGPT-subscription Codex backend dialect: the wire format is exactly the OpenAI Responses
+ * API (streaming, tool calls, reasoning deltas), so this reuses {@link OpenAIResponsesDialect}
+ * unchanged and only adjusts the routing identifier, the chat route and the model catalog source.
+ *
+ * <p>The chat endpoint is {@code https://chatgpt.com/backend-api/codex/responses} (the base URL is
+ * provider-configured as {@code .../codex}). The model catalog is served by the Codex backend at
+ * {@code {base}/models?client_version=N} in a different shape than the public OpenAI {@code /v1/models}
+ * endpoint: an object with a {@code models} array of catalog entries carrying {@code visibility},
+ * {@code supported_in_api} and {@code minimal_client_version}, which this dialect filters before
+ * exposing them as {@link LlmModel}s.</p>
+ */
+public class CodexDialect extends OpenAIResponsesDialect {
+
+    /** Default Codex client version advertised for model gating (whole part of 0.N.x). */
+    static final int DEFAULT_CLIENT_VERSION = 160;
+
+    private final int clientVersion;
+
+    /**
+     * Creates the dialect advertising the default Codex client version.
+     *
+     * @param mapper JSON mapper used for wire serialization.
+     * @param client HTTP client used for provider calls.
+     * @param provider provider coordinates; {@code baseUrl} should end in {@code .../codex/responses}.
+     */
+    public CodexDialect(final JsonMapper mapper, final ExtendedHttpClient client, final ProviderSpec provider) {
+        this(mapper, client, provider, DEFAULT_CLIENT_VERSION);
+    }
+
+    /**
+     * Creates the dialect with a tunable Codex client version, which gates which models the backend
+     * discloses in its catalog ({@code minimal_client_version}).
+     *
+     * @param mapper JSON mapper used for wire serialization.
+     * @param client HTTP client used for provider calls.
+     * @param provider provider coordinates; {@code baseUrl} should end in {@code .../codex/responses}.
+     * @param clientVersion the whole part of the Codex client version this dialect advertises (eg. 160 for 0.160.x).
+     */
+    public CodexDialect(
+            final JsonMapper mapper,
+            final ExtendedHttpClient client,
+            final ProviderSpec provider,
+            final int clientVersion) {
+        super(mapper, client, provider);
+        this.clientVersion = clientVersion <= 0 ? DEFAULT_CLIENT_VERSION : clientVersion;
+    }
+
+    /** The routing identifier of this dialect. */
+    @Override
+    public String name() {
+        return "codex";
+    }
+
+    /** The chat route suffix appended to the provider base URL: the Codex backend serves the Responses API. */
+    @Override
+    protected String chatRouteSuffix() {
+        return "/responses";
+    }
+
+    /**
+     * The Codex (chatgpt.com) backend streams SSE without a {@code text/event-stream} content-type
+     * header, so the base {@code openStream} classification (which requires that header) would buffer
+     * the whole body as an error and report "LLM request failed (200): event: response.created". For
+     * codex, any 2xx to the streaming endpoint is a live SSE stream by definition.
+     */
+    @Override
+    protected CompletionStage<io.yupiik.llm.client.spi.StreamAttempt> openStream(
+            final byte[] payload, final BooleanSupplier cancelled) {
+        try {
+            return client.sendAsync(http(payload), java.net.http.HttpResponse.BodyHandlers.ofPublisher())
+                    .thenCompose(response -> {
+                        if (response.statusCode() >= 200 && response.statusCode() <= 299) {
+                            return CompletableFuture.completedFuture(new io.yupiik.llm.client.spi.StreamAttempt(
+                                    response.statusCode(), response.headers(), response.body(), null));
+                        }
+                        return collect(response.body())
+                                .thenApply(body -> new io.yupiik.llm.client.spi.StreamAttempt(
+                                        response.statusCode(), response.headers(), null, body));
+                    });
+        } catch (final RuntimeException e) {
+            return failed(e);
+        }
+    }
+
+    /**
+     * Lists the models the authenticated Codex account may use: fetches the chatgpt.com model catalog
+     * and keeps only entries that are selectable (visible, API-backed) and usable with the advertised
+     * client version. Costs are zero because the subscription is plan-included.
+     *
+     * @return the filtered, normalized model listing.
+     */
+    @Override
+    public CompletionStage<LlmModels> models() {
+        try {
+            return client.sendAsync(codexModelsRequest(), HttpResponse.BodyHandlers.ofString())
+                    .thenCompose(response -> {
+                        try {
+                            return CompletableFuture.completedFuture(
+                                    toLlmModels(parseResponse(CodexModels.class, response)));
+                        } catch (final LlmResponseParseException e) {
+                            return failed(e);
+                        }
+                    });
+        } catch (final RuntimeException e) {
+            return failed(e);
+        }
+    }
+
+    private HttpRequest codexModelsRequest() {
+        final var endpoint = modelsEndpoint();
+        final var builder = HttpRequest.newBuilder()
+                .uri(URI.create(endpoint))
+                .timeout(provider.timeout())
+                .header("accept", "application/json")
+                .GET();
+        // the codexAuth bearer (dynamic header) + the static account-id header are applied by the
+        // customizer, and authenticate() adds the API-key fallback; without these the catalog call
+        // would go out unauthenticated and be rejected by the ChatGPT backend
+        authenticate(builder);
+        provider.headersCustomizer().accept(builder);
+        return builder.build();
+    }
+
+    /** Derives the Codex models catalog endpoint from the chat base URL (strip {@code /responses}).
+     *  The {@code client_version} must be a full {@code major.minor.patch} string (the backend rejects
+     *  a bare integer with "Invalid client_version format"), so the configured whole part is expanded. */
+    private String modelsEndpoint() {
+        final var base = provider.baseUrl() == null ? "" : provider.baseUrl();
+        final var stripped =
+                base.endsWith("/responses") ? base.substring(0, base.length() - "/responses".length()) : base;
+        final var withoutSlash = stripped.endsWith("/") ? stripped.substring(0, stripped.length() - 1) : stripped;
+        return withoutSlash + "/models?client_version=0." + clientVersion + ".0";
+    }
+
+    /** Normalizes the Codex catalog into {@link LlmModels}, filtering to selectable and usable entries. */
+    private LlmModels toLlmModels(final CodexModels catalog) {
+        final var models = new ArrayList<LlmModel>();
+        final var list = catalog == null ? List.<CodexModels.CodexModel>of() : catalog.models();
+        if (list != null) {
+            for (final var m : list) {
+                if (m == null || !m.selectable() || !m.usableWith(clientVersion)) {
+                    continue;
+                }
+                final var attrs = new LinkedHashMap<String, Object>();
+                attrs.put("slug", m.slug());
+                attrs.put("display_name", m.displayName());
+                if (m.contextWindow() != null) {
+                    attrs.put("context_window", m.contextWindow());
+                }
+                if (m.maxContextWindow() != null) {
+                    attrs.put("max_context_window", m.maxContextWindow());
+                }
+                models.add(new LlmModel(m.id(), null, null, m.displayName(), attrs));
+            }
+        }
+        return new LlmModels(models);
+    }
+}

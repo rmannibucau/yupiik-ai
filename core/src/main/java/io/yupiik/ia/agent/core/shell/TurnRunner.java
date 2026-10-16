@@ -19,9 +19,11 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
+import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
@@ -45,23 +47,34 @@ public class TurnRunner {
     private final ExecutorService executor;
     private final AgentSessionService agentSessionService;
     private final SubagentRegistry subagentRegistry;
+    private final CodexLoginService codexLoginService;
+
+    public TurnRunner(
+            final MavenRepositoryKnowledgeService mavenKnowledgeService,
+            final ExecutorService executor,
+            final AgentSessionService agentSessionService,
+            final SubagentRegistry subagentRegistry,
+            final CodexLoginService codexLoginService) {
+        this.mavenKnowledgeService = mavenKnowledgeService;
+        this.executor = executor;
+        this.agentSessionService = agentSessionService;
+        this.subagentRegistry = subagentRegistry;
+        this.codexLoginService = codexLoginService;
+    }
 
     public TurnRunner(
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final ExecutorService executor,
             final AgentSessionService agentSessionService,
             final SubagentRegistry subagentRegistry) {
-        this.mavenKnowledgeService = mavenKnowledgeService;
-        this.executor = executor;
-        this.agentSessionService = agentSessionService;
-        this.subagentRegistry = subagentRegistry;
+        this(mavenKnowledgeService, executor, agentSessionService, subagentRegistry, null);
     }
 
     public TurnRunner(
             final MavenRepositoryKnowledgeService mavenKnowledgeService,
             final ExecutorService executor,
             final AgentSessionService agentSessionService) {
-        this(mavenKnowledgeService, executor, agentSessionService, null);
+        this(mavenKnowledgeService, executor, agentSessionService, null, null);
     }
 
     protected TurnRunner() {
@@ -69,6 +82,7 @@ public class TurnRunner {
         this.executor = null;
         this.agentSessionService = null;
         this.subagentRegistry = null;
+        this.codexLoginService = null;
     }
 
     /**
@@ -132,19 +146,10 @@ public class TurnRunner {
         final var done = new CompletableFuture<Boolean>();
         executor.execute(() -> {
             try {
-                if (request.prompt() == null) {
-                    loop.resume(request.agentName(), request.sessionId(), history, cancelled, request.queuedPrompt());
-                } else {
-                    loop.run(
-                            request.prompt(),
-                            request.agentName(),
-                            request.sessionId(),
-                            history,
-                            cancelled,
-                            request.queuedPrompt());
-                }
+                runTurnOrLogin(request, loop, history, cancelled, env);
             } catch (final Throwable t) {
                 done.completeExceptionally(t);
+                return;
             } finally {
                 // an interrupt also stops the sub-agents this session spawned: their probe is
                 // latched here, while the flag still reads true - a child polling after the next
@@ -178,5 +183,54 @@ public class TurnRunner {
             }
         });
         return done;
+    }
+
+    /** Runs a turn, auto-completing the interactive Codex login on first use and retrying once. */
+    private void runTurnOrLogin(
+            final TurnRequest request,
+            final AgentLoop loop,
+            final List<Message> history,
+            final BooleanSupplier cancelled,
+            final ShellEnv env) {
+        var codexRetried = false;
+        while (true) {
+            try {
+                runTurnBody(request, loop, history, cancelled);
+                return;
+            } catch (final CodexNotAuthenticatedException notAuthed) {
+                if (codexRetried || codexLoginService == null) {
+                    throw notAuthed;
+                }
+                codexRetried = true;
+                codexLoginService.signIn(
+                        notAuthed.provider(),
+                        false,
+                        url -> env.frontend()
+                                .transcript("Sign in to use this Codex provider: authorize at\n\n<" + url
+                                        + ">\n\nWaiting for authorization; you can close the tab when done..."),
+                        _ -> cancelled.getAsBoolean());
+                // login completed: retry the turn body once
+            }
+        }
+    }
+
+    /** The raw agent-loop invocation for one turn (prompt or resume). */
+    private void runTurnBody(
+            final TurnRequest request,
+            final AgentLoop loop,
+            final List<Message> history,
+            final BooleanSupplier cancelled)
+            throws CodexNotAuthenticatedException {
+        if (request.prompt() == null) {
+            loop.resume(request.agentName(), request.sessionId(), history, cancelled, request.queuedPrompt());
+        } else {
+            loop.run(
+                    request.prompt(),
+                    request.agentName(),
+                    request.sessionId(),
+                    history,
+                    cancelled,
+                    request.queuedPrompt());
+        }
     }
 }

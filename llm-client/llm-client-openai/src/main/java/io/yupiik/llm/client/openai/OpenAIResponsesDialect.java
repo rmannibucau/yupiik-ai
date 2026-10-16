@@ -47,7 +47,7 @@ import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 
 /** OpenAI {@code /responses} reactive dialect mapping the neutral model to the Responses wire format. */
-public final class OpenAIResponsesDialect extends AbstractDialect {
+public class OpenAIResponsesDialect extends AbstractDialect {
 
     private volatile Consumer<String> onRawLine;
     // Records the ids of tool calls whose arguments were already streamed incrementally via

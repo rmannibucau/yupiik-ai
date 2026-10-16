@@ -1282,7 +1282,8 @@ class TuiCommandRenderTest {
                 providerManager,
                 new AgentProvider(configuration),
                 null, // SecretSessionModes
-                null); // SecretRedactor
+                null, // SecretRedactor
+                null); // CodexLoginService
         return new TuiCommand(
                 conf,
                 tuiConfiguration,

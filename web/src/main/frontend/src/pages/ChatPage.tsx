@@ -1922,6 +1922,15 @@ function Markdown({ content, writing = false }: { content: string; writing?: boo
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
+          // Links (incl. the Codex login authorize URL) open in a new tab so the terminal/chat keeps
+          // its place while the user authorizes in the browser.
+          link({ href, children }) {
+            return (
+              <a href={href} target="_blank" rel="noopener noreferrer">
+                {children}
+              </a>
+            );
+          },
           // Fenced code block: SyntaxHighlighter handles the language-specific grammar + aui-md pre
           // styling. The outer `.aui-md pre` (ReactMarkdown's container) provides the themed dark
           // background (--yca-pre-bg), radius and padding; the inner SyntaxHighlighter pre stays

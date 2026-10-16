@@ -24,9 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
 import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.SubagentRegistry;
+import io.yupiik.ia.agent.core.llm.CodexLoginService;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
+import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
+import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -343,6 +346,61 @@ class TurnRunnerTest {
                 final Supplier<String> queuedPrompt) {
             this.resumedSession.set(sessionId);
             return null;
+        }
+    }
+
+    @Test
+    void firstCodexUseRunsLoginAndRetriesTheTurn() {
+        final var loop = new RecordingLoop();
+        final var runs = new AtomicReference<>(0);
+        loop.onRun = () -> {
+            if (runs.updateAndGet(v -> v + 1) == 1) {
+                throw new CodexNotAuthenticatedException("first-fail");
+            }
+        };
+        final var captor = new CapturingLoginService();
+        final var frontend = new RecordingFrontend();
+        final var env = new ShellEnv(frontend, new FixedIo(true), new ShellSession(), null);
+        final var runner = new TurnRunner(noIndexing(), EXECUTOR, agentSessionService(), null, captor);
+
+        final var ran = runner.submit(new TurnRunner.TurnRequest(
+                        loop,
+                        env,
+                        "s-codex",
+                        "coder",
+                        "hi",
+                        () -> List.of(new Message("user", null, "old", null, null, null)),
+                        () -> false))
+                .toCompletableFuture()
+                .join();
+
+        assertTrue(ran, "the turn must complete after a successful interactive login");
+        assertEquals(1, captor.signIns.get(), "the login flow must run exactly once");
+        assertEquals("first-fail", captor.providerKey.get(), "the missing session provider must be signed in");
+        assertEquals(2, runs.get(), "the turn body must run again after login");
+    }
+
+    /** A login service that records the call without performing a real network flow. */
+    private static final class CapturingLoginService extends CodexLoginService {
+        private final AtomicReference<Integer> signIns = new AtomicReference<>(0);
+        private final AtomicReference<String> providerKey = new AtomicReference<>();
+
+        private CapturingLoginService() {
+            super(null, null, null);
+        }
+
+        @Override
+        public CodexTokenStore signIn(
+                final String provider,
+                final boolean device,
+                final java.util.function.Consumer<String> urlSink,
+                final java.util.function.Predicate<Boolean> cancelled) {
+            signIns.set(signIns.get() + 1);
+            providerKey.set(provider);
+            if (urlSink != null) {
+                urlSink.accept("http://localhost:1/auth/callback");
+            }
+            return new CodexTokenStore("acc", "ref", "acct", System.currentTimeMillis() + 3600_000, "id");
         }
     }
 

@@ -79,17 +79,20 @@ public class ConfigCommands implements SlashCommandSet {
             final ProviderManager providerManager,
             final AgentProvider agentProvider,
             final io.yupiik.ia.agent.core.security.SecretSessionModes secretModes,
-            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
+            final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor,
+            final io.yupiik.ia.agent.core.llm.CodexLoginService codexLoginService) {
         this.agentSessionService = agentSessionService;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
         this.agentProvider = agentProvider;
         this.secretModes = secretModes;
         this.secretRedactor = secretRedactor;
+        this.codexLoginService = codexLoginService;
     }
 
     private final io.yupiik.ia.agent.core.security.SecretSessionModes secretModes;
     private final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
+    private final io.yupiik.ia.agent.core.llm.CodexLoginService codexLoginService;
 
     @Override
     public List<SlashCommand> commands() {
@@ -501,7 +504,7 @@ public class ConfigCommands implements SlashCommandSet {
             final var effective = updated.providerId() == null
                     ? (agentSessionService.lastProviderId() == null ? arg : agentSessionService.lastProviderId())
                     : updated.providerId();
-            return CompletableFuture.completedStage(ShellOutcome.status("provider: " + effective));
+            return CompletableFuture.completedStage(autoLoginCodex(effective, env));
         }
         final var ids = providerManager.providers().stream().map(p -> p.id()).toList();
         return env.io().pick("provider", ids).thenApply(selected -> {
@@ -511,8 +514,37 @@ public class ConfigCommands implements SlashCommandSet {
             final var updated = agentSessionService.setProvider(selected.get(), settings);
             env.session().runtime().updateChatSettings(updated);
             final var effective = updated.providerId() == null ? selected.get() : updated.providerId();
-            return ShellOutcome.status("provider: " + effective);
+            return autoLoginCodex(effective, env);
         });
+    }
+
+    /**
+     * A codex-flavored provider needs an OAuth session before its models can be listed or used. When
+     * switching to one that has no cached session, start the interactive browser login (surfacing the
+     * authorize link through the frontend) then retry the model list, so the switch to a codex
+     * provider auto-authenticates instead of failing the model fetch.
+     */
+    private ShellOutcome autoLoginCodex(final String effectiveProvider, final ShellEnv env) {
+        final var provider = providerManager.provider(effectiveProvider);
+        final boolean codex = provider != null
+                && (provider.api() == io.yupiik.ia.agent.core.llm.ApiFlavor.CODEX
+                        || io.yupiik.ia.agent.core.llm.ChatRoutes.detectFlavor(provider.baseUrl())
+                                == io.yupiik.ia.agent.core.llm.ApiFlavor.CODEX);
+        if (!codex || codexLoginService == null || codexLoginService.load(effectiveProvider) != null) {
+            return ShellOutcome.status("provider: " + effectiveProvider);
+        }
+        try {
+            codexLoginService.signIn(
+                    effectiveProvider,
+                    false,
+                    url -> env.frontend()
+                            .transcript("Sign in to use the Codex provider '" + effectiveProvider
+                                    + "': authorize at\n\n<" + url + ">\n\nWaiting for authorization..."),
+                    _ -> false);
+            return ShellOutcome.status("provider: " + effectiveProvider + " (Codex signed in)");
+        } catch (final RuntimeException e) {
+            return ShellOutcome.error("provider: " + effectiveProvider + " - Codex login failed: " + e.getMessage());
+        }
     }
 
     private CompletionStage<ShellOutcome> agent(final String arg, final ShellEnv env) {

@@ -539,7 +539,7 @@ public abstract class AbstractDialect implements Dialect {
         return failed(failure);
     }
 
-    private static CompletionStage<byte[]> collect(final Flow.Publisher<List<ByteBuffer>> publisher) {
+    protected static CompletionStage<byte[]> collect(final Flow.Publisher<List<ByteBuffer>> publisher) {
         final var result = new CompletableFuture<byte[]>();
         publisher.subscribe(new Flow.Subscriber<>() {
             private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();

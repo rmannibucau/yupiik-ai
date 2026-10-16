@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.llm;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.framework.handlebars.HandlebarsCompiler;
+import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
 import io.yupiik.fusion.framework.handlebars.spi.Template;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
@@ -37,6 +38,7 @@ import io.yupiik.llm.client.LlmResilienceConfig;
 import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.RoutingLlmClient;
 import io.yupiik.llm.client.anthropic.AnthropicDialect;
+import io.yupiik.llm.client.codex.CodexDialect;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.openai.OpenAICompletionsDialect;
 import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
@@ -61,6 +63,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.BiFunction;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 
@@ -94,6 +97,8 @@ public class ChatClient implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     /** Provides the {@code {{exec}}} handlebars helper for dynamic provider headers; {@code null} in tests/programmatic use. */
     private final ExecTemplateHelper execTemplateHelper;
+    /** Provides the {@code {{codexAuth}}} handlebars helper for Codex-flavored providers; {@code null} when not wired. */
+    private final CodexAuthTemplateHelper codexAuthTemplateHelper;
 
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
@@ -119,7 +124,8 @@ public class ChatClient implements AutoCloseable {
             final ToolCallArgumentsRepairer toolCallArgumentsRepairer,
             final InBandToolCallExtractor inBandToolCallExtractor,
             final ScheduledExecutorService scheduler,
-            final ExecTemplateHelper execTemplateHelper) {
+            final ExecTemplateHelper execTemplateHelper,
+            final CodexAuthTemplateHelper codexAuthTemplateHelper) {
         this(
                 configuration,
                 mapper,
@@ -130,7 +136,8 @@ public class ChatClient implements AutoCloseable {
                 inBandToolCallExtractor,
                 false,
                 scheduler,
-                execTemplateHelper);
+                execTemplateHelper,
+                codexAuthTemplateHelper);
     }
 
     public ChatClient(
@@ -149,6 +156,7 @@ public class ChatClient implements AutoCloseable {
                 toolCallArgumentsRepairer,
                 null,
                 false,
+                null,
                 null,
                 null);
     }
@@ -174,6 +182,7 @@ public class ChatClient implements AutoCloseable {
                 null,
                 false,
                 null,
+                null,
                 null);
     }
 
@@ -197,6 +206,7 @@ public class ChatClient implements AutoCloseable {
                 null,
                 true,
                 null,
+                null,
                 null);
     }
 
@@ -210,7 +220,8 @@ public class ChatClient implements AutoCloseable {
             final InBandToolCallExtractor inBandToolCallExtractor,
             final boolean ownsHttpClient,
             final ScheduledExecutorService scheduler,
-            final ExecTemplateHelper execTemplateHelper) {
+            final ExecTemplateHelper execTemplateHelper,
+            final CodexAuthTemplateHelper codexAuthTemplateHelper) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
@@ -224,6 +235,7 @@ public class ChatClient implements AutoCloseable {
         this.ownsHttpClient = ownsHttpClient;
         this.scheduler = scheduler;
         this.execTemplateHelper = execTemplateHelper;
+        this.codexAuthTemplateHelper = codexAuthTemplateHelper;
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer; per-provider clients get their own resilience
         // wrapper so the concurrency budget is scoped to one provider base URL
@@ -275,6 +287,7 @@ public class ChatClient implements AutoCloseable {
         this.ownsHttpClient = false;
         this.scheduler = null;
         this.execTemplateHelper = null;
+        this.codexAuthTemplateHelper = null;
     }
 
     /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
@@ -352,7 +365,7 @@ public class ChatClient implements AutoCloseable {
                     ? provider.maxConcurrent()
                     : configuration.llm().maxConcurrent();
             return new DialectLlmClient(
-                    dialect(flavor, spec), resiliences.computeIfAbsent(key, _ -> resilience(bounds)));
+                    dialect(flavor, spec, provider), resiliences.computeIfAbsent(key, _ -> resilience(bounds)));
         });
     }
 
@@ -372,6 +385,12 @@ public class ChatClient implements AutoCloseable {
         }
         final var compiled = new ConcurrentHashMap<String, Template>();
         final var exec = execTemplateHelper.exec();
+        final var helpers = new LinkedHashMap<String, Function<HelperContext, Object>>();
+        helpers.put("exec", exec);
+        final var codexAuth = codexAuthTemplateHelper == null ? null : codexAuthTemplateHelper.codexAuth();
+        if (codexAuth != null) {
+            helpers.put("codexAuth", codexAuth);
+        }
         return builder -> {
             staticHeaders.forEach((k, v) -> {
                 if (k != null && !k.isBlank() && v != null && !v.isBlank()) {
@@ -386,7 +405,7 @@ public class ChatClient implements AutoCloseable {
                         k,
                         name -> new HandlebarsCompiler()
                                 .compile(new HandlebarsCompiler.CompilationContext(
-                                        new HandlebarsCompiler.Settings().helpers(Map.of("exec", exec)),
+                                        new HandlebarsCompiler.Settings().helpers(helpers),
                                         template == null ? "" : template)));
                 final String rendered;
                 try {
@@ -402,7 +421,7 @@ public class ChatClient implements AutoCloseable {
         };
     }
 
-    private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec) {
+    private Dialect dialect(final ApiFlavor flavor, final ProviderSpec spec, final ProviderConfiguration provider) {
         final var debugLogger = configuration.httpClient().debug() ? Logger.getLogger("yca.http") : null;
         return switch (flavor) {
             case COMPLETIONS -> {
@@ -419,6 +438,13 @@ public class ChatClient implements AutoCloseable {
                 }
                 yield d;
             }
+            case CODEX -> {
+                final var d = new CodexDialect(mapper, httpClient, spec, codexClientVersion(provider));
+                if (debugLogger != null) {
+                    d.setOnRawLine(debugLogger::fine);
+                }
+                yield d;
+            }
             case ANTHROPIC -> {
                 final var d = new AnthropicDialect(mapper, httpClient, spec);
                 if (debugLogger != null) {
@@ -428,6 +454,27 @@ public class ChatClient implements AutoCloseable {
             }
             case AUTO -> throw new IllegalStateException("resolved flavor must not be AUTO");
         };
+    }
+
+    /** The wire key carrying the Codex client version inside {@code providerSpecificOptions}. */
+    private static final String CODEX_CLIENT_VERSION_KEY = "codex_client_version";
+
+    /**
+     * The Codex client version a provider advertises for model gating, read from its
+     * {@code providerSpecificOptions} (key {@code codex_client_version}) and defaulting to 160. Only
+     * meaningful for codex-flavored providers; the value is internal (never sent on the wire - see
+     * the filtering in {@link #others(Map, ...)} usage below).
+     */
+    private int codexClientVersion(final ProviderConfiguration provider) {
+        if (provider == null || provider.providerSpecificOptions() == null) {
+            return 160;
+        }
+        final var options = providerManager.providerOptions(provider);
+        final var value = options.get(CODEX_CLIENT_VERSION_KEY);
+        if (value instanceof Number n) {
+            return n.intValue() > 0 ? n.intValue() : 160;
+        }
+        return 160;
     }
 
     /**
@@ -827,7 +874,13 @@ public class ChatClient implements AutoCloseable {
         }
         final var providerOptions = providerManager.providerOptions(provider);
         if (!providerOptions.isEmpty()) {
-            others.putAll(providerOptions);
+            for (final var entry : providerOptions.entrySet()) {
+                // internal consumer options ride in providerSpecificOptions but must not hit the wire
+                if (CODEX_CLIENT_VERSION_KEY.equals(entry.getKey())) {
+                    continue;
+                }
+                others.put(entry.getKey(), entry.getValue());
+            }
         }
         final var tuning = providerManager.tuning(provider, model);
         final var tuningOptions = providerManager.tuningOptions(tuning);

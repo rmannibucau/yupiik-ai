@@ -344,6 +344,23 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void codexClientVersionIsConsumedNotSentOnTheWire() throws Exception {
+        // codex_client_version is an internal consumer option (model gating for the Codex backend),
+        // so it must not leak as a wire field while unrelated options still flow through
+        final var cfg = configuration(Map.of(
+                "yca.provider.providers.0.providerSpecificOptions",
+                "{\"codex_client_version\":210,\"temperature\":0.5}"));
+        client.close();
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        final var result = client.chat(request());
+        assertEquals("hello there", result.message().content());
+        final var body = bodies.get(bodies.size() - 1);
+        assertEquals(0, occurrences(body, "codex_client_version"), "the internal option must be dropped: " + body);
+        assertTrue(body.contains("\"temperature\":0.5"), "unrelated options still flow through: " + body);
+    }
+
+    @Test
     void providerReasoningConfigFullyOverridesTheVariantExtras() throws Exception {
         // an explicitly configured reasoning shape (thinking/output_config) must win verbatim over the
         // selected variant extras: the variant must not fill in missing sub-keys (e.g. a 'display')
@@ -376,6 +393,35 @@ class ChatClientFlavorTest {
     @Test
     void modelsListsIds() throws Exception {
         assertEquals(List.of("model-a", "model-b"), client.models().ids());
+    }
+
+    @Test
+    void codexBaseUrlIsDetectedByAutoFlavor() {
+        final var cfg = io.yupiik.ia.agent.core.configuration.TestConfigs.codingAgent(Map.ofEntries(
+                Map.entry("yca.storageHome", storageHome.toString()),
+                Map.entry("yca.provider.providers.length", "1"),
+                Map.entry("yca.provider.providers.0.id", "default"),
+                Map.entry("yca.provider.providers.0.baseUrl", "https://chatgpt.com/backend-api/codex"),
+                Map.entry("yca.provider.providers.0.apiKey", ""),
+                Map.entry("yca.provider.providers.0.model", "gpt-5.3-codex"),
+                Map.entry("yca.provider.providers.0.api", "auto"),
+                Map.entry("yca.provider.providers.0.contextWindow", "400000"),
+                Map.entry("yca.provider.providers.0.timeoutSeconds", "5"),
+                Map.entry("yca.llm.retriesMaxAttempts", "1"),
+                Map.entry("yca.llm.retriesBaseDelayMs", "1"),
+                Map.entry("yca.llm.rateLimitRequestsPerMinute", "0"),
+                Map.entry("yca.llm.maxConcurrent", "1"),
+                Map.entry("yca.llm.retryOnContextOverflow", "true"),
+                Map.entry("yca.llm.maxIterations", "250")));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // a .../codex base URL resolves to the CODEX flavor without any network probe
+        assertEquals(ApiFlavor.CODEX, client.flavor());
+        // the chat endpoint derived from .../codex carries the /responses route
+        assertEquals(
+                "https://chatgpt.com/backend-api/codex/responses",
+                io.yupiik.ia.agent.core.llm.ChatRoutes.chatEndpoint(
+                        "https://chatgpt.com/backend-api/codex", ApiFlavor.CODEX));
     }
 
     @Test

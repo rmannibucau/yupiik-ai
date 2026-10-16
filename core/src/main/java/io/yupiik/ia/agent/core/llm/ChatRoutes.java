@@ -43,6 +43,9 @@ public final class ChatRoutes {
         if (url.endsWith("/messages")) {
             return ApiFlavor.ANTHROPIC;
         }
+        if (isCodexBase(url)) {
+            return ApiFlavor.CODEX;
+        }
         if (url.endsWith("/responses")) {
             return ApiFlavor.RESPONSES;
         }
@@ -50,6 +53,16 @@ public final class ChatRoutes {
             return ApiFlavor.COMPLETIONS;
         }
         return null;
+    }
+
+    /**
+     * Whether the URL points at the ChatGPT Codex backend: its path ends in {@code /codex} (the
+     * configured base, eg. {@code https://chatgpt.com/backend-api/codex}) or {@code /codex/responses}
+     * (the full chat endpoint). The {@code /responses} suffix must be checked before this so a generic
+     * Responses endpoint is not mis-detected as Codex.
+     */
+    private static boolean isCodexBase(final String url) {
+        return url.endsWith("/codex") || url.endsWith("/codex/responses");
     }
 
     /** The chat endpoint to hand to a dialect: the base URL when it carries a route, the flavored route otherwise. */
@@ -61,12 +74,20 @@ public final class ChatRoutes {
         if (url.endsWith("/messages") || url.endsWith("/responses") || url.endsWith("/chat/completions")) {
             return url;
         }
+        final var codex = flavor == ApiFlavor.CODEX || isCodexBase(url);
+        if (url.endsWith("/codex/responses")) {
+            return url;
+        }
         final var route =
                 switch (flavor == null ? ApiFlavor.COMPLETIONS : flavor) {
                     case ANTHROPIC -> "/messages";
-                    case RESPONSES -> "/responses";
+                    case RESPONSES, CODEX -> "/responses";
                     default -> "/chat/completions";
                 };
+        if (codex) {
+            // a bare .../codex base carries no route but its route is unambiguous (/responses)
+            return url + "/responses";
+        }
         final var dialect = flavor == null ? ApiFlavor.COMPLETIONS : flavor;
         LOGGER.warning(
                 "Cannot reliably derive the chat endpoint from baseUrl '" + baseUrl

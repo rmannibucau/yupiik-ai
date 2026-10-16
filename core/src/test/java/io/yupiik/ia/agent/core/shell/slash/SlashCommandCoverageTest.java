@@ -41,7 +41,7 @@ class SlashCommandCoverageTest {
         final var out = new ArrayList<SlashCommand>();
         // the command sets only build specs and lambdas in commands(), they do
         // not dereference their services - null stays safe here
-        out.addAll(new ConfigCommands(null, null, null, null, null, null).commands());
+        out.addAll(new ConfigCommands(null, null, null, null, null, null, null).commands());
         out.addAll(new MaintainCommands(null, null, null).commands());
         out.addAll(new InspectCommands(null).commands());
         out.addAll(new SessionCommands(null, null).commands());
@@ -80,7 +80,7 @@ class SlashCommandCoverageTest {
     /** The regression this whole completion work started from: /metrics must be completeable. */
     @Test
     void metricsCompletionIsRegistered() {
-        final var registry = new SlashRegistry(List.of(new ConfigCommands(null, null, null, null, null, null)));
+        final var registry = new SlashRegistry(List.of(new ConfigCommands(null, null, null, null, null, null, null)));
         assertNotEquals(ArgCompletion.NONE, registry.completionFor("metrics"), "/metrics must have a completion");
     }
 }

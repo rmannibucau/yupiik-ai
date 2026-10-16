@@ -81,6 +81,104 @@ defaults to `true`), and every remaining argument is the command line (command
 then argv). A non-zero exit status fails the render: the header is not sent
 and the error surfaces loudly.
 
+== Codex (ChatGPT subscription) providers
+
+Codex-flavored providers talk to OpenAI's ChatGPT subscription backend
+(`https://chatgpt.com/backend-api/codex`, the Responses API the Codex CLI uses)
+instead of the pay-per-token public API. They are authenticated with an OAuth
+signed-in ChatGPT account rather than an API key, and their models are included
+with the subscription.
+
+Set the base URL to `https://chatgpt.com/backend-api/codex` (or the full
+`.../codex/responses`). The `api=auto` flavor detection recognizes the `/codex`
+path and derives the chat endpoint `.../codex/responses`. The `model` id is the
+slug of one of the models your plan exposes - the Codex model family varies by
+subscription and over time (`gpt-6-luna`, `gpt-5.3-codex`, ...), so pick a slug
+from what `/codex login` lists for your account (the exact set is fetched live
+from the `.../codex/models` catalog):
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "default",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "api": "auto",
+        "model": "gpt-6-luna",
+        "contextWindow": 400000,
+        "providerSpecificOptions": "{\"codex_client_version\": 160}",
+        "dynamicHeaders": {
+          "authorization": "Bearer {{codexAuth \"default\"}}"
+        },
+        "headers": {
+          "ChatGPT-Account-Id": "<your-chatgpt-account-id>"
+        }
+      }
+    ]
+  }
+}
+----
+
+`dynamicHeaders`, `headers` and the default `{{exec}}` helper work exactly as
+described above.
+
+The `{{codexAuth "<providerId>"}}` handlebars helper resolves the OAuth session
+access token for that provider and returns it raw (prepend `Bearer ` in the
+template). It refreshes lazily - only when a request is actually made - and
+persists the (possibly rotated) refresh token to
+`<storageHome>/providers/<provider>/codex.auth.json`.
+
+`providerSpecificOptions` may carry `codex_client_version`, the whole part of
+the Codex CLI version this provider advertises for model gating in the Codex
+backend catalog (eg. `160` for `0.160.x`, or `200` for `0.200.x`). It is an
+internal option: it is consumed by the dialect when listing models and is never
+sent on the wire. Omit it for the default of `160`.
+
+The models a subscription exposes often come with per-model behavior or
+variants (eg. reasoning-effort presets for a `gpt-6-luna`). Declare them under
+`provider.models`, each entry matching by id or substring, with per-model
+`contextWindow` and a `behavior` carrying `variants` selected at runtime with
+`/model <model> <variant>`:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "default",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "model": "gpt-6-luna",
+        "models": [
+          {
+            "model": "gpt-6-luna",
+            "contextWindow": 400000,
+            "behavior": {
+              "variants": [
+                { "name": "default", "reasoningEffort": "medium" },
+                { "name": "reasoning", "reasoningEffort": "xhigh" }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----
+
+Login is a one-time interactive step: run `/codex login <provider>` in a
+session. It starts the ChatGPT/Codex OAuth browser flow (the default, matching
+`codex login`; `--device` opts into the device-code flow like the CLI's
+`--device-auth`), prints the URL to open, waits for you to authorize, and
+persists the session token. If the device-code flow is disabled for the account
+(device sign-in off in ChatGPT security settings), the login explains that you
+can use the default browser flow instead. The models listed for the provider
+are the ones your plan actually exposes, so use the slug that appears there
+rather than a hardcoded example.
+
  Per-provider system-prompt tuning, such as the strength of todo-guidance
  (`yca.provider.*.prompt.todo`), is covered in
  xref:features/todo-guidance.adoc[Todo and plan guidance].

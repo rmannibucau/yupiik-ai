@@ -37,7 +37,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 class ConfigCommandsTest {
-    private final ConfigCommands commands = new ConfigCommands(null, null, null, null, null, null);
+    private final ConfigCommands commands = new ConfigCommands(null, null, null, null, null, null, null);
 
     private ShellOutcome run(final String arg, final ShellSession session, final ConversationTranscript transcript) {
         final var cmd = commands.commands().stream()
@@ -87,7 +87,7 @@ class ConfigCommandsTest {
     }
 
     private ShellOutcome runVariant(final String arg, final ShellSession session) {
-        final var cmd = new ConfigCommands(null, variantClient(), null, null, null, null)
+        final var cmd = new ConfigCommands(null, variantClient(), null, null, null, null, null)
                 .commands().stream()
                         .filter(c -> c.spec().name().equals("/variant"))
                         .findFirst()
