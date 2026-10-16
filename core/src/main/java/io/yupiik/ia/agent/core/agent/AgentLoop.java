@@ -218,6 +218,7 @@ public class AgentLoop {
     private final String subagentName;
     /** Null means this is a regular agent turn; a non-null set is a subagent execution ceiling. */
     private volatile Set<String> allowedTools;
+
     private volatile Integer maxIterationsCap;
     /**
      * Session this loop instance belongs to. Events are tagged with it so the
@@ -745,7 +746,10 @@ public class AgentLoop {
      * simply cannot call them - the strongest form of "plan must not build".
      */
     private List<Tool> wireTools() {
-        final var tools = toolRegistry.toWireTools(tool -> allowedTools == null || allowedTools.contains(tool.name()));
+        final var toolCeiling = effectiveAllowedTools();
+        final var tools = toolCeiling == null
+                ? toolRegistry.toWireTools()
+                : toolRegistry.toWireTools(tool -> toolCeiling.contains(tool.name()));
         if (permissionService == null || permissionService.mode() != AgentMode.PLAN) {
             return tools;
         }
@@ -755,6 +759,20 @@ public class AgentLoop {
                     return embedded == null || embedded.category() != ToolCategory.EDIT;
                 })
                 .toList();
+    }
+
+    private Set<String> effectiveAllowedTools() {
+        final var profileTools = agentProvider == null ? null : agentProvider.allowedTools(currentAgentName);
+        final var runTools = allowedTools;
+        if (profileTools == null) {
+            return runTools;
+        }
+        if (runTools == null) {
+            return profileTools;
+        }
+        final var intersection = new java.util.HashSet<>(profileTools);
+        intersection.retainAll(runTools);
+        return Set.copyOf(intersection);
     }
 
     /** Installs a child run's tool ceiling before its first request. Null retains the registry's full set. */
@@ -768,6 +786,11 @@ public class AgentLoop {
             throw new IllegalArgumentException("maxIterationsCap must be positive");
         }
         this.maxIterationsCap = cap;
+    }
+
+    /** Whether the most recent turn stopped at its resolved iteration cap. */
+    public boolean iterationLimitReached() {
+        return turnState.iterationLimitReached;
     }
 
     public String run(
@@ -1081,7 +1104,8 @@ public class AgentLoop {
                 chatSettings,
                 callCancelled,
                 sessionWorkdir,
-                ordinal);
+                ordinal,
+                effectiveAllowedTools());
     }
 
     /**
@@ -1213,7 +1237,11 @@ public class AgentLoop {
                 toolDurationWallMs,
                 toolsRun,
                 turnDurationMs,
-                new AgentEvent.Throughput(turnState.outputTokens, turnState.reasoningTokens, turnState.llmActiveMs, turnState.llmReportedMs),
+                new AgentEvent.Throughput(
+                        turnState.outputTokens,
+                        turnState.reasoningTokens,
+                        turnState.llmActiveMs,
+                        turnState.llmReportedMs),
                 currentSessionId,
                 subagentId,
                 subagentName);
@@ -1397,11 +1425,12 @@ public class AgentLoop {
 
                                 @Override
                                 public void malformedToolArguments() {
-                                    emit(notice(
-                                            AgentEvent.Notice.Level.WARN,
-                                            "Server rejected the request: malformed tool call arguments (parse_error.101). "
-                                                    + "The arguments were kept as-is (repair failed or disabled); remove the "
-                                                    + "corrupted call from the transcript or retry with the repair enabled."));
+                                    emit(
+                                            notice(
+                                                    AgentEvent.Notice.Level.WARN,
+                                                    "Server rejected the request: malformed tool call arguments (parse_error.101). "
+                                                            + "The arguments were kept as-is (repair failed or disabled); remove the "
+                                                            + "corrupted call from the transcript or retry with the repair enabled."));
                                 }
 
                                 @Override
@@ -1521,7 +1550,8 @@ public class AgentLoop {
                             // part of the request), hitting the same wall. Jump straight to the
                             // change-strategy prompt instead of the verbatim continue. Without reasoning
                             // the usual progressive escalation (continue, then split) still applies.
-                            final var changeStrategy = turnState.lastRequestProducedReasoning || truncationContinues >= 2;
+                            final var changeStrategy =
+                                    turnState.lastRequestProducedReasoning || truncationContinues >= 2;
                             messages.add(Message.user(
                                     changeStrategy ? TRUNCATION_SPLIT_PROMPT : TRUNCATION_CONTINUE_PROMPT));
                             // the reasoning flag was consumed: a retry of this request must not re-trigger
@@ -1718,6 +1748,7 @@ public class AgentLoop {
             persistStopNotice(
                     sessionId,
                     "Maximum iterations reached (" + maxIterations + "): turn stopped; resume starts a fresh window.");
+            turnState.iterationLimitReached = true;
             emit(error("Maximum iterations reached (" + maxIterations + ")"));
             emitTurnMetrics(null, turnStartNanos);
             return null;
@@ -1769,7 +1800,13 @@ public class AgentLoop {
         if (turnState.thinkingActive) {
             turnState.thinkingMs += (precisionDurationMarker.now() - turnState.thinkingStartNanos) / 1_000_000;
         }
-        emit(turnMetrics(turnState.llmCalls, turnState.thinkingMs, turnState.toolSumMs, turnState.toolWallMs, turnState.toolsRun, turnDurationMs));
+        emit(turnMetrics(
+                turnState.llmCalls,
+                turnState.thinkingMs,
+                turnState.toolSumMs,
+                turnState.toolWallMs,
+                turnState.toolsRun,
+                turnDurationMs));
         if (content != null) {
             lastTurnEndedWithContent = !content.isBlank();
             emit(turnDone(content));
@@ -2489,7 +2526,9 @@ public class AgentLoop {
             final boolean userInjected) {
         final var pending = unfinishedTodos(toolsRanThisTurn);
         final var maxContinues = todoMaxContinues();
-        if (pending == null || !canAutoContinueUnfinished(userInjected) || turnState.unfinishedTodoContinues >= maxContinues) {
+        if (pending == null
+                || !canAutoContinueUnfinished(userInjected)
+                || turnState.unfinishedTodoContinues >= maxContinues) {
             return false;
         }
         turnState.unfinishedTodoContinues++;
@@ -2637,13 +2676,7 @@ public class AgentLoop {
                     return executor.submit(() -> runTool(call, cancelled));
                 },
                 outcome -> appendToolResult(
-                        sessionId,
-                        messages,
-                        outcome,
-                        staleReads,
-                        roundInformative,
-                        roundRefused,
-                        roundCoverage),
+                        sessionId, messages, outcome, staleReads, roundInformative, roundRefused, roundCoverage),
                 this::awaitTool,
                 () -> checkRoundBudget(sessionId, messages, toolsTokens),
                 precisionDurationMarker::now,
@@ -2993,7 +3026,7 @@ public class AgentLoop {
             emit(toolFinished(name, unknownToolDiagnostic(name), false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
-        final var childToolCeiling = allowedTools;
+        final var childToolCeiling = effectiveAllowedTools();
         if (childToolCeiling != null && !childToolCeiling.contains(name)) {
             final var diagnostic = "Tool is not allowed for this agent run: " + name;
             unregisterRunningTool(ordinal);

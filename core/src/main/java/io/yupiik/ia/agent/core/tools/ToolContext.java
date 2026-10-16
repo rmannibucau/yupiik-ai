@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.todo.TodoStore;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -53,6 +54,8 @@ import java.util.function.BooleanSupplier;
  * @param callCancelled  per-call cancellation probe: distinct from {@code cancelled} (the turn probe)
  *                       so a UI can cancel the running tool alone while the turn keeps going. Never
  *                       {@code null}: standalone contexts report "not cancelled".
+ * @param allowedTools   effective tool ceiling for the current agent; null means the registry and permission policy
+ *                       determine availability.
  */
 public record ToolContext(
         String sessionId,
@@ -73,7 +76,9 @@ public record ToolContext(
         // context is not tied to a specific running tool call (standalone/btw invocations). Tools that
         // emit their own streaming fragments (e.g. BashTool's ToolStream) surface it so every fragment
         // correlates to the exact started call, never to a same-named sibling.
-        long ordinal) {
+        long ordinal,
+        // effective tool ceiling of the current agent, propagated to prevent delegation from widening access
+        Set<String> allowedTools) {
 
     /** Backward-compatible convenience: builds a context without per-session provider/model settings. */
     public ToolContext(
@@ -101,7 +106,8 @@ public record ToolContext(
                 null,
                 null,
                 null,
-                -1);
+                -1,
+                null);
     }
 
     /** Convenience: a full context (per-session services + settings + project dir) for a non-tool context. */
@@ -133,7 +139,8 @@ public record ToolContext(
                 settings,
                 callCancelled,
                 projectDir,
-                -1);
+                -1,
+                null);
     }
 
     public ToolContext {
@@ -146,7 +153,7 @@ public record ToolContext(
     /** A context without any session-scoped service, for standalone tool invocation. */
     public static ToolContext empty() {
         return new ToolContext(
-                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, null, -1);
+                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, null, -1, null);
     }
 
     /**
@@ -156,7 +163,21 @@ public record ToolContext(
      */
     public static ToolContext empty(final Path projectDir) {
         return new ToolContext(
-                null, null, null, null, null, null, null, null, null, Cancellations.NEVER, null, null, projectDir, -1);
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                Cancellations.NEVER,
+                null,
+                null,
+                projectDir,
+                -1,
+                null);
     }
 
     /**

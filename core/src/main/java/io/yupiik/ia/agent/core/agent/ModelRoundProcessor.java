@@ -6,22 +6,23 @@
  *
  *  http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 package io.yupiik.ia.agent.core.agent;
 
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
-import io.yupiik.ia.agent.core.llm.LlmHttpFailureException;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.PauseEvent;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import java.io.IOException;
 import java.util.concurrent.TimeUnit;
@@ -121,7 +122,9 @@ public final class ModelRoundProcessor {
 
     private static String causeSummary(final Throwable e) {
         final var cause = e.getCause();
-        final var message = cause == null || cause.getMessage() == null || cause.getMessage().isBlank()
+        final var message = cause == null
+                        || cause.getMessage() == null
+                        || cause.getMessage().isBlank()
                 ? e.getMessage()
                 : cause.getMessage();
         return message == null ? "unknown transport failure" : message;

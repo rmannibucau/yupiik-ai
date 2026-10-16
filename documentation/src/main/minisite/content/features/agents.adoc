@@ -15,16 +15,18 @@ with `@<name> `.
 
 == Defining agents
 
-`yca.agents` is a list of named prompts. The `prompt` is inline text, or a file
+`yca.agents` is a list of named profiles. The `prompt` is inline text, or a file
 path whose content is loaded when it expands to an existing regular file (for
-example `prompt=~/.yupiik/coding-agent/agents/reviewer.md`).
+example `prompt=~/.yupiik/coding-agent/agents/reviewer.md`). The optional `tools`
+list restricts the profile to those tool names; omitting it leaves the normal
+session and permission rules in force.
 
 .Example configuration.json
 [source,json]
 ----
 {
   "agents": [
-    { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md" },
+    { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md", "tools": ["read", "glob", "grep"] },
     { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them." }
   ]
 }
@@ -46,3 +48,18 @@ the parent's frontier model, that report no tool output on their own provider.
 The resolved model of a running/recently-completed sub-agent is surfaced in the
 `/subagents` overlay (list rows and the detail transcript) when a reference was
 requested.
+
+== Sub-agent run limits and tools
+
+`spawn_subagent` accepts an optional `agent` profile, a `tools` allowlist, and
+`max_turns`. The requested tools are intersected with the profile's tool list
+when both are present, and are enforced both in the child model's tool schema
+and again before tool execution. An empty `tools` list allows no tools. Unknown
+profile names or unavailable requested tools fail the child run. Sub-agents use
+separate permission grants; their approval prompts still appear in the parent
+session. Parent permission restrictions remain in force.
+
+`max_turns` counts model round-trips. The effective limit is the lowest of the
+per-spawn value, configured `yca.subagents.maxIterations`, and applicable
+provider/model iteration cap. If `max_turns` is omitted, the configured subagent
+limit applies. Nested sub-agents are disabled.

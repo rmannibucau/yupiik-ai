@@ -17,6 +17,7 @@ package io.yupiik.ia.agent.core.configuration;
 
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import java.util.List;
 
 @JsonModel
 public record AgentConfiguration(
@@ -30,4 +31,13 @@ public record AgentConfiguration(
                 required = true,
                 documentation =
                         "Agent instructions: inline text, or a file path whose content is loaded (eg. ~/.yupiik/coding-agent/agents/reviewer.md). A value is treated as a file path when it expands to an existing regular file, otherwise it is used as inline text.")
-        String prompt) {}
+        String prompt,
+
+        @Property(
+                documentation =
+                        "Optional tool-name allowlist for this agent. When omitted all otherwise available tools are eligible; configured and session permission rules still apply.")
+        List<String> tools) {
+    public AgentConfiguration(final String name, final String prompt) {
+        this(name, prompt, null);
+    }
+}

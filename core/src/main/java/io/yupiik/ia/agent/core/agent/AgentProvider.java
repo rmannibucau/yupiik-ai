@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 @ApplicationScoped
 public class AgentProvider {
@@ -52,6 +53,12 @@ public class AgentProvider {
             }
         }
         return null;
+    }
+
+    /** Returns the configured profile tool ceiling, or null when the profile has no restriction. */
+    public Set<String> allowedTools(final String name) {
+        final var agent = byName(name);
+        return agent == null || agent.tools() == null ? null : Set.copyOf(agent.tools());
     }
 
     /**

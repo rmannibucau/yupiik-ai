@@ -71,6 +71,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
@@ -82,6 +83,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.LockSupport;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -122,6 +124,99 @@ class AgentLoopTest {
                 "Unknown tool \"foo\": not in this session's toolset (built-in or enabled MCP)."
                         + " Run /tools to list the valid tools; only exact names from the request's tools field are accepted.",
                 diagnostic("foo"));
+    }
+
+    @Test
+    void toolCeilingFiltersWireSchemasAndRejectsDirectCalls() throws Exception {
+        final var executed = new ArrayList<String>();
+        final var advertised = new ArrayList<List<String>>();
+        final var allowedTool = testTool("allowed", executed);
+        final var blockedTool = testTool("blocked", executed);
+        final var candidates = List.of(allowedTool, blockedTool);
+        final var registry = new ToolRegistry(null) {
+            @Override
+            public List<Tool> toWireTools() {
+                return candidates.stream().map(this::wireTool).toList();
+            }
+
+            @Override
+            public List<Tool> toWireTools(final Predicate<EmbeddedTool> filter) {
+                return candidates.stream().filter(filter).map(this::wireTool).toList();
+            }
+
+            private Tool wireTool(final EmbeddedTool tool) {
+                return Tool.function(tool.name(), tool.description(), tool.schema());
+            }
+
+            @Override
+            public EmbeddedTool tool(final String name) {
+                return candidates.stream()
+                        .filter(tool -> tool.name().equals(name))
+                        .findFirst()
+                        .orElse(null);
+            }
+        };
+        final var replies = new ArrayDeque<>(
+                List.of(toolCallReply("blocked-call", "blocked"), new ScriptedReply("done", "stop", false)));
+        final ChatClient client = new ChatClient() {
+            @Override
+            public Message stream(
+                    final ChatCompletionRequest request,
+                    final Consumer<PauseEvent> pauseListener,
+                    final Consumer<LlmStreamEvent> onDelta,
+                    final BooleanSupplier cancelled)
+                    throws IOException {
+                advertised.add(request.tools().stream()
+                        .map(tool -> tool.function().name())
+                        .toList());
+                final var next = replies.poll();
+                if (next.finishReason() != null) {
+                    onDelta.accept(new End(next.finishReason(), null));
+                }
+                return next.toMessage();
+            }
+        };
+
+        final var agent = loop(
+                client, null, configuration(true), noContextManager(), noSessionStore(), null, registry, null, null);
+        agent.allowedTools(Set.of("allowed"));
+        assertEquals("done", agent.run("try a blocked tool", null, "s1", null, () -> false));
+        assertEquals(List.of("allowed"), advertised.getFirst(), "the blocked tool must not be advertised");
+        assertTrue(executed.isEmpty(), "a direct call outside the ceiling must not execute");
+        assertTrue(events.stream()
+                .filter(AgentEvent.ToolFinished.class::isInstance)
+                .map(AgentEvent.ToolFinished.class::cast)
+                .anyMatch(result -> result.output().contains("not allowed for this agent run")));
+    }
+
+    private EmbeddedTool testTool(final String name, final List<String> executed) {
+        return new EmbeddedTool() {
+            @Override
+            public String name() {
+                return name;
+            }
+
+            @Override
+            public String description() {
+                return "test tool";
+            }
+
+            @Override
+            public ToolCategory category() {
+                return ToolCategory.READ;
+            }
+
+            @Override
+            public Map<String, Object> schema() {
+                return Map.of();
+            }
+
+            @Override
+            public ToolResult execute(final Map<String, Object> args) {
+                executed.add(name);
+                return ToolResult.ok("ran " + name);
+            }
+        };
     }
 
     @Test

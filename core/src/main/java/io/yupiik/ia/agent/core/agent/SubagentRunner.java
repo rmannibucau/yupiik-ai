@@ -184,8 +184,8 @@ public class SubagentRunner {
             final var message = "Subagent could not be scheduled: " + e.getMessage();
             final var result = SubagentRegistry.SubagentResult.error(message, "");
             subagentRegistry.complete(state.id(), result);
-            emitter.emit(new AgentEvent.SubagentCompleted(
-                    message, false, false, state.parentSessionId(), state.id(), name));
+            emitter.emit(
+                    new AgentEvent.SubagentCompleted(message, false, false, state.parentSessionId(), state.id(), name));
         }
     }
 
@@ -196,12 +196,29 @@ public class SubagentRunner {
             final BooleanSupplier cancelled) {
         final var subagentSessionId = state.parentSessionId() + "-subagent-" + state.id();
         final var subagentName = state.name() != null ? state.name() : state.id();
-        if (state.allowedTools() != null) {
+        final var profile =
+                state.profile() == null || state.profile().isBlank() ? null : agentProvider.byName(state.profile());
+        if (state.profile() != null && profile == null) {
+            return SubagentRegistry.SubagentResult.error("Unknown agent profile: " + state.profile(), "");
+        }
+        final Set<String> profileTools = profile == null ? null : agentProvider.allowedTools(profile.name());
+        final var effectiveAllowedTools =
+                intersectToolCeilings(state.parentAllowedTools(), profileTools, state.allowedTools());
+        if (state.parentAllowedTools() != null || profileTools != null || state.allowedTools() != null) {
             final var available = toolRegistry.tools().stream()
                     .filter(io.yupiik.ia.agent.core.tools.EmbeddedTool::usable)
                     .map(io.yupiik.ia.agent.core.tools.EmbeddedTool::name)
                     .collect(java.util.stream.Collectors.toSet());
-            final var unknown = new java.util.TreeSet<>(state.allowedTools());
+            final var unknown = new java.util.TreeSet<String>();
+            if (profileTools != null) {
+                unknown.addAll(profileTools);
+            }
+            if (state.allowedTools() != null) {
+                unknown.addAll(state.allowedTools());
+            }
+            if (state.parentAllowedTools() != null) {
+                unknown.addAll(state.parentAllowedTools());
+            }
             unknown.removeAll(available);
             if (!unknown.isEmpty()) {
                 return SubagentRegistry.SubagentResult.error(
@@ -209,8 +226,8 @@ public class SubagentRunner {
             }
         }
 
-        // Create isolated services for this subagent: explicit instances built from the shared beans and the
-        // spawning session's context (the parent permission state, feedback gate and usage are inherited).
+        // Create isolated services for this subagent: explicit instances built from shared infrastructure and
+        // child-owned policy/history/todo state. The parent approval UI and usage aggregation are reused.
         final var subagentSessionStore = new InMemorySessionStore(mapper, clock);
         final var subagentTodoStore = new InMemoryTodoStore();
         final var parentUsage = parentContext != null && parentContext.usage() != null
@@ -286,27 +303,24 @@ public class SubagentRunner {
             }
         }
         agentLoop.updateChatSettings(subagentSettings);
-        agentLoop.allowedTools(state.allowedTools());
+        agentLoop.allowedTools(effectiveAllowedTools);
         final var configuredCap = configuration.subagents() == null
-                        ? null
-                        : configuration.subagents().maxIterations();
-        var maxIterationsCap = configuredCap == null || configuredCap < 1
-                ? configuration.llm().maxIterations()
-                : configuredCap;
-        if (state.maxTurns() != null) {
-            maxIterationsCap = Math.min(maxIterationsCap, state.maxTurns());
-        }
+                ? null
+                : configuration.subagents().maxIterations();
+        final var maxIterationsCap =
+                resolveMaxIterationsCap(configuredCap, configuration.llm().maxIterations(), state.maxTurns());
         agentLoop.maxIterationsCap(maxIterationsCap);
 
         final var fullConversation = new StringBuilder();
         fullConversation
                 .append("System: ")
-                .append(subagentSystemPromptBuilder.build(state.task(), null))
+                .append(subagentSystemPromptBuilder.build(state.task(), profile))
                 .append("\n\n");
         fullConversation.append("User: ").append(state.task()).append("\n\n");
 
         final BooleanSupplier subagentCancelled = () -> cancelled.getAsBoolean() || state.isCancelled();
-        final var result = agentLoop.run(state.task(), null, subagentSessionId, List.of(), subagentCancelled);
+        final var result =
+                agentLoop.run(state.task(), state.profile(), subagentSessionId, List.of(), subagentCancelled);
 
         fullConversation
                 .append("Assistant: ")
@@ -321,13 +335,52 @@ public class SubagentRunner {
 
         // a null result on a cancelled turn is a cancellation, not a failure: the loop returns null
         // when the interrupt unwound it, and the parent transcript must render it as such
-        if (result == null && (state.isCancelled() || cancelled.getAsBoolean())) {
-            return SubagentRegistry.SubagentResult.cancelled(fullConversation.toString());
+        if (result == null) {
+            return nullRunResult(
+                    fullConversation.toString(),
+                    state.isCancelled() || cancelled.getAsBoolean(),
+                    agentLoop.iterationLimitReached());
         }
         return result != null
                 ? SubagentRegistry.SubagentResult.success(result, fullConversation.toString(), artifacts)
                 : SubagentRegistry.SubagentResult.error(
                         "Subagent completed without result", fullConversation.toString());
+    }
+
+    @SafeVarargs
+    static Set<String> intersectToolCeilings(final Set<String>... ceilings) {
+        java.util.HashSet<String> result = null;
+        for (final var ceiling : ceilings) {
+            if (ceiling == null) {
+                continue;
+            }
+            if (result == null) {
+                result = new java.util.HashSet<>(ceiling);
+            } else {
+                result.retainAll(ceiling);
+            }
+        }
+        return result == null ? null : Set.copyOf(result);
+    }
+
+    static int resolveMaxIterationsCap(final Integer configuredCap, final int globalCap, final Integer requestedCap) {
+        var resolved = configuredCap == null || configuredCap < 1 ? globalCap : configuredCap;
+        if (requestedCap != null) {
+            resolved = Math.min(resolved, requestedCap);
+        }
+        return resolved;
+    }
+
+    static SubagentRegistry.SubagentResult nullRunResult(
+            final String conversation, final boolean cancelled, final boolean iterationLimitReached) {
+        if (cancelled) {
+            return SubagentRegistry.SubagentResult.cancelled(conversation);
+        }
+        if (iterationLimitReached) {
+            return SubagentRegistry.SubagentResult.budgetExhausted(
+                    conversation, "Maximum subagent iteration budget reached");
+        }
+        return SubagentRegistry.SubagentResult.error("Subagent completed without result", conversation);
     }
 
     private List<String> extractArtifacts(final SessionStore sessionStore, final String sessionId) {

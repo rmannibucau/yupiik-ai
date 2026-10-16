@@ -104,7 +104,7 @@ public class SubagentRegistry {
      */
     public Optional<SubagentState> start(
             final String parentSessionId, final String task, final String name, final String model) {
-        return start(new AgentRunSpec(parentSessionId, task, name, model, null, null));
+        return start(new AgentRunSpec(parentSessionId, task, name, null, model, null, null, null));
     }
 
     public Optional<SubagentState> start(final AgentRunSpec spec) {
@@ -262,7 +262,7 @@ public class SubagentRegistry {
         private volatile long completedAt;
 
         public SubagentState(final String id, final String parentSessionId, final String task, final long startedAt) {
-            this(id, new AgentRunSpec(parentSessionId, task, null, null, null, null), startedAt);
+            this(id, new AgentRunSpec(parentSessionId, task, null, null, null, null, null, null), startedAt);
         }
 
         public SubagentState(
@@ -271,7 +271,7 @@ public class SubagentRegistry {
                 final String task,
                 final String name,
                 final long startedAt) {
-            this(id, new AgentRunSpec(parentSessionId, task, name, null, null, null), startedAt);
+            this(id, new AgentRunSpec(parentSessionId, task, name, null, null, null, null, null), startedAt);
         }
 
         public SubagentState(
@@ -281,7 +281,7 @@ public class SubagentRegistry {
                 final String name,
                 final long startedAt,
                 final String model) {
-            this(id, new AgentRunSpec(parentSessionId, task, name, model, null, null), startedAt);
+            this(id, new AgentRunSpec(parentSessionId, task, name, null, model, null, null, null), startedAt);
         }
 
         public SubagentState(final String id, final AgentRunSpec spec, final long startedAt) {
@@ -311,12 +311,20 @@ public class SubagentRegistry {
             return spec.model();
         }
 
+        public String profile() {
+            return spec.profile();
+        }
+
         public Integer maxTurns() {
             return spec.maxTurns();
         }
 
         public Set<String> allowedTools() {
             return spec.allowedTools();
+        }
+
+        public Set<String> parentAllowedTools() {
+            return spec.parentAllowedTools();
         }
 
         public AgentRunSpec spec() {
@@ -374,35 +382,39 @@ public class SubagentRegistry {
     }
 
     public static final class SubagentResult {
+        public enum Status {
+            SUCCEEDED,
+            FAILED,
+            CANCELLED,
+            BUDGET_EXHAUSTED
+        }
+
         private final String summary;
         private final String fullConversation;
         private final List<String> artifacts;
-        private final boolean success;
-        private final boolean cancelled;
+        private final Status status;
         private final String error;
 
         private SubagentResult(
                 final String summary,
                 final String fullConversation,
                 final List<String> artifacts,
-                final boolean success,
-                final boolean cancelled,
+                final Status status,
                 final String error) {
             this.summary = summary;
             this.fullConversation = fullConversation;
-            this.artifacts = artifacts;
-            this.success = success;
-            this.cancelled = cancelled;
+            this.artifacts = List.copyOf(artifacts);
+            this.status = status;
             this.error = error;
         }
 
         public static SubagentResult success(
                 final String summary, final String fullConversation, final List<String> artifacts) {
-            return new SubagentResult(summary, fullConversation, artifacts, true, false, null);
+            return new SubagentResult(summary, fullConversation, artifacts, Status.SUCCEEDED, null);
         }
 
         public static SubagentResult error(final String error, final String fullConversation) {
-            return new SubagentResult(null, fullConversation, List.of(), false, false, error);
+            return new SubagentResult(null, fullConversation, List.of(), Status.FAILED, error);
         }
 
         /**
@@ -411,7 +423,11 @@ public class SubagentRegistry {
          * cancellation, not as a red "Subagent failed" card.
          */
         public static SubagentResult cancelled(final String fullConversation) {
-            return new SubagentResult(null, fullConversation, List.of(), false, true, "Sub-agent cancelled");
+            return new SubagentResult(null, fullConversation, List.of(), Status.CANCELLED, "Sub-agent cancelled");
+        }
+
+        public static SubagentResult budgetExhausted(final String fullConversation, final String message) {
+            return new SubagentResult(null, fullConversation, List.of(), Status.BUDGET_EXHAUSTED, message);
         }
 
         public String summary() {
@@ -427,11 +443,19 @@ public class SubagentRegistry {
         }
 
         public boolean success() {
-            return success;
+            return status == Status.SUCCEEDED;
         }
 
         public boolean cancelled() {
-            return cancelled;
+            return status == Status.CANCELLED;
+        }
+
+        public Status status() {
+            return status;
+        }
+
+        public boolean budgetExhausted() {
+            return status == Status.BUDGET_EXHAUSTED;
         }
 
         public String error() {

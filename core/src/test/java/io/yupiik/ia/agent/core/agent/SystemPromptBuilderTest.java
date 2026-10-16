@@ -88,9 +88,9 @@ class SystemPromptBuilderTest {
                 prompt.contains("project rule"),
                 "only the nearest project AGENTS.md should be loaded, not the full ancestor stack");
         assertTrue(
-                prompt.contains("always use tabs"),
-                "opencode-precedence global (~/.config/opencode/AGENTS.md) should win over storage-home");
-        assertFalse(prompt.contains("storage rule"), "only the first existing global AGENTS.md should be loaded");
+                prompt.contains("storage rule"),
+                "storage-home AGENTS.md should take precedence over other global files");
+        assertFalse(prompt.contains("always use tabs"), "only the first existing global AGENTS.md should be loaded");
     }
 
     @Test

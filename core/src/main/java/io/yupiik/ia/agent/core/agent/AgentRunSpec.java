@@ -6,11 +6,12 @@
  *
  *  http://www.apache.org/licenses/LICENSE-2.0
  *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 package io.yupiik.ia.agent.core.agent;
 
@@ -21,11 +22,14 @@ public record AgentRunSpec(
         String parentSessionId,
         String task,
         String name,
+        String profile,
         String model,
         Integer maxTurns,
-        Set<String> allowedTools) {
+        Set<String> allowedTools,
+        Set<String> parentAllowedTools) {
     public AgentRunSpec {
         allowedTools = allowedTools == null ? null : Set.copyOf(allowedTools);
+        parentAllowedTools = parentAllowedTools == null ? null : Set.copyOf(parentAllowedTools);
     }
 
     /** Null means no per-run override; an empty set explicitly allows no tools. */

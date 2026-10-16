@@ -70,8 +70,11 @@ public class SpawnSubagentTool implements EmbeddedTool {
     @Override
     public String description() {
         return "Launch a sub-agent to work on a task in parallel with isolated state. "
-                + "The sub-agent inherits the parent's system prompt (AGENTS.md, skills) but has its own "
-                + "conversation history, todo list, and snapshots. Returns a subagent_id for tracking.";
+                + "It inherits the parent's project context and permission ceiling, and has its own "
+                + "conversation history, permission grants, todo list, and snapshots. Optional agent profiles "
+                + "and the tools allowlist can further restrict which tools the child may use. max_turns sets a positive "
+                + "upper bound on the child's model round-trips; configured subagent and provider/model limits may lower it. "
+                + "Returns a subagent_id for tracking.";
     }
 
     @Override
@@ -85,16 +88,17 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 Map.of(
                         "task", Schemas.str("The task description for the sub-agent to execute."),
                         "name", Schemas.str("Optional name for the sub-agent (for display/logging)."),
+                        "agent", Schemas.str("Optional named agent profile whose prompt and tool restrictions apply."),
                         "model",
                                 Schemas.str("Optional model (or $provider/model) routing this sub-agent to a specific "
                                         + "model/provider instead of inheriting the parent session's selection or the "
                                         + "provider's defaultSubagentModel. The explicit model always wins."),
                         "max_turns",
                                 Schemas.intProp(
-                                        "Maximum turns for the sub-agent (optional, defaults to global maxIterations)."),
+                                        "Maximum model round-trips for the sub-agent (optional; capped by configured subagent and provider/model limits)."),
                         "tools",
                                 Schemas.arrayOf(
-                                        "Optional list of tool names to allow for the sub-agent.",
+                                        "Optional allowlist of tool names for the sub-agent; an empty list allows no tools.",
                                         Schemas.str("Tool name"))),
                 "task");
     }
@@ -115,6 +119,9 @@ public class SpawnSubagentTool implements EmbeddedTool {
         if (parentTodos == null) {
             return ToolResult.error("spawn_subagent requires an active session todo list.");
         }
+        if (context.subagentId() != null) {
+            return ToolResult.error("Nested sub-agents are disabled.");
+        }
         if (!subagentRegistry.enabled()) {
             return ToolResult.error("Sub-agents are disabled (yca.subagents.enabled=false or concurrency limit is 0).");
         }
@@ -123,6 +130,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
             return ToolResult.error("task is required");
         }
         final var name = arg(args, "name");
+        final var profile = arg(args, "agent");
         final var model = arg(args, "model");
         final var maxTurnsObj = args.get("max_turns");
         final Integer maxTurns = maxTurnsObj instanceof Number n ? n.intValue() : null;
@@ -136,7 +144,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         .collect(java.util.stream.Collectors.toUnmodifiableSet())
                 : args.containsKey("tools") ? Set.of() : null;
         final var stateOpt = subagentRegistry.start(new AgentRunSpec(
-                context.sessionId(), task, name, model, maxTurns, allowedTools));
+                context.sessionId(), task, name, profile, model, maxTurns, allowedTools, context.allowedTools()));
         if (stateOpt.isEmpty()) {
             return ToolResult.error("Cannot start sub-agent: maximum concurrent sub-agents reached ("
                     + subagentRegistry.maxConcurrent() + ").");

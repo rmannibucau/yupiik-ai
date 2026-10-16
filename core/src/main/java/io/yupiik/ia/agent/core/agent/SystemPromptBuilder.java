@@ -599,8 +599,8 @@ public class SystemPromptBuilder {
     private List<Path> globalAgentsFiles() {
         final var home = configuration.resolveHome();
         final var list = new ArrayList<Path>();
-        addIfRegular(list, Path.of(home, ".config", "opencode", "AGENTS.md"));
         addIfRegular(list, Path.of(configuration.resolveStorageHome()).resolve("AGENTS.md"));
+        addIfRegular(list, Path.of(home, ".config", "opencode", "AGENTS.md"));
         addIfRegular(list, Path.of(home, ".claude", "AGENTS.md"));
         return list;
     }

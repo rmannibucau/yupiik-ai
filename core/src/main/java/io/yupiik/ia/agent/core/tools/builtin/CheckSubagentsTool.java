@@ -129,6 +129,8 @@ public class CheckSubagentsTool implements EmbeddedTool {
                         result.summary(),
                         "artifacts",
                         result.artifacts(),
+                        "status",
+                        result.status().name().toLowerCase(java.util.Locale.ROOT),
                         "completed",
                         true)));
             } catch (final RuntimeException e) {
@@ -136,8 +138,15 @@ public class CheckSubagentsTool implements EmbeddedTool {
             }
         } else {
             try {
-                return ToolResult.error(
-                        mapper.toString(Map.of("subagent_id", subagentId, "error", result.error(), "completed", true)));
+                return ToolResult.error(mapper.toString(Map.of(
+                        "subagent_id",
+                        subagentId,
+                        "error",
+                        result.error(),
+                        "status",
+                        result.status().name().toLowerCase(java.util.Locale.ROOT),
+                        "completed",
+                        true)));
             } catch (final RuntimeException e) {
                 return ToolResult.error("Sub-agent failed: " + result.error());
             }

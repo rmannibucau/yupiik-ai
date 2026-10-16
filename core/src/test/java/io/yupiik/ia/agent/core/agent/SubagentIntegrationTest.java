@@ -513,6 +513,15 @@ class SubagentIntegrationTest {
             final ToolRegistry registry,
             final SubagentRegistry reg,
             final CodingAgentConfiguration cfg) {
+        return newRunner(client, registry, reg, cfg, EXECUTOR);
+    }
+
+    private TestSubagentRunner newRunner(
+            final ChatClient client,
+            final ToolRegistry registry,
+            final SubagentRegistry reg,
+            final CodingAgentConfiguration cfg,
+            final ExecutorService executor) {
         final var mockUsageTracker = new UsageTracker() {
             @Override
             public void record(final io.yupiik.ia.agent.core.llm.Usage usage) {}
@@ -586,11 +595,38 @@ class SubagentIntegrationTest {
                 new TodoPromptResolver(),
                 null,
                 Clock.systemUTC(),
-                EXECUTOR,
+                executor,
                 reg,
                 new PrecisionDurationMarkerProvider(),
                 null);
         return new TestSubagentRunner(baseRunner);
+    }
+
+    @Test
+    void rejectedSchedulingCompletesTheChildAndReleasesCapacityExactlyOnce() throws Exception {
+        final var cfg = config(Map.of("yca.subagents.maxConcurrent", "1"));
+        final var reg = newRegistry(cfg, 3);
+        final var rejectingExecutor = Executors.newSingleThreadExecutor();
+        rejectingExecutor.shutdown();
+        final var runner = newRunner(
+                scriptedClient(new ArrayDeque<>(), new ArrayList<>()),
+                emptyToolRegistry(),
+                reg,
+                cfg,
+                rejectingExecutor);
+
+        final var rejected = reg.start("parent", "rejected task").orElseThrow();
+        runner.runAsync(rejected, noopStore(), noopSnapshotStore(), noopTodoStore(), () -> false);
+        rejected.awaitResult();
+        assertEquals(
+                SubagentRegistry.SubagentResult.Status.FAILED, rejected.result().status());
+        assertEquals(0, reg.activeCount());
+
+        final var replacement = reg.start("parent", "replacement").orElseThrow();
+        reg.complete(rejected.id(), SubagentRegistry.SubagentResult.error("duplicate completion", ""));
+        assertEquals(1, reg.activeCount(), "a duplicate completion must not release another child's permit");
+        reg.cancel(replacement.id());
+        assertEquals(0, reg.activeCount());
     }
 
     @Test

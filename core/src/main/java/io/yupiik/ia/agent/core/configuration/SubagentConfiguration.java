@@ -32,5 +32,5 @@ public record SubagentConfiguration(
         @Property(
                 defaultValue = "250",
                 documentation =
-                        "Maximum number of iterations (LLM round-trips) a sub-agent can execute in a single turn. Defaults to the global yca.llm.maxIterations when not set.")
+                        "Maximum number of model round-trips a sub-agent can execute in one run. A per-spawn max_turns can lower this limit; provider/model iteration caps can lower it further. When unset, the global yca.llm.maxIterations applies.")
         Integer maxIterations) {}
