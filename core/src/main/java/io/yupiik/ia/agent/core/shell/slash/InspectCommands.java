@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.shell.slash;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.cli.slash.SlashCommandSpec;
 import io.yupiik.ia.agent.core.cli.slash.SlashGroup;
+import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.session.AgentSessionService;
 import io.yupiik.ia.agent.core.shell.ShellEnv;
 import io.yupiik.ia.agent.core.shell.ShellOutcome;
@@ -35,16 +36,29 @@ public class InspectCommands implements SlashCommandSet {
     }
 
     private final AgentSessionService agentSessionService;
+    private final MemoryProductionPolicy memoryProductionPolicy;
 
     public InspectCommands(final AgentSessionService agentSessionService) {
+        this(agentSessionService, null);
+    }
+
+    public InspectCommands(
+            final AgentSessionService agentSessionService, final MemoryProductionPolicy memoryProductionPolicy) {
         this.agentSessionService = agentSessionService;
+        this.memoryProductionPolicy = memoryProductionPolicy;
     }
 
     @Override
     public List<SlashCommand> commands() {
         return List.of(
                 SlashCommand.of(
-                        new SlashCommandSpec("/memory", null, "show global and project memory", SlashGroup.INSPECT),
+                        new SlashCommandSpec(
+                                "/memory",
+                                "show | on|off | enabled=true|false | compact",
+                                "show memory, show/disable/enable memory production for this session, or compact",
+                                SlashGroup.INSPECT),
+                        ArgCompletion.options(
+                                "show", "on", "off", "enable", "disable", "enabled=true", "enabled=false"),
                         SlashAction.sync(this::memory)),
                 SlashCommand.of(
                         new SlashCommandSpec(
@@ -57,11 +71,31 @@ public class InspectCommands implements SlashCommandSet {
     }
 
     private ShellOutcome memory(final String arg, final ShellEnv env) {
-        if ("compact".equalsIgnoreCase(arg == null ? "" : arg.strip())) {
+        final var option = arg == null ? "" : arg.strip();
+        if ("compact".equalsIgnoreCase(option)) {
             return ShellOutcome.transcript("**Memory compaction**\n\n" + agentSessionService.compactMemory());
+        }
+        // toggle memory production for THIS tab (per-session): only stops producing new facts
+        // (extraction + memory_write persist); the system prompt / injected memory are unchanged.
+        final var sessionId = env.session().sessionId();
+        final var isOn = isOn(option);
+        final var isOff = isOff(option);
+        if (isOn || isOff) {
+            if (memoryProductionPolicy == null || sessionId == null || sessionId.isBlank()) {
+                return ShellOutcome.status("cannot toggle memory production for this session");
+            }
+            memoryProductionPolicy.set(sessionId, isOn);
+            final var enabled = memoryProductionPolicy.enabled(sessionId);
+            return ShellOutcome.status(
+                    "memory production is now " + (enabled ? "enabled" : "disabled") + " for this session");
         }
         final var stats = agentSessionService.memoryStats();
         final var sb = new StringBuilder("\n```text\n");
+        if (memoryProductionPolicy != null) {
+            sb.append("-- production: ")
+                    .append(memoryProductionPolicy.enabled(sessionId) ? "enabled" : "disabled")
+                    .append(" (this session)\n");
+        }
         sb.append("-- global: ")
                 .append(stats.globalChars())
                 .append(" chars, ")
@@ -119,5 +153,19 @@ public class InspectCommands implements SlashCommandSet {
 
     private ShellOutcome todos(final String arg, final ShellEnv env) {
         return ShellOutcome.transcript(env.session().runtime().todos().render());
+    }
+
+    /** Whether the given /memory argument is an explicit "produce" token. */
+    private static boolean isOn(final String option) {
+        return "on".equalsIgnoreCase(option)
+                || "enable".equalsIgnoreCase(option)
+                || "enabled=true".equalsIgnoreCase(option);
+    }
+
+    /** Whether the given /memory argument is an explicit "do not produce" token. */
+    private static boolean isOff(final String option) {
+        return "off".equalsIgnoreCase(option)
+                || "disable".equalsIgnoreCase(option)
+                || "enabled=false".equalsIgnoreCase(option);
     }
 }

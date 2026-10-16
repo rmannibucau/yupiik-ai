@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
+import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.io.IOException;
@@ -155,6 +156,7 @@ public class MemoryExtractor {
     private final UsageTracker usageTracker;
     private final String sessionId;
     private final MemoryCompactor memoryCompactor;
+    private final MemoryProductionPolicy productionPolicy;
     private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
     /** Number of messages already extracted (in-memory watermark). */
     private final AtomicLong watermark = new AtomicLong();
@@ -171,6 +173,7 @@ public class MemoryExtractor {
             final UsageTracker usageTracker,
             final String sessionId,
             final MemoryCompactor memoryCompactor,
+            final MemoryProductionPolicy productionPolicy,
             final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.configuration = configuration;
@@ -183,6 +186,7 @@ public class MemoryExtractor {
         this.usageTracker = usageTracker;
         this.sessionId = sessionId;
         this.memoryCompactor = memoryCompactor;
+        this.productionPolicy = productionPolicy;
         this.secretRedactor = secretRedactor;
     }
 
@@ -198,6 +202,7 @@ public class MemoryExtractor {
         this.usageTracker = null;
         this.sessionId = null;
         this.memoryCompactor = null;
+        this.productionPolicy = null;
         this.secretRedactor = null;
     }
 
@@ -290,7 +295,9 @@ public class MemoryExtractor {
     }
 
     private boolean enabled() {
-        return configuration.memory().enabled()
+        return (productionPolicy == null || productionPolicy.enabled(sessionId))
+                && configuration != null
+                && configuration.memory().enabled()
                 && configuration.memory().maxRatio() > 0
                 && configuration.memory().maxChars() > 0;
     }

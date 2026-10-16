@@ -21,23 +21,23 @@ import java.util.List;
 
 /**
  * Outbound LLM filter hook (mutable holder emitted by {@code ChatClient} right before a request is
- * serialized). Observers registered via {@code @OnEvent(OutboundLlmFilter.class)} may replace the
+ * serialized). Observers registered via {@code @OnEvent(OutboundLlmRequest.class)} may replace the
  * {@link #messages} list (e.g. redact secrets). The secret redactor installs itself as an observer;
  * custom extensions add their own observers for additional inbound/outbound filters. Observers run
  * in {@code @Order} so the chain is composed.
  */
-public class OutboundLlmFilter {
+public class OutboundLlmRequest {
 
     private List<Message> messages;
     private final ChatSettings settings;
     private final String sessionId;
     private final String callKind;
 
-    public OutboundLlmFilter(final List<Message> messages, final ChatSettings settings, final String sessionId) {
+    public OutboundLlmRequest(final List<Message> messages, final ChatSettings settings, final String sessionId) {
         this(messages, settings, sessionId, "agent");
     }
 
-    public OutboundLlmFilter(
+    public OutboundLlmRequest(
             final List<Message> messages, final ChatSettings settings, final String sessionId, final String callKind) {
         this.messages = messages;
         this.settings = settings;

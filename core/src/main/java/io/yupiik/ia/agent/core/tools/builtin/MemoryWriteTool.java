@@ -19,6 +19,7 @@ import static io.yupiik.ia.agent.core.tools.Schemas.str;
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
@@ -32,9 +33,15 @@ import java.util.Map;
 @ApplicationScoped
 public class MemoryWriteTool implements EmbeddedTool {
     private final MemoryStore memoryStore;
+    private final MemoryProductionPolicy memoryProductionPolicy;
 
     public MemoryWriteTool(final MemoryStore memoryStore) {
+        this(memoryStore, null);
+    }
+
+    public MemoryWriteTool(final MemoryStore memoryStore, final MemoryProductionPolicy memoryProductionPolicy) {
         this.memoryStore = memoryStore;
+        this.memoryProductionPolicy = memoryProductionPolicy;
     }
 
     @Override
@@ -83,6 +90,10 @@ public class MemoryWriteTool implements EmbeddedTool {
         final var fact = arg(args, "fact");
         if (fact == null || fact.isBlank()) {
             return ToolResult.error("fact is required");
+        }
+        final var sessionId = context == null ? null : context.sessionId();
+        if (memoryProductionPolicy != null && sessionId != null && !memoryProductionPolicy.enabled(sessionId)) {
+            return ToolResult.ok("memory production is disabled for this session - not stored");
         }
         final var global = "global".equalsIgnoreCase(arg(args, "scope") == null ? "project" : arg(args, "scope"));
         // default to an explicit keep directive (p5); keep=false or an explicit p override downgrades it.

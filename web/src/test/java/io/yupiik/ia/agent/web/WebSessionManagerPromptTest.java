@@ -88,6 +88,7 @@ class WebSessionManagerPromptTest {
                 new PrecisionDurationMarkerProvider(),
                 null,
                 null,
+                null, // memory production policy
                 null); // SecretRedactor
         this.manager = new WebSessionManager(
                 runtimeFactory,

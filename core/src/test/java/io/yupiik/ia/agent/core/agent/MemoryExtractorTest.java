@@ -30,6 +30,7 @@ import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
 import io.yupiik.ia.agent.core.llm.Message;
 import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
@@ -126,6 +127,7 @@ class MemoryExtractorTest {
                 null,
                 "s-test",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         extractor.asyncExtractNow(List.of(Message.user("user said: the project now uses tabs")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
@@ -194,6 +196,7 @@ class MemoryExtractorTest {
                 null,
                 "s-test",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         extractor.asyncExtractNow(List.of(Message.user("user said: we use tabs now")), ChatSettings.EMPTY);
         assertTrue(done.await(5, TimeUnit.SECONDS), "the extractor must emit a notice");
@@ -250,6 +253,7 @@ class MemoryExtractorTest {
                 null,
                 "s-delta",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         final var messages = new ArrayList<Message>();
         messages.add(Message.user("first message: use tabs"));
@@ -302,6 +306,7 @@ class MemoryExtractorTest {
                 null,
                 "s-min",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         // re-enable the default 1000-char gate for this test: config() sets it to 0 so the
         // async extraction tests fire, but this test wants the gate active
@@ -329,11 +334,63 @@ class MemoryExtractorTest {
                 null,
                 "s-min",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         // tiny delta below the default 1000-char gate: no call (end-of-turn path only)
         gated.asyncExtractNow(List.of(Message.user("hi")), ChatSettings.EMPTY);
         Thread.sleep(200); // give the async task a chance to (not) run
         assertEquals(0, calls.get(), "a tiny delta must not fire an end-of-turn extraction");
+    }
+
+    @Test
+    void disabledProductionPolicyBlocksExtraction() throws Exception {
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var calls = new AtomicInteger();
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws IOException {
+                calls.incrementAndGet();
+                return new StructuredResult(
+                        new ChatResult(
+                                Message.assistant(
+                                        "{\"facts\":[{\"text\":\"should not persist\",\"scope\":\"project\"}]}", null),
+                                new Usage(1, 1, 2)),
+                        true);
+            }
+        };
+        final var policy = new MemoryProductionPolicy();
+        policy.set("s-disabled", false);
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null,
+                store,
+                mapper,
+                EXECUTOR,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        // no-op
+                    }
+                },
+                Clock.systemUTC(),
+                null,
+                "s-disabled",
+                null,
+                policy,
+                null);
+        // neither the end-of-turn hook nor the session-close forced pass may mine anything
+        extractor.asyncExtractNow(List.of(Message.user("a durable fact appears here")), ChatSettings.EMPTY, true);
+        Thread.sleep(200);
+        assertEquals(0, calls.get(), "a disabled session must not fire an extraction call");
+        assertFalse(
+                extractor.forceExtractNow(List.of(Message.user("a durable fact appears here"))),
+                "forced pass is a no-op when disabled");
+        assertEquals(0, calls.get(), "the forced pass must not call the LLM either");
+        assertTrue(store.readProject().isBlank(), "nothing may reach the store while disabled");
     }
 
     @Test
@@ -382,6 +439,7 @@ class MemoryExtractorTest {
                 null,
                 "s-forced",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         // a below-threshold delta must still be extracted when forced (session close)
         final var messages = new ArrayList<Message>();
@@ -426,6 +484,7 @@ class MemoryExtractorTest {
                 null,
                 "s-async",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         // the end-of-turn hook is not debounced: the first call must run right away
         extractor.asyncExtractNow(List.of(Message.user("one")), ChatSettings.EMPTY);
@@ -472,6 +531,7 @@ class MemoryExtractorTest {
                 null,
                 "s-gating",
                 null,
+                null, // memory production policy (default: enabled)
                 null);
         final var one = List.of(Message.user("one"));
         final var two = List.of(Message.user("one"), Message.user("two"));

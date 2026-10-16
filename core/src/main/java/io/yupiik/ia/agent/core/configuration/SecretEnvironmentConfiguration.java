@@ -58,7 +58,7 @@ public record SecretEnvironmentConfiguration(
         List<String> qualifiers,
 
         @Property(
-                defaultValue = "java.util.List.of(\"PWD\", \"OLDPWD\")",
+                defaultValue = "java.util.List.of(\"PWD\", \"OLDPWD\", \"SDKMAN_OLD_PWD\")",
                 documentation =
                         "Environment variable NAMES that are never harvested as secrets, whatever the keyword/qualifier "
                                 + "rules say. Matched exactly (case-sensitive). Defaults to the shell working-directory "

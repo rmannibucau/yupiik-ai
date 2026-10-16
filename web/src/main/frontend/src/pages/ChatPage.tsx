@@ -263,6 +263,24 @@ export function ChatPage({
     await call('session.slash', { id: sessionId, text: `/btw ${btw.question}` }).catch(() => {});
   }, [sessionId, btw?.question]);
 
+  // the /help modal: opened when the user dispatches /help, fed by the resulting "transcript" SSE
+  // event (which /help renders through, and which the inline block renderer deliberately skips), and
+  // dismissed via the Close button, Esc or the backdrop.
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [helpContent, setHelpContent] = useState<string | null>(null);
+  // capture the /help transcript as it streams in and show it in the big scrollable modal
+  useEffect(() => {
+    if (!helpOpen) return;
+    const message = latestTranscriptMessage(events);
+    if (message !== null) {
+      setHelpContent(message);
+    }
+  }, [events, helpOpen]);
+  useEffect(() => {
+    if (helpOpen) return;
+    setHelpContent(null);
+  }, [helpOpen]);
+
   // Issue #1: ensure the session is served by the backend AND its tab is registered. App normally
   // registers the tab on /session/:id navigation; this is the safety net for any mount that skipped it
   // (e.g. openSession dedup is a no-op when App already added the tab). We only register when the
@@ -535,6 +553,12 @@ export function ChatPage({
       // slash commands are dispatched server-side (a /command line is never sent to the LLM) and
       // the sidebar is re-synced because such commands may change mode/provider/model/permissions.
       if (text.startsWith('/')) {
+        if (isHelpCommand(text)) {
+          // /help renders its markdown through a "transcript" event the inline renderer skips; open
+          // the big modal and let the streaming effect above feed it the markdown as it arrives.
+          setHelpOpen(true);
+          setHelpContent(null);
+        }
         await call('session.slash', { id: sessionId, text }).catch(() => undefined);
         loadSidebar();
       } else {
@@ -910,6 +934,7 @@ export function ChatPage({
       <StatusBar status={status} busy={busy} initializing={initializing} btw={btw} onOpenBtw={() => setBtwOpen(true)} onClearBtw={clearBtw} />
       <RequestModal request={pending} onAnswer={answer as (id: number, value: unknown) => void} />
       {btwOpen && <BtwModal btw={btw} onClose={() => setBtwOpen(false)} onRetry={retryBtw} />}
+      {helpOpen && <HelpModal content={helpContent} onClose={() => setHelpOpen(false)} />}
       <div className="border-t p-3" style={{ borderColor: 'var(--yca-border)' }}>
         <div className="relative">
           {showCompletion && (
@@ -1540,6 +1565,25 @@ export function todoDiffSummary(
   }
   for (const p of prev) {
     if (p.status !== 'cancelled' && !nextHas(p.content)) return `☐ ${p.content}`; // dropped
+  }
+  return null;
+}
+
+/** Whether a submitted prompt is the /help slash command (leading slash help, even with args). */
+export function isHelpCommand(text: string): boolean {
+  return /^\/help\b/.test(text?.trim() ?? '');
+}
+
+/**
+ * The newest "transcript" event's message, or null when none is present. /help renders the command
+ * catalog through a "transcript" event (which the inline block renderer deliberately skips); the big
+ * modal reads it from the raw SSE event log through this helper.
+ */
+export function latestTranscriptMessage(events: ReadonlyArray<{ type: string; message?: string | null }>): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    if (events[i].type === 'transcript') {
+      return events[i].message ?? '';
+    }
   }
   return null;
 }
@@ -2279,6 +2323,84 @@ function BtwModal({
           >
             Close
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The /help modal: a big, near-full-view scrollable panel with the command catalog rendered from
+ * the "transcript" event /help dispatches (which the inline block renderer intentionally skips).
+ * Sized with margins instead of a small centered card so the whole command list is readable, with
+ * an internal scroll for long content. Closable via the Close button, Esc, or clicking the backdrop.
+ */
+function HelpModal({ content, onClose }: { content: string | null; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 sm:p-8"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Help"
+        className="flex h-[88vh] w-[min(960px,94vw)] flex-col overflow-hidden rounded-lg"
+        style={{ border: '1px solid var(--yca-border)', background: 'var(--yca-panel-2)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          className="flex shrink-0 items-center gap-2 border-b px-5 py-3"
+          style={{ borderColor: 'var(--yca-border)' }}
+        >
+          <span
+            className="shrink-0 rounded px-1.5 py-0.5 text-xs font-bold uppercase"
+            style={{ background: 'rgba(70,247,47,0.12)', color: 'var(--yca-accent)' }}
+          >
+            help
+          </span>
+          <div className="min-w-0 flex-1 truncate text-sm font-semibold" style={{ color: 'var(--yca-text)' }}>
+            Slash commands
+          </div>
+          <button
+            onClick={onClose}
+            className="shrink-0 rounded px-1.5 leading-none hover:bg-white/10"
+            style={{ color: 'var(--yca-muted)' }}
+            title="Close"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          {content == null ? (
+            <div className="py-6 text-sm" style={{ color: 'var(--yca-muted)' }}>
+              loading…
+            </div>
+          ) : (
+            <div
+              className="prose prose-sm max-w-none text-sm leading-relaxed"
+              style={{ color: 'var(--yca-text)' }}
+            >
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={{ a: ({ children, ...props }) => (
+                  <a {...props} target="_blank" rel="noreferrer" className="underline">
+                    {children}
+                  </a>
+                ) }}
+              >
+                {content}
+              </ReactMarkdown>
+            </div>
+          )}
         </div>
       </div>
     </div>

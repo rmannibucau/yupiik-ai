@@ -20,6 +20,7 @@ import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
+import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
@@ -45,6 +46,10 @@ public final class SessionRuntime {
     private final StatusReporter status;
     private final ContextManager contextManager;
     private final SystemPromptBuilder systemPromptBuilder;
+    // the per-session memory-production flag holder + the session id it is keyed by, wired by the
+    // SessionRuntimeFactory so a closed session releases its entry (no leak in the singleton)
+    private final MemoryProductionPolicy memoryProductionPolicy;
+    private final String memoryProductionKey;
 
     public SessionRuntime(
             final AgentLoop loop,
@@ -55,6 +60,20 @@ public final class SessionRuntime {
             final StatusReporter status,
             final ContextManager contextManager,
             final SystemPromptBuilder systemPromptBuilder) {
+        this(loop, permissions, feedback, usage, todos, status, contextManager, systemPromptBuilder, null, null);
+    }
+
+    SessionRuntime(
+            final AgentLoop loop,
+            final PermissionService permissions,
+            final UserFeedbackService feedback,
+            final UsageTracker usage,
+            final TodoStore todos,
+            final StatusReporter status,
+            final ContextManager contextManager,
+            final SystemPromptBuilder systemPromptBuilder,
+            final MemoryProductionPolicy memoryProductionPolicy,
+            final String memoryProductionKey) {
         this.loop = loop;
         this.permissions = permissions;
         this.feedback = feedback;
@@ -63,6 +82,8 @@ public final class SessionRuntime {
         this.status = status;
         this.contextManager = contextManager;
         this.systemPromptBuilder = systemPromptBuilder;
+        this.memoryProductionPolicy = memoryProductionPolicy;
+        this.memoryProductionKey = memoryProductionKey;
     }
 
     /** The session's own agent loop (turn execution, per-turn metrics). */
@@ -118,5 +139,9 @@ public final class SessionRuntime {
     /** Releases the session: fires the {@code yca.hooks.SessionEnded} hook once (idempotent like the loop). */
     public void close() {
         loop.close();
+        // release the per-session memory-production flag so the application-scoped policy never leaks
+        if (memoryProductionPolicy != null && memoryProductionKey != null && !memoryProductionKey.isBlank()) {
+            memoryProductionPolicy.clear(memoryProductionKey);
+        }
     }
 }

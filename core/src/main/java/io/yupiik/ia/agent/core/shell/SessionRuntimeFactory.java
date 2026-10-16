@@ -35,6 +35,7 @@ import io.yupiik.ia.agent.core.events.SessionStartedEvent;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.memory.MemoryCompactor;
+import io.yupiik.ia.agent.core.memory.MemoryProductionPolicy;
 import io.yupiik.ia.agent.core.memory.MemoryStore;
 import io.yupiik.ia.agent.core.permissions.BashRulesRegistry;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
@@ -76,6 +77,7 @@ public class SessionRuntimeFactory {
     private final PrecisionDurationMarkerProvider precisionDurationMarker;
     private final ExecutorService executor;
     private final BashRulesRegistry bashRulesRegistry;
+    private final MemoryProductionPolicy memoryProductionPolicy;
     private volatile io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor;
 
     public SessionRuntimeFactory(
@@ -98,6 +100,7 @@ public class SessionRuntimeFactory {
             final PrecisionDurationMarkerProvider precisionDurationMarker,
             final ExecutorService executor,
             final BashRulesRegistry bashRulesRegistry,
+            final MemoryProductionPolicy memoryProductionPolicy,
             final io.yupiik.ia.agent.core.security.SecretRedactor secretRedactor) {
         this.chatClient = chatClient;
         this.toolRegistry = toolRegistry;
@@ -118,6 +121,7 @@ public class SessionRuntimeFactory {
         this.precisionDurationMarker = precisionDurationMarker;
         this.executor = executor;
         this.bashRulesRegistry = bashRulesRegistry;
+        this.memoryProductionPolicy = memoryProductionPolicy;
         this.secretRedactor = secretRedactor;
     }
 
@@ -151,6 +155,7 @@ public class SessionRuntimeFactory {
                 usage,
                 sessionId,
                 memoryCompactor,
+                memoryProductionPolicy,
                 secretRedactor);
         final var systemPromptBuilder = new SystemPromptBuilder(
                 configuration,
@@ -206,7 +211,16 @@ public class SessionRuntimeFactory {
                     sessionKey));
         }
         return new SessionRuntime(
-                loop, permissions, feedback, usage, todos, status, contextManager, systemPromptBuilder);
+                loop,
+                permissions,
+                feedback,
+                usage,
+                todos,
+                status,
+                contextManager,
+                systemPromptBuilder,
+                memoryProductionPolicy,
+                sessionId);
     }
 
     /** Convenience: the key and the initial session id are the same value. */
@@ -263,6 +277,7 @@ public class SessionRuntimeFactory {
         this.executor = null;
         this.precisionDurationMarker = null;
         this.bashRulesRegistry = null;
+        this.memoryProductionPolicy = null;
         this.secretRedactor = null;
     }
 }

@@ -82,6 +82,7 @@ class SessionRuntimeTest {
                 new PrecisionDurationMarkerProvider(),
                 null,
                 null,
+                null, // memory production policy
                 null);
     }
 

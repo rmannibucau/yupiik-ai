@@ -42,6 +42,7 @@ import io.yupiik.ia.agent.core.llm.ToolCall;
 import io.yupiik.ia.agent.core.permissions.PermissionService;
 import io.yupiik.ia.agent.core.question.UserFeedbackService;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.security.OutboundLlmRequest;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
 import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
@@ -1365,8 +1366,7 @@ public class AgentLoop {
                 final var model = requestModel(resolved);
                 // secret redaction: let observer(s) (the default SecretRedactor, or custom
                 // extensions) transform the outgoing messages before they reach the provider
-                final var outbound =
-                        new io.yupiik.ia.agent.core.security.OutboundLlmFilter(messages, chatSettings, sessionId);
+                final var outbound = new OutboundLlmRequest(messages, chatSettings, sessionId);
                 emitter.emit(outbound);
                 final var wireMessages = outbound.messages();
                 lastLlmPayload = new LlmPayload(

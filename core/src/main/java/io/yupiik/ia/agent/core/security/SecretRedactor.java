@@ -67,7 +67,7 @@ public class SecretRedactor {
 
     /* ---------------- outbound ---------------- */
 
-    public void onOutbound(@OnEvent @Order(100) final OutboundLlmFilter event) {
+    public void onOutbound(@OnEvent @Order(100) final OutboundLlmRequest event) {
         final var mode = modeFor(event.sessionId());
         if (mode == null || mode == SecretRedactionMode.PASSTHROUGH) {
             return; // disabled or per-session passthrough: send raw
