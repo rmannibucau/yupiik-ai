@@ -63,7 +63,7 @@ public record ToolUsePreEvent(
 
                 Input payload (`ToolUsePreEvent.Payload`, on stdin as camelCase JSON):
                 - `eventContext`: shared session/agent/cwd/mode/model context
-                - `toolName`: tool id (eg. `bash`, `read_file`)
+                - `toolName`: tool id (eg. `bash`, `read`)
                 - `toolInput`: raw tool arguments as the agent provided them
                 - `toolUseId`: call id
 
@@ -75,7 +75,7 @@ public record ToolUsePreEvent(
 
     /**
      * The serializable input payload of {@link ToolUsePreEvent}: what a callback receives on stdin for a tool call
-     * about to run. {@code toolName} is the tool id ("bash", "read_file", ...) — bash is a regular tool, there is
+     * about to run. {@code toolName} is the tool id ("bash", "read", ...) — bash is a regular tool, there is
      * no dedicated bash event. {@code toolInput} is the raw parsed tool arguments as the agent provided them.
      */
     @JsonModel

@@ -157,8 +157,7 @@ class SessionStoreTest {
                         2,
                         "assistant",
                         "reading",
-                        List.of(new ToolCall(
-                                "c1", "function", new FunctionCall("read_file", "{\"path\":\"a\"}"), null)),
+                        List.of(new ToolCall("c1", "function", new FunctionCall("read", "{\"path\":\"a\"}"), null)),
                         "c1"));
 
         final var loaded = store.load(id);
@@ -167,7 +166,7 @@ class SessionStoreTest {
         assertEquals("hi", loaded.get(0).content());
         assertEquals("assistant", loaded.get(1).role());
         assertEquals("reading", loaded.get(1).content());
-        assertEquals("read_file", loaded.get(1).toolCalls().get(0).function().name());
+        assertEquals("read", loaded.get(1).toolCalls().get(0).function().name());
         assertEquals("c1", loaded.get(1).toolCallId());
     }
 
@@ -263,11 +262,11 @@ class SessionStoreTest {
                         "assistant",
                         "reading",
                         List.of(
-                                new ToolCall("c1", "function", new FunctionCall("read_file", "{\"path\":\"a\"}"), null),
+                                new ToolCall("c1", "function", new FunctionCall("read", "{\"path\":\"a\"}"), null),
                                 new ToolCall("c2", "function", new FunctionCall("grep", "{\"pattern\":\"x\"}"), null)),
                         null));
         // legacy shape: tool result carrying the tool NAME instead of the call id
-        store.append(id, SessionEntry.of(3, "tool", "ok", null, "read_file"));
+        store.append(id, SessionEntry.of(3, "tool", "ok", null, "read"));
 
         final var loaded = store.load(id);
         assertEquals(3, loaded.size());

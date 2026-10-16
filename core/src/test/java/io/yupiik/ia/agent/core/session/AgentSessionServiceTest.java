@@ -63,7 +63,7 @@ class AgentSessionServiceTest {
                 return Map.of(
                         "fs",
                                 List.of(
-                                        tool("read_file", "[fs] Read a file\n\nlong"),
+                                        tool("read", "[fs] Read a file\n\nlong"),
                                         tool("write_file", "[fs] Write a file")),
                         "code", List.of(tool("find_symbol", "[code] Find a symbol")));
             }
@@ -83,7 +83,7 @@ class AgentSessionServiceTest {
                 .findFirst()
                 .orElseThrow();
         assertEquals(
-                List.of("read_file", "write_file"),
+                List.of("read", "write_file"),
                 fs.tools().stream().map(AgentSessionService.ToolInfo::name).toList());
         assertEquals("Read a file", fs.tools().get(0).description());
     }
@@ -93,7 +93,7 @@ class AgentSessionServiceTest {
         final var service = service(new McpManager() {
             @Override
             public Map<String, List<EmbeddedTool>> toolsByServer() {
-                return Map.of("fs", List.of(tool("read_file", "Read a file"), tool("write_file", "Write a file")));
+                return Map.of("fs", List.of(tool("read", "Read a file"), tool("write_file", "Write a file")));
             }
         });
 
@@ -512,10 +512,7 @@ class AgentSessionServiceTest {
                         Message.assistant(
                                 "reading",
                                 List.of(new ToolCall(
-                                        "call-1",
-                                        "function",
-                                        new FunctionCall("read_file", "{\"path\":\"a.txt\"}"),
-                                        null))),
+                                        "call-1", "function", new FunctionCall("read", "{\"path\":\"a.txt\"}"), null))),
                         Message.tool("call-1", "file body"));
             }
         };
@@ -526,7 +523,7 @@ class AgentSessionServiceTest {
         assertEquals(3, dump.messages().size());
         assertNull(dump.messages().get(0).toolName());
         assertNull(dump.messages().get(1).toolName());
-        assertEquals("read_file", dump.messages().get(2).toolName());
+        assertEquals("read", dump.messages().get(2).toolName());
     }
 
     @Test

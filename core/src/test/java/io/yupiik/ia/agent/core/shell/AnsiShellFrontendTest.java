@@ -208,8 +208,8 @@ class AnsiShellFrontendTest {
 
         frontend.onEvent(new AgentEvent.TextDelta("hel", "s1"));
         frontend.onEvent(new AgentEvent.TextDelta("lo", "s1"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "out", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "out", true, "s1"));
         frontend.onEvent(new AgentEvent.TurnDone("hello", "s1"));
         frontend.endTurn();
 

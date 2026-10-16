@@ -24,13 +24,13 @@ public record BuiltinToolsConfiguration(
         @Property(
                 defaultValue = "true",
                 documentation =
-                        "Register the embedded local tool server (bash, read_file, write_file, edit_file, glob, grep, list_dir, write_todo, ask_user, memory_write, webfetch, websearch, apply_patch, skill, ...). Set to false to expose tools only through configured MCP servers.")
+                        "Register the embedded local tool server (bash, read, write_file, edit_file, glob, grep, write_todo, ask_user, memory_write, webfetch, websearch, apply_patch, skill, ...). Set to false to expose tools only through configured MCP servers.")
         boolean enabled,
 
         @Property(
                 defaultValue = "java.util.List.of()",
                 documentation =
-                        "Allow-list of built-in tool names exposed to the model (exact names, eg. read_file, edit_file, glob, grep, list_dir, bash, write_file, apply_patch). Empty keeps every enabled tool. A lean set shrinks the wire tool schemas that ride every request - the main per-call token lever after the system prompt (see features/provider-tuning).")
+                        "Allow-list of built-in tool names exposed to the model (exact names, eg. read, edit_file, glob, grep, bash, write_file, apply_patch). Empty keeps every enabled tool. A lean set shrinks the wire tool schemas that ride every request - the main per-call token lever after the system prompt (see features/provider-tuning).")
         List<String> enabledTools,
 
         @Property(

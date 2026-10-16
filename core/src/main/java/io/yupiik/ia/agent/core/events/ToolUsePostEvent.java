@@ -53,7 +53,7 @@ public record ToolUsePostEvent(
 
                 Input payload (`ToolUsePostEvent.Payload`, on stdin as camelCase JSON):
                 - `eventContext`: shared session/agent/cwd/mode/model context
-                - `toolName`: tool id (eg. `bash`, `read_file`)
+                - `toolName`: tool id (eg. `bash`, `read`)
                 - `toolInput`: the raw tool arguments
                 - `toolUseId`: call id
                 - `success`: whether the tool call succeeded

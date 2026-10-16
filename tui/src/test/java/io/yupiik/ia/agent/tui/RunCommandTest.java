@@ -393,8 +393,8 @@ class RunCommandTest {
                     final String sessionId,
                     final List<Message> history,
                     final BooleanSupplier cancelled) {
-                shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", sessionId));
-                shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", sessionId));
+                shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, sessionId));
                 shellRegistry.onEvent(new AgentEvent.TurnDone("done", sessionId));
                 return "ok";
             }

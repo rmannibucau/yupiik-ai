@@ -33,7 +33,7 @@ public record ToolsConfiguration(
                 defaultValue = "true",
                 documentation =
                         "Run consecutive read-only tool calls of a single model reply concurrently on virtual threads"
-                                + " (eg. parallel read_file/grep batches). State-changing tools stay sequential and the"
+                                + " (eg. parallel read/grep batches). State-changing tools stay sequential and the"
                                 + " message order always follows the model's call order. Set to false for fully"
                                 + " sequential tool execution.")
         boolean parallelReadonly,

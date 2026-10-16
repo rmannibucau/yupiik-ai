@@ -16,6 +16,8 @@
 package io.yupiik.ia.agent.core.tools.builtin;
 
 import static io.yupiik.ia.agent.core.tools.ToolArgs.arg;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.optBool;
+import static io.yupiik.ia.agent.core.tools.ToolArgs.optInt;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -39,7 +41,6 @@ import java.util.Map;
 @ApplicationScoped
 public class GlobTool implements EmbeddedTool {
 
-    private static final int MAX_RESULTS = 500;
     private static final List<String> SKIP_PARTS = List.of("/target/", "/.git/", "/node_modules/", "/build/", "/.yca/");
 
     private final CodingAgentConfiguration configuration;
@@ -59,9 +60,8 @@ public class GlobTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Fast file pattern matching tool (eg. `**/*.java`, `src/**/*.xml`), skipping build output and ignored "
-                + "directories. Use this instead of bash find/ls. You can call multiple tools in a single reply: "
-                + "speculatively batch several potentially useful searches.";
+        return "Search file paths using a glob pattern (examples: `**/*.java`, `src/**/*.xml`), skipping build output "
+                + "and ignored directories. Set hidden=true to include hidden files/directories.";
     }
 
     @Override
@@ -74,7 +74,9 @@ public class GlobTool implements EmbeddedTool {
         return Schemas.object(
                 Map.of(
                         "pattern", Schemas.str("Glob pattern, eg. `**/*.java`."),
-                        "path", Schemas.str("Base directory, default `.`.")),
+                        "path", Schemas.str("Base directory, default `.`."),
+                        "hidden", Schemas.bool("Include hidden files and directories, default false."),
+                        "limit", Schemas.intProp("Maximum number of matching files to return, default 100.")),
                 "pattern");
     }
 
@@ -99,13 +101,15 @@ public class GlobTool implements EmbeddedTool {
                 ? FileSystems.getDefault().getPathMatcher("glob:" + pattern.substring(3))
                 : null;
         final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
+        final var hidden = optBool(args, "hidden", false);
+        final var limit = (int) Math.min(1000, Math.max(1, optInt(args, "limit", 100)));
         final var matches = new ArrayList<String>();
         final var truncated = new boolean[] {false};
         try {
             Files.walkFileTree(base, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) {
-                    if (!dir.equals(base) && skip(dir, ignore)) {
+                    if (!dir.equals(base) && skip(dir, ignore, hidden)) {
                         return FileVisitResult.SKIP_SUBTREE;
                     }
                     return FileVisitResult.CONTINUE;
@@ -113,13 +117,13 @@ public class GlobTool implements EmbeddedTool {
 
                 @Override
                 public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) {
-                    if (skip(file, ignore)) {
+                    if (skip(file, ignore, hidden)) {
                         return FileVisitResult.CONTINUE;
                     }
                     final var rel = base.relativize(file);
                     final var relPath = rel.toString().isEmpty() ? file.getFileName() : rel;
                     if (matcher.matches(relPath) || (flatMatcher != null && flatMatcher.matches(relPath))) {
-                        if (matches.size() >= MAX_RESULTS) {
+                        if (matches.size() >= limit) {
                             truncated[0] = true;
                             return FileVisitResult.TERMINATE;
                         }
@@ -136,13 +140,17 @@ public class GlobTool implements EmbeddedTool {
             sb.append(m).append('\n');
         }
         if (truncated[0]) {
-            sb.append("... results capped at ").append(MAX_RESULTS).append('\n');
+            sb.append("... results capped at ").append(limit).append('\n');
         }
         return ToolResult.ok(sb.toString());
     }
 
-    private static boolean skip(final Path p, final FileIgnore ignore) {
+    private static boolean skip(final Path p, final FileIgnore ignore, final boolean hidden) {
         final var n = p.toString();
+        final var fileName = p.getFileName() == null ? "" : p.getFileName().toString();
+        if (!hidden && fileName.startsWith(".")) {
+            return true;
+        }
         for (final var part : SKIP_PARTS) {
             if (n.contains(part)) {
                 return true;

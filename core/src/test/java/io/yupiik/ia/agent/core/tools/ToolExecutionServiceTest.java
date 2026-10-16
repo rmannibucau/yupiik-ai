@@ -94,8 +94,8 @@ class ToolExecutionServiceTest {
     void nonBashToolsAreNotReprocessed() {
         final var output = "line\n".repeat(50);
         final var reports = new ArrayList<String>();
-        final var result = service().execute(tool("read_file", output), Map.of(), context(reports));
-        assertEquals(output, result.output(), "read_file output must not be re-truncated by processors");
+        final var result = service().execute(tool("read", output), Map.of(), context(reports));
+        assertEquals(output, result.output(), "read output must not be re-truncated by processors");
         assertTrue(reports.isEmpty(), reports.toString());
     }
 

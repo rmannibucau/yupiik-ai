@@ -41,7 +41,7 @@ class ToolRunTest {
         final var run = ToolRun.of(List.of(
                 new ToolRun.Member(card(1, "bash", "grep x", 10, false), "r1"),
                 new ToolRun.Member(card(2, "bash", "grep x", 20, false), "r2"),
-                new ToolRun.Member(card(3, "read_file", "a.java", 5, true), "r3")));
+                new ToolRun.Member(card(3, "read", "a.java", 5, true), "r3")));
         assertEquals(3, run.size());
         assertEquals(2, run.commandCounts().get("grep x")); // same args -> one command bucket
         assertEquals(1, run.commandCounts().get("a.java"));
@@ -88,7 +88,7 @@ class ToolRunTest {
         final var glyphs = Glyphs.of("unicode");
         for (final var c : List.of(
                 card(7, "bash", "grep x", 10, false),
-                card(9, "read_file", "a.java", 5, false),
+                card(9, "read", "a.java", 5, false),
                 card(11, "git", "status", 3, true))) {
             final var text = TuiCommand.hiddenToolLineText(c, palette, glyphs);
             // the ordinal appears in the member label, so the TUI can anchor the overlay
@@ -146,7 +146,7 @@ class ToolRunTest {
         // and no full card bodies, so the run stays compact while each line stays clickable
         final var members = List.of(
                 new ToolRun.Member(card(1, "bash", "ls", 10, false), "r1"),
-                new ToolRun.Member(card(2, "read_file", "x", 20, false), "r2"),
+                new ToolRun.Member(card(2, "read", "x", 20, false), "r2"),
                 new ToolRun.Member(card(3, "bash", "pwd", 5, false), "r3"));
         final var run = ToolRun.of(members);
         assertEquals(3, run.size());

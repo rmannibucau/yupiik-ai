@@ -34,9 +34,9 @@ class ConversationTranscriptTest {
         final var t = new ConversationTranscript();
         t.startUserTurn("hi");
         t.onEvent(new AgentEvent.ThinkingDelta("let me", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolStream("read_file", "body", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true, "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("read", "body", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1"));
         t.onEvent(new AgentEvent.TurnDone("answer", "s1"));
 
         final var md = t.transcript().toString();
@@ -44,7 +44,7 @@ class ConversationTranscriptTest {
         assertTrue(md.contains(ConversationTranscript.THOUGHT_BEGIN));
         assertTrue(md.contains("**Thinking**"));
         assertTrue(md.contains(ConversationTranscript.TOOL_BEGIN));
-        assertTrue(md.contains("*streaming `read_file`: a.txt*"));
+        assertTrue(md.contains("*streaming `read`: a.txt*"));
         assertTrue(md.contains("```text\nbody\n```"));
         assertTrue(md.contains("**Assistant**\n\nanswer"));
         assertFalse(t.busy());
@@ -267,8 +267,8 @@ class ConversationTranscriptTest {
         // round 1: think, say something, call a tool
         t.onEvent(new AgentEvent.ThinkingDelta("first I read the file", "s1"));
         t.onEvent(new AgentEvent.TextDelta("let me look", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true, "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1"));
         // round 2: think again, then the real answer (TurnDone carries it in full)
         t.onEvent(new AgentEvent.ThinkingDelta("now I answer", "s1"));
         t.onEvent(new AgentEvent.TurnDone("here is the answer", "s1"));
@@ -276,12 +276,7 @@ class ConversationTranscriptTest {
         final var md = t.transcript().toString();
         // chronological: thought, what it said before the call, the tool, the final thought, the answer
         assertOrdered(
-                md,
-                "first I read the file",
-                "let me look",
-                "*streaming `read_file`",
-                "now I answer",
-                "here is the answer");
+                md, "first I read the file", "let me look", "*streaming `read`", "now I answer", "here is the answer");
         // one label for the whole turn, not one per chunk
         assertEquals(1, countOccurrences(md, "**Assistant**"), md);
         // what the model said before calling the tool is not lost when the turn ends
@@ -317,8 +312,8 @@ class ConversationTranscriptTest {
         t.onEvent(new AgentEvent.ToolFinished("edit_file", "oldString not found", false, "s1"));
         // round 2: the next message must start clean, without the leaked "` :" prefix
         t.onEvent(new AgentEvent.TextDelta("Le fichier a peut-être bougé depuis.", "s1"));
-        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolFinished("read_file", "body", true, "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read", "body", true, "s1"));
 
         final var md = t.transcript().toString();
         // round 1 keeps its full tail (backtick + " :") attached to the message that produced it
@@ -653,14 +648,14 @@ class ConversationTranscriptTest {
     void parallelToolsEachKeepTheirOwnStreamAndCommand() {
         final var t = new ConversationTranscript();
         // two parallel read-only tools interleave their starts and streams
-        t.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.txt\"}", "s1"));
-        t.onEvent(new AgentEvent.ToolStream("read_file", "content-of-a", "s1"));
+        t.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.txt\"}", "s1"));
+        t.onEvent(new AgentEvent.ToolStream("read", "content-of-a", "s1"));
         t.onEvent(new AgentEvent.ToolStarted("grep", "{\"command\":\"grep -r x\"}", "s1"));
         t.onEvent(new AgentEvent.ToolStream("grep", "match-line", "s1"));
         // A finishes first: its card must carry A's command and A's stream only
-        t.onEvent(new AgentEvent.ToolFinished("read_file", "content-of-a", true, "s1"));
+        t.onEvent(new AgentEvent.ToolFinished("read", "content-of-a", true, "s1"));
         final var mdAfterA = t.transcript().toString();
-        assertTrue(mdAfterA.contains("*streaming `read_file`: a.txt*"), mdAfterA);
+        assertTrue(mdAfterA.contains("*streaming `read`: a.txt*"), mdAfterA);
         assertTrue(mdAfterA.contains("content-of-a"), mdAfterA);
         assertFalse(mdAfterA.contains("match-line"), "B's stream must not leak into A's card: " + mdAfterA);
         // B finishes: its own card with its own content, ordinal strictly after A's
@@ -669,7 +664,7 @@ class ConversationTranscriptTest {
         assertTrue(md.contains("*streaming `grep`: grep -r x*"), md);
         assertTrue(md.contains("match-line"), md);
         assertEquals(2, t.toolCallCount(), "one ordinal per finished call, in finish order");
-        final var iA = md.indexOf("read_file");
+        final var iA = md.indexOf("read");
         final var iB = md.indexOf("grep");
         assertTrue(iA < iB, "cards must follow finish order: " + md);
     }

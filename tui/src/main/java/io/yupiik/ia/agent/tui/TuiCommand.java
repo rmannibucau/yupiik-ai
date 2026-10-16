@@ -4749,7 +4749,7 @@ public class TuiCommand implements Runnable {
         return Line.from(spans.toArray(Span[]::new));
     }
 
-    /** Short run summary: {@code 5 tools · grep ×3 · read_file ×2}. */
+    /** Short run summary: {@code 5 tools · grep ×3 · read ×2}. */
     private String summary(final ToolRun run) {
         final var counts = run.commandCounts();
         final var sb = new StringBuilder(run.size() == 1 ? "1 tool" : run.size() + " tools");
@@ -4793,7 +4793,7 @@ public class TuiCommand implements Runnable {
             // first render before a (#n) header exists: resolve from the started-not-
             // finished FIFO so the live card is still anchored (clickable overlay).
             // the card name is the command when the tool carries one (bash) and the
-            // tool name otherwise (read_file); the FIFO holds both keys
+            // tool name otherwise (read); the FIFO holds both keys
             final var ordinals = state.pendingToolOrdinals.get(card.name());
             if (ordinals != null && !ordinals.isEmpty()) {
                 card = new ToolCard(card.name(), card.args(), card.output(), false, 0, true, ordinals.peekLast());
@@ -4961,7 +4961,7 @@ public class TuiCommand implements Runnable {
     static String condensedCommand(final ToolCard card) {
         if (!card.running()
                 && !card.failed()
-                && ("read_file".equals(card.name())
+                && ("read".equals(card.name())
                         || "write_file".equals(card.name())
                         || "edit_file".equals(card.name()))) {
             return card.keyCommand(TuiCommand::shortenToRelative);

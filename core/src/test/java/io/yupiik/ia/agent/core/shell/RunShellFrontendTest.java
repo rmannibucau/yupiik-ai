@@ -98,24 +98,24 @@ class RunShellFrontendTest {
 
         frontend.onEvent(new AgentEvent.TextDelta("hel", "s1"));
         frontend.onEvent(new AgentEvent.TextDelta("lo", "s1"));
-        frontend.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
-        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "out", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "out", true, "s1"));
         frontend.onEvent(new AgentEvent.Status("working", "s1"));
         frontend.onEvent(new AgentEvent.Error("boom", "s1"));
 
         assertEquals("hello", out.toString(StandardCharsets.UTF_8));
         final var joined = String.join("\n", logs);
-        assertTrue(joined.contains("tool started: read_file"), joined);
+        assertTrue(joined.contains("tool started: read"), joined);
         assertTrue(joined.contains("INFO working"), joined);
         assertTrue(joined.contains("SEVERE boom"), joined);
-        assertFalse(joined.contains("[read_file] out"), "tool output must not print when showToolOutput is off");
+        assertFalse(joined.contains("[read] out"), "tool output must not print when showToolOutput is off");
     }
 
     @Test
     void toolOutputPrintsOnceWhenNotStreamedAndEnabled() {
         final var frontend = new RunShellFrontend(false, ToolOutputVisibility.SHOWN);
 
-        frontend.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, "s1"));
+        frontend.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1"));
 
         assertEquals(1, logs.size());
         assertTrue(logs.get(0).contains("line1\nline2"), logs.get(0));

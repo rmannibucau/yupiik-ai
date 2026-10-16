@@ -29,7 +29,7 @@ import java.util.Map;
 /**
  * Slices the source lines of a single graph symbol (type or method) instead of re-reading the whole file:
  * the graph already knows every symbol's {@code file:start-end} span, so one method costs a few dozen lines
- * of context instead of a 2000-line {@code read_file}.
+ * of context instead of a 2000-line {@code read}.
  */
 @ApplicationScoped
 public class ReadSymbolTool implements EmbeddedTool {
@@ -51,9 +51,9 @@ public class ReadSymbolTool implements EmbeddedTool {
     @Override
     public String description() {
         return "Read the source lines of a single symbol (type, interface, enum or method) from the structural code "
-                + "graph, identified by fully-qualified name or unique simple name. Much cheaper than read_file for "
+                + "graph, identified by fully-qualified name or unique simple name. Much cheaper than read for "
                 + "inspecting one type or method: only the symbol span (plus optional context lines) is returned, "
-                + "with the same numbered-line format as read_file.";
+                + "with the same numbered-line format as read.";
     }
 
     @Override

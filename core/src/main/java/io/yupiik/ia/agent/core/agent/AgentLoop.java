@@ -2094,7 +2094,7 @@ public class AgentLoop {
                     continue;
                 }
                 final var name = call.function().name();
-                if ("read_file".equals(name) || "grep".equals(name) || "glob".equals(name)) {
+                if ("read".equals(name) || "grep".equals(name) || "glob".equals(name)) {
                     final var path = toolFilePath(call);
                     if (path != null) {
                         readsAfter.add(path);
@@ -2780,7 +2780,7 @@ public class AgentLoop {
     }
 
     /** File tools whose results participate in stale-read invalidation. */
-    private static final Set<String> FILE_READ_TOOLS = Set.of("read_file");
+    private static final Set<String> FILE_READ_TOOLS = Set.of("read");
 
     private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file", "apply_patch");
 
@@ -2788,7 +2788,7 @@ public class AgentLoop {
     private static final String STALE_READ_MARKER = "[stale read cleared:";
 
     /**
-     * Tracks which {@code read_file} results sit in the conversation and by which path, so a later
+     * Tracks which {@code read} results sit in the conversation and by which path, so a later
      * successful write to the same path can flag them as superseded instead of letting the model
      * reason over stale file snapshots until prune/compaction eventually drops them. The flag rides
      * inside the write tool's own result message (brand-new content that turn), so nothing is ever
@@ -2803,7 +2803,7 @@ public class AgentLoop {
         }
 
         /**
-         * Records a {@code read_file} (by call id), or computes which earlier read paths a
+         * Records a {@code read} (by call id), or computes which earlier read paths a
          * successful write invalidated. Never mutates {@code messages}: the caller folds the
          * returned paths into the write tool's own result message, which is appended right after
          * this call (zero prefix-cache cost — that message is new content this round anyway).
@@ -2854,7 +2854,7 @@ public class AgentLoop {
         }
     }
 
-    /** Rebuilds the {@code callId -> path} index of past {@code read_file} calls from the conversation. */
+    /** Rebuilds the {@code callId -> path} index of past {@code read} calls from the conversation. */
     private Map<String, Path> readsFromHistory(final List<Message> messages) {
         if (messages.isEmpty()) {
             return Map.of();
@@ -2866,7 +2866,7 @@ public class AgentLoop {
             }
             for (final var call : message.toolCalls()) {
                 final var fn = call.function();
-                if (fn == null || !"read_file".equals(fn.name()) || fn.arguments() == null) {
+                if (fn == null || !"read".equals(fn.name()) || fn.arguments() == null) {
                     continue;
                 }
                 try {
@@ -3200,7 +3200,7 @@ public class AgentLoop {
 
     /**
      * Coverage keys of a successful read-only tool call, used by the exploration-plateau detector:
-     * a normalized absolute path for file tools (page-aware for read_file, pattern-aware for grep),
+     * a normalized absolute path for file tools (page-aware for read, pattern-aware for grep),
      * and for bash the configured bash-rules prefix + target from {@link PermissionService} - so the
      * recognized read-only families come from the config, never from a hardcoded command list.
      * Returns an empty list when the call does not map to a recognisable coverage target (writes,
@@ -3229,9 +3229,7 @@ public class AgentLoop {
                     ? (pattern.isBlank() ? List.of() : List.of("grep:" + pattern))
                     : List.of("grep:" + pattern + ":" + normalizeCoveragePath(path));
         }
-        if (("glob".equals(name) || "list_dir".equals(name))
-                && args.get("path") instanceof final String path
-                && !path.isBlank()) {
+        if ("glob".equals(name) && args.get("path") instanceof final String path && !path.isBlank()) {
             return List.of(normalizeCoveragePath(path));
         }
         return List.of();

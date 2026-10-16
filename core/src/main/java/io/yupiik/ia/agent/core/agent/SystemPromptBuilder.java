@@ -195,7 +195,7 @@ public class SystemPromptBuilder {
                 + "and propose the closest available tool instead of calling an unknown one.\n");
         sb.append('\n');
         sb.append("Tool usage policy:\n");
-        sb.append("- Use the dedicated search tools for code exploration (grep, glob, read_file, list_dir); do NOT use "
+        sb.append("- Use the dedicated search tools for code exploration (grep, glob, read); do NOT use "
                 + "bash for grep/rg/find. Reserve other bash for real system commands (git, mvn, npm, docker...).\n");
         // when the read-only survey rewrite is enabled, invite the batched bash survey form (it is executed
         // in-process, safely and capped) instead of fragmenting the exploration into many isolated tool reads.

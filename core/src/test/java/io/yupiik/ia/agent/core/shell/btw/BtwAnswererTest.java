@@ -67,7 +67,7 @@ class BtwAnswererTest {
 
     /** A realistic DSML tool-call block as emitted by DeepSeek V4. */
     private static final String DSML_BLOCK = "<\uFF5CDSML\uFF5Ctool_calls>\n"
-            + "<\uFF5CDSML\uFF5Cinvoke name=read_file>\n"
+            + "<\uFF5CDSML\uFF5Cinvoke name=read>\n"
             + "<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
             + "</\uFF5CDSML\uFF5Cinvoke>\n"
             + "</\uFF5CDSML\uFF5Ctool_calls>";
@@ -162,7 +162,7 @@ class BtwAnswererTest {
         return new EmbeddedTool() {
             @Override
             public String name() {
-                return "read_file";
+                return "read";
             }
 
             @Override
@@ -229,7 +229,7 @@ class BtwAnswererTest {
     private String response(final String body, final int request) {
         if (body.contains("NATIVE READ")) {
             return request == 1
-                    ? toolResponse("read_file", "{\"path\":\"src/App.java\"}")
+                    ? toolResponse("read", "{\"path\":\"src/App.java\"}")
                     : textResponse("read round-trip done");
         }
         if (body.contains("BASH CAT")) {
@@ -248,7 +248,7 @@ class BtwAnswererTest {
                     : textResponse("write done");
         }
         if (body.contains("TOOLCALL MARKUP")) {
-            // first request carries the markup the parser must turn into a real read_file call
+            // first request carries the markup the parser must turn into a real read call
             return request == 1
                     ? textResponse("the parsed answer\n\n" + DSML_BLOCK)
                     : textResponse("the parsed answer");
@@ -343,7 +343,7 @@ class BtwAnswererTest {
         assertFalse(body.contains("\"max_tokens\""), body);
         // /btw now declares the plan-mode read-only tools instead of running tool-less
         assertTrue(body.contains("\"tools\""), body);
-        assertTrue(body.contains("read_file"), body);
+        assertTrue(body.contains("read"), body);
         assertTrue(body.contains("Side question: what did I say?"), body);
         assertTrue(body.contains("hello"), body);
         assertEquals(2, sessionStore.size("s1"));
@@ -428,7 +428,7 @@ class BtwAnswererTest {
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertEquals("the parsed answer", answer);
-        // the DSML block was turned into a real read_file execution, not just stripped
+        // the DSML block was turned into a real read execution, not just stripped
         assertEquals(2, bodies.size(), bodies.toString());
         assertTrue(bodies.get(1).contains("file content: src/App.java"), bodies.get(1));
         assertEquals(1, sessionStore.size("s1"));
@@ -479,7 +479,7 @@ class BtwAnswererTest {
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
         assertTrue(answer.startsWith("> "), answer);
-        assertTrue(answer.contains("Attempted tools: read_file"), answer);
+        assertTrue(answer.contains("Attempted tools: read"), answer);
         // the round cap was reached: six model round-trips, all tool-only
         assertEquals(6, bodies.size(), bodies.toString());
         // a broken exchange is never replayed into the next side question

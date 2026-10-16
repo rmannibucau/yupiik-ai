@@ -67,7 +67,7 @@ class ToolCallMarkupStripperTest {
     void invokeWithoutOuterBlockIsStillRemoved() {
         // DeepSeek V4 intermittently emits a complete invoke while the outer tool_calls
         // opener is missing or corrupted.
-        final var raw = "A\n\n<\uFF5CDSML\uFF5Cinvoke name=read_file>\n{}\n<\uFF5CDSML\uFF5Cend_tools>\n\nB";
+        final var raw = "A\n\n<\uFF5CDSML\uFF5Cinvoke name=read>\n{}\n<\uFF5CDSML\uFF5Cend_tools>\n\nB";
         assertEquals("A\n\nB", stripper.strip(raw));
     }
 
@@ -75,13 +75,13 @@ class ToolCallMarkupStripperTest {
     void legacyV31MarkersAreRemoved() {
         final var begin = "<\uFF5Ctool\u2581calls\u2581begin\uFF5C>";
         final var end = "<\uFF5Ctool\u2581calls\u2581end\uFF5C>";
-        final var raw = "A\n\n" + begin + "read_file\n```json\n{\"path\":\"x\"}\n```" + end + "\n\nB";
+        final var raw = "A\n\n" + begin + "read\n```json\n{\"path\":\"x\"}\n```" + end + "\n\nB";
         assertEquals("A\n\nB", stripper.strip(raw));
     }
 
     @Test
     void asciiMangledDsmlMarkersAreRemoved() {
-        final var raw = "A\n\n<|DSML|tool_calls>\n<|DSML|invoke name=read_file>\n</|DSML|tool_calls>";
+        final var raw = "A\n\n<|DSML|tool_calls>\n<|DSML|invoke name=read>\n</|DSML|tool_calls>";
         assertEquals("A", stripper.strip(raw));
     }
 
@@ -105,14 +105,14 @@ class ToolCallMarkupStripperTest {
 
     @Test
     void unterminatedBlockIsCutToTheEnd() {
-        final var raw = "Answer.\n\n<\uFF5CDSML\uFF5Ctool_calls>\n<\uFF5CDSML\uFF5Cinvoke name=read_file>\n{\"p\":1}";
+        final var raw = "Answer.\n\n<\uFF5CDSML\uFF5Ctool_calls>\n<\uFF5CDSML\uFF5Cinvoke name=read>\n{\"p\":1}";
         assertEquals("Answer.", stripper.strip(raw));
     }
 
     @Test
     void qwenJsonTagIsRemoved() {
         final var raw =
-                "Let me check.\n\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\"}}\n</tool_call>";
+                "Let me check.\n\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"path\": \"a.txt\"}}\n</tool_call>";
         assertEquals("Let me check.", stripper.strip(raw));
     }
 

@@ -325,11 +325,11 @@ class TuiTranscriptModelTest {
 
     @Test
     void nonStreamedToolSuccessFallsBackToFinishedOutput() {
-        model.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
-        model.onEvent(new AgentEvent.ToolFinished("read_file", "line1\nline2", true, "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolFinished("read", "line1\nline2", true, "s1"));
         final var transcript = model.transcript().toString();
         assertTrue(transcript.contains(TuiTranscriptModel.TOOL_BEGIN));
-        assertTrue(transcript.contains("*streaming `read_file`*"));
+        assertTrue(transcript.contains("*streaming `read`*"));
         assertTrue(transcript.contains("```text\nline1\nline2\n```"));
         assertTrue(transcript.contains(TuiTranscriptModel.TOOL_END));
         assertNull(model.runningTool());
@@ -337,8 +337,8 @@ class TuiTranscriptModelTest {
 
     @Test
     void nonStreamedToolSuccessWithEmptyOutputWritesNothing() {
-        model.onEvent(new AgentEvent.ToolStarted("read_file", "{}", "s1"));
-        model.onEvent(new AgentEvent.ToolFinished("read_file", "", true, "s1"));
+        model.onEvent(new AgentEvent.ToolStarted("read", "{}", "s1"));
+        model.onEvent(new AgentEvent.ToolFinished("read", "", true, "s1"));
         assertFalse(model.transcript().toString().contains(TuiTranscriptModel.TOOL_BEGIN));
     }
 

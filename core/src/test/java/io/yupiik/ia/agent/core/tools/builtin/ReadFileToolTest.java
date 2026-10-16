@@ -86,7 +86,7 @@ class ReadFileToolTest {
         final var result = tool.execute(
                 Map.of("path", root.resolve("zzz-does-not-exist.java").toString()));
         assertFalse(result.success());
-        assertTrue(result.output().startsWith("File not found:"), result.output());
+        assertTrue(result.output().startsWith("File or directory not found:"), result.output());
         assertFalse(result.output().contains("Did you mean"), result.output());
     }
 
@@ -107,5 +107,34 @@ class ReadFileToolTest {
                 tool.execute(Map.of("path", "rel.txt"), io.yupiik.ia.agent.core.tools.ToolContext.empty(projectDir));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("session content"), result.output());
+    }
+
+    @Test
+    void readsDirectoryAsFlatListing(@TempDir final Path root) throws IOException {
+        Files.createDirectories(root.resolve("sub"));
+        Files.writeString(root.resolve("a.txt"), "x");
+        Files.writeString(root.resolve("sub/b.txt"), "y");
+        final var tool = new ReadFileTool();
+
+        final var result = tool.execute(Map.of("path", root.toString()));
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().startsWith("Read directory " + root), result.output());
+        assertTrue(result.output().contains("a.txt\n"), result.output());
+        assertTrue(result.output().contains("sub/\n"), result.output()); // dirs end with /
+    }
+
+    @Test
+    void paginatesDirectoryListing(@TempDir final Path root) throws IOException {
+        for (var i = 1; i <= 5; i++) {
+            Files.writeString(root.resolve("f" + i + ".txt"), "x");
+        }
+        final var tool = new ReadFileTool();
+        final var result = tool.execute(Map.of("path", root.toString(), "offset", "2", "limit", "2"));
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().startsWith("Read directory " + root + ", entries 2-3"), result.output());
+        assertTrue(result.output().contains("f2.txt"), result.output());
+        assertTrue(result.output().contains("f3.txt"), result.output());
+        assertFalse(result.output().contains("f1.txt"), result.output());
+        assertTrue(result.output().contains("more entries below, use offset=4"), result.output());
     }
 }

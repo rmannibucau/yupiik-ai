@@ -502,8 +502,7 @@ class MemoryExtractorTest {
                         List.of(new io.yupiik.ia.agent.core.llm.ToolCall(
                                 "tc-2",
                                 "function",
-                                new io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall(
-                                        "read_file", "{\"path\":\"/tmp/x\"}"),
+                                new io.yupiik.ia.agent.core.llm.ToolCall.FunctionCall("read", "{\"path\":\"/tmp/x\"}"),
                                 null))),
                 Message.assistant("the function reads a config file", null),
                 Message.user("<compacted-context> the previous conversation was summarized </compacted-context>"),
@@ -516,7 +515,7 @@ class MemoryExtractorTest {
         assertTrue(!excerpt.contains("system prompt"), "the system prompt must be filtered: " + excerpt);
         assertTrue(!excerpt.contains("huge JSON"), "tool results must be filtered: " + excerpt);
         assertTrue(
-                !excerpt.contains("tc-2") && !excerpt.contains("read_file"),
+                !excerpt.contains("tc-2") && !excerpt.contains("/tmp/x"),
                 "assistant tool-call frames must be filtered: " + excerpt);
         assertTrue(!excerpt.contains("compacted-context"), "compaction digests must be filtered: " + excerpt);
         assertTrue(!excerpt.contains("volatile tail"), "the volatile tail must be filtered: " + excerpt);

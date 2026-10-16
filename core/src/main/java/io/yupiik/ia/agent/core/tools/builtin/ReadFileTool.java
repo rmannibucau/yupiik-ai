@@ -47,15 +47,16 @@ public class ReadFileTool implements EmbeddedTool {
 
     @Override
     public String name() {
-        return "read_file";
+        return "read";
     }
 
     @Override
     public String description() {
-        return "Read a text file, returns numbered lines (`<line>: <content>` aligned for grep correlation). "
-                + "By default returns up to 2000 lines from the start; use offset (1-based line) and limit to read "
-                + "more, and grep to locate content in large files first. Call this in parallel with other reads "
-                + "when you know there are multiple files to inspect; avoid tiny repeated slices.";
+        return "Read the contents of a file or directory: a text file returns numbered lines "
+                + "(`<line>: <content>` aligned for grep correlation); a directory returns its entries one per line "
+                + "(directories end with `/`). Use offset (1-based line/entry) and limit to read large files or "
+                + "directories in sections. Prefer one larger read over many small slices, and use grep to find "
+                + "specific content in large files.";
     }
 
     @Override
@@ -67,9 +68,11 @@ public class ReadFileTool implements EmbeddedTool {
     public Map<String, Object> schema() {
         return Schemas.object(
                 Map.of(
-                        "path", str("File path, absolute or relative to the working directory."),
-                        "offset", Schemas.intProp("1-based line to start from, default 1."),
-                        "limit", Schemas.intProp("Maximum number of lines to read, default 2000.")),
+                        "path", str("File or directory path, absolute or relative to the working directory."),
+                        "offset", Schemas.intProp("1-based line (or directory entry) to start from, default 1."),
+                        "limit",
+                                Schemas.intProp(
+                                        "Maximum number of lines (or directory entries) to read, default 2000.")),
                 "path");
     }
 
@@ -82,14 +85,56 @@ public class ReadFileTool implements EmbeddedTool {
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var path = context.resolvePath(
                 arg(args, "path"), configuration == null ? null : configuration.resolveProjectDir());
-        if (!Files.isRegularFile(path)) {
+        if (!Files.exists(path)) {
             final var suggestion = suggestPath(path);
-            return ToolResult.error(
-                    "File not found: " + path + (suggestion == null ? "" : ". Did you mean: " + suggestion + "?"));
+            return ToolResult.error("File or directory not found: " + path
+                    + (suggestion == null ? "" : ". Did you mean: " + suggestion + "?"));
+        }
+        if (Files.isDirectory(path)) {
+            return listDirectory(path, (int) Math.max(1, optInt(args, "offset", 1)), (int)
+                    Math.min(10_000, optInt(args, "limit", 2000)));
         }
         final var offset = (int) Math.max(1, optInt(args, "offset", 1));
         final var limit = (int) Math.min(10_000, optInt(args, "limit", 2000));
         return renderLines(path, offset, offset + limit - 1);
+    }
+
+    /** Flat directory listing (opencode read parity): entries one per line, dirs end with '/', dirs first. */
+    static ToolResult listDirectory(final Path dir, final int offset, final int limit) {
+        final var entries = new java.util.ArrayList<java.nio.file.Path>();
+        try (final var stream = Files.list(dir)) {
+            stream.forEach(entries::add);
+        } catch (final IOException | UncheckedIOException e) {
+            return ToolResult.error("Cannot list " + dir + ": " + e.getMessage());
+        }
+        entries.sort((a, b) -> {
+            final var ad = Files.isDirectory(a);
+            final var bd = Files.isDirectory(b);
+            if (ad != bd) {
+                return ad ? -1 : 1;
+            }
+            return a.getFileName().toString().compareTo(b.getFileName().toString());
+        });
+        final var start = Math.max(0, offset - 1);
+        final var end = Math.min(entries.size(), start + limit);
+        final var sb = new StringBuilder();
+        final var count = end - start;
+        sb.append("Read directory ")
+                .append(dir)
+                .append(", entries ")
+                .append(offset)
+                .append('-')
+                .append(offset + count - 1)
+                .append('\n');
+        for (final var entry : entries.subList(start, end)) {
+            sb.append(entry.getFileName())
+                    .append(Files.isDirectory(entry) ? "/" : "")
+                    .append('\n');
+        }
+        if (end < entries.size()) {
+            sb.append("... more entries below, use offset=").append(end + 1).append(" to continue\n");
+        }
+        return ToolResult.ok(sb.toString());
     }
 
     /**

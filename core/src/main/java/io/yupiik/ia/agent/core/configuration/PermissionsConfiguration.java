@@ -29,11 +29,10 @@ public record PermissionsConfiguration(
 
         @Property(
                 defaultValue = "java.util.List.of()",
-                documentation =
-                        "Tool name or bash command prefixes always allowed. Comma separated, eg. `read_file,grep`."
-                                + " For bash commands the patterns are matched against every segment of the command"
-                                + " (both bare, eg. `mvn *`, and `bash:` prefixed forms); every segment must match for"
-                                + " the command to be allowed.")
+                documentation = "Tool name or bash command prefixes always allowed. Comma separated, eg. `read,grep`."
+                        + " For bash commands the patterns are matched against every segment of the command"
+                        + " (both bare, eg. `mvn *`, and `bash:` prefixed forms); every segment must match for"
+                        + " the command to be allowed.")
         List<String> allow,
 
         @Property(

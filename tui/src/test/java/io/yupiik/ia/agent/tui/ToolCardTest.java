@@ -103,9 +103,9 @@ class ToolCardTest {
 
     @Test
     void parsesRunningCardWithoutCommand() {
-        final var card = ToolCard.parse("`* running read_file`");
+        final var card = ToolCard.parse("`* running read`");
         assertTrue(card.running());
-        assertEquals("read_file", card.name());
+        assertEquals("read", card.name());
         assertEquals("", card.output());
     }
 

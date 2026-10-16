@@ -1798,11 +1798,11 @@ class TuiCommandRenderTest {
         awaitTui();
         awaitText("yca coding agent");
 
-        // two consecutive finished calls (grep then read_file) become one run
+        // two consecutive finished calls (grep then read) become one run
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class A {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry)));
 
         // collapsed by default in COLLAPSED mode: only the run header survives (the header
         // carries the command names in its summary, but member outputs are hidden)
@@ -1811,12 +1811,12 @@ class TuiCommandRenderTest {
 
         // clicking the run header expands the members (COLLAPSED open shows one-liners, not outputs)
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("2 tools")));
-        awaitText("✓ read_file #2 - a.java");
+        awaitText("✓ read #2 - a.java");
         awaitText("✓ bash #1 - grep x src");
 
         // re-clicking the header collapses it back: the member lines disappear again
         tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("2 tools")));
-        awaitTextGone("✓ read_file #2 - a.java");
+        awaitTextGone("✓ read #2 - a.java");
         awaitTextGone("✓ bash #1 - grep x src");
         awaitText("2 tools");
 
@@ -1836,8 +1836,8 @@ class TuiCommandRenderTest {
         // burst A: two consecutive finished calls
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class A {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry)));
 
         // a user turn separates the bursts: the runs must not merge into one mega-run
         shellRegistry.onEvent(new AgentEvent.PromptIntegrated("second question", sid(shellRegistry)));
@@ -1845,8 +1845,8 @@ class TuiCommandRenderTest {
         // burst B: another two consecutive finished calls
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"ls -la\"}", sid(shellRegistry)));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "total 8", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"b.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class B {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"b.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class B {}", true, sid(shellRegistry)));
 
         // both runs are collapsed by default in COLLAPSED mode: two independent run headers,
         // and no member line is rendered while a run is collapsed (the toggle is observable)
@@ -1854,9 +1854,9 @@ class TuiCommandRenderTest {
         awaitText("2 tools");
         assertTrue(secondHeaderIsBelow(firstHeader, "2 tools"), "expected two separate run headers");
         awaitTextGone("✓ bash #1 - grep x src");
-        awaitTextGone("✓ read_file #2 - a.java");
+        awaitTextGone("✓ read #2 - a.java");
         awaitTextGone("✓ bash #3 - ls -la");
-        awaitTextGone("✓ read_file #4 - b.java");
+        awaitTextGone("✓ read #4 - b.java");
         // full outputs stay hidden while the runs are collapsed
         awaitTextGone("total 8");
         awaitTextGone("class A {}");
@@ -1870,13 +1870,13 @@ class TuiCommandRenderTest {
         awaitOccurrences("▼ 2 tools", 1);
         assertEquals(1, occurrences("▶ 2 tools"));
         awaitText("✓ bash #1 - grep x src");
-        awaitText("✓ read_file #2 - a.java");
+        awaitText("✓ read #2 - a.java");
         // run B stayed collapsed: its members are still hidden
         awaitTextGone("✓ bash #3 - ls -la");
-        awaitTextGone("✓ read_file #4 - b.java");
+        awaitTextGone("✓ read #4 - b.java");
 
         // clicking an expanded run's member one-liner opens that tool's full-output modal
-        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ read_file #2 - a.java")));
+        tuiRef.get().dispatch(MouseEvent.press(MouseButton.LEFT, 2, rowOf("✓ read #2 - a.java")));
         awaitText("full output");
         awaitText("class A {}");
         tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
@@ -1887,7 +1887,7 @@ class TuiCommandRenderTest {
         awaitOccurrences("▼ 2 tools", 0);
         assertEquals(2, occurrences("▶ 2 tools"));
         awaitTextGone("✓ bash #1 - grep x src");
-        awaitTextGone("✓ read_file #2 - a.java");
+        awaitTextGone("✓ read #2 - a.java");
 
         // expanding the second run works even though the first is collapsed
         final var secondHeader = rowOfBelow(firstHeader, "2 tools");
@@ -1895,9 +1895,9 @@ class TuiCommandRenderTest {
         awaitOccurrences("▼ 2 tools", 1);
         assertEquals(1, occurrences("▶ 2 tools"));
         awaitText("✓ bash #3 - ls -la");
-        awaitText("✓ read_file #4 - b.java");
+        awaitText("✓ read #4 - b.java");
         awaitTextGone("✓ bash #1 - grep x src");
-        awaitTextGone("✓ read_file #2 - a.java");
+        awaitTextGone("✓ read #2 - a.java");
 
         // a member click opens the modal (run B open: the one-liner members are clickable
         // under COLLAPSED mode)
@@ -1925,8 +1925,8 @@ class TuiCommandRenderTest {
         // in every visibility mode; SHOWN keeps it open with its member cards)
         shellRegistry.onEvent(new AgentEvent.ToolStarted("bash", "{\"command\":\"grep x src\"}", sid(shellRegistry)));
         shellRegistry.onEvent(new AgentEvent.ToolFinished("bash", "hit", true, sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolStarted("read_file", "{\"path\":\"a.java\"}", sid(shellRegistry)));
-        shellRegistry.onEvent(new AgentEvent.ToolFinished("read_file", "class A {}", true, sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolStarted("read", "{\"path\":\"a.java\"}", sid(shellRegistry)));
+        shellRegistry.onEvent(new AgentEvent.ToolFinished("read", "class A {}", true, sid(shellRegistry)));
         awaitText("2 tools");
 
         // SHOWN opens the run: the member cards render inside the box

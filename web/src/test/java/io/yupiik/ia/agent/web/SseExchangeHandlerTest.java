@@ -270,12 +270,12 @@ class SseExchangeHandlerTest {
 
         // a structural pair pushed AFTER the burst must always be delivered (never dropped):
         // the finished frame is what flips a tool card out of "working", so losing it is the bug.
-        broker.pushAgentEvent("slow", new AgentEvent.ToolStarted("read_file", "{}", 1, "slow", null, null));
-        broker.pushAgentEvent("slow", new AgentEvent.ToolFinished("read_file", "done", true, "slow", null, null));
+        broker.pushAgentEvent("slow", new AgentEvent.ToolStarted("read", "{}", 1, "slow", null, null));
+        broker.pushAgentEvent("slow", new AgentEvent.ToolFinished("read", "done", true, "slow", null, null));
 
-        await(() -> framesPeek(tab).stream().anyMatch(l -> l.contains("read_file")), 5, TimeUnit.SECONDS);
+        await(() -> framesPeek(tab).stream().anyMatch(l -> l.contains("read")), 5, TimeUnit.SECONDS);
         assertTrue(
-                framesPeek(tab).stream().anyMatch(l -> l.contains("\"tool-finished\"") && l.contains("read_file")),
+                framesPeek(tab).stream().anyMatch(l -> l.contains("\"tool-finished\"") && l.contains("read")),
                 "structural tool-finished frame must survive the burst, got: " + framesPeek(tab));
     }
 
@@ -299,9 +299,9 @@ class SseExchangeHandlerTest {
                         List.of(new ToolCall(
                                 "call-1",
                                 "function",
-                                new ToolCall.FunctionCall("read_file", "{\"path\":\"src/Main.java\"}"),
+                                new ToolCall.FunctionCall("read", "{\"path\":\"src/Main.java\"}"),
                                 null))),
-                Message.toolResult("call-1", "final answer", "read_file"),
+                Message.toolResult("call-1", "final answer", "read"),
                 Message.user("ok"));
 
         final var events = WebReplay.replay("sess", messages);
@@ -312,9 +312,9 @@ class SseExchangeHandlerTest {
         assertEquals("text-delta", events.get(1).type());
         assertEquals("thinking\nresponse", events.get(1).message());
         assertEquals("tool-started", events.get(2).type());
-        assertEquals("read_file", events.get(2).message());
+        assertEquals("read", events.get(2).message());
         assertEquals("tool-finished", events.get(3).type());
-        assertEquals("read_file", events.get(3).message());
+        assertEquals("read", events.get(3).message());
         assertEquals("final answer", ((Map<?, ?>) events.get(3).data()).get("output"));
         assertEquals("user", events.get(4).type());
         assertEquals("ok", events.get(4).message());
@@ -323,25 +323,25 @@ class SseExchangeHandlerTest {
     @Test
     void replayDropsOrphanToolStartedWhenTheTurnWasInterrupted() {
         // the agent persists the assistant message (with its tool_calls) BEFORE the tool runs; a turn
-        // cancelled between the two leaves a persisted read_file call with no tool result. Replaying it
+        // cancelled between the two leaves a persisted read call with no tool result. Replaying it
         // as a tool-started with no tool-finished would render a card stuck "working" forever, so the
         // orphan started must be dropped entirely.
         final var messages = List.of(
                 Message.projectDir("/tmp/proj"),
                 Message.user("read it"),
-                // assistant emitted read_file but the turn was cancelled before the tool result persisted
+                // assistant emitted read but the turn was cancelled before the tool result persisted
                 Message.assistant(
                         "reading",
                         List.of(new ToolCall(
                                 "call-orphan",
                                 "function",
-                                new ToolCall.FunctionCall("read_file", "{\"path\":\"src/Main.java\"}"),
+                                new ToolCall.FunctionCall("read", "{\"path\":\"src/Main.java\"}"),
                                 null))),
                 // no Message.toolResult for call-orphan
                 Message.user("never mind"));
 
         final var events = WebReplay.replay("sess", messages);
-        // user + text-delta + user = 3; the orphan read_file must NOT add a tool-started (no card stuck)
+        // user + text-delta + user = 3; the orphan read must NOT add a tool-started (no card stuck)
         assertEquals(3, events.size());
         assertTrue(
                 events.stream().noneMatch(e -> "tool-started".equals(e.type())),
@@ -353,7 +353,7 @@ class SseExchangeHandlerTest {
 
     @Test
     void replayKeepsStartedForACompletedCallAndSkipsTheOrphanAfterIt() {
-        // a completed read_file followed by an interrupted one: only the completed call is rendered.
+        // a completed read followed by an interrupted one: only the completed call is rendered.
         final var messages = List.of(
                 Message.user("go"),
                 Message.assistant(
@@ -362,15 +362,15 @@ class SseExchangeHandlerTest {
                                 new ToolCall(
                                         "call-a",
                                         "function",
-                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"a\"}"),
+                                        new ToolCall.FunctionCall("read", "{\"path\":\"a\"}"),
                                         null),
                                 new ToolCall(
                                         "call-b",
                                         "function",
-                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"b\"}"),
+                                        new ToolCall.FunctionCall("read", "{\"path\":\"b\"}"),
                                         null))),
                 // only call-a has a result (call-b was interrupted)
-                Message.toolResult("call-a", "content-a", "read_file"),
+                Message.toolResult("call-a", "content-a", "read"),
                 Message.user("done"));
 
         final var events = WebReplay.replay("sess", messages);
@@ -380,8 +380,8 @@ class SseExchangeHandlerTest {
                 events.stream().filter(e -> "tool-finished".equals(e.type())).toList();
         assertEquals(1, started.size(), "only the completed call should render a started card, got: " + started);
         assertEquals(1, finished.size());
-        assertEquals("read_file", started.get(0).message());
-        assertEquals("read_file", finished.get(0).message());
+        assertEquals("read", started.get(0).message());
+        assertEquals("read", finished.get(0).message());
     }
 
     /** First non-{@code data:} event header, or {@code null} until the first event line arrives. */

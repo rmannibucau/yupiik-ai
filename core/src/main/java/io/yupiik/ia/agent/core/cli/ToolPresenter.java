@@ -53,12 +53,11 @@ public final class ToolPresenter {
         final var args = parse(argsJson);
         return switch (name == null ? "" : name) {
             case "bash" -> "Bash(" + compact(str(args, "command")) + suffixWorkdir(args) + ")";
-            case "read_file" -> "Read(" + compact(str(args, "path")) + suffixRead(args) + ")";
+            case "read" -> "Read(" + compact(str(args, "path")) + suffixRead(args) + ")";
             case "write_file" -> "Write(" + compact(str(args, "path")) + ")";
             case "edit_file" -> "Edit(" + compact(str(args, "path")) + ")";
             case "grep" -> "Search(" + shortString(str(args, "pattern")) + " in " + compact(str(args, "path")) + ")";
             case "glob" -> "Find(" + compact(str(args, "pattern")) + ")";
-            case "list_dir" -> "List(" + compact(str(args, "path")) + ")";
             case "write_todo" -> "Todos(" + todoCount(argsJson) + ")";
             case "memory_write" -> "Memory(" + compact(str(args, "phase")) + ")";
             case "ask_user" -> "Ask(" + shortString(str(args, "question")) + ")";

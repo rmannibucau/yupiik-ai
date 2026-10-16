@@ -127,7 +127,7 @@ class CompletionEngineTest {
 
             @Override
             public List<String> tools() {
-                return List.of("read_file", "write_file", "bash");
+                return List.of("read", "write_file", "bash");
             }
 
             @Override

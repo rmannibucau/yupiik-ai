@@ -53,8 +53,8 @@ class GlobToolTest {
         }
         final var out = tool.execute(Map.of("pattern", "**/*.txt", "path", root.toString()))
                 .output();
-        assertTrue(out.contains("500 match(es)"), out);
-        assertTrue(out.contains("results capped at 500"), out);
+        assertTrue(out.contains("100 match(es)"), out);
+        assertTrue(out.contains("results capped at 100"), out);
     }
 
     @Test

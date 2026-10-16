@@ -217,12 +217,12 @@ class SessionCommandsTest {
         assertTrue(markdown.contains("<session-state>"), markdown);
         assertTrue(markdown.contains("### 4. assistant"), markdown);
         // a tool result is labelled with the tool name recovered from the assistant call
-        assertTrue(markdown.contains("### 5. tool (read_file) [h1] [error]"), markdown);
+        assertTrue(markdown.contains("### 5. tool (read) [h1] [error]"), markdown);
         assertTrue(markdown.contains("boom"), markdown);
-        assertTrue(markdown.contains("**tool_call** read_file [h1]"), markdown);
+        assertTrue(markdown.contains("**tool_call** read [h1]"), markdown);
         assertTrue(markdown.contains("## Tools (1)"), markdown);
         assertTrue(markdown.contains("~42 tokens estimated for all the tool schemas"), markdown);
-        assertTrue(markdown.contains("### read_file (function)"), markdown);
+        assertTrue(markdown.contains("### read (function)"), markdown);
         assertTrue(markdown.contains("read a file from disk"), markdown);
         // two-part header: the aggregate estimate is stated once, each per-tool header carries its own
         assertTrue(markdown.contains("**parameters** (~"), markdown);
@@ -277,11 +277,11 @@ class SessionCommandsTest {
                                 List.of(new ToolCall(
                                         "h1",
                                         "function",
-                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"a.java\"}"),
+                                        new ToolCall.FunctionCall("read", "{\"path\":\"a.java\"}"),
                                         null))),
                         Message.tool("h1", "boom", true)),
                 List.of(Tool.function(
-                        "read_file",
+                        "read",
                         "read a file from disk",
                         Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string"))))),
                 "auto",

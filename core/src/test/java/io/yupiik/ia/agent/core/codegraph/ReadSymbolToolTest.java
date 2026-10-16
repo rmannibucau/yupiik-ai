@@ -54,7 +54,7 @@ class ReadSymbolToolTest {
         final var text = result.output();
         assertTrue(text.contains("symbol METHOD p.Sample#add (src/Sample.java:3-5)"), text);
         assertTrue(text.contains("signature int add(int a, int b)"), text);
-        // context=1 -> lines 2..6 rendered, read_file numbering format
+        // context=1 -> lines 2..6 rendered, read numbering format
         assertTrue(text.contains("     2\tpublic class Sample {"), text);
         assertTrue(text.contains("     5\t    }"), text);
     }

@@ -101,7 +101,7 @@ class ToolPresenterTest {
     void summarizesFileTools() {
         assertEquals(
                 "Read(src/Foo.java: 500 lines)",
-                presenter.summarize("read_file", "{\"path\":\"src/Foo.java\",\"limit\":500}"));
+                presenter.summarize("read", "{\"path\":\"src/Foo.java\",\"limit\":500}"));
         assertEquals("Write(pom.xml)", presenter.summarize("write_file", "{\"path\":\"pom.xml\",\"content\":\"x\"}"));
         assertEquals(
                 "Edit(pom.xml)",
@@ -112,7 +112,7 @@ class ToolPresenterTest {
     void summarizesSearchTools() {
         assertEquals("Search(Foo in src)", presenter.summarize("grep", "{\"pattern\":\"Foo\",\"path\":\"src\"}"));
         assertEquals("Find(**/*.java)", presenter.summarize("glob", "{\"pattern\":\"**/*.java\"}"));
-        assertEquals("List(src/main)", presenter.summarize("list_dir", "{\"path\":\"src/main\"}"));
+        assertEquals("Read(src/main)", presenter.summarize("read", "{\"path\":\"src/main\"}"));
     }
 
     @Test
@@ -167,7 +167,7 @@ class ToolPresenterTest {
 
     @Test
     void malformedArgsDoNotThrow() {
-        assertEquals("Read(?)", presenter.summarize("read_file", "{not json"));
+        assertEquals("Read(?)", presenter.summarize("read", "{not json"));
         assertTrue(presenter.diff("edit_file", "{not json}", 5).isEmpty());
     }
 }

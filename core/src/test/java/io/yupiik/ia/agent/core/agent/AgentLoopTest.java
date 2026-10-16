@@ -1932,14 +1932,12 @@ class AgentLoopTest {
     @Test
     void explorationPlateauStopsTheTurn() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        // 9 read_file rounds on the SAME file, same 2k bucket, distinct limits: signatures are novel
+        // 9 read rounds on the SAME file, same 2k bucket, distinct limits: signatures are novel
         // (ToolRepeats stays silent), coverage is redundant -> plateau after 8
         final int[] offsets = {0, 100, 700, 1500, 100, 700, 1500, 0, 100};
         for (var i = 0; i < offsets.length; i++) {
             replies.add(toolCallReply(
-                    "t" + i,
-                    "read_file",
-                    "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
+                    "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -1981,9 +1979,7 @@ class AgentLoopTest {
         final int[] offsets = {0, 100, 700};
         for (var i = 0; i < offsets.length; i++) {
             replies.add(toolCallReply(
-                    "t" + i,
-                    "read_file",
-                    "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
+                    "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2028,11 +2024,11 @@ class AgentLoopTest {
     @Test
     void plateauResetByWrite() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        replies.add(toolCallReply("r1", "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
-        replies.add(toolCallReply("r2", "read_file", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r1", "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
+        replies.add(toolCallReply("r2", "read", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
         replies.add(toolCallReply("w1", "write_file", "{\"path\":\"/a.txt\",\"content\":\"new\"}"));
-        replies.add(toolCallReply("r3", "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
-        replies.add(toolCallReply("r4", "read_file", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r3", "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
+        replies.add(toolCallReply("r4", "read", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
         replies.add(new ScriptedReply("done", "stop", false));
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2067,8 +2063,7 @@ class AgentLoopTest {
         // 10 DISTINCT files read once each: every round is a fresh coverage key, so the plateau
         // streak never accumulates (re-reading an older file is what the plateau guard is for)
         for (var i = 0; i < 10; i++) {
-            replies.add(
-                    toolCallReply("t" + i, "read_file", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":30}"));
+            replies.add(toolCallReply("t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":30}"));
         }
         replies.add(new ScriptedReply("done", "stop", false));
         final var requests = new ArrayList<List<Message>>();
@@ -2103,8 +2098,8 @@ class AgentLoopTest {
         final var replies = new ArrayDeque<ScriptedReply>();
         // behavior plateauRounds=3, nudge_2: nudge at streak 1 (3-2), hard stop at streak 3
         for (var i = 0; i < 4; i++) {
-            replies.add(toolCallReply(
-                    "t" + i, "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+            replies.add(
+                    toolCallReply("t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2155,8 +2150,8 @@ class AgentLoopTest {
         final var replies = new ArrayDeque<ScriptedReply>();
         // behavior plateauRounds=4, nudge_1: nudge at streak 3 (4-1), hard stop at streak 4
         for (var i = 0; i < 5; i++) {
-            replies.add(toolCallReply(
-                    "t" + i, "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+            replies.add(
+                    toolCallReply("t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2201,10 +2196,10 @@ class AgentLoopTest {
     void plateauNudgeLetsModelRecover() {
         final var replies = new ArrayDeque<ScriptedReply>();
         // plateauRounds=3, nudge_2: rounds 1 (a) -> nudge; then a NEW file (b) resets; then more new files
-        replies.add(toolCallReply("r1", "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
-        replies.add(toolCallReply("r2", "read_file", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
-        replies.add(toolCallReply("r3", "read_file", "{\"path\":\"/b.txt\",\"offset\":0,\"limit\":50}"));
-        replies.add(toolCallReply("r4", "read_file", "{\"path\":\"/c.txt\",\"offset\":0,\"limit\":60}"));
+        replies.add(toolCallReply("r1", "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":30}"));
+        replies.add(toolCallReply("r2", "read", "{\"path\":\"/a.txt\",\"offset\":100,\"limit\":40}"));
+        replies.add(toolCallReply("r3", "read", "{\"path\":\"/b.txt\",\"offset\":0,\"limit\":50}"));
+        replies.add(toolCallReply("r4", "read", "{\"path\":\"/c.txt\",\"offset\":0,\"limit\":60}"));
         replies.add(new ScriptedReply("done", "stop", false));
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2245,8 +2240,8 @@ class AgentLoopTest {
     void plateauFeedbackNoneKeepsHardStopWithoutNudge() {
         final var replies = new ArrayDeque<ScriptedReply>();
         for (var i = 0; i < 4; i++) {
-            replies.add(toolCallReply(
-                    "t" + i, "read_file", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+            replies.add(
+                    toolCallReply("t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2297,7 +2292,7 @@ class AgentLoopTest {
         // 6 tool rounds: behavior.maxIterations=3 stops the window after 3 rounds
         for (var i = 0; i < 6; i++) {
             replies.add(toolCallReply(
-                    "t" + i, "read_file", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+                    "t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2353,7 +2348,7 @@ class AgentLoopTest {
         final var replies = new ArrayDeque<ScriptedReply>();
         for (var i = 0; i < 4; i++) {
             replies.add(toolCallReply(
-                    "t" + i, "read_file", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+                    "t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
         }
         final var requests = new ArrayList<List<Message>>();
         final var client = chatClient(replies, requests);
@@ -2603,12 +2598,12 @@ class AgentLoopTest {
                         + " in request " + messages);
     }
 
-    /** A registry exposing a read-only {@code read_file} tool (coverage-keyed for the plateau guard). */
+    /** A registry exposing a read-only {@code read} tool (coverage-keyed for the plateau guard). */
     private ToolRegistry readFileRegistry() {
         return registryOf(new EmbeddedTool() {
             @Override
             public String name() {
-                return "read_file";
+                return "read";
             }
 
             @Override
@@ -2642,13 +2637,13 @@ class AgentLoopTest {
         });
     }
 
-    /** A registry exposing read_file + write_file (writes reset the plateau streak). */
+    /** A registry exposing read + write_file (writes reset the plateau streak). */
     private ToolRegistry readWriteRegistry() {
         return registryOf(
                 new EmbeddedTool() {
                     @Override
                     public String name() {
-                        return "read_file";
+                        return "read";
                     }
 
                     @Override
@@ -2803,10 +2798,7 @@ class AgentLoopTest {
                     return Message.assistant(
                             null,
                             List.of(new ToolCall(
-                                    "t1",
-                                    "function",
-                                    new ToolCall.FunctionCall("read_file", "{\"path\":\"/tmp/x\"}"),
-                                    0)));
+                                    "t1", "function", new ToolCall.FunctionCall("read", "{\"path\":\"/tmp/x\"}"), 0)));
                 }
                 onDelta.accept(new End("stop", null));
                 return Message.assistant("all done", null);
@@ -2815,7 +2807,7 @@ class AgentLoopTest {
         final var tool = new EmbeddedTool() {
             @Override
             public String name() {
-                return "read_file";
+                return "read";
             }
 
             @Override
@@ -3243,8 +3235,7 @@ class AgentLoopTest {
         messages.add(Message.tool("w", "written"));
         messages.add(Message.assistant(
                 null,
-                List.of(new ToolCall(
-                        "r", "function", new ToolCall.FunctionCall("read_file", "{\"path\":\"a.txt\"}"), 0))));
+                List.of(new ToolCall("r", "function", new ToolCall.FunctionCall("read", "{\"path\":\"a.txt\"}"), 0))));
         messages.add(Message.tool("r", "content"));
 
         assertEquals(1, loopOn.supersedeOverwrittenWrites(messages), "a write overwritten by a read is superseded");
@@ -3732,7 +3723,7 @@ class AgentLoopTest {
                                 List.of(new ToolCall(
                                         "t1",
                                         "function",
-                                        new ToolCall.FunctionCall("read_file", "{\"path\":\"" + file + "\"}"),
+                                        new ToolCall.FunctionCall("read", "{\"path\":\"" + file + "\"}"),
                                         0)));
                     case 2 ->
                         Message.assistant(
@@ -3833,7 +3824,7 @@ class AgentLoopTest {
                         List.of(new ToolCall(
                                 "h1",
                                 "function",
-                                new ToolCall.FunctionCall("read_file", "{\"path\":\"" + file + "\"}"),
+                                new ToolCall.FunctionCall("read", "{\"path\":\"" + file + "\"}"),
                                 0))),
                 Message.tool("h1", "old content"));
         final var result = loop(
@@ -3868,7 +3859,7 @@ class AgentLoopTest {
                 "no system message may appear mid-conversation (breaks the provider prefix cache)");
     }
 
-    /** A registry serving {@code read_file} (READ/readonly) and {@code write_file} (EDIT) fakes. */
+    /** A registry serving {@code read} (READ/readonly) and {@code write_file} (EDIT) fakes. */
     private ToolRegistry fileToolsRegistry() {
         return new ToolRegistry(null) {
             @Override
@@ -3878,7 +3869,7 @@ class AgentLoopTest {
 
             @Override
             public EmbeddedTool tool(final String name) {
-                final var read = "read_file".equals(name);
+                final var read = "read".equals(name);
                 if (!read && !"write_file".equals(name)) {
                     return null;
                 }
@@ -4682,12 +4673,11 @@ class AgentLoopTest {
         final var requests = new ArrayList<List<Message>>();
         final var client = scriptedToolClient(
                 requests,
-                List.of(new ToolCall(
-                        "c1", "function", new ToolCall.FunctionCall("read_file", "{\"path\":\"a.txt\"}"), 0)));
+                List.of(new ToolCall("c1", "function", new ToolCall.FunctionCall("read", "{\"path\":\"a.txt\"}"), 0)));
         final var registry = registryOf(new EmbeddedTool() {
             @Override
             public String name() {
-                return "read_file";
+                return "read";
             }
 
             @Override
@@ -4805,7 +4795,7 @@ class AgentLoopTest {
             @Override
             public List<Tool> toWireTools() {
                 return List.of(Tool.function(
-                        "read_file",
+                        "read",
                         "read a file from disk",
                         Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string")))));
             }
@@ -4817,14 +4807,14 @@ class AgentLoopTest {
         };
     }
 
-    /** A registry exposing {@code read_file} (READ) and {@code write_file} (EDIT) wire tools. */
+    /** A registry exposing {@code read} (READ) and {@code write_file} (EDIT) wire tools. */
     private ToolRegistry readWriteWireToolsRegistry() {
         return new ToolRegistry(null) {
             @Override
             public List<Tool> toWireTools() {
                 return List.of(
                         Tool.function(
-                                "read_file",
+                                "read",
                                 "read a file from disk",
                                 Map.of("type", "object", "properties", Map.of("path", Map.of("type", "string")))),
                         Tool.function(
@@ -4835,7 +4825,7 @@ class AgentLoopTest {
 
             @Override
             public EmbeddedTool tool(final String name) {
-                final var read = "read_file".equals(name);
+                final var read = "read".equals(name);
                 if (!read && !"write_file".equals(name)) {
                     return null;
                 }
@@ -4965,7 +4955,7 @@ class AgentLoopTest {
         final var planTools =
                 payloads.getFirst().stream().map(t -> t.function().name()).toList();
         assertFalse(planTools.contains("write_file"), "plan mode must hide EDIT tools: " + planTools);
-        assertTrue(planTools.contains("read_file"), "plan mode must keep READ tools: " + planTools);
+        assertTrue(planTools.contains("read"), "plan mode must keep READ tools: " + planTools);
 
         payloads.clear();
         final var buildPermissions = new PermissionService(config);
@@ -4989,7 +4979,7 @@ class AgentLoopTest {
         final var buildTools =
                 payloads.getFirst().stream().map(t -> t.function().name()).toList();
         assertTrue(buildTools.contains("write_file"), "build mode must expose EDIT tools: " + buildTools);
-        assertTrue(buildTools.contains("read_file"), "build mode must keep READ tools: " + buildTools);
+        assertTrue(buildTools.contains("read"), "build mode must keep READ tools: " + buildTools);
     }
 
     @Test

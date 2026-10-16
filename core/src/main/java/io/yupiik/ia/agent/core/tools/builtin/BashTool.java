@@ -108,7 +108,7 @@ public class BashTool implements EmbeddedTool {
                 + "stdout/stderr "
                 + "(truncated at maxOutputChars, " + toolOutputCapHuman() + "). "
                 + "For terminal operations (git, mvn, npm, docker...); file ops use the dedicated "
-                + "read_file/grep/glob/list_dir tools. Use the workdir parameter instead of `cd <dir> && <cmd>`.";
+                + "read/grep/glob tools. Use the workdir parameter instead of `cd <dir> && <cmd>`.";
     }
 
     private String toolOutputCapHuman() {

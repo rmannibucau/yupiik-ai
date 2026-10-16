@@ -30,7 +30,7 @@ class ToolCallMarkupParserTest {
     void parsesDsmToolCalls() {
         final var raw = "I will read the file.\n\n"
                 + "<\uFF5CDSML\uFF5Ctool_calls>\n"
-                + "<\uFF5CDSML\uFF5Cinvoke name=read_file>\n"
+                + "<\uFF5CDSML\uFF5Cinvoke name=read>\n"
                 + "<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
                 + "</\uFF5CDSML\uFF5Cinvoke>\n"
                 + "</\uFF5CDSML\uFF5Ctool_calls>";
@@ -39,7 +39,7 @@ class ToolCallMarkupParserTest {
         final var call = calls.get(0);
         assertTrue(call.id().startsWith("btw-"), call.id());
         assertEquals("function", call.type());
-        assertEquals("read_file", call.function().name());
+        assertEquals("read", call.function().name());
         assertEquals("{\"path\":\"src/App.java\"}", call.function().arguments());
         assertNull(call.index());
     }
@@ -47,7 +47,7 @@ class ToolCallMarkupParserTest {
     @Test
     void parsesMultipleInvokesInOneBlock() {
         final var raw = "<\uFF5CDSML\uFF5Ctool_calls>\n"
-                + "<\uFF5CDSML\uFF5Cinvoke name=read_file>\n"
+                + "<\uFF5CDSML\uFF5Cinvoke name=read>\n"
                 + "<\uFF5CDSML\uFF5Cparameter name=path string=true>a.txt</\uFF5CDSML\uFF5Cparameter>\n"
                 + "</\uFF5CDSML\uFF5Cinvoke>\n"
                 + "<\uFF5CDSML\uFF5Cinvoke name=grep>\n"
@@ -58,7 +58,7 @@ class ToolCallMarkupParserTest {
         final var calls = parser.parse(raw);
         assertEquals(2, calls.size());
         assertEquals("btw-1", calls.get(0).id());
-        assertEquals("read_file", calls.get(0).function().name());
+        assertEquals("read", calls.get(0).function().name());
         assertEquals("{\"path\":\"a.txt\"}", calls.get(0).function().arguments());
         assertEquals("btw-2", calls.get(1).id());
         assertEquals("grep", calls.get(1).function().name());
@@ -71,26 +71,26 @@ class ToolCallMarkupParserTest {
     void parsesLegacyV31Markers() {
         final var raw = "<\uFF5Ctool\u2581calls\u2581begin\uFF5C>\n"
                 + "<\uFF5Ctool\u2581call\u2581begin\uFF5C>\n"
-                + "name=read_file\n"
+                + "name=read\n"
                 + "<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
                 + "<\uFF5Ctool\u2581call\u2581end\uFF5C>\n"
                 + "<\uFF5Ctool\u2581calls\u2581end\uFF5C>";
         final var calls = parser.parse(raw);
         assertEquals(1, calls.size(), calls.toString());
-        assertEquals("read_file", calls.get(0).function().name());
+        assertEquals("read", calls.get(0).function().name());
         assertEquals("{\"path\":\"src/App.java\"}", calls.get(0).function().arguments());
     }
 
     @Test
     void parsesAsciiMangledMarkers() {
         final var raw = "<|tool_calls|>\n"
-                + "<\uFF5CDSML\uFF5Cinvoke name=read_file>\n"
+                + "<\uFF5CDSML\uFF5Cinvoke name=read>\n"
                 + "<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\n"
                 + "</\uFF5CDSML\uFF5Cinvoke>\n"
                 + "</|tool_calls|>";
         final var calls = parser.parse(raw);
         assertEquals(1, calls.size(), calls.toString());
-        assertEquals("read_file", calls.get(0).function().name());
+        assertEquals("read", calls.get(0).function().name());
         assertEquals("{\"path\":\"src/App.java\"}", calls.get(0).function().arguments());
     }
 
@@ -133,10 +133,10 @@ class ToolCallMarkupParserTest {
     @Test
     void parsesQwenJsonInTagWithArgumentsObject() {
         final var raw =
-                "Answering now.\n<tool_call>\n{\"name\": \"read_file\", \"arguments\": {\"path\": \"a.txt\", \"limit\": 40}}\n</tool_call>";
+                "Answering now.\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"path\": \"a.txt\", \"limit\": 40}}\n</tool_call>";
         final var calls = parser.parse(raw);
         assertEquals(1, calls.size(), calls.toString());
-        assertEquals("read_file", calls.get(0).function().name());
+        assertEquals("read", calls.get(0).function().name());
         // the arguments object is preserved verbatim
         assertEquals(
                 "{\"path\": \"a.txt\", \"limit\": 40}", calls.get(0).function().arguments());
@@ -144,10 +144,10 @@ class ToolCallMarkupParserTest {
 
     @Test
     void parsesQwenJsonInTagWithoutArguments() {
-        final var raw = "<tool_call>\n{\"name\": \"list_dir\"}\n</tool_call>";
+        final var raw = "<tool_call>\n{\"name\": \"read\"}\n</tool_call>";
         final var calls = parser.parse(raw);
         assertEquals(1, calls.size(), calls.toString());
-        assertEquals("list_dir", calls.get(0).function().name());
+        assertEquals("read", calls.get(0).function().name());
         assertEquals("{}", calls.get(0).function().arguments());
     }
 

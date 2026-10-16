@@ -76,7 +76,7 @@ class WriteFileToolTest {
     void listRelativePathTargetsSessionProjectDir(@TempDir final Path projectDir) throws IOException {
         Files.createDirectories(projectDir.resolve("sub"));
         Files.writeString(projectDir.resolve("sub/a.txt"), "x");
-        final var result = new ListDirTool().execute(Map.of("path", "sub"), ToolContext.empty(projectDir));
+        final var result = new ReadFileTool().execute(Map.of("path", "sub"), ToolContext.empty(projectDir));
         assertTrue(result.success(), result.output());
         assertTrue(result.output().contains("a.txt"), result.output());
     }

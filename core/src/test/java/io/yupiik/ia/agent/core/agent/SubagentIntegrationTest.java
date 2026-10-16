@@ -771,11 +771,11 @@ class SubagentIntegrationTest {
 
             @Override
             public EmbeddedTool tool(final String name) {
-                if ("read_file".equals(name)) {
+                if ("read".equals(name)) {
                     return new EmbeddedTool() {
                         @Override
                         public String name() {
-                            return "read_file";
+                            return "read";
                         }
 
                         @Override
@@ -809,7 +809,7 @@ class SubagentIntegrationTest {
         };
 
         final var replies = new ArrayDeque<ScriptedReply>();
-        replies.add(ScriptedReply.toolCall("read_file", "{}"));
+        replies.add(ScriptedReply.toolCall("read", "{}"));
         replies.add(new ScriptedReply("done", "stop"));
         final var requests = new ArrayList<List<Message>>();
 

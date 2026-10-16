@@ -135,7 +135,7 @@ class ChatClientInBandToolCallsTest {
                         "\n",
                         "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me read it.\\n\"},\"finish_reason\":null}]}",
                         "",
-                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<\uFF5CDSML\uFF5Ctool_calls>\\n<\uFF5CDSML\uFF5Cinvoke name=read_file>\\n<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\\n</\uFF5CDSML\uFF5Cinvoke>\\n</\uFF5CDSML\uFF5Ctool_calls>\"},\"finish_reason\":null}]}",
+                        "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"<\uFF5CDSML\uFF5Ctool_calls>\\n<\uFF5CDSML\uFF5Cinvoke name=read>\\n<\uFF5CDSML\uFF5Cparameter name=path string=true>src/App.java</\uFF5CDSML\uFF5Cparameter>\\n</\uFF5CDSML\uFF5Cinvoke>\\n</\uFF5CDSML\uFF5Ctool_calls>\"},\"finish_reason\":null}]}",
                         "",
                         "data: {\"id\":\"1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}",
                         "",
@@ -146,7 +146,7 @@ class ChatClientInBandToolCallsTest {
         final var message = client.stream(request(), deltas::add);
         assertEquals("Let me read it.", message.content(), "the DSML markup must be stripped from the content");
         assertEquals(1, message.toolCalls().size(), "the in-band call must be extracted into toolCalls");
-        assertEquals("read_file", message.toolCalls().get(0).function().name());
+        assertEquals("read", message.toolCalls().get(0).function().name());
         assertEquals(
                 "{\"path\":\"src/App.java\"}",
                 message.toolCalls().get(0).function().arguments());

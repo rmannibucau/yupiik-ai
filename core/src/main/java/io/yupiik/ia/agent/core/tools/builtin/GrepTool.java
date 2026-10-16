@@ -63,10 +63,9 @@ public class GrepTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Fast content search tool that works with any codebase size: searches file contents with a regex, "
-                + "skipping build output, VCS directories and ignored paths, and returns `path:line: text` matches. "
-                + "Use this instead of bash grep/rg. Filter files by name with the include parameter (eg. `*.java`). "
-                + "When several searches are independent, batch them in the same reply.";
+        return "Search file contents using a regular expression or exact text matching; locate specific code, "
+                + "symbols, or text patterns, and narrow searches with `include`. Returns matching file paths, line "
+                + "numbers, and line previews, skipping build output, VCS directories and ignored paths.";
     }
 
     @Override
@@ -78,11 +77,15 @@ public class GrepTool implements EmbeddedTool {
     public Map<String, Object> schema() {
         return Schemas.object(
                 Map.of(
-                        "pattern", Schemas.str("Regular expression to search."),
+                        "pattern", Schemas.str("Regular expression (or exact text when literal=true) to search."),
                         "path", Schemas.str("Base directory or file, default `.`."),
                         "include", Schemas.str("Glob filter on file names, eg. `*.java`."),
+                        "literal",
+                                Schemas.bool(
+                                        "Treat pattern as exact text instead of a regular expression, default false."),
                         "ignoreCase", Schemas.bool("Case insensitive search."),
-                        "maxResults", Schemas.intProp("Maximum number of matches, default 80.")),
+                        "limit", Schemas.intProp("Maximum number of matching lines to return, default 100."),
+                        "maxResults", Schemas.intProp("Maximum number of matching lines to return, default 100.")),
                 "pattern");
     }
 
@@ -97,14 +100,18 @@ public class GrepTool implements EmbeddedTool {
         if (pattern == null || pattern.isBlank()) {
             return ToolResult.error("pattern is required");
         }
-        final var regex = Pattern.compile(pattern, optBool(args, "ignoreCase", false) ? Pattern.CASE_INSENSITIVE : 0);
+        final var literal = optBool(args, "literal", false);
+        final var regex = Pattern.compile(
+                literal ? Pattern.quote(pattern) : pattern,
+                optBool(args, "ignoreCase", false) ? Pattern.CASE_INSENSITIVE : 0);
         final var base = context.resolvePath(
                 arg(args, "path") == null ? "." : arg(args, "path"),
                 configuration == null ? null : configuration.resolveProjectDir());
         final var include = arg(args, "include");
         final var includeMatcher =
                 include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);
-        final var max = (int) Math.min(1000, Math.max(1, optInt(args, "maxResults", 80)));
+        final var limitArg = optInt(args, "limit", -1);
+        final var max = (int) Math.min(1000, Math.max(1, limitArg > 0 ? limitArg : optInt(args, "maxResults", 100)));
         final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
         final var matches = new ArrayList<String>();
         final var filesScanned = new int[] {0};
