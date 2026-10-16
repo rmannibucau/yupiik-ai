@@ -195,6 +195,10 @@
               <!-- jline 3.25: a real tty makes the system terminal spawn PosixPtyTerminal pump
                    threads that outlive the surefire fork JVM and delay its exit by 30s -->
               <org.jline.terminal.type>dumb</org.jline.terminal.type>
+              <!-- keep secret-redaction tests independent of the dev box: never harvest the real
+                   ~/.m2 settings files under test (fusion config reads system properties) -->
+              <yca.secrets.maven.settings>/tmp/yca-test-does-not-exist/settings.xml</yca.secrets.maven.settings>
+              <yca.secrets.maven.masterSecret>/tmp/yca-test-does-not-exist/settings-security4.xml</yca.secrets.maven.masterSecret>
             </systemPropertyVariables>
             <!-- the whole suite pins the default zone to UTC so tests asserting wall-clock
                  stamps (formatDate/time helpers, speaker labels, TUI headers) are exact and

@@ -188,6 +188,44 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
     expect(s.liveOutTokens).toBeUndefined();
     expect(s.liveReasoningTokens).toBeUndefined();
   });
+
+  it('a reloaded snapshot (replayed text only, no usage) still yields a log-derived out estimate', () => {
+    // WebReplay replays only user/text/tool events - no usage-updated/turn-metrics. Without the
+    // log-derived liveOutChars fallback the metrics bar would render an EMPTY token line after a
+    // reload (all seven token sources null); with it, the replayed deltas give a non-zero "out".
+    // A trailing turn-done (completed turn on reload) keeps the accumulated value for display.
+    const s = foldStatus([
+      ev('user', 'reload'),
+      ev('text-delta', 'Old bursts were emitted and validated.'),
+      ev('text-delta', ' Now the second burst.'),
+      { type: 'turn-done', sessionId: 's1', message: null } as WebEvent,
+    ]);
+    expect(s.liveOutTokens).toBeUndefined(); // no provider usage replayed
+    expect(s.completionTokens).toBeUndefined(); // no usage-updated replayed
+    expect(s.liveOutChars).toBe('Old bursts were emitted and validated. Now the second burst.'.length);
+  });
+
+  it('a server-seeded synthetic usage-updated (snapshot seed) yields cumulative in/out immediately', () => {
+    // WebSessionManager.snapshotFor now prepends a synthetic usage-updated carrying the session's
+    // cumulative totals for reloaded tabs, so the metrics bar shows exact "in N · out N" on load.
+    const s = foldStatus([usageEv({ promptTokens: 4000, completionTokens: 1200, reasoningTokens: 300, contextPercent: 42 })]);
+    expect(s.promptTokens).toBe(4000);
+    expect(s.completionTokens).toBe(1200);
+    // no busy baseline yet, so the live out delta is the whole cumulative total
+    expect(s.liveOutTokens).toBe(1200);
+    expect(s.liveReasoningTokens).toBe(300);
+  });
+
+  it('log-derived out chars start fresh at each new user turn', () => {
+    const s = foldStatus([
+      ev('user', 'first turn'),
+      ev('text-delta', 'alpha '),
+      { type: 'turn-done', sessionId: 's1', message: null } as WebEvent,
+      ev('user', 'second turn'),
+      ev('text-delta', 'beta gamma'),
+    ]);
+    expect(s.liveOutChars).toBe('beta gamma'.length);
+  });
 });
 
 describe('bootstrapFromSnapshot - bootstrapped (history-loaded) transition', () => {

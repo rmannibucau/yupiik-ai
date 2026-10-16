@@ -206,14 +206,26 @@ class WebSessionResolveNullResultTest {
         }
 
         @Override
-        public CompletionStage<String> ask(
+        public CompletionStage<BtwAnswerer.BtwAnswer> ask(
                 final String question,
                 final String sessionId,
                 final io.yupiik.ia.agent.core.context.UsageTracker usage,
                 final java.util.function.BooleanSupplier cancelled,
                 final io.yupiik.ia.agent.core.permissions.ApprovalGate sessionGate,
                 final io.yupiik.ia.agent.core.llm.ChatSettings sessionSettings) {
-            return CompletableFuture.completedFuture("unused");
+            return CompletableFuture.completedFuture(new BtwAnswerer.BtwAnswer("unused", false));
+        }
+
+        @Override
+        public CompletionStage<BtwAnswerer.BtwAnswer> ask(
+                final String question,
+                final String sessionId,
+                final io.yupiik.ia.agent.core.context.UsageTracker usage,
+                final java.util.function.BooleanSupplier cancelled,
+                final io.yupiik.ia.agent.core.permissions.ApprovalGate sessionGate,
+                final io.yupiik.ia.agent.core.llm.ChatSettings sessionSettings,
+                final io.yupiik.ia.agent.core.agent.SystemPromptBuilder systemPromptBuilder) {
+            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
         }
     }
 }

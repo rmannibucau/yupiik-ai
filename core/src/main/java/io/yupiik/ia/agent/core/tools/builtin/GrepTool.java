@@ -23,6 +23,7 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.FileIgnore;
+import io.yupiik.ia.agent.core.tools.LenientPattern;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
@@ -77,7 +78,10 @@ public class GrepTool implements EmbeddedTool {
     public Map<String, Object> schema() {
         return Schemas.object(
                 Map.of(
-                        "pattern", Schemas.str("Regular expression (or exact text when literal=true) to search."),
+                        "pattern",
+                                Schemas.str(
+                                        "Java regular expression to search; escape literal parentheses as `\\(` and `\\)`. "
+                                                + "Use literal=true for a plain phrase, especially one containing parentheses."),
                         "path", Schemas.str("Base directory or file, default `.`."),
                         "include", Schemas.str("Glob filter on file names, eg. `*.java`."),
                         "literal",
@@ -101,9 +105,20 @@ public class GrepTool implements EmbeddedTool {
             return ToolResult.error("pattern is required");
         }
         final var literal = optBool(args, "literal", false);
-        final var regex = Pattern.compile(
-                literal ? Pattern.quote(pattern) : pattern,
-                optBool(args, "ignoreCase", false) ? Pattern.CASE_INSENSITIVE : 0);
+        final var flags = optBool(args, "ignoreCase", false) ? Pattern.CASE_INSENSITIVE : 0;
+        final var lenient = LenientPattern.compile(literal ? Pattern.quote(pattern) : pattern, flags);
+        final var regex = lenient.pattern();
+        if (regex == null) {
+            // even the tolerant repair could not salvage it -> surface a helpful message instead of the
+            // raw engine exception, and steer the model toward literal matching for a plain phrase
+            return ToolResult.error("Invalid regular expression: " + lenient.originalError()
+                    + ". Pattern is a Java regex; escape literal parentheses as `\\(`/`\\)`. "
+                    + "For a plain phrase (e.g. one containing parentheses) set `literal: true`.");
+        }
+        final var adjustedNote = lenient.adjusted()
+                ? "NOTE: pattern was adjusted (escaped unbalanced parentheses) to be a valid Java regex; "
+                        + "prefer writing balanced escapes yourself, or set `literal: true` for a plain phrase.\n"
+                : "";
         final var base = context.resolvePath(
                 arg(args, "path") == null ? "." : arg(args, "path"),
                 configuration == null ? null : configuration.resolveProjectDir());
@@ -111,7 +126,7 @@ public class GrepTool implements EmbeddedTool {
         final var includeMatcher =
                 include == null ? null : FileSystems.getDefault().getPathMatcher("glob:" + include);
         final var limitArg = optInt(args, "limit", -1);
-        final var max = (int) Math.min(1000, Math.max(1, limitArg > 0 ? limitArg : optInt(args, "maxResults", 100)));
+        final var max = Math.clamp(limitArg > 0 ? limitArg : optInt(args, "maxResults", 100), 1, 1000);
         final var ignore = FileIgnore.of(FileIgnore.gitRoot(base), null);
         final var matches = new ArrayList<String>();
         final var filesScanned = new int[] {0};
@@ -147,9 +162,9 @@ public class GrepTool implements EmbeddedTool {
             return ToolResult.error("Cannot search " + base + ": " + e.getMessage());
         }
         if (matches.isEmpty()) {
-            return ToolResult.ok("No match (" + filesScanned[0] + " files scanned)");
+            return ToolResult.ok(adjustedNote + "No match (" + filesScanned[0] + " files scanned)");
         }
-        final var sb = new StringBuilder(matches.size() + " match(es)\n");
+        final var sb = new StringBuilder(adjustedNote).append(matches.size()).append(" match(es)\n");
         for (final var m : matches) {
             sb.append(m).append('\n');
         }

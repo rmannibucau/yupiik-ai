@@ -19,6 +19,7 @@ import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.BtwConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
@@ -72,7 +73,41 @@ public class BtwAnswerer {
     /** Bound on the model round-trips of a single /btw answer, tool round-trips included. */
     static final int MAX_TOOL_ROUNDS = 6;
 
-    static final String SYSTEM_PROMPT =
+    /**
+     * Tool-less prompt used when {@code yca.slashcommands.btw.tools} is off (the default) and no session
+     * {@link SystemPromptBuilder} is available (headless/unit paths): answer from context only. When a
+     * session system prompt is provided the request reuses it for the cache prefix instead and the same
+     * direction travels in the final user message via {@link #USER_DIRECTION}.
+     */
+    static final String TOOL_LESS_SYSTEM_PROMPT =
+            "You answer quick side questions ('by the way') asked while a coding agent session is running. "
+                    + "The session conversation is provided for context; the reply being streamed, if any, is not part of it. "
+                    + "Answer directly and concisely in markdown from what you already know. "
+                    + "Do not call any tools and do not take any actions. "
+                    + "Never write 'Let me check...', 'I'll look it up...', or announce a verification step. "
+                    + "If answering would need reading a file or an external source, say it cannot be checked from a side "
+                    + "question and answer with what you know (or say you do not know); do not offer to investigate.";
+
+    /**
+     * Answering direction appended to the /btw user prompt when the request runs with the session's own
+     * system prompt (cache-consistent path): the system prompt does not carry /btw intent, so the rule
+     * lives in the changing tail where {@code applyCaching} already places a breakpoint.
+     */
+    static final String USER_DIRECTION =
+            "Answer this quick side question directly in a single response, from what you already know. "
+                    + "You are NOT to call any tool, read any file, run any command, or take any action; nothing you attempt "
+                    + "here is executed. Never write 'Let me check...', 'I'll look it up...', or announce a verification step. "
+                    + "If answering would need reading a file or an external source, say it cannot be checked from a side "
+                    + "question and answer with what you know (or say you do not know); do not offer to investigate. "
+                    + "Do not write tool-call markup as text.";
+
+    /** Shown when the model spent the answer trying to call a tool it was never allowed to execute. */
+    static final String DANGLING_TOOL_ANSWER_NOTE =
+            "> The model tried to call a tool instead of answering this side question directly; no tool was executed and the "
+                    + "placeholder above is what it left behind. Ask in the main conversation or retry.";
+
+    /** Tooled prompt used when {@code yca.slashcommands.btw.tools} is on: may inspect the project like plan mode. */
+    static final String TOOLED_SYSTEM_PROMPT =
             "You answer quick side questions ('by the way') asked while a coding agent session is running. "
                     + "The session conversation is provided for context; the reply being streamed, if any, is not part of it. "
                     + "You can use the declared read-only tools (file/command readers, searches, and the read-only shell "
@@ -127,27 +162,58 @@ public class BtwAnswerer {
 
     public record BtwExchange(String question, String answer) {}
 
-    public CompletionStage<String> ask(
+    /**
+     * Result of a /btw side question. {@code retryable} is true when the answerer could not produce a
+     * real answer (empty output or the tool round cap was reached in tooled mode) and re-asking the same
+     * question may succeed, so a UI should offer a Retry action instead of treating it as a hard error.
+     */
+    public record BtwAnswer(String text, boolean retryable) {
+        static BtwAnswer of(final String text) {
+            return new BtwAnswer(text, false);
+        }
+    }
+
+    public CompletionStage<BtwAnswer> ask(
             final String question,
             final String sessionId,
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate) {
-        return ask(question, sessionId, usage, cancelled, sessionGate, null);
+        return ask(question, sessionId, usage, cancelled, sessionGate, null, null);
     }
 
     /** @param sessionSettings the requesting tab's selection; null means the process default provider/model */
-    public CompletionStage<String> ask(
+    public CompletionStage<BtwAnswer> ask(
             final String question,
             final String sessionId,
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
             final ChatSettings sessionSettings) {
-        final var future = new CompletableFuture<String>();
+        return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings, null);
+    }
+
+    /**
+     * @param sessionSettings the requesting tab's selection; null means the process default provider/model
+     * @param systemPrompt the session's {@link SystemPromptBuilder}, when available, so the /btw request
+     *                     rebuilds the exact system-prompt prefix the main agent loop sends (byte-identical
+     *                     across turns) and the provider prompt cache keeps hitting. Null keeps the compact
+     *                     tool-less fallback used by the headless/unit paths.
+     */
+    public CompletionStage<BtwAnswer> ask(
+            final String question,
+            final String sessionId,
+            final UsageTracker usage,
+            final BooleanSupplier cancelled,
+            final ApprovalGate sessionGate,
+            final ChatSettings sessionSettings,
+            final SystemPromptBuilder systemPrompt) {
+        final var future = new CompletableFuture<BtwAnswer>();
         executor.execute(() -> {
             try {
-                future.complete(doAsk(question, sessionId, usage, cancelled, sessionGate, sessionSettings));
+                final var answer =
+                        doAsk(question, sessionId, usage, cancelled, sessionGate, sessionSettings, systemPrompt);
+                future.complete(answer);
             } catch (final IOException e) {
                 future.completeExceptionally(e);
             } catch (final InterruptedException e) {
@@ -160,22 +226,94 @@ public class BtwAnswerer {
         return future;
     }
 
-    String doAsk(
+    BtwAnswer doAsk(
             final String question,
             final String sessionId,
             final UsageTracker usage,
             final BooleanSupplier cancelled,
             final ApprovalGate sessionGate,
-            final ChatSettings sessionSettings)
+            final ChatSettings sessionSettings,
+            final SystemPromptBuilder systemPrompt)
             throws IOException, InterruptedException {
         final var conf = configuration();
         final var bounded = tail(sessionStore.load(sessionId), conf.maxHistoryMessages());
         final var messages = new ArrayList<Message>(bounded.size() + 2);
-        messages.add(Message.system(SYSTEM_PROMPT));
+        final var systemText = systemPrompt != null ? systemPrompt.build(null, null) : TOOL_LESS_SYSTEM_PROMPT;
+        messages.add(Message.system(systemText));
         messages.addAll(bounded);
-        messages.add(Message.user(userPrompt(conf, question)));
+        final var usingSessionPrompt = systemPrompt != null;
+        messages.add(Message.user(userPrompt(conf, question, usingSessionPrompt)));
         final var model = conf.model() == null || conf.model().isBlank() ? null : conf.model();
         final var target = client(model);
+        if (!conf.tools()) {
+            // Tool-less default: a single generation that never executes anything. The request keeps the
+            // session's system prompt (when provided) and the full wire tool schema so the provider prompt
+            // cache prefix stays byte-identical with the main agent loop; the model is told through the
+            // final user message to answer directly and never act, and stray in-band tool-call markup a
+            // model emits anyway is never executed. A content that was consumed by a tool attempt - the
+            // model reached for a tool and left only an intro - is surfaced as a retryable note, never a
+            // silent truncated success.
+            var requestSettings = target.settings();
+            if (sessionSettings != null) {
+                requestSettings =
+                        requestSettings == null ? sessionSettings : requestSettings.inheritFrom(sessionSettings);
+            }
+            var retried = false;
+            String raw = "";
+            for (var round = 0; round < 2; round++) {
+                if (cancelled.getAsBoolean()) {
+                    throw new InterruptedException("cancelled");
+                }
+                final var res = target.client()
+                        .chat(
+                                new ChatCompletionRequest(
+                                                model,
+                                                messages,
+                                                null,
+                                                null,
+                                                false,
+                                                wireBtwTools(),
+                                                null,
+                                                conf.maxTokens() > 0 ? conf.maxTokens() : null,
+                                                null,
+                                                null)
+                                        .withSettings(requestSettings),
+                                cancelled);
+                if (usage != null) {
+                    usage.recordAuxiliary(res.usage());
+                }
+                final var content = res.message() == null ? null : res.message().content();
+                raw = content == null ? "" : String.valueOf(content);
+                // A model that reached for a tool - natively or through in-band text markup that ChatClient
+                // hoisted into toolCalls - leaves only this stripped intro, never a real answer. Detect it via
+                // the declared calls (primary) or any leftover markup (backstop) and surface it as retryable
+                // instead of a silent success; a tool-call result can even arrive with blank content.
+                final var nativeCalls =
+                        res.message() == null ? null : res.message().toolCalls();
+                final var attemptedToolCall =
+                        (nativeCalls != null && !nativeCalls.isEmpty()) || inBandToolCallExtractor.containsMarkup(raw);
+                final var answer = inBandToolCallExtractor.strip(raw);
+                if (!answer.isBlank() && !attemptedToolCall) {
+                    remember(conf, new BtwExchange(question, answer));
+                    return BtwAnswer.of(answer);
+                }
+                if (!answer.isBlank()) {
+                    // the model reached for a tool and left only this intro; it must not look like a
+                    // clean success (arms the Retry affordance), and the broken exchange is never
+                    // replayed into a follow-up side question.
+                    return new BtwAnswer(danglingNote(answer), true);
+                }
+                // truncated-while-thinking signature: tokens were spent but nothing came out. Retry once.
+                if (!retried && res.usage() != null && res.usage().completionTokens() > 0) {
+                    retried = true;
+                    continue;
+                }
+                return new BtwAnswer(
+                        "The model returned an empty answer. Check the output budget or retry the side question.",
+                        true);
+            }
+        }
+        // Tooled mode (yca.slashcommands.btw.tools): bounded read-only tool loop over the inherited history.
         // /btw never inherits the session permission mode: plan-mode rules only, and the caller's
         // approval gate (the tabs share it, so an approval pops above the btw modal) decides the rest.
         final var permissions = new PermissionService(configuration, emitter);
@@ -224,7 +362,7 @@ public class BtwAnswerer {
                 final var answer = inBandToolCallExtractor.strip(raw);
                 if (!answer.isBlank()) {
                     remember(conf, new BtwExchange(question, answer));
-                    return answer;
+                    return BtwAnswer.of(answer);
                 }
                 // truncated-while-thinking signature: tokens were spent but nothing came out.
                 // Retry once, then fall back to a note instead of an exception.
@@ -232,7 +370,9 @@ public class BtwAnswerer {
                     retried = true;
                     continue;
                 }
-                return "The model returned an empty answer. Check the output budget or retry the side question.";
+                return new BtwAnswer(
+                        "The model returned an empty answer. Check the output budget or retry the side question.",
+                        true);
             }
             final var prose = inBandToolCallExtractor.strip(raw);
             messages.add(Message.assistant(prose.isBlank() ? null : prose, calls));
@@ -244,8 +384,8 @@ public class BtwAnswerer {
                 messages.add(Message.tool(call.id(), outcome.output(), !outcome.success()));
             }
         }
-        // round cap reached while the model kept calling tools: surface the glitch.
-        return glitchNote(raw, attemptedTools);
+        // round cap reached while the model kept calling tools: surface the glitch as a retryable note.
+        return new BtwAnswer(glitchNote(raw, attemptedTools), true);
     }
 
     /** Executes a single /btw tool call, mirroring the main loop's authorisation and bounding. */
@@ -373,7 +513,11 @@ public class BtwAnswerer {
 
     private BtwConfiguration configuration() {
         final var slashcommands = configuration.slashcommands();
-        return slashcommands == null || slashcommands.btw() == null ? BtwConfiguration.DEFAULT : slashcommands.btw();
+        if (slashcommands != null && slashcommands.btw() != null) {
+            return slashcommands.btw();
+        }
+        // factory does not inject a nested default (direct test construction): inline the property defaults.
+        return new BtwConfiguration("", 0, 200, 5, false);
     }
 
     private List<Message> tail(final List<Message> history, final int max) {
@@ -383,8 +527,13 @@ public class BtwAnswerer {
         return history.subList(history.size() - max, history.size());
     }
 
-    private String userPrompt(final BtwConfiguration conf, final String question) {
+    private String userPrompt(final BtwConfiguration conf, final String question, final boolean usingSessionPrompt) {
         final var sb = new StringBuilder();
+        if (usingSessionPrompt) {
+            // the request reuses the session system prompt for the cache prefix, so the /btw "answer
+            // directly, never act" rule lives here, in the changing tail where the cache already breaks.
+            sb.append(USER_DIRECTION).append("\n\n");
+        }
         final List<BtwExchange> recent = recent(conf.recall());
         if (!recent.isEmpty()) {
             sb.append("Earlier side questions in this session (context only):\n\n");
@@ -395,6 +544,16 @@ public class BtwAnswerer {
         }
         sb.append("Side question: ").append(question);
         return sb.toString();
+    }
+
+    /** The tools the main loop declares for the session: the full wire schema, never filtered to a btw-only set. */
+    private List<Tool> wireBtwTools() {
+        return toolRegistry == null ? List.<Tool>of() : toolRegistry.toWireTools();
+    }
+
+    /** Renders the tool-attempt fallback: the leftover intro plus an explicit, honest note (Claude-Code style). */
+    private String danglingNote(final String stripped) {
+        return (stripped == null || stripped.isBlank() ? "" : stripped + "\n\n") + DANGLING_TOOL_ANSWER_NOTE;
     }
 
     private List<BtwExchange> recent(final int recall) {

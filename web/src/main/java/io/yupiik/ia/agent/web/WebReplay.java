@@ -117,7 +117,17 @@ final class WebReplay {
                                 null,
                                 null,
                                 call.function().name(),
-                                Map.of("args", Map.of(), "ordinal", ordinal++)));
+                                Map.of(
+                                        "args",
+                                        // replayed cards must show their command/path summary exactly like
+                                        // the live stream (AgentLoop emits the raw arguments JSON); the
+                                        // persisted tool call retains them, so forward them instead of the
+                                        // empty map that left bash/read_file cards with no summary text.
+                                        call.function().arguments() == null
+                                                ? "{}"
+                                                : call.function().arguments(),
+                                        "ordinal",
+                                        ordinal++)));
                     }
                 }
                 continue;

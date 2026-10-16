@@ -90,6 +90,25 @@ public class ToolCallMarkupStripper {
     private static final Pattern BLANK_LINES = Pattern.compile("\n{3,}");
 
     /**
+     * Whether the raw text carries any of the in-band tool-call block markers this stripper knows
+     * (DSML, V3.1, ASCII-mangled, Qwen/Hermes or GLM). Structure-aware: probes the actual marker
+     * tokens, not arbitrary prose substrings, and returns {@code false} for a {@code null}/empty
+     * input and for plain text.
+     */
+    public boolean containsMarkup(final String raw) {
+        if (raw == null || raw.isEmpty()) {
+            return false;
+        }
+        // Same marker families as {@link #strip}: the DSML blocks all carry "DSML", the V3.1
+        // markers the lower-one-eighth-block glyph, the ASCII-mangled form still keeps
+        // "tool_calls", and the Qwen/Hermes/GLM forms all open with the literal "<tool_call>".
+        return raw.indexOf("DSML") >= 0
+                || raw.indexOf(LOW_LINE) >= 0
+                || raw.indexOf("tool_calls") >= 0
+                || raw.indexOf("<tool_call>") >= 0;
+    }
+
+    /**
      * Removes every tool-call block from the raw model output.
      * A {@code null} input becomes an empty string; clean text is returned unchanged.
      *

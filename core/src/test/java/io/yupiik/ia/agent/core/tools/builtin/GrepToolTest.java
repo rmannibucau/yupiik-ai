@@ -72,6 +72,28 @@ class GrepToolTest {
         assertFalse(out.contains("Other.java"), out);
     }
 
+    @Test
+    void unbalancedParenPatternIsRepairedAndReported() throws IOException {
+        write(root.resolve("Foo.java"), "boolean handleKey( final int a\nboolean key( final int b\n");
+        write(root.resolve("Bar.java"), "void dispatch();\n");
+
+        final var out = tool.execute(Map.of("pattern", "handleKey(|key(", "path", root.toString()))
+                .output();
+
+        assertTrue(out.contains("handleKey("), "the repaired pattern must actually match: " + out);
+        assertTrue(out.contains("adjusted"), "the adjusted pattern must be surfaced to the model: " + out);
+    }
+
+    @Test
+    void invalidPatternReturnsHelpfulErrorWithLiteralGuidance() throws IOException {
+        write(root.resolve("a.txt"), "x\n");
+
+        final var out = tool.execute(Map.of("pattern", "(bad\\p{q}", "path", root.toString()));
+
+        assertFalse(out.success(), "an unrepairable pattern must error: " + out.output());
+        assertTrue(out.output().contains("literal: true"), "the error must steer toward literal matching: " + out);
+    }
+
     private static void write(final Path file, final String content) throws IOException {
         Files.createDirectories(file.getParent());
         Files.writeString(file, content);

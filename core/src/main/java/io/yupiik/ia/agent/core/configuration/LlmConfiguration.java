@@ -70,6 +70,12 @@ public record LlmConfiguration(
         int plateauRounds,
 
         @Property(
+                defaultValue = "6",
+                documentation =
+                        "Consecutive informative read-only exploration rounds without an answer after which a one-shot 'wrap up and answer' nudge is injected. Complements the plateau guard: a spiral of NOVEL reads/globs (each round fresh, so never 'redundant' and never a plateau) still gets told to stop expanding and synthesize. No hard stop - the model can still gather if the nudge is wrong. 0 disables the nudge.")
+        int explorationNudgeRounds,
+
+        @Property(
                 defaultValue = "io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode.NUDGE_2",
                 documentation =
                         "Plateau feedback strategy for the models that do not set a per-model behavior or per-provider tuning plateauFeedback: NUDGE_2 nudges once at limit-2, NUDGE_1 at limit-1 (both then hard-stop at the limit), NONE never nudges.")

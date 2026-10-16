@@ -16,13 +16,13 @@
 package io.yupiik.ia.agent.core.tools.builtin.bashoverride;
 
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.ia.agent.core.tools.LenientPattern;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Pattern;
-import java.util.regex.PatternSyntaxException;
 
 /**
  * Faithful {@code grep} reimplementation over explicit file/directory operands (globs are expanded by the
@@ -51,7 +51,7 @@ public class JavaGrep implements JavaCommand {
                     continue;
                 }
                 final var flags = a.substring(1);
-                if (flags.isEmpty() || flags.chars().anyMatch(c -> SUPPORTED_FLAGS.indexOf(c) < 0)) {
+                if (flags.chars().anyMatch(c -> SUPPORTED_FLAGS.indexOf(c) < 0)) {
                     return false;
                 }
             }
@@ -67,7 +67,7 @@ public class JavaGrep implements JavaCommand {
         var patternExpected = true;
         for (final var a : args) {
             if (a.equals("--") || patternExpected && a.startsWith("-") && a.length() > 1) {
-                if (patternExpected && a.startsWith("-") && a.length() > 1 && !a.equals("--")) {
+                if (patternExpected && a.startsWith("-") && !a.equals("--")) {
                     flags.append(a.substring(1));
                     continue;
                 }
@@ -92,11 +92,10 @@ public class JavaGrep implements JavaCommand {
         final boolean onlyFilename = flags.chars().anyMatch(c -> c == 'l');
         final boolean count = flags.chars().anyMatch(c -> c == 'c');
         final boolean recursive = flags.chars().anyMatch(c -> c == 'r');
-        final Pattern regex;
-        try {
-            regex = Pattern.compile(pattern, caseInsensitive ? Pattern.CASE_INSENSITIVE : 0);
-        } catch (final PatternSyntaxException e) {
-            return false; // invalid regex: not something we can faithfully honor -> let the real shell try
+        final var literalRepair = LenientPattern.compile(pattern, caseInsensitive ? Pattern.CASE_INSENSITIVE : 0);
+        final var regex = literalRepair.pattern();
+        if (regex == null) {
+            return false; // invalid/broken regex: not something we can faithfully honor -> let the real shell try
         }
         final List<Path> files = new ArrayList<>();
         for (final var op : operands) {

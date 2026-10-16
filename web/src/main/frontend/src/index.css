@@ -17,6 +17,13 @@
 }
 
 :root {
+  /* Native form-control rendering (select dropdown popups, checkboxes, radio, scrollbars inside
+   * controls) must follow the active theme. The default (no data-theme) is dark: with the page's
+   * dark palette, declaring `color-scheme: dark` makes the browser render the native <select>
+   * dropdown <option> popup with the dark scheme — without it the popup falls back to light and
+   * becomes unreadable (light text on light background). Mirrored by :root[data-theme='light']. */
+  color-scheme: dark;
+
   /* brand typography: self-hosted Inter (300-700) + JetBrains Mono (400/500), same as the yupiik
    * minisite so the web UI shares the product look (--font-sans / --font-mono in theme.css). */
   --yca-font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -63,6 +70,9 @@
 }
 
 :root[data-theme='light'] {
+  /* light scheme for native form controls, mirroring the :root dark default (see above). */
+  color-scheme: light;
+
   --yca-brand-green: #1f7a12;
   --yca-brand-green-dark: #2ecf1c;
   --yca-brand-purple: #8a3bb8;
@@ -367,4 +377,13 @@ textarea:focus-visible {
 ::selection {
   background: color-mix(in srgb, var(--yca-ring) 20%, var(--yca-panel));
   color: var(--yca-heading);
+}
+
+/* Belt-and-suspenders for native <option> dropdown rows: even with color-scheme set, a few
+ * platforms/engines render the open <select> popup with their own default surface. Pin the
+ * option row to the theme tokens so the open dropdown is always readable (the <select> itself
+ * is styled inline per-control). */
+select option {
+  background: var(--yca-panel);
+  color: var(--yca-text);
 }

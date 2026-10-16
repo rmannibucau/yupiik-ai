@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatSettings;
@@ -213,6 +214,21 @@ class WebSessionManagerBtwTest {
     }
 
     @Test
+    void retryableAnswerIsBroadcastAndHeldInTheSlot() {
+        manager.attach("s1");
+        manager.slash("s1", "/btw retry me").join();
+        broker.frames.poll();
+        answerer.completeRetryable("retry me", "could not answer, retry");
+        final var doneFrame = broker.awaitFrame();
+        assertTrue(doneFrame.contains("\"running\":false"), doneFrame);
+        assertTrue(doneFrame.contains("\"answer\":\"could not answer, retry\""), doneFrame);
+        assertTrue(doneFrame.contains("\"retryable\":true"), doneFrame);
+        final var state = manager.btwState("s1");
+        assertEquals("could not answer, retry", state.answer());
+        assertTrue(state.retryable());
+    }
+
+    @Test
     void snapshotForReseedsALiveAnswer() {
         manager.attach("s1");
         manager.slash("s1", "/btw reseed me").join();
@@ -276,7 +292,7 @@ class WebSessionManagerBtwTest {
 
     /** Controllable {@code BtwAnswerer}: overrides the 6-arg ask to return per-question futures. */
     private static final class FakeBtwAnswerer extends BtwAnswerer {
-        private final java.util.Map<String, CompletableFuture<String>> pending =
+        private final java.util.Map<String, CompletableFuture<BtwAnswerer.BtwAnswer>> pending =
                 new java.util.concurrent.ConcurrentHashMap<>();
         // the real cancellation supplier the manager passed in, keyed by question - so a canceled test
         // reflects the actual override/clear the production code performs on the BtwState it owns.
@@ -287,7 +303,7 @@ class WebSessionManagerBtwTest {
         }
 
         @Override
-        public CompletionStage<String> ask(
+        public CompletionStage<BtwAnswerer.BtwAnswer> ask(
                 final String question,
                 final String sessionId,
                 final UsageTracker usage,
@@ -299,6 +315,18 @@ class WebSessionManagerBtwTest {
             return this.pending.get(question);
         }
 
+        @Override
+        public CompletionStage<BtwAnswerer.BtwAnswer> ask(
+                final String question,
+                final String sessionId,
+                final UsageTracker usage,
+                final BooleanSupplier cancelled,
+                final ApprovalGate sessionGate,
+                final ChatSettings sessionSettings,
+                final SystemPromptBuilder systemPromptBuilder) {
+            return ask(question, sessionId, usage, cancelled, sessionGate, sessionSettings);
+        }
+
         private BooleanSupplier cancelledSupplier(final String question) {
             return cancelled.get(question);
         }
@@ -306,7 +334,14 @@ class WebSessionManagerBtwTest {
         private void complete(final String question, final String answer) {
             final var future = pending.get(question);
             if (future != null) {
-                future.complete(answer);
+                future.complete(new BtwAnswerer.BtwAnswer(answer, false));
+            }
+        }
+
+        private void completeRetryable(final String question, final String answer) {
+            final var future = pending.get(question);
+            if (future != null) {
+                future.complete(new BtwAnswerer.BtwAnswer(answer, true));
             }
         }
 

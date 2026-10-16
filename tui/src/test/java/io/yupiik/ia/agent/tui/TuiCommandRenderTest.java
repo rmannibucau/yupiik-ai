@@ -1036,6 +1036,73 @@ class TuiCommandRenderTest {
         quit();
     }
 
+    @Test
+    void btwRetryRetriesAnEmptyAnswerInModal() throws Exception {
+        // an empty /btw answer (with completion tokens) becomes a retryable failure surfaced in the modal
+        llm.answer("");
+        final var shellRegistry = testRegistry();
+        final var turnStarted = new CountDownLatch(1);
+        final var releaseTurn = new CountDownLatch(1);
+        final var agentLoop = new AgentLoop() {
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled) {
+                try {
+                    turnStarted.countDown();
+                    releaseTurn.await();
+                } catch (final InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                shellRegistry.onEvent(new AgentEvent.TextDelta("hello from stub", sessionId));
+                shellRegistry.onEvent(new AgentEvent.TurnDone("hello from stub", sessionId));
+                return "ok";
+            }
+
+            @Override
+            public String run(
+                    final String prompt,
+                    final String agentName,
+                    final String sessionId,
+                    final List<Message> history,
+                    final BooleanSupplier cancelled,
+                    final Supplier<String> queuedPrompt) {
+                return run(prompt, agentName, sessionId, history, cancelled);
+            }
+        };
+        final var command = command(shellRegistry, agentLoop);
+        uiThread = new Thread(command, "tui-btw-retry-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+
+        tuiRef.get().dispatch(new PasteEvent("say hi"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        assertTrue(
+                turnStarted.await(TIMEOUT_MS, TimeUnit.MILLISECONDS), "the stub turn did not start before the timeout");
+        tuiRef.get().dispatch(new PasteEvent("/btw what is this"));
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ENTER));
+        awaitText("Q: what is this");
+        // the empty answer surfaces a retryable failure with the Retry affordance in the modal footer
+        awaitText("r Retry");
+
+        llm.answer("the retried answer");
+        tuiRef.get().dispatch(KeyEvent.ofChar('r'));
+        awaitText("Q: what is this");
+        awaitText("the retried answer");
+        assertTrue(sessionAppends.isEmpty(), "btw retry must never write to the session store");
+
+        tuiRef.get().dispatch(KeyEvent.ofKey(KeyCode.ESCAPE));
+        awaitTextGone("Q: what is this");
+        releaseTurn.countDown();
+        awaitText("hello from stub");
+        quit();
+    }
+
     private AgentLoop stubAgentLoop() {
         return new AgentLoop() {
             @Override
@@ -1209,8 +1276,13 @@ class TuiCommandRenderTest {
                 null,
                 configuration,
                 null);
-        final var configCommands =
-                new ConfigCommands(agentSessionService, chatClient, providerManager, new AgentProvider(configuration));
+        final var configCommands = new ConfigCommands(
+                agentSessionService,
+                chatClient,
+                providerManager,
+                new AgentProvider(configuration),
+                null, // SecretSessionModes
+                null); // SecretRedactor
         return new TuiCommand(
                 conf,
                 tuiConfiguration,

@@ -20,6 +20,7 @@ import io.yupiik.fusion.framework.build.api.cli.Command;
 import io.yupiik.fusion.framework.build.api.configuration.Property;
 import io.yupiik.fusion.framework.build.api.configuration.RootConfiguration;
 import io.yupiik.ia.agent.core.agent.AgentEvent;
+import io.yupiik.ia.agent.core.agent.AgentLoop;
 import io.yupiik.ia.agent.core.agent.AgentProvider;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.PermissionMode;
@@ -212,7 +213,7 @@ public class RunCommand implements Runnable {
             System.out.flush();
             shellRegistry.unregister(shellEnv);
             runtime.close();
-            // headless run end: persist the pending memory delta now, before the JVM exits
+            // headless run end: persist the mined memory delta now, before the JVM exits
             try {
                 runtime.loop().forceExtractNow(sessionStore.load(sessionId), runtime.chatSettings());
             } catch (final RuntimeException e) {
@@ -224,7 +225,7 @@ public class RunCommand implements Runnable {
                 // the JVM is already shutting down (forced-exit path): the hook runs on its own
             }
             detailLog.close();
-            writeMetrics(metrics, started);
+            writeMetrics(metrics, started, runtime.loop().auxiliaryUsage());
         }
         if (failed.get()) {
             throw new IllegalStateException("run failed: " + lastError.get());
@@ -267,7 +268,7 @@ public class RunCommand implements Runnable {
         return cancelled::get;
     }
 
-    private void writeMetrics(final Metrics metrics, final long started) {
+    private void writeMetrics(final Metrics metrics, final long started, final AgentLoop.AuxiliaryUsage aux) {
         if (conf.metricsOutputFile() == null || conf.metricsOutputFile().isBlank()) {
             return;
         }
@@ -283,6 +284,20 @@ public class RunCommand implements Runnable {
                 + " compactions=" + metrics.compactions.get()
                 + " codeTools=" + metrics.codeTools.get()
                 + " llmCalls=" + metrics.llmCalls.get()
+                // background (auxiliary) LLM spend: calls/tokens that never appear as conversation
+                // turns (memory extraction, compaction summarizer, sub-agent fold-in) but ARE billed
+                // and measured by the middleware. aux* break the background out; total* = in-loop +
+                // background so the app self-report matches the middleware.
+                + " auxLlmCalls=" + (aux == null ? 0 : aux.calls())
+                + " auxPromptTokens=" + (aux == null ? 0 : aux.promptTokens())
+                + " auxCompletionTokens=" + (aux == null ? 0 : aux.completionTokens())
+                + " auxCacheReadTokens=" + (aux == null ? 0 : aux.cacheReadTokens())
+                + " auxFreshTokens=" + (aux == null ? 0 : aux.freshTokens())
+                + " totalLlmCalls=" + (metrics.llmCalls.get() + (aux == null ? 0 : aux.calls()))
+                + " totalPromptTokens="
+                + (metrics.promptTokens.get() + (aux == null ? 0 : aux.promptTokens()))
+                + " totalCompletionTokens="
+                + (metrics.completionTokens.get() + (aux == null ? 0 : aux.completionTokens()))
                 + " maxContext=" + metrics.maxContext
                 + " sumContext=" + metrics.sumContext.get()
                 + " toolCalls=" + metrics.toolCalls.get()

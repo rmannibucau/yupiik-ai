@@ -42,7 +42,7 @@ export type SessionStatus = {
   notice?: { level?: string; message?: string };
   busy?: boolean;
   // the current /btw side question (latest-wins single slot): absent/null when no btw is open.
-  btw?: { id?: number; running?: boolean; question: string; answer?: string; error?: string };
+  btw?: { id?: number; running?: boolean; question: string; answer?: string; error?: string; retryable?: boolean };
 };
 
 /** Stable identity of an event, used to merge (not replace) live events with the snapshot. */
@@ -358,10 +358,11 @@ export function useSessionStream(sessionId: string | undefined) {
 
   // Derive the status bar from the single event log so it can never desync from the transcript:
   // usage-updated/turn-metrics/status/notice are "latest wins" messages, so fold over the tail.
-  // liveOutChars (the realtime out-char estimate) is kept in a ref and overlaid so the fold stays pure.
+  // liveOutChars is also folded from the log (see foldStatus) so it survives a reload; the realtime
+  // ref overlay only bumps it higher while a turn streams live, never clobbers the log-derived value.
   const status = useMemo<SessionStatus>(() => {
     const s = foldStatus(events);
-    if (liveOutCharsRef.current > 0) s.liveOutChars = liveOutCharsRef.current;
+    if (liveOutCharsRef.current > 0) s.liveOutChars = Math.max(s.liveOutChars ?? 0, liveOutCharsRef.current);
     return s;
   }, [events]);
 
@@ -392,7 +393,21 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
   // last explicit busy flag seen (unset until the first frame carries one): used to detect a real
   // turn start (false -> true) and ignore the repeated busy:true activity frames mid-turn.
   let lastBusy: boolean | undefined;
+  // chars of streamed output/reasoning text since the last turn boundary, accumulated over the WHOLE
+  // event log (live + replayed). Mirrors foldLiveOutChars but survives a reload, whose snapshot
+  // replays text-delta/thinking-delta that the live-only liveOutCharsRef never saw - without it a
+  // reloaded session with a no-usage provider would have no token source and render empty metrics.
+  let liveOutChars = 0;
   for (const ev of events) {
+    if (ev.type === 'text-delta' || ev.type === 'thinking-delta') {
+      liveOutChars += ev.message?.length ?? 0;
+    } else if (ev.type === 'user') {
+      // a new turn starts: reset the out estimate to that turn's streamed text. Unlike the live-only
+      // ref (foldLiveOutChars resets on turn-done), this does NOT zero on turn-done/cancelled/error so
+      // a reloaded snapshot of a completed turn keeps its displayable out estimate when no turn-metrics
+      // or usage was replayed alongside it.
+      liveOutChars = 0;
+    }
     if (ev.type === 'usage-updated') {
       const d = ev.data ?? {};
       s.model = (ev.message as string) || s.model;
@@ -480,6 +495,9 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
     const reasoning = Math.max(0, reasoningTotal - reasoningBase);
     if (reasoning > 0) s.liveReasoningTokens = reasoning;
   }
+  // the log-derived streamed-char estimate (last completed turn or in-flight turn): present even on a
+  // reloaded session with no provider usage, so the token line never renders empty.
+  if (liveOutChars > 0) s.liveOutChars = liveOutChars;
   return s;
 }
 

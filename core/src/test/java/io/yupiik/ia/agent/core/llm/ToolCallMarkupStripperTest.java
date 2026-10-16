@@ -16,7 +16,9 @@
 package io.yupiik.ia.agent.core.llm;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
 
@@ -29,6 +31,18 @@ class ToolCallMarkupStripperTest {
 
     private static String invoke(final String name, final String body) {
         return "<\uFF5CDSML\uFF5Cinvoke " + name + ">\n" + body + "\n</\uFF5CDSML\uFF5Cinvoke>";
+    }
+
+    @Test
+    void containsMarkupDetectsOnlyRealMarkerFamilies() {
+        assertFalse(stripper.containsMarkup(null));
+        assertFalse(stripper.containsMarkup(""));
+        assertFalse(stripper.containsMarkup("just prose about opencode's todo tool"));
+        // prose that merely *discusses* tools must not be mistaken for markup
+        assertFalse(stripper.containsMarkup("opencode's tool list has no write_todo"));
+        assertTrue(stripper.containsMarkup("A\n\n<|DSML|tool_calls>\n..."));
+        assertTrue(stripper.containsMarkup("<tool_call>{\"name\":\"read\"}</tool_call>"));
+        assertTrue(stripper.containsMarkup("A\n\n<|tool_calls|>\n..."));
     }
 
     @Test

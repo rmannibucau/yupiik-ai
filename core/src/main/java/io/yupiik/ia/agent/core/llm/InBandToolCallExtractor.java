@@ -57,4 +57,18 @@ public class InBandToolCallExtractor {
     public String strip(final String raw) {
         return stripper.strip(raw);
     }
+
+    /**
+     * Whether the raw model content carries any in-band tool-call markup (DeepSeek DSML, the V3.1
+     * markers, the ASCII manglings, or the Qwen/Hermes/GLM {@code <tool_call>} families) that
+     * {@link #strip} would remove. Lets a caller tell a clean prose answer apart from a model that
+     * reached for a tool through the text channel even though none was declared or executed - the
+     * latter must not be surfaced as a clean, silent success.
+     *
+     * @param raw the assistant content as received, may be {@code null}.
+     * @return {@code true} when any tool-call block markup is present.
+     */
+    public boolean containsMarkup(final String raw) {
+        return stripper.containsMarkup(raw);
+    }
 }

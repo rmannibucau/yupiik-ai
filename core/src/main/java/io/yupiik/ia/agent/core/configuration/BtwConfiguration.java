@@ -41,7 +41,10 @@ public record BtwConfiguration(
                 defaultValue = "5",
                 documentation =
                         "Number of previous /btw questions and answers replayed to the model so follow-up side questions stay coherent (memory only, never persisted). 0 disables the replay.")
-        int recall) {
+        int recall,
 
-    public static final BtwConfiguration DEFAULT = new BtwConfiguration("", 0, 200, 5);
-}
+        @Property(
+                defaultValue = "false",
+                documentation =
+                        "Whether a /btw side question may additionally run the plan-mode read-only tools (file/command readers, searches, and the read-only shell commands) to inspect the project while answering. Default false: /btw is a single generation that never executes anything - it reuses the session's system prompt and the full wire tool schema so the provider prompt cache stays byte-identical with the main agent loop, and the model is directed through the prompt to answer directly and never act. A model that still reaches for a tool (native or in-band text markup) is never executed and is surfaced as a retryable note instead of a silent truncated answer. Turn on this flag to also let /btw actually run the read-only plan-mode tools ('let /btw read the project').")
+        boolean tools) {}

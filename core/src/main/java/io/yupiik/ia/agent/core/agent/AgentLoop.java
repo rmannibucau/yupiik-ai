@@ -123,8 +123,19 @@ public class AgentLoop {
             "You just repeated the same bash/state-changing call with the same arguments, and it returned"
                     + " the same already-known result again. Do not re-issue it: it adds no information."
                     + " Change approach - use a different command or tool, narrow or widen the query, or"
-                    + " proceed from what you already collected. If you are stuck, state exactly what is"
-                    + " still missing instead of retrying the same call.";
+                    + " state exactly what is still missing instead of repeating the call.";
+
+    /**
+     * One-shot nudge injected when the model has spent llm.explorationNudgeRounds consecutive
+     * informative read-only rounds exploring without answering. Complements the plateau guard
+     * (which only catches re-reading already-seen targets): a spiral of novel reads is
+     * informative every round, so only a wrap-up directive stops it.
+     */
+    static final String EXPLORATION_NUDGE_PROMPT =
+            "You have spent several consecutive rounds exploring the codebase with read-only tools."
+                    + " You have enough context: stop expanding the survey now and deliver the answer."
+                    + " Synthesize what you already collected; only call another tool if a single,"
+                    + " decisive piece of information is strictly missing.";
 
     /** Nudge sent to the model after a truncated reply so it resumes instead of restarting. */
     private static final String TRUNCATION_CONTINUE_PROMPT =
@@ -416,6 +427,12 @@ public class AgentLoop {
 
     /** Whether the plateau nudge (plateauFeedback nudge_1/nudge_2) was already injected this turn. */
     private boolean plateauNudged;
+
+    /** Whether the one-shot exploration nudge (EXPLORATION_NUDGE_PROMPT) was already injected this turn. */
+    private boolean explorationNudged;
+
+    /** Consecutive informative read-only rounds this turn without an answer (drives the exploration nudge). */
+    private int explorationRounds;
 
     /** Whether the one-shot doom-loop nudge (DOOM_LOOP_NUDGE_PROMPT) was already injected this turn. */
     private boolean doomLoopNudged;
@@ -851,6 +868,8 @@ public class AgentLoop {
         seenFiles.clear();
         plateauRounds = 0;
         plateauNudged = false;
+        explorationRounds = 0;
+        explorationNudged = false;
         doomLoopNudged = false;
         final var messages = new ArrayList<Message>();
         messages.add(Message.system(systemPromptBuilder.build(promptForBuilding == null ? "" : promptForBuilding, agent)
@@ -1629,6 +1648,26 @@ public class AgentLoop {
                     }
                 } else {
                     plateauRounds = 0;
+                }
+                // exploration nudge (novel-spiral complement to the plateau guard): plateau/doom-loop
+                // only catch redundant work; a spiral of NOVEL reads/globs is informative every round
+                // and slips through. After llm.explorationNudgeRounds such consecutive rounds without
+                // an answer, inject a one-shot wrap-up directive (no hard stop: a genuinely deep task
+                // can still continue gathering - the model decides).
+                final var readOnlyRound = !roundCoverage.contains(WRITE_MARKER) && !roundCoverage.isEmpty();
+                if (readOnlyRound && roundInformative[0]) {
+                    explorationRounds++;
+                    final var nudgeRounds = configuration.llm().explorationNudgeRounds();
+                    if (nudgeRounds > 0 && !explorationNudged && explorationRounds >= nudgeRounds) {
+                        explorationNudged = true;
+                        emit(notice(
+                                AgentEvent.Notice.Level.INFO,
+                                "exploration nudge sent to the model (round " + explorationRounds + ')'));
+                        messages.add(Message.user(EXPLORATION_NUDGE_PROMPT));
+                        continue windowLoop;
+                    }
+                } else {
+                    explorationRounds = 0;
                 }
                 if (!toolDirectiveApplied && contextView != null) {
                     final var directive = contextView.poll();

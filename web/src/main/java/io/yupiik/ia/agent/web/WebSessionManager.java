@@ -273,7 +273,7 @@ public class WebSessionManager implements AutoCloseable {
         if (previous != null) {
             previous.cancelled().set(true);
         }
-        final var state = new BtwState(id, question, true, null, null, cancelled);
+        final var state = new BtwState(id, question, true, null, null, false, cancelled);
         synchronized (session) {
             session.btw = state;
         }
@@ -285,13 +285,14 @@ public class WebSessionManager implements AutoCloseable {
                         runtime == null ? null : runtime.usage(),
                         cancelled::get,
                         runtime == null ? null : runtime.permissions().gate(),
-                        runtime == null ? null : runtime.chatSettings())
+                        runtime == null ? null : runtime.chatSettings(),
+                        runtime == null ? null : runtime.systemPromptBuilder())
                 .whenComplete((answer, error) -> onBtwAnswer(session, state, answer, error));
         return CompletableFuture.completedFuture(true);
     }
 
     private void onBtwAnswer(
-            final WebSession session, final BtwState state, final String answer, final Throwable error) {
+            final WebSession session, final BtwState state, final BtwAnswerer.BtwAnswer answer, final Throwable error) {
         // stale: a newer /btw replaced this one, or the user cleared/closed it before it finished
         synchronized (session) {
             if (session.btw == null
@@ -303,12 +304,16 @@ public class WebSessionManager implements AutoCloseable {
                 final var cause = error.getCause() == null ? error : error.getCause();
                 final var message =
                         cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
-                session.btw = new BtwState(state.id(), state.question(), false, null, message, state.cancelled());
+                session.btw =
+                        new BtwState(state.id(), state.question(), false, null, message, false, state.cancelled());
                 broadcastBtw(session.sessionId, session.btw);
                 return;
             }
-            final var answerText = answer == null || answer.isBlank() ? "(no answer)" : answer;
-            session.btw = new BtwState(state.id(), state.question(), false, answerText, null, state.cancelled());
+            final var answerText =
+                    answer == null || answer.text() == null || answer.text().isBlank() ? "(no answer)" : answer.text();
+            final var retryable = answer != null && answer.retryable();
+            session.btw =
+                    new BtwState(state.id(), state.question(), false, answerText, null, retryable, state.cancelled());
             broadcastBtw(session.sessionId, session.btw);
         }
     }
@@ -357,6 +362,9 @@ public class WebSessionManager implements AutoCloseable {
         }
         if (state.error() != null) {
             data.put("error", state.error());
+        }
+        if (state.retryable()) {
+            data.put("retryable", true);
         }
         broker.broadcast(
                 sessionId,
@@ -453,7 +461,8 @@ public class WebSessionManager implements AutoCloseable {
      * @return the replayed {@link WebEventDto}s in conversation order
      */
     public List<WebEventDto> snapshotFor(final String sessionId) {
-        final var replay = WebReplay.replay(sessionId, sessionStore.load(sessionId));
+        final var messages = sessionStore.load(sessionId);
+        final var replay = WebReplay.replay(sessionId, messages);
         // a tab that connects mid-turn must learn the session is already busy (the persistable history
         // carries no live busy state): prepend a synthetic status frame the frontend's foldStatus folds
         // in, so the status bar shows "working" and the Stop button appears without re-running the turn.
@@ -467,6 +476,29 @@ public class WebSessionManager implements AutoCloseable {
             final var btw = webSession.btw;
             if (btw != null) {
                 replay.add(btwEvent(sessionId, btw));
+            }
+            // Persisted history carries no usage telemetry (WebReplay replays only user/text/tool
+            // events), so a reloaded/reconnected tab would otherwise fold a log with NO token source
+            // and the metrics bar renders empty until the next live usage-updated frame. Re-seed the
+            // session's cumulative token totals as a synthetic usage-updated so the reloaded metrics
+            // show the exact "in N · out N" (and don't freeze) immediately. Only emitted while the
+            // session recorded any usage, so a genuinely fresh session shows nothing spurious.
+            final var usage = webSession.runtime.usage();
+            if (usage.completionTokens() > 0 || usage.promptTokens() > 0) {
+                final var effective = usage.effectiveContext(messages, 0);
+                replay.add(new WebEventDto(
+                        "usage-updated",
+                        sessionId,
+                        null,
+                        null,
+                        null,
+                        Map.of(
+                                "promptTokens", (int) usage.promptTokens(),
+                                "completionTokens", (int) usage.completionTokens(),
+                                "reasoningTokens", (int) usage.reasoningTokens(),
+                                "cacheReadTokens", (int) usage.cacheReadTokens(),
+                                "estimatedContextTokens", effective,
+                                "contextPercent", usage.contextPercent(effective))));
             }
         }
         return replay;
@@ -482,6 +514,9 @@ public class WebSessionManager implements AutoCloseable {
         }
         if (state.error() != null) {
             data.put("error", state.error());
+        }
+        if (state.retryable()) {
+            data.put("retryable", true);
         }
         return new WebEventDto("btw", sessionId, null, null, state.question(), data);
     }
@@ -606,7 +641,14 @@ public class WebSessionManager implements AutoCloseable {
      * carries the outcome. {@code cancelled} lets a newer /btw, a clear, or a session close stop the
      * in-flight answerer loop (its completion is then discarded by the stale-id/cancelled guard).
      */
-    record BtwState(long id, String question, boolean running, String answer, String error, AtomicBoolean cancelled) {}
+    record BtwState(
+            long id,
+            String question,
+            boolean running,
+            String answer,
+            String error,
+            boolean retryable,
+            AtomicBoolean cancelled) {}
 
     /** {@link ShellIO} bridging interactive requests (approval/question) to JSON-RPC over SSE. */
     private final class WebShellIO implements ShellIO {

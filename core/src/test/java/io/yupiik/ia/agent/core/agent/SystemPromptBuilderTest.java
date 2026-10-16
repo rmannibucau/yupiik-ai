@@ -301,7 +301,7 @@ class SystemPromptBuilderTest {
         permissions.setMode(AgentMode.PLAN);
         final var builder =
                 new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null, null, null);
-        final var prompt = builder.build();
+        final var prompt = builder.build("add a retry to the LLM client and fix its error handling");
         assertTrue(prompt.contains("Mode: PLAN"));
         assertTrue(prompt.contains("Repository mutations are forbidden by default"));
         assertTrue(prompt.contains("write_todo is the only state-changing tool allowed"));
@@ -318,7 +318,25 @@ class SystemPromptBuilderTest {
         // the mode constraint is a tail: the mode-neutral identity (which mentions editing) comes first
         assertTrue(prompt.indexOf("edit files") < prompt.indexOf("Mode: PLAN"));
         // the system prompt is deterministic now: no volatile session state inside
-        assertEquals(prompt, builder.build());
+        assertEquals(prompt, builder.build("add a retry to the LLM client and fix its error handling"));
+    }
+
+    @Test
+    void planModeAnswersInformationalQuestionsDirectly() throws Exception {
+        final var cfg = config(Map.of("yca.mode", "plan"));
+        final var permissions = new PermissionService(cfg);
+        permissions.setMode(AgentMode.PLAN);
+        final var builder =
+                new SystemPromptBuilder(cfg, null, null, permissions, new AgentProvider(cfg), null, null, null, null);
+        final var prompt = builder.build("Explain what this project is about: purpose, architecture and how to start");
+        assertTrue(prompt.contains("Mode: PLAN"));
+        assertTrue(
+                prompt.contains("The request is informational: explore the codebase as needed and answer directly"),
+                "informational prompts must not get the plan/todo mandate: " + prompt);
+        assertFalse(
+                prompt.contains("deliver a detailed, concrete implementation plan"),
+                "no plan deliverable for informational prompts: " + prompt);
+        assertTrue(prompt.contains("write_todo is the only state-changing tool allowed"), "read-only rule stays");
     }
 
     @Test
@@ -395,7 +413,9 @@ class SystemPromptBuilderTest {
                 null,
                 null);
         final var prompt = builder.build("explain how the retry logic works");
-        assertTrue(prompt.contains("owner docs"), "workingDir README stays when the prompt names no target dir");
+        assertFalse(
+                prompt.contains("owner docs"),
+                "project README must not be eagerly inlined (opencode-aligned: read project docs on demand)");
         assertFalse(
                 prompt.contains("Target project directory:"), "no target persona when the prompt names no target dir");
     }
@@ -549,6 +569,23 @@ class SystemPromptBuilderTest {
         assertTrue(
                 prompt.contains("Keep the list accurate with write_todo as work progresses"),
                 "the rules must order to keep statuses accurate");
+    }
+
+    @Test
+    void systemPromptTeachesMaximalParallelToolBatching() {
+        final var cfg = config(Map.of(
+                "yca.storageHome", storageHome.toString(),
+                "yca.workingDir", project.toString()));
+        final var prompt = builder(cfg, todoResolver(), providerManager(cfg)).build();
+        assertTrue(
+                prompt.contains("Maximize use of parallel tool calls"),
+                "the tool policy must tell the model to maximize parallel batching: " + prompt);
+        assertTrue(
+                prompt.contains("read .` + `glob **/*.md"),
+                "a worked round-1 batching pattern must be present so the model batches from the start: " + prompt);
+        assertFalse(
+                prompt.contains("batched read-only survey"),
+                "the chaining survey invite must not be advertised (it taught the noisy ls -la && echo form)");
     }
 
     @Test

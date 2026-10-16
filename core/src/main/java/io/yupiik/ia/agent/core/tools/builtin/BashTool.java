@@ -105,10 +105,9 @@ public class BashTool implements EmbeddedTool {
     @Override
     public String description() {
         return "Run a shell command (real bash when available, /bin/sh otherwise) and return its combined "
-                + "stdout/stderr "
-                + "(truncated at maxOutputChars, " + toolOutputCapHuman() + "). "
-                + "For terminal operations (git, mvn, npm, docker...); file ops use the dedicated "
-                + "read/grep/glob tools. Use the workdir parameter instead of `cd <dir> && <cmd>`.";
+                + "stdout/stderr (truncated at maxOutputChars, " + toolOutputCapHuman() + "). "
+                + "For terminal operations (git, mvn, npm, docker...) and batched read-only surveys; file "
+                + "ops use the dedicated read/grep/glob tools. Use the workdir parameter instead of `cd <dir> && <cmd>`.";
     }
 
     private String toolOutputCapHuman() {

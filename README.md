@@ -62,14 +62,14 @@ java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-f
 java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar run --prompt "explain the pom.xml" --provider-model gpt-5-mini
 java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar run --prompt "produce a plan to add auth" --provider-model gpt-5-mini --yca-run-mode plan
 java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar run --prompt "apply the fix" --yca-provider-model gpt-5-mini --yca-run-mode build --yca-run-show-tool-output
-java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar web --yca-http-port 6060
+java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar web --port 6060
 java --enable-native-access=ALL-UNNAMED -jar yca/target/yca-bin-1.0.0-SNAPSHOT-fatjar.jar help
 ```
 
 `web` starts the browser UI on `http://127.0.0.1:6060/` (override the bind with
-`--yca-http-host` / `--yca-http-port`, disable auto-open with
-`--yca-http-open-browser false`, switch to a platform thread pool with
-`--yca-http-virtual-threads false`). The backend is a Tomcat-free JRE
+`--host` / `--port`, disable auto-open with
+`--openBrowser false`, switch to a platform thread pool with
+`--virtualThreads false`). The backend is a Tomcat-free JRE
 `HttpServer` speaking JSON-RPC (`POST /api/rpc`), a reactive SSE duplex
 (`GET /api/stream?session=`), and serving the bundled React UI from
 `META-INF/resources` with proper ETag/immutable caching.

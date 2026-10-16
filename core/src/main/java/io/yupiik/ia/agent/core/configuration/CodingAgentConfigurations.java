@@ -18,6 +18,7 @@ package io.yupiik.ia.agent.core.configuration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -43,9 +44,15 @@ public final class CodingAgentConfigurations {
         private String storageHome;
         private PermissionsConfiguration permissions;
         private StructuralCodeGraphConfiguration codeGraph;
+        private Map<String, String> custom = Map.of();
 
         private Builder() {
             // no-op
+        }
+
+        public Builder custom(final Map<String, String> custom) {
+            this.custom = custom;
+            return this;
         }
 
         public Builder baseUrl(final String baseUrl) {
@@ -69,7 +76,7 @@ public final class CodingAgentConfigurations {
         }
 
         public CodingAgentConfiguration build() {
-            final var map = new HashMap<String, String>();
+            final var map = new HashMap<>(custom);
             map.put("yca.storageHome", storageHome);
             map.put("yca.provider.providers.length", "1");
             map.put("yca.provider.providers.0.id", "default");

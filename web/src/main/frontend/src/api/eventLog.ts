@@ -97,13 +97,30 @@ function collapseReplayDuplicate(blocks: Block[], runningTools: Map<string, numb
         // heal the streamed block with the authoritative complete text
         b.content = msg;
         b.writing = true;
-        // drop the replayed tool cards between the healed text and the current tail
-        const removed = blocks.splice(i + 1, blocks.length - i - 1);
+        // Drop ONLY the replayed duplicate tool cards that sit in the contiguous suffix after the
+        // healed text. A card still `running` is a LIVE tool of the ongoing turn and must never be
+        // spliced away: a mid-turn SSE reconnect replays a full text-delta of a PRIOR completed round
+        // into a log that already holds the currently-executing tool's card after that text, and the
+        // old whole-tail splice deleted that live running card (the "currently running tool sometimes
+        // disappears" bug). Finished/replayed cards (`done`/`interrupted`) are interchangeable with a
+        // replayed reconstruction (the dedup this collapse exists for), so they stay removable; the
+        // payment is never crossing a running card or a non-tool block.
+        let cut = blocks.length;
+        for (let k = blocks.length - 1; k > i; k--) {
+          const c = blocks[k];
+          if (c.kind === 'tool' && c.state !== 'running') {
+            cut = k; // tentatively part of the removable replayed-duplicate suffix
+            continue;
+          }
+          cut = k + 1; // a running live card (or any non-tool block): keep it and everything before
+          break;
+        }
+        const removed = blocks.splice(cut, blocks.length - cut);
         for (const card of removed) {
           if (card.kind === 'tool') {
             const stack = runningTools.get(card.name);
             if (stack) {
-              const j = stack.indexOf(i + 1);
+              const j = stack.indexOf(cut);
               if (j >= 0) stack.splice(j, 1);
               if (stack.length === 0) runningTools.delete(card.name);
             }

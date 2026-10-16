@@ -30,6 +30,7 @@ import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
+import io.yupiik.llm.client.model.LlmToolCall;
 import io.yupiik.llm.client.model.Usage;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
@@ -38,6 +39,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -49,6 +51,11 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Handler;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -810,6 +817,236 @@ class AnthropicDialectTest {
                 failure.getMessage() != null
                         && failure.getMessage().contains("provider answered with a stream for a non-streaming request"),
                 () -> "expected the contextual stream error but got: " + failure);
+    }
+
+    @Test
+    void stripsDanglingToolUseInterruptedByPlainUserMessage(final JsonMapper mapper) throws Exception {
+        // corrupt history: an assistant tool_use whose result never landed because a plain user text
+        // (e.g. a queued prompt) was interposed. Without sanitizing, this would make the gateway reject
+        // the request with "tool_use ids were found without tool_result blocks immediately after".
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        dialect.chat(new LlmRequest(
+                        "m",
+                        List.of(
+                                LlmMessage.user("do it"),
+                                LlmMessage.assistant("", List.of(LlmToolCall.of("t1", "grep", "{}"))),
+                                LlmMessage.user("follow up!")),
+                        null,
+                        null,
+                        64,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        false,
+                        Map.of()))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertFalse(body.contains("\"type\":\"tool_use\""), "the dangling tool_use must be stripped:\n" + body);
+        assertFalse(body.contains("tool_use"), "no tool_use block may reach the wire:\n" + body);
+        assertTrue(body.contains("follow up!"), "the interposed user text is preserved:\n" + body);
+    }
+
+    @Test
+    void warnLogsWhenSanitizerDropsDanglingToolUse(final JsonMapper mapper) throws Exception {
+        // dropped blocks must be observable, not silent: repairing in the agent loop is the primary
+        // path, this wire backstop logs a WARN so lost context is never invisible.
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var records = new ArrayList<LogRecord>();
+        final var logger = Logger.getLogger(AnthropicDialect.class.getName());
+        final var previousLevel = logger.getLevel();
+        final var previousUseParent = logger.getUseParentHandlers();
+        final var handler = new Handler() {
+            @Override
+            public void publish(final LogRecord record) {
+                records.add(record);
+            }
+
+            @Override
+            public void flush() {}
+
+            @Override
+            public void close() {}
+        };
+        logger.addHandler(handler);
+        logger.setLevel(Level.WARNING);
+        logger.setUseParentHandlers(false);
+        try {
+            final var dialect =
+                    new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+            dialect.chat(new LlmRequest(
+                            "m",
+                            List.of(
+                                    LlmMessage.user("do it"),
+                                    LlmMessage.assistant("", List.of(LlmToolCall.of("t1", "grep", "{}"))),
+                                    LlmMessage.user("follow up!")),
+                            null,
+                            null,
+                            64,
+                            null,
+                            null,
+                            null,
+                            null,
+                            null,
+                            false,
+                            Map.of()))
+                    .toCompletableFuture()
+                    .get(5, TimeUnit.SECONDS);
+            final var warns = records.stream()
+                    .filter(record -> record.getLevel() == Level.WARNING)
+                    .collect(Collectors.toList());
+            assertFalse(warns.isEmpty(), "a WARN must be logged when the sanitizer drops a dangling tool_use");
+            assertTrue(
+                    warns.stream()
+                            .anyMatch(record ->
+                                    String.valueOf(record.getMessage()).contains("t1")),
+                    "the WARN must name the dropped tool call id:\n" + warns);
+        } finally {
+            logger.removeHandler(handler);
+            logger.setLevel(previousLevel);
+            logger.setUseParentHandlers(previousUseParent);
+        }
+    }
+
+    @Test
+    void keepsValidContiguousToolUseToolResultPair(final JsonMapper mapper) throws Exception {
+        // a valid history: the assistant tool_use is immediately answered by its tool_result
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        dialect.chat(new LlmRequest(
+                        "m",
+                        List.of(
+                                LlmMessage.user("do it"),
+                                LlmMessage.assistant("", List.of(LlmToolCall.of("t1", "grep", "{}"))),
+                                LlmMessage.tool("t1", "found")),
+                        null,
+                        null,
+                        64,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        false,
+                        Map.of()))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertTrue(body.contains("\"type\":\"tool_use\""), "the matched tool_use must be preserved:\n" + body);
+        assertTrue(body.contains("\"id\":\"t1\""), "the matched tool_use id must be preserved:\n" + body);
+        assertTrue(body.contains("\"type\":\"tool_result\""), "the matched tool_result must be preserved:\n" + body);
+        assertTrue(
+                body.contains("\"tool_use_id\":\"t1\""),
+                "the matched tool_result must reference its tool_use:\n" + body);
+    }
+
+    @Test
+    void dropsOrphanToolResultWithoutPreceedingToolUse(final JsonMapper mapper) throws Exception {
+        // corruption the other way: a tool_result with no immediately-preceding assistant tool_use
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        dialect.chat(new LlmRequest(
+                        "m",
+                        List.of(LlmMessage.user("do it"), LlmMessage.tool("orphan", "stale result")),
+                        null,
+                        null,
+                        64,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        false,
+                        Map.of()))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertFalse(body.contains("tool_result"), "the orphan tool_result must be dropped:\n" + body);
+        assertTrue(body.contains("do it"), "the user message is preserved:\n" + body);
+    }
+
+    @Test
+    void boundingDoesNotDropOlderPairedBurstButStillCatchesTailDangle(final JsonMapper mapper) throws Exception {
+        // the pairing check is bounded to the live tail: an older, already-completed round (pair a) is
+        // emitted as-is even though it lies before the most recent user prompt, while a dangling tool_use
+        // in the live tail (b, no result) is still stripped.
+        server.createContext("/v1/messages", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(
+                    exchange,
+                    200,
+                    "{\"id\":\"m1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"m\","
+                            + "\"content\":[{\"type\":\"text\",\"text\":\"ok\"}],\"stop_reason\":\"end_turn\",\"stop_sequence\":null,"
+                            + "\"usage\":{\"input_tokens\":5,\"output_tokens\":1}}");
+        });
+        server.start();
+        final var dialect = new AnthropicDialect(mapper, client, ProviderSpec.of(port() + "/v1/messages", "sk-test"));
+        dialect.chat(new LlmRequest(
+                        "m",
+                        List.of(
+                                LlmMessage.user("first"),
+                                LlmMessage.assistant("", List.of(LlmToolCall.of("a", "grep", "{}"))),
+                                LlmMessage.tool("a", "found"),
+                                LlmMessage.user("second"),
+                                LlmMessage.assistant("", List.of(LlmToolCall.of("b", "grep", "{}")))),
+                        null,
+                        null,
+                        64,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        false,
+                        Map.of()))
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        assertTrue(
+                body.contains("\"id\":\"a\""),
+                "the older completed pair's tool_use must be preserved even though it precedes the latest prompt:\n"
+                        + body);
+        assertTrue(body.contains("\"tool_use_id\":\"a\""), "the older pair's result must be preserved:\n" + body);
+        assertFalse(body.contains("\"id\":\"b\""), "the live-tail dangling tool_use must still be stripped:\n" + body);
     }
 
     private static <T> Optional<Throwable> failureOf(final CompletableFuture<T> future) {

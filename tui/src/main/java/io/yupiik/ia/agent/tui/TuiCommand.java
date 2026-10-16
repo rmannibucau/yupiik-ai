@@ -1739,7 +1739,7 @@ public class TuiCommand implements Runnable {
             return true;
         }
         if (state.btw != null) {
-            return onBtwKey(key, state);
+            return onBtwKey(key, runner, state);
         }
         if (key.hasCtrl() && key.hasShift() && key.isCharIgnoreCase('c')) {
             copySelection(runner, state);
@@ -2268,13 +2268,19 @@ public class TuiCommand implements Runnable {
             notify(state, "usage: /btw <question>");
             return;
         }
+        // the typed /btw path refuses while one is already open; the Retry key re-asks in place instead.
         if (state.btw != null) {
             notify(state, "a btw answer is already open - close it first (Esc)");
             return;
         }
+        askBtw(question, runner, state);
+    }
+
+    /** (Re-)asks a /btw question, resetting the single-slot overlay to a fresh running state. */
+    private void askBtw(final String question, final TuiRunner runner, final UiState state) {
         final var ordinal = state.btwOrdinal.incrementAndGet();
         final var cancelled = new AtomicBoolean(false);
-        state.btw = new UiState.BtwOverlay(ordinal, question, "", null, true, 0, cancelled);
+        state.btw = new UiState.BtwOverlay(ordinal, question, "", null, true, false, 0, cancelled);
         final var sessionId = state.session.sessionId();
         btwAnswerer
                 .ask(
@@ -2284,7 +2290,11 @@ public class TuiCommand implements Runnable {
                                 ? state.session.runtime().usage()
                                 : null,
                         cancelled::get,
-                        btwGate(runner, state, ordinal))
+                        btwGate(runner, state, ordinal),
+                        null,
+                        state.session.runtime() != null
+                                ? state.session.runtime().systemPromptBuilder()
+                                : null)
                 .whenComplete((answer, error) ->
                         runLater(state, () -> onBtwAnswer(state, ordinal, answer, error, cancelled)));
     }
@@ -2292,7 +2302,7 @@ public class TuiCommand implements Runnable {
     private void onBtwAnswer(
             final UiState state,
             final long ordinal,
-            final String answer,
+            final BtwAnswerer.BtwAnswer answer,
             final Throwable error,
             final AtomicBoolean cancelled) {
         if (state.btw == null || state.btw.ordinal() != ordinal) {
@@ -2306,17 +2316,13 @@ public class TuiCommand implements Runnable {
         if (error != null) {
             final var cause = error.getCause() == null ? error : error.getCause();
             final var message = cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
-            state.btw = new UiState.BtwOverlay(ordinal, question, "", message, false, 0, cancelled);
+            state.btw = new UiState.BtwOverlay(ordinal, question, "", message, false, false, 0, cancelled);
             return;
         }
+        final var answerText =
+                answer == null || answer.text() == null || answer.text().isBlank() ? "(no answer)" : answer.text();
         state.btw = new UiState.BtwOverlay(
-                ordinal,
-                question,
-                answer == null || answer.isBlank() ? "(no answer)" : answer,
-                null,
-                false,
-                0,
-                cancelled);
+                ordinal, question, answerText, null, false, answer != null && answer.retryable(), 0, cancelled);
     }
 
     private void closeBtw(final UiState state) {
@@ -2337,9 +2343,17 @@ public class TuiCommand implements Runnable {
         }
     }
 
-    private boolean onBtwKey(final KeyEvent key, final UiState state) {
+    private boolean onBtwKey(final KeyEvent key, final TuiRunner runner, final UiState state) {
         if (key.isCancel() || key.isKey(KeyCode.ESCAPE) || key.isConfirm() || key.isChar('q')) {
             closeBtw(state);
+            return true;
+        }
+        // a settled, retryable btw failure: re-ask the same question in place.
+        if ((key.isChar('r') || key.isCharIgnoreCase('R'))
+                && state.btw != null
+                && !state.btw.running()
+                && state.btw.retryable()) {
+            askBtw(state.btw.question(), runner, state);
             return true;
         }
         final var delta = scrollService.keyDelta(key);
@@ -2356,6 +2370,7 @@ public class TuiCommand implements Runnable {
                 btw.answer(),
                 btw.error(),
                 btw.running(),
+                btw.retryable(),
                 scrollService.apply(btw.scroll(), delta),
                 btw.cancelled());
     }
@@ -6139,11 +6154,14 @@ public class TuiCommand implements Runnable {
                             .build(),
                     splits.getFirst());
         }
+        final var footer = btw.running()
+                ? "  Esc cancel"
+                : btw.retryable()
+                        ? "  r Retry   Wheel/Up/Down scroll  Esc close  "
+                        : "  Wheel/Up/Down scroll  Esc close  ";
         frame.renderWidget(
                 Paragraph.builder()
-                        .text(Text.from(Line.from(Span.styled(
-                                btw.running() ? "  Esc cancel" : "  Wheel/Up/Down scroll  Esc close  ",
-                                Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
+                        .text(Text.from(Line.from(Span.styled(footer, Style.EMPTY.fg(Color.hex(palette.textMuted()))))))
                         .overflow(Overflow.CLIP)
                         .build(),
                 splits.get(1));
@@ -8154,6 +8172,7 @@ public class TuiCommand implements Runnable {
                 String answer,
                 String error,
                 boolean running,
+                boolean retryable,
                 int scroll,
                 AtomicBoolean cancelled) {}
 

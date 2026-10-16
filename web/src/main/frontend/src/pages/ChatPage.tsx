@@ -256,6 +256,12 @@ export function ChatPage({
     if (!sessionId) return;
     await call('session.btwClear', { id: sessionId }).catch(() => {});
   }, [sessionId]);
+  // a retryable /btw failure: re-ask the same question by re-dispatching /btw, which resets the
+  // single-slot modal to a fresh running state (latest-wins).
+  const retryBtw = useCallback(async () => {
+    if (!sessionId || !btw?.question) return;
+    await call('session.slash', { id: sessionId, text: `/btw ${btw.question}` }).catch(() => {});
+  }, [sessionId, btw?.question]);
 
   // Issue #1: ensure the session is served by the backend AND its tab is registered. App normally
   // registers the tab on /session/:id navigation; this is the safety net for any mount that skipped it
@@ -446,9 +452,21 @@ export function ChatPage({
 
   useEffect(() => {
     if (!onTitleChange || !sessionId) return;
-    const firstUser = events.find((ev) => ev.type === 'user' && typeof ev.message === 'string' && ev.message.trim());
+    // Compaction prepends a digest as a fresh user message wrapped in
+    // <compacted-context>/<pruned-context>; treat it as historical state, not the
+    // conversation's opening question, so it never leaks into the tab title as
+    // "<compacted-context>## ...". Mirror ContextView.java's marker filtering.
+    const firstUser = events.find(
+      (ev) => ev.type === 'user'
+        && typeof ev.message === 'string'
+        && ev.message.trim()
+        && !/^\s*<(?:compacted|pruned)-context>/.test(ev.message)
+    );
     if (!firstUser) return;
-    const text = (firstUser.message as string).trim().replace(/\s+/g, ' ');
+    const text = (firstUser.message as string)
+      .trim()
+      .replace(/\s+/g, ' ')
+      .replace(/^<(?:compacted|pruned)-context>\s*.*?##\s*/, '');
     onTitleChange(sessionId, text.length > 60 ? `${text.slice(0, 57)}…` : text);
   }, [events, sessionId, onTitleChange]);
 
@@ -891,7 +909,7 @@ export function ChatPage({
       {/* bottom bar kept for live agent status + feedback (thinking/calling/working spinners) */}
       <StatusBar status={status} busy={busy} initializing={initializing} btw={btw} onOpenBtw={() => setBtwOpen(true)} onClearBtw={clearBtw} />
       <RequestModal request={pending} onAnswer={answer as (id: number, value: unknown) => void} />
-      {btwOpen && <BtwModal btw={btw} onClose={() => setBtwOpen(false)} />}
+      {btwOpen && <BtwModal btw={btw} onClose={() => setBtwOpen(false)} onRetry={retryBtw} />}
       <div className="border-t p-3" style={{ borderColor: 'var(--yca-border)' }}>
         <div className="relative">
           {showCompletion && (
@@ -2176,9 +2194,11 @@ function RequestModal({
 function BtwModal({
   btw,
   onClose,
+  onRetry,
 }: {
   btw?: SessionStatus['btw'];
   onClose: () => void;
+  onRetry: () => void;
 }) {
   useEffect(() => {
     if (!btw) return;
@@ -2228,6 +2248,11 @@ function BtwModal({
             <div className="whitespace-pre-wrap text-sm" style={{ color: '#ff8484' }}>
               {btw.error}
             </div>
+          ) : btw.retryable ? (
+            <div className="whitespace-pre-wrap text-sm" style={{ color: 'var(--yca-muted)' }}>
+              {btw.answer ?? '(no answer)'}
+              {'\n\n'}This side question could not be answered; you can retry it.
+            </div>
           ) : (
             <div className="prose prose-sm max-w-none text-sm leading-relaxed" style={{ color: 'var(--yca-text)' }}>
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer" className="underline">{children}</a> }}>
@@ -2236,7 +2261,17 @@ function BtwModal({
             </div>
           )}
         </div>
-        <div className="mt-3 flex justify-end">
+        <div className="mt-3 flex justify-end gap-2">
+          {!running && btw.retryable && (
+            <button
+              onClick={onRetry}
+              className="rounded border px-3 py-1 text-xs"
+              style={{ borderColor: 'var(--yca-accent)', color: 'var(--yca-accent)' }}
+              title="Retry the side question"
+            >
+              Retry
+            </button>
+          )}
           <button
             onClick={onClose}
             className="rounded border px-3 py-1 text-xs"

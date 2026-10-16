@@ -109,6 +109,18 @@ class BashOverrideTest {
     }
 
     @Test
+    void honorsUnbalancedParenGrepPattern(@TempDir final Path dir) {
+        // a stray literal '(' would break both Java regex and the real grep; the shared repair must
+        // single it out so the override honors the pattern instead of falling back to an erroring shell
+        write(dir, "app.log", "handleKey( final int a\nother line\n");
+        assertEquals(
+                "handleKey( final int a\n",
+                override(0)
+                        .tryRewrite("grep -h 'handleKey( final int a' app.log", dir)
+                        .orElse(""));
+    }
+
+    @Test
     void capsOutputAtMaxCharsPerCommand(@TempDir final Path dir) {
         final var big = new StringBuilder();
         for (var i = 0; i < 40; i++) {

@@ -138,6 +138,38 @@ describe('eventsToBlocks - replayed full-text supersedes the streamed tail (neve
     expect((texts[0] as { content: string }).content).toBe(full);
     expect(tools).toHaveLength(1);
   });
+
+  it('never deletes a live RUNNING tool card when a mid-turn reconnect replays a prior round', () => {
+    // Scenario: the tab is mid-turn with a bash call still executing (tool-started + tool-stream,
+    // no tool-finished yet) when an SSE reconnect lands. The snapshot replays the PREVIOUS completed
+    // round: its full text-delta lossy-supersedes the already-streamed answer, plus a reconstructed
+    // duplicate tool card. The collapse must heal the text and drop ONLY the replayed duplicate card
+    // (a done card), never the live running bash card that sits between them.
+    const limiter = 'Old bursts (before the last user prompt) were and validated when they were the current burst.';
+    const full = 'Old bursts (before the last user prompt) were emitted and validated when they were the current burst.';
+    const blocks = eventsToBlocks([
+      // live stream of the prior answer, lossy at the tail
+      ev({ type: 'user', sessionId: 's1', message: 'step it' }),
+      ev({ type: 'text-delta', sessionId: 's1', message: limiter }),
+      // the CURRENT turn's tool is still running (no tool-finished yet) - must survive the collapse
+      ev({ type: 'tool-started', sessionId: 's1', message: 'bash', data: { ordinal: 5, args: '{"command":"mvn test"}' } }),
+      ev({ type: 'tool-stream', sessionId: 's1', message: 'bash', data: { ordinal: 5, fragment: 'compiling...' } }),
+      // reconnect snapshot re-delivers the prior round complete + a reconstructed duplicate card
+      ev({ type: 'text-delta', sessionId: 's1', message: full }),
+      ev({ type: 'tool-started', sessionId: 's1', message: 'write_todo', data: { ordinal: 1 } }),
+      ev({ type: 'tool-finished', sessionId: 's1', message: 'write_todo', data: { ordinal: 1, output: 'ok', success: true } }),
+    ]);
+    const texts = blocks.filter((b) => b.kind === 'text');
+    const tools = blocks.filter((b) => b.kind === 'tool');
+    // the answer is healed to the complete text (single copy, no duplication)
+    expect(texts).toHaveLength(1);
+    expect((texts[0] as { content: string }).content).toBe(full);
+    // the live running bash card is preserved (still running, with its streamed stdout) and the
+    // replayed duplicate write_todo card is still present (the collapse dropped nothing live)
+    expect(tools).toHaveLength(2);
+    expect(tools[0]).toMatchObject({ name: 'bash', toolOrdinal: 5, state: 'running', content: 'compiling...\n' });
+    expect(tools[1]).toMatchObject({ name: 'write_todo', toolOrdinal: 1, state: 'done' });
+  });
 });
 
 describe('eventsToBlocks - repeated same-name tools bind to their own card via ordinal', () => {

@@ -52,11 +52,10 @@ public class ReadFileTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Read the contents of a file or directory: a text file returns numbered lines "
-                + "(`<line>: <content>` aligned for grep correlation); a directory returns its entries one per line "
-                + "(directories end with `/`). Use offset (1-based line/entry) and limit to read large files or "
-                + "directories in sections. Prefer one larger read over many small slices, and use grep to find "
-                + "specific content in large files.";
+        return "Read the contents of a file or directory. Each text line is prefixed by its 1-based line number "
+                + "as `<line>: <content>`. Directory entries are returned one per line (directories end with `/`). "
+                + "Use offset (1-based line/entry) and limit to read large files or directories in sections; prefer "
+                + "one larger read over many small slices, and use grep to find specific content in large files.";
     }
 
     @Override

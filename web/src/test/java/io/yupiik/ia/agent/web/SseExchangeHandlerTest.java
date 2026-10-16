@@ -313,6 +313,9 @@ class SseExchangeHandlerTest {
         assertEquals("thinking\nresponse", events.get(1).message());
         assertEquals("tool-started", events.get(2).type());
         assertEquals("read", events.get(2).message());
+        // the persisted tool-call arguments must survive the replay so the frontend can build its
+        // command/path summary (bash/read_file cards) - was previously dropped as an empty map.
+        assertEquals("{\"path\":\"src/Main.java\"}", ((Map<?, ?>) events.get(2).data()).get("args"));
         assertEquals("tool-finished", events.get(3).type());
         assertEquals("read", events.get(3).message());
         assertEquals("final answer", ((Map<?, ?>) events.get(3).data()).get("output"));
@@ -382,6 +385,34 @@ class SseExchangeHandlerTest {
         assertEquals(1, finished.size());
         assertEquals("read", started.get(0).message());
         assertEquals("read", finished.get(0).message());
+    }
+
+    @Test
+    void replayCarriesTheBashCommandSoItsSummarySurvives() {
+        // a bash call persisted with its command: replaying it as a tool-started must forward the
+        // command as the args string, otherwise the frontend collapses the card to the bare tool name
+        // (summarizeArgs gets no 'command'), which is the "bash has no summary text" symptom on reload.
+        final var messages = List.of(
+                Message.user("build it"),
+                Message.assistant(
+                        "building",
+                        List.of(new ToolCall(
+                                "call-1",
+                                "function",
+                                new ToolCall.FunctionCall("bash", "{\"command\":\"mvn test\"}"),
+                                null))),
+                Message.toolResult("call-1", "BUILD SUCCESS", "bash"),
+                Message.user("thanks"));
+
+        final var events = WebReplay.replay("sess", messages);
+        final var started =
+                events.stream().filter(e -> "tool-started".equals(e.type())).toList();
+        assertEquals(1, started.size());
+        assertEquals("bash", started.get(0).message());
+        assertEquals(
+                "{\"command\":\"mvn test\"}",
+                ((Map<?, ?>) started.get(0).data()).get("args"),
+                "replayed bash tool must carry its command so the card shows a summary");
     }
 
     /** First non-{@code data:} event header, or {@code null} until the first event line arrives. */

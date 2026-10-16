@@ -57,11 +57,11 @@ public class WriteTodoTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Create and maintain the session's structured todo list (content + status) for multi-step "
-                + "work (3+ distinct steps). Status: pending/in_progress/completed/cancelled. In PLAN mode new "
-                + "items stay 'pending' (the list IS the plan); in BUILD mode mark in_progress as you start, "
-                + "completed only once actually done, cancelled for dropped steps. Completed/cancelled items "
-                + "stay as progress history. Skip for single trivial steps.";
+        return "Create and maintain the session's structured todo list (content + status) for multi-step work "
+                + "(3+ distinct steps). Status: pending/in_progress/completed/cancelled. In PLAN mode new items "
+                + "stay 'pending' (the list IS the plan); in BUILD mode mark in_progress as you start, completed "
+                + "only once actually done, cancelled for dropped steps. Completed/cancelled items stay as "
+                + "progress history. Skip for single trivial steps.";
     }
 
     @Override

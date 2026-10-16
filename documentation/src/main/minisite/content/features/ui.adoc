@@ -113,11 +113,16 @@ the running turn.
 The question is an orphan by design: it is not added to the conversation, not
 persisted to the session and not echoed to the transcript, so the next turns
 never see it.
-The answer inherits the session history (minus the reply being streamed) and
-runs with a bounded read-only tool loop: the model can read files, search and
-run plan-mode commands (the same global bash allow-list used in plan mode, so
-a refused command simply means "not allowed"), and it is never granted
-write access or permissions-all mode.
+By default the answer is a single generation that never executes anything: it reuses
+the session's system-prompt prefix and tool schema so the provider prompt cache
+stays byte-identical with the main agent loop, and the model is directed to answer
+directly and never act. A model that still reaches for a tool - natively or through
+in-band text markup - is never executed and is surfaced as a retryable note rather
+than a silent truncated answer.
+With `yca.slashcommands.btw.tools` enabled the answer instead runs a bounded
+read-only tool loop: the model can read files, search and run plan-mode commands
+(the same global bash allow-list used in plan mode, so a refused command simply
+means "not allowed"), and it is never granted write access or permissions-all mode.
 Mutating commands trigger the approval gate like any other command in the
 session, but the side loop stays bounded and keeps the turn running.
 The last few side questions are replayed to the model so follow-up side
@@ -147,6 +152,10 @@ block once ready.
 |`yca.slashcommands.btw.recall`
 |5
 |Previous side questions replayed for follow-ups, 0 disables the replay.
+
+|`yca.slashcommands.btw.tools`
+|false
+|When false (default) /btw is a one-shot that never executes; the session system prompt and tool schema are kept for the provider cache and stray tool attempts surface as a retryable note. When true, /btw may also run the plan-mode read-only tools.
 |===
 
 == Sessions on exit

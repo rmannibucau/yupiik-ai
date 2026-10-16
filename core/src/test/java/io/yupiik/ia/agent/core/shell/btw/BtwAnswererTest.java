@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.sun.net.httpserver.HttpServer;
 import io.yupiik.fusion.framework.api.event.Emitter;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.SystemPromptBuilder;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
@@ -336,19 +337,58 @@ class BtwAnswererTest {
         final var answer = answerer.ask("what did I say?", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("hello there", answer);
+        assertEquals("hello there", answer.text());
+        assertFalse(answer.retryable(), "a successful tool-less (default) answer is not retryable");
         final var body = bodies.getLast();
         assertTrue(body.contains("\"model\":\"test-model\""), body);
         // the tiny default budget would starve reasoning: when not configured, it follows the provider
         assertFalse(body.contains("\"max_tokens\""), body);
-        // /btw now declares the plan-mode read-only tools instead of running tool-less
-        assertTrue(body.contains("\"tools\""), body);
-        assertTrue(body.contains("read"), body);
+        // /btw is tool-less in behavior but keeps the session's tool schema in the request (never executed)
+        // so the provider prompt-cache prefix stays byte-identical with the main agent loop; the anti-reflex
+        // "answer directly, never act" direction rides in the system prompt on this fallback path.
+        assertFalse(body.contains("\"tools\":[]"), body);
+        assertTrue(body.contains("\"read\""), body);
+        assertTrue(body.contains("Never write 'Let me check...'"), body);
         assertTrue(body.contains("Side question: what did I say?"), body);
         assertTrue(body.contains("hello"), body);
+        // a tool-less /btw is a single one-shot generation
+        assertEquals(1, bodies.size(), bodies.toString());
         assertEquals(2, sessionStore.size("s1"));
         assertEquals(1L, usageTracker.auxiliaryRequests());
         assertEquals(3L, usageTracker.auxiliaryPromptTokens());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    void keepsSystemPromptAndToolSchemaByteIdenticalToMainLoopForCache() throws Exception {
+        // the /btw request must reuse the session's system prompt and the full wire tool schema (never
+        // executed) so the provider prompt-cache prefix stays byte-identical with the main agent loop.
+        final var configuration = TestConfigs.codingAgent(config(Map.of()));
+        final var builder = new SystemPromptBuilder(configuration, null, null, null, null, null, null, null, null);
+        final var expectedSystem = builder.build(null, null);
+        final var expectedNames = toolRegistry.toWireTools().stream()
+                .map(t -> t.function().name())
+                .sorted()
+                .toList();
+        sessionStore.replace("s1", List.of(Message.user("hi")));
+        answerer.ask("what did I say?", "s1", usageTracker, () -> false, null, null, builder)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        final var body = bodies.getLast();
+        // parse the request back and assert the system message is byte-identical to the main loop's
+        final var request = (Map<String, Object>) mapper.fromString(Object.class, body);
+        final var msgs = (List<Map<String, Object>>) request.get("messages");
+        assertEquals(3, msgs.size(), msgs.toString());
+        assertEquals("system", msgs.get(0).get("role"));
+        assertEquals(expectedSystem, msgs.get(0).get("content"));
+        // tools are declared (cache-consistent), never empty
+        assertFalse(body.contains("\"tools\":[]"), body);
+        final var actualNames = new java.util.ArrayList<String>();
+        final var m = java.util.regex.Pattern.compile("\"name\":\"([a-z_]+)\"").matcher(body);
+        while (m.find()) {
+            actualNames.add(m.group(1));
+        }
+        assertTrue(actualNames.containsAll(expectedNames), actualNames + " vs " + expectedNames);
     }
 
     @Test
@@ -408,10 +448,12 @@ class BtwAnswererTest {
     @Test
     void nativeToolCallsRoundTrip() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
-        final var answer = answerer.ask("NATIVE READ", "s1", usageTracker, () -> false, null)
+        final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
+                .ask("NATIVE READ", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("read round-trip done", answer);
+        assertEquals("read round-trip done", answer.text());
+        assertFalse(answer.retryable());
         assertEquals(2, bodies.size(), bodies.toString());
         // the first request declared the tools, the second carried the tool result back to the model
         assertTrue(bodies.get(0).contains("\"tools\""), bodies.get(0));
@@ -424,10 +466,11 @@ class BtwAnswererTest {
     @Test
     void toolCallMarkupIsParsedAndExecuted() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
-        final var answer = answerer.ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
+        final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
+                .ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("the parsed answer", answer);
+        assertEquals("the parsed answer", answer.text());
         // the DSML block was turned into a real read execution, not just stripped
         assertEquals(2, bodies.size(), bodies.toString());
         assertTrue(bodies.get(1).contains("file content: src/App.java"), bodies.get(1));
@@ -437,22 +480,22 @@ class BtwAnswererTest {
     @Test
     void bashReadCommandRunsButDestructiveIsRefused() throws Exception {
         sessionStore.replace("s1", List.of(Message.user("hi")));
-        final var answer = answerer(Map.of())
+        final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
                 .ask("BASH CAT", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("cat done", answer);
+        assertEquals("cat done", answer.text());
         assertEquals(2, bodies.size(), bodies.toString());
         // the plan-mode allow-list ran `cat` and fed the output back
         assertTrue(bodies.get(1).contains("cat content"), bodies.get(1));
         bodies.clear();
 
         // a fresh answerer so the previous exchange is not replayed into this side question
-        final var denied = answerer(Map.of())
+        final var denied = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
                 .ask("BASH RM", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("rm done", denied);
+        assertEquals("rm done", denied.text());
         assertEquals(2, bodies.size(), bodies.toString());
         // `rm -rf` is not a plan-mode read-only command: it is refused, and the tool never ran
         assertTrue(bodies.get(1).contains("Permission denied by user"), bodies.get(1));
@@ -461,10 +504,11 @@ class BtwAnswererTest {
 
     @Test
     void nonReadToolIsRefusedWithoutRunning() throws Exception {
-        final var answer = answerer.ask("WRITE TOOL", "s1", usageTracker, () -> false, null)
+        final var answer = answerer(Map.of("yca.slashcommands.btw.tools", "true"))
+                .ask("WRITE TOOL", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("write done", answer);
+        assertEquals("write done", answer.text());
         assertEquals(2, bodies.size(), bodies.toString());
         // write_file is never declared (-tools- has no writer) and is refused by plan-mode rules
         assertFalse(bodies.get(0).contains("write_file"), bodies.get(0));
@@ -474,12 +518,14 @@ class BtwAnswererTest {
     @Test
     void toolCallOnlyAnswerFallsBackToRawNoteAndIsNotReplayed() throws Exception {
         sessionStore.replace("s1", List.of());
-        final var answerer = answerer(Map.of());
+        final var answerer = answerer(Map.of("yca.slashcommands.btw.tools", "true"));
         final var answer = answerer.ask("TOOLCALL ONLY", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertTrue(answer.startsWith("> "), answer);
-        assertTrue(answer.contains("Attempted tools: read"), answer);
+        assertTrue(answer.text().startsWith("> "), answer.text());
+        assertTrue(answer.text().contains("Attempted tools: read"), answer.text());
+        // a tooled-mode round-cap is surfaced as a retryable failure, never an exception
+        assertTrue(answer.retryable(), "the round-cap glitch must be retryable");
         // the round cap was reached: six model round-trips, all tool-only
         assertEquals(6, bodies.size(), bodies.toString());
         // a broken exchange is never replayed into the next side question
@@ -492,12 +538,13 @@ class BtwAnswererTest {
     }
 
     @Test
-    void blankAnswerRetriesOnceThenReturnsNote() throws Exception {
+    void blankAnswerRetriesOnceThenReturnsRetryableNote() throws Exception {
         final var first = answerer(Map.of())
                 .ask("TRUNCATED FIRST", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        assertEquals("hello there", first);
+        assertEquals("hello there", first.text());
+        assertFalse(first.retryable());
         // the blank first answer was retried, then succeeded
         assertEquals(2, bodies.size(), bodies.toString());
 
@@ -507,8 +554,28 @@ class BtwAnswererTest {
                 .ask("EMPTY PLEASE", "s1", usageTracker, () -> false, null)
                 .toCompletableFuture()
                 .get(5, TimeUnit.SECONDS);
-        // a still-blank answer becomes a note, never an exception
-        assertTrue(alwaysBlank.startsWith("The model returned an empty answer"), alwaysBlank);
-        assertTrue(alwaysBlank.contains("Check the output budget"), alwaysBlank);
+        // a still-blank answer becomes a retryable note, never an exception
+        assertTrue(alwaysBlank.text().startsWith("The model returned an empty answer"), alwaysBlank.text());
+        assertTrue(alwaysBlank.text().contains("Check the output budget"), alwaysBlank.text());
+        assertTrue(alwaysBlank.retryable(), "an empty answer must be retryable");
+    }
+
+    @Test
+    void toolAttemptMarkupIsNeverExecutedAndSurfacesAsRetryable() throws Exception {
+        sessionStore.replace("s1", List.of(Message.user("hi")));
+        final var answer = answerer(Map.of())
+                .ask("TOOLCALL MARKUP", "s1", usageTracker, () -> false, null)
+                .toCompletableFuture()
+                .get(5, TimeUnit.SECONDS);
+        // the default mode never executes the stray in-band call; a model that reached for a tool (DSML
+        // markup in the text channel) must not look like a clean success - the leftover prose becomes a
+        // retryable note so the web/TUI Retry affordance is armed.
+        assertTrue(answer.text().contains("the parsed answer"), answer.text());
+        assertTrue(answer.text().contains("tried to call a tool"), answer.text());
+        assertTrue(answer.retryable(), "a tool-attempt (markup) answer must be retryable");
+        // exactly one request (no tool feedback round) and no tool ever ran
+        assertEquals(1, bodies.size(), bodies.toString());
+        assertFalse(bodies.get(0).contains("file content: src/App.java"), bodies.get(0));
+        assertEquals(1, sessionStore.size("s1"));
     }
 }

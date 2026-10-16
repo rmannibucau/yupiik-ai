@@ -64,6 +64,6 @@ public record SecretEnvironmentConfiguration(
                                 + "rules say. Matched exactly (case-sensitive). Defaults to the shell working-directory "
                                 + "variables (PWD and OLDPWD), whose value is the current/previous folder path, not a "
                                 + "credential - harvesting it used to redact the whole working-directory path out of every "
-                                + "message. Only applies to the process-environment harvest (System.getenv()), not to "
+                                + "message. Only applies to the process-environment harvest (`System.getenv()`), not to "
                                 + "env/config files.")
         List<String> knownSafeValues) {}

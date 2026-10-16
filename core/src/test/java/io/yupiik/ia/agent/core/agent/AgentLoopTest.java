@@ -2089,6 +2089,90 @@ class AgentLoopTest {
     }
 
     /**
+     * Exploration nudge: a spiral of NOVEL read-only rounds (fresh files every time - never redundant,
+     * so the plateau/doom-loop guards stay silent) gets a one-shot wrap-up nudge injected as a user
+     * message after llm.explorationNudgeRounds (default 6) consecutive informative rounds. The turn
+     * keeps running: the nudge directs, it does not stop.
+     */
+    @Test
+    void explorationNudgeFiresAfterConsecutiveNovelReadRounds() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 8 distinct files (novel coverage, informative outputs) then an answer
+        for (var i = 0; i < 8; i++) {
+            replies.add(toolCallReply("t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":30}"));
+        }
+        replies.add(new ScriptedReply("done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(true, Map.of("yca.llm.maxIterations", "50")),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNotNull(result, "the nudge must not stop the turn - the model still answers");
+        final var nudged = requests.stream()
+                .flatMap(List::stream)
+                .filter(m -> "user".equals(m.role()))
+                .anyMatch(m -> m.content().toString().contains("stop expanding the survey"));
+        assertTrue(nudged, "the wrap-up nudge must reach the model as a user message");
+        final var notices = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .toList();
+        assertTrue(
+                notices.stream().anyMatch(n -> n.message().contains("exploration nudge")),
+                "an info notice must surface the nudge: " + notices);
+        // one-shot: exactly one fire event per turn (the injected message then persists in history,
+        // so it shows up in later request snapshots - that is expected, not a re-fire)
+        final var fires = notices.stream()
+                .filter(n -> n.message().contains("exploration nudge"))
+                .count();
+        assertEquals(1, fires, "the nudge must fire exactly once per turn");
+    }
+
+    /**
+     * Exploration nudge disabled (llm.explorationNudgeRounds=0): a novel-read spiral gets no wrap-up
+     * message - the guard is opt-out like the plateau guard.
+     */
+    @Test
+    void explorationNudgeDisabledByConfig() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        for (var i = 0; i < 8; i++) {
+            replies.add(toolCallReply("t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":30}"));
+        }
+        replies.add(new ScriptedReply("done", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var result = loop(
+                        client,
+                        null,
+                        configuration(
+                                true, Map.of("yca.llm.maxIterations", "50", "yca.llm.explorationNudgeRounds", "0")),
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNotNull(result);
+        final var nudged = requests.stream()
+                .flatMap(List::stream)
+                .anyMatch(m -> "user".equals(m.role()) && m.content().toString().contains("stop expanding the survey"));
+        assertFalse(nudged, "explorationNudgeRounds=0 must suppress the nudge entirely");
+    }
+
+    /**
      * Plateau feedback: with nudge_2 (default) the model gets a one-shot strategy nudge when the
      * streak reaches limit-2 (injected as a user message, so it reaches the LLM), then still
      * hard-stops at the limit if it keeps re-reading.

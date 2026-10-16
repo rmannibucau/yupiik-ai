@@ -34,7 +34,14 @@ import java.util.List;
 import java.util.regex.Pattern;
 
 public class SystemPromptBuilder {
-    private static final List<String> SIBLING_CONTEXT_FILES = List.of("CLAUDE.md", "README.md");
+    /**
+     * Files that used to be inlined eagerly into the system prompt as {@code <project-file>} blocks. Removed:
+     * README.md/CLAUDE.md are project *content*, not agent instructions - eager inlining of a large README (this
+     * project's is ~34 KB) can silently swallow the instruction prefix under {@code capSystemPrompt} (which keeps
+     * the tail) and leave the model with only noise. Like opencode, we read project docs on demand with the
+     * {@code read} tool instead. AGENTS.md (a real instructions file) is still injected.
+     */
+    private static final List<String> SIBLING_CONTEXT_FILES = List.of();
 
     /**
      * Hard ceiling on the assembled system prompt (rules + environment + project AGENTS.md + skills
@@ -180,9 +187,9 @@ public class SystemPromptBuilder {
         }
         sb.append("- Persist durable facts/decisions with memory_write.\n");
         sb.append("- Verify your work (compile/test) when feasible.\n");
-        sb.append("- Answer directly and concisely in markdown from what you already know. Prefer terse, "
-                + "single-line bullets over prose paragraphs or nested lists; do not restate what is obvious "
-                + "or already in context, and do not pad with preamble or closing remarks.\n");
+        sb.append("- Answer directly and concisely in markdown from what you already know. Keep responses clear "
+                + "and concise: lead with the outcome, not the steps you took to reach it; do not restate "
+                + "what is obvious or already in context, and do not pad with preamble or closing remarks.\n");
         sb.append(
                 "- Work with absolute paths; resolve relative paths against their intended root before using a tool.\n");
         sb.append(
@@ -195,35 +202,32 @@ public class SystemPromptBuilder {
                 + "and propose the closest available tool instead of calling an unknown one.\n");
         sb.append('\n');
         sb.append("Tool usage policy:\n");
-        sb.append("- Use the dedicated search tools for code exploration (grep, glob, read); do NOT use "
-                + "bash for grep/rg/find. Reserve other bash for real system commands (git, mvn, npm, docker...).\n");
-        // when the read-only survey rewrite is enabled, invite the batched bash survey form (it is executed
-        // in-process, safely and capped) instead of fragmenting the exploration into many isolated tool reads.
-        if (configuration.tools().bashOverrides() != null
-                && configuration.tools().bashOverrides().enabled()) {
-            final var enabled = enabledOverrideCommands();
-            if (!enabled.isEmpty()) {
-                sb.append("- Prefer one bash call that batches read-only survey commands (")
-                        .append(String.join(", ", enabled))
-                        .append(") when you can, e.g. `ls -la && cat README.md && cat pom.xml` - it runs "
-                                + "in-process, safely, and costs far fewer round-trips than many isolated reads. "
-                                + "For a one-off or deep search, the dedicated tools still work.\n");
-            }
-        }
-        sb.append("- Batch independent tool calls in one reply: consecutive read-only calls run concurrently, so N "
-                + "independent calls cost one round-trip. Only sequence calls that need previous results.\n");
+        // opencode harness rules (packages/core/src/plugin/system-prompt): dedicated tools first, shell only as
+        // fallback, and never noisy echo/printf separator chaining. The survey-rewrite invitation that used to live
+        // here taught the model the forbidden `ls -la && echo "---" && ...` form and was removed (the in-process
+        // override mechanism still exists at runtime; it simply is not advertised as a prompt pattern).
+        sb.append("- Prefer dedicated tools over shell commands; fall back to the shell when a tool cannot do "
+                + "what you need.\n");
+        sb.append("- Do not chain shell commands with separators like `echo \"====\";` or `printf '---'`; the "
+                + "output becomes noisy in a way that makes the user's side of the conversation worse.\n");
+        sb.append("- Maximize use of parallel tool calls: you can call multiple independent tools in one reply, "
+                + "so N independent read-only calls cost one round-trip. Always batch them where possible - for "
+                + "example start with `read .` + `glob **/*.md` (or any needed reads) together, and only sequence "
+                + "a call that depends on a previous result.\n");
         sb.append(
                 "- Avoid tiny repeated slices: when you need more context around a hit, read a larger window instead of many 30-line chunks.\n");
+        sb.append(
+                "- Avoid repeating the same tool with the same parameters once you have useful results: use the result "
+                        + "to take the next step (\u2192 pick one match, read that file, then act) instead of searching again in a loop.\n");
         sb.append('\n');
         // per-session override wins when set (frozen once at runtime creation so the stable prefix stays
         // byte-identical across turns); otherwise the process default applies.
-        final var w = workdir != null
+        final var workingDir = workdir != null
                 ? workdir
                 : configuration.resolveWorkingDir().toAbsolutePath().normalize();
         final var projectDir = workdir != null
                 ? workdir
                 : configuration.resolveProjectDir().toAbsolutePath().normalize();
-        final var workingDir = w;
         sb.append("Environment:\n");
         sb.append("- Working directory: ").append(workingDir).append('\n');
         if (!projectDir.equals(workingDir)) {
@@ -276,18 +280,25 @@ public class SystemPromptBuilder {
             sb.append('\n');
             sb.append(
                     "Mode: PLAN. Repository mutations are forbidden by default: no file creation, edits or deletions, and no state-changing shell commands - write_todo is the only state-changing tool allowed.\n");
-            sb.append(
-                    "Todos are the plan, not a progress report: every item stays 'pending' - statuses only advance in build mode, once a step is actually executed.\n");
-            sb.append(
-                    "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
-            sb.append(
-                    "Record the plan with write_todo and keep the list in sync with the discussion: whenever a follow-up changes the plan (scope, steps, approach, trade-offs), update it in the same turn so it always mirrors the latest agreed plan. Completed or cancelled items from earlier build sessions are progress history: keep them.\n");
             final var hints = configuration.permissions() != null
                             && configuration.permissions().bash() != null
                     ? configuration.permissions().bash().readOnlyPromptHints()
                     : null;
             if (hints != null && !hints.isBlank()) {
                 sb.append(hints).append('\n');
+            }
+            if (taskImpliesChanges(prompt)) {
+                sb.append(
+                        "Todos are the plan, not a progress report: every item stays 'pending' - statuses only advance in build mode, once a step is actually executed.\n");
+                sb.append(
+                        "Analyze the codebase and deliver a detailed, concrete implementation plan (files to touch, steps, approach and trade-offs, risks), ready for the user to review before anything is applied.\n");
+                sb.append(
+                        "Record the plan with write_todo and keep the list in sync with the discussion: whenever a follow-up changes the plan (scope, steps, approach, trade-offs), update it in the same turn so it always mirrors the latest agreed plan. Completed or cancelled items from earlier build sessions are progress history: keep them.\n");
+            } else {
+                // informational request (explain/what/how/describe/...): no todo ceremony, no forced plan
+                // deliverable - explore as needed and answer directly, like the non-plan harnesses do.
+                sb.append(
+                        "The request is informational: explore the codebase as needed and answer directly - no plan or todo list is required.\n");
             }
         }
         return capSystemPrompt(sb.toString(), resolvedSystemPromptCap());
@@ -594,20 +605,31 @@ public class SystemPromptBuilder {
         return list;
     }
 
-    /** The read-only survey commands actually enabled by {@code yca.tools.bashOverrides.commands}. */
-    private List<String> enabledOverrideCommands() {
-        final var overrides = configuration.tools().bashOverrides();
-        if (overrides == null || !overrides.enabled()) {
-            return java.util.List.of();
+    /**
+     * Conservative heuristic deciding whether the user request implies code changes (plan mandate) or is
+     * purely informational (answer directly). Change-verbs anywhere in a short prompt win; anything else -
+     * explain/what/how/describe/overview/questions - is informational. Conservative by design: an ambiguous
+     * prompt falls through to "informational", which is the cheaper wrong call (the model can still plan if
+     * the user asks to).
+     */
+    private static boolean taskImpliesChanges(final String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return false;
         }
-        final var enabled = new java.util.ArrayList<String>();
-        for (final var candidate :
-                List.of("cat", "ls", "head", "tail", "echo", "pwd", "cd", "sed", "wc", "grep", "find", "rg")) {
-            if (overrides.keeps(candidate)) {
-                enabled.add(candidate);
+        final var lower = prompt.toLowerCase();
+        final var changed = "\\b(implement|fix|add|refactor|create|change|remove|delete|migrate|rewrite|rename|"
+                + "update|modify|patch|write|build|scaffold|port|extract|introduce|enable|disable|wire|simplify|"
+                + "move|split|rework)\\w*\\b";
+        var matcher = Pattern.compile(changed).matcher(lower);
+        while (matcher.find()) {
+            // questions about *how to* change (how do I add X?) are still informational; bare
+            // imperatives ("fix X", "add Y") imply work
+            final var before = lower.substring(Math.max(0, matcher.start() - 18), matcher.start());
+            if (!before.matches(".*(how (do|can|to|would)|what (about|if)|why (not|do)|where (do|can)).*")) {
+                return true;
             }
         }
-        return enabled;
+        return false;
     }
 
     private static void addIfRegular(final List<Path> list, final Path path) {
