@@ -144,6 +144,21 @@ public class PermissionService {
         sessionGrants.clear();
     }
 
+    /**
+     * Creates child-scoped permission state for a delegated agent run. Effective modes, project scope,
+     * dynamic bash rules, and the approval transport are inherited; session grants are deliberately not
+     * copied, and any approval granted to the child is recorded only on the returned instance.
+     */
+    public PermissionService forkForChild() {
+        final var child = new PermissionService(configuration, emitter, bashRulesRegistry);
+        child.projectDir(projectDir);
+        child.mode = mode();
+        child.permissionMode = permissionMode();
+        child.gate = gate;
+        dynamicRules.forEach(child::addDynamicRule);
+        return child;
+    }
+
     public void setMode(final AgentMode mode) {
         final var from = this.mode;
         this.mode = mode;

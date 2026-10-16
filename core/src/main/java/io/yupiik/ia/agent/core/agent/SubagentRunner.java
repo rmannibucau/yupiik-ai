@@ -199,7 +199,7 @@ public class SubagentRunner {
         final var subagentUsageTracker = new SubagentUsageTracker(parentUsage, state.id());
         final var subagentStatusReporter = new StatusReporter();
         final var subagentPermissions = parentContext != null && parentContext.permissions() != null
-                ? parentContext.permissions()
+                ? parentContext.permissions().forkForChild()
                 : new PermissionService(configuration, emitter);
         final var subagentSystemPromptBuilder = new SystemPromptBuilder(
                 configuration,
