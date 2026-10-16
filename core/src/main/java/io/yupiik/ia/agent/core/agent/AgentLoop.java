@@ -57,7 +57,6 @@ import io.yupiik.ia.agent.core.tools.ToolResult;
 import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.ContextWindowExceededException;
-import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
@@ -83,7 +82,6 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
@@ -194,6 +192,7 @@ public class AgentLoop {
     private final ToolRegistry toolRegistry;
     private final ToolExecutionService toolExecutionService;
     private final ToolCallCoordinator toolCallCoordinator;
+    private final ModelRoundProcessor modelRoundProcessor;
     private final CodingAgentConfiguration configuration;
     private final PermissionService permissionService;
     private final UsageTracker usageTracker;
@@ -595,6 +594,7 @@ public class AgentLoop {
         this.toolRegistry = toolRegistry;
         this.toolExecutionService = toolExecutionService;
         this.toolCallCoordinator = new ToolCallCoordinator();
+        this.modelRoundProcessor = new ModelRoundProcessor(chatClient, configuration, precisionDurationMarker);
         this.configuration = configuration;
         this.permissionService = permissionService;
         this.usageTracker = usageTracker;
@@ -1383,7 +1383,43 @@ public class AgentLoop {
                 final long pausedBeforeMs = turnLlmPausedMs;
                 try {
                     llmStartNanos = precisionDurationMarker.now();
-                    assistant = streamWithRetry(request, usage, finishReason, cancelled);
+                    assistant = modelRoundProcessor.stream(
+                            request,
+                            usage,
+                            cancelled,
+                            pauseListener,
+                            delta -> dispatch(delta, usage, finishReason),
+                            new ModelRoundProcessor.Observer() {
+                                @Override
+                                public void begin() {
+                                    lastRequestProducedReasoning = false;
+                                    resetInlineSplitter();
+                                }
+
+                                @Override
+                                public void resetText() {
+                                    emit(textReset());
+                                }
+
+                                @Override
+                                public void retrying(final String message) {
+                                    emit(notice(AgentEvent.Notice.Level.WARN, message));
+                                }
+
+                                @Override
+                                public void malformedToolArguments() {
+                                    emit(notice(
+                                            AgentEvent.Notice.Level.WARN,
+                                            "Server rejected the request: malformed tool call arguments (parse_error.101). "
+                                                    + "The arguments were kept as-is (repair failed or disabled); remove the "
+                                                    + "corrupted call from the transcript or retry with the repair enabled."));
+                                }
+
+                                @Override
+                                public void paused(final long millis) {
+                                    turnLlmPausedMs += millis;
+                                }
+                            });
                 } catch (final ContextWindowExceededException e) {
                     if (!retryOnOverflow || overflowRetried) {
                         throw e;
@@ -2273,141 +2309,6 @@ public class AgentLoop {
                 usageTracker.clearAnchor();
             }
         }
-    }
-
-    /**
-     * Streams the request, retrying whole requests whose transport broke mid-stream after partial
-     * content (eg. a chunked connection cut): the history is untouched until the stream returns so a
-     * plain retry is safe. Each retry discards the partial rendering ({@link AgentEvent.TextReset})
-     * and backs off exponentially before resending. Failures before any fragment and exhausted
-     * retries propagate to the caller.
-     */
-    private Message streamWithRetry(
-            final ChatCompletionRequest request,
-            final io.yupiik.ia.agent.core.llm.Usage[] usage,
-            final String[] finishReason,
-            final BooleanSupplier cancelled)
-            throws IOException, InterruptedException {
-        final var maxAttempts = 1 + Math.max(0, configuration.llm().streamRetriesMaxAttempts());
-        IOException last = null;
-        // a fresh generation starts here: whether it produces reasoning (and may burn its whole
-        // output budget thinking) is observed per-attempt by dispatch()
-        lastRequestProducedReasoning = false;
-        resetInlineSplitter();
-        for (var attempt = 1; attempt <= maxAttempts; attempt++) {
-            if (cancelled.getAsBoolean()) {
-                throw new IOException("Cancelled");
-            }
-            try {
-                return chatClient.stream(
-                        request, pauseListener, delta -> dispatch(delta, usage, finishReason), cancelled);
-            } catch (final LlmHttpFailureException e) {
-                // llama.cpp / ollama style backends reject the whole turn with a 500 when the
-                // tool-call arguments they just produced are malformed (unescaped control chars or
-                // a structurally corrupt tail): the retry loop below would burn the same failing
-                // payload again, so surface the cause explicitly instead of a bare "falling back"
-                // silence. The repairer normally fixes these payloads; when it cannot (or the
-                // arguments were already stored by an earlier turn), the user must see why.
-                if (isToolCallArgumentsRejected(e)) {
-                    emit(notice(
-                            AgentEvent.Notice.Level.WARN,
-                            "Server rejected the request: malformed tool call arguments (parse_error.101). "
-                                    + "The arguments were kept as-is (repair failed or disabled); remove the "
-                                    + "corrupted call from the transcript or retry with the repair enabled."));
-                }
-                last = e;
-                if (attempt >= maxAttempts) {
-                    break;
-                }
-                emit(textReset());
-                emit(notice(
-                        AgentEvent.Notice.Level.WARN,
-                        "Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/' + maxAttempts
-                                + ")."));
-                // the backoff is idle time: it must not be counted as generation time
-                final var backoffMs = streamRetryBackoffMs(attempt);
-                turnLlmPausedMs += backoffMs;
-                // an interrupt pressed during the backoff must abort the retry immediately:
-                // the sleep is the only gap between two stream attempts, so check around it
-                if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {
-                    throw new IOException("Cancelled");
-                }
-            } catch (final IOException e) {
-                last = e;
-                if (attempt >= maxAttempts) {
-                    break;
-                }
-                emit(textReset());
-                emit(notice(
-                        AgentEvent.Notice.Level.WARN,
-                        "Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/' + maxAttempts
-                                + ")."));
-                // the backoff is idle time: it must not be counted as generation time
-                final var backoffMs = streamRetryBackoffMs(attempt);
-                turnLlmPausedMs += backoffMs;
-                // an interrupt pressed during the backoff must abort the retry immediately:
-                // the sleep is the only gap between two stream attempts, so check around it
-                if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {
-                    throw new IOException("Cancelled");
-                }
-            }
-        }
-        throw last;
-    }
-
-    /** Exponential backoff between mid-stream retries: base * 2^(attempt-1), capped by retryAfterMaxWaitMs. */
-    private long streamRetryBackoffMs(final int attempt) {
-        final var base = Math.max(0, configuration.llm().retriesBaseDelayMs());
-        final var cap = Math.max(base, configuration.llm().retryAfterMaxWaitMs());
-        var delay = base;
-        for (var i = 1; i < attempt && delay < cap; i++) {
-            delay *= 2;
-        }
-        return Math.min(delay, cap);
-    }
-
-    /**
-     * Sleeps in small slices so a turn cancellation is noticed promptly (a single
-     * {@code Thread.sleep} could park the loop through the whole backoff).
-     *
-     * @return {@code false} when the current thread was interrupted (caller aborts the retry).
-     */
-    private boolean interruptibleSleep(final long millis) {
-        final var deadline = precisionDurationMarker.now() + TimeUnit.MILLISECONDS.toNanos(millis);
-        while (true) {
-            final var remaining = deadline - precisionDurationMarker.now();
-            if (remaining <= 0) {
-                return true;
-            }
-            try {
-                Thread.sleep(Math.clamp(remaining / 1_000_000, 1, 100));
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-    }
-
-    private static String causeSummary(final Throwable e) {
-        final var cause = e.getCause();
-        final var message = cause == null
-                        || cause.getMessage() == null
-                        || cause.getMessage().isBlank()
-                ? e.getMessage()
-                : cause.getMessage();
-        return message == null ? "unknown transport failure" : message;
-    }
-
-    /**
-     * Whether a provider rejection is the llama.cpp / ollama style "the tool call arguments this
-     * model just produced are not parseable JSON" HTTP failure. The arguments are repaired before
-     * being sent (see {@code ToolCallArgumentsRepairer}); when this marker still shows up the
-     * payload was already corrupt at generation time and the repair could not recover it (or is
-     * disabled for the model). Surfaced explicitly because retrying the same turn cannot fix it.
-     */
-    private static boolean isToolCallArgumentsRejected(final LlmHttpFailureException e) {
-        final var body = e.body();
-        return body != null && body.contains("parse_error.101");
     }
 
     /**

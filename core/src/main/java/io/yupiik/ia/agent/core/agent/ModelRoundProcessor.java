@@ -1,0 +1,134 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.yupiik.ia.agent.core.agent;
+
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.llm.ChatClient;
+import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
+import io.yupiik.ia.agent.core.llm.LlmHttpFailureException;
+import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.llm.PauseEvent;
+import io.yupiik.ia.agent.core.llm.Usage;
+import io.yupiik.ia.agent.core.wiring.PrecisionDurationMarkerProvider;
+import io.yupiik.llm.client.model.LlmStreamEvent;
+import java.io.IOException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+
+/** Owns one model round's stream retry policy; the turn supplies event and counter updates. */
+public final class ModelRoundProcessor {
+    public interface Observer {
+        void begin();
+
+        void resetText();
+
+        void retrying(String message);
+
+        void malformedToolArguments();
+
+        void paused(long millis);
+    }
+
+    private final ChatClient chatClient;
+    private final CodingAgentConfiguration configuration;
+    private final PrecisionDurationMarkerProvider clock;
+
+    public ModelRoundProcessor(
+            final ChatClient chatClient,
+            final CodingAgentConfiguration configuration,
+            final PrecisionDurationMarkerProvider clock) {
+        this.chatClient = chatClient;
+        this.configuration = configuration;
+        this.clock = clock;
+    }
+
+    public Message stream(
+            final ChatCompletionRequest request,
+            final Usage[] usage,
+            final BooleanSupplier cancelled,
+            final Consumer<PauseEvent> pauseListener,
+            final Consumer<LlmStreamEvent> onDelta,
+            final Observer observer)
+            throws IOException, InterruptedException {
+        final var maxAttempts = 1 + Math.max(0, configuration.llm().streamRetriesMaxAttempts());
+        IOException last = null;
+        observer.begin();
+        for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+            if (cancelled.getAsBoolean()) {
+                throw new IOException("Cancelled");
+            }
+            try {
+                return chatClient.stream(request, pauseListener, onDelta, cancelled);
+            } catch (final IOException e) {
+                if (e instanceof LlmHttpFailureException failure && isToolCallArgumentsRejected(failure)) {
+                    observer.malformedToolArguments();
+                }
+                last = e;
+                if (attempt >= maxAttempts) {
+                    break;
+                }
+                observer.resetText();
+                observer.retrying("Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/'
+                        + maxAttempts + ").");
+                final var backoffMs = streamRetryBackoffMs(attempt);
+                observer.paused(backoffMs);
+                if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {
+                    throw new IOException("Cancelled");
+                }
+            }
+        }
+        throw last;
+    }
+
+    private long streamRetryBackoffMs(final int attempt) {
+        final var base = Math.max(0, configuration.llm().retriesBaseDelayMs());
+        final var cap = Math.max(base, configuration.llm().retryAfterMaxWaitMs());
+        var delay = base;
+        for (var i = 1; i < attempt && delay < cap; i++) {
+            delay *= 2;
+        }
+        return Math.min(delay, cap);
+    }
+
+    private boolean interruptibleSleep(final long millis) {
+        final var deadline = clock.now() + TimeUnit.MILLISECONDS.toNanos(millis);
+        while (true) {
+            final var remaining = deadline - clock.now();
+            if (remaining <= 0) {
+                return true;
+            }
+            try {
+                Thread.sleep(Math.clamp(remaining / 1_000_000, 1, 100));
+            } catch (final InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+    }
+
+    private static String causeSummary(final Throwable e) {
+        final var cause = e.getCause();
+        final var message = cause == null || cause.getMessage() == null || cause.getMessage().isBlank()
+                ? e.getMessage()
+                : cause.getMessage();
+        return message == null ? "unknown transport failure" : message;
+    }
+
+    private static boolean isToolCallArgumentsRejected(final LlmHttpFailureException e) {
+        final var body = e.body();
+        return body != null && body.contains("parse_error.101");
+    }
+}
