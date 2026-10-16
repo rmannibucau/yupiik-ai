@@ -218,6 +218,7 @@ public class AgentLoop {
     private final String subagentName;
     /** Null means this is a regular agent turn; a non-null set is a subagent execution ceiling. */
     private volatile Set<String> allowedTools;
+    private volatile Integer maxIterationsCap;
     /**
      * Session this loop instance belongs to. Events are tagged with it so the
      * shell registry can route each stream to the tab that owns it. A loop
@@ -759,6 +760,14 @@ public class AgentLoop {
     /** Installs a child run's tool ceiling before its first request. Null retains the registry's full set. */
     public void allowedTools(final Set<String> names) {
         this.allowedTools = names == null ? null : Set.copyOf(names);
+    }
+
+    /** Sets a positive upper bound for this agent run; model and provider caps may still lower it. */
+    public void maxIterationsCap(final int cap) {
+        if (cap < 1) {
+            throw new IllegalArgumentException("maxIterationsCap must be positive");
+        }
+        this.maxIterationsCap = cap;
     }
 
     public String run(
@@ -2368,7 +2377,9 @@ public class AgentLoop {
         final var override = resolved == null || providerManager == null
                 ? 0
                 : providerManager.maxIterationsOverride(resolved.provider(), resolved.model());
-        return override > 0 ? override : configuration.llm().maxIterations();
+        final var configured = override > 0 ? override : configuration.llm().maxIterations();
+        final var cap = maxIterationsCap;
+        return cap == null ? configured : Math.min(configured, cap);
     }
 
     /**

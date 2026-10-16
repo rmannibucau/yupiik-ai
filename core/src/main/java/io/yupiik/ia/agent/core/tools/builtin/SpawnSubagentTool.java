@@ -126,6 +126,9 @@ public class SpawnSubagentTool implements EmbeddedTool {
         final var model = arg(args, "model");
         final var maxTurnsObj = args.get("max_turns");
         final Integer maxTurns = maxTurnsObj instanceof Number n ? n.intValue() : null;
+        if (maxTurns != null && maxTurns < 1) {
+            return ToolResult.error("max_turns must be a positive integer");
+        }
         final Set<String> allowedTools = args.get("tools") instanceof List<?> list
                 ? list.stream()
                         .filter(String.class::isInstance)

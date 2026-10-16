@@ -142,7 +142,7 @@ public class SubagentRunner {
 
     /**
      * @param parentContext the spawning session's tool context: the sub-agent
-     *                      inherits the parent's permission state and feedback gate
+     *                      inherits the parent's effective permission ceiling and feedback gate
      *                      (so a question raised by a sub-agent answers in the
      *                      spawning tab) and its events carry the parent session
      *                      id so they route back to that tab.
@@ -156,29 +156,37 @@ public class SubagentRunner {
             final BooleanSupplier cancelled) {
         final var name = state.name() != null ? state.name() : state.id();
         emitter.emit(new AgentEvent.SubagentStarted(state.task(), state.parentSessionId(), state.id(), name));
-        executor.execute(() -> {
-            try {
-                final var result = runSubagent(state, parentSnapshotStore, parentContext, cancelled);
-                subagentRegistry.complete(state.id(), result);
-                emitter.emit(new AgentEvent.SubagentCompleted(
-                        result.summary() != null ? result.summary() : result.error(),
-                        result.success(),
-                        result.cancelled(),
-                        state.parentSessionId(),
-                        state.id(),
-                        name));
-            } catch (final Exception e) {
-                final var message = "Subagent failed: " + e.getMessage();
-                final var wasCancelled = state.isCancelled() || cancelled.getAsBoolean();
-                subagentRegistry.complete(
-                        state.id(),
-                        wasCancelled
-                                ? SubagentRegistry.SubagentResult.cancelled("")
-                                : SubagentRegistry.SubagentResult.error(message, ""));
-                emitter.emit(new AgentEvent.SubagentCompleted(
-                        message, false, wasCancelled, state.parentSessionId(), state.id(), name));
-            }
-        });
+        try {
+            executor.execute(() -> {
+                try {
+                    final var result = runSubagent(state, parentSnapshotStore, parentContext, cancelled);
+                    subagentRegistry.complete(state.id(), result);
+                    emitter.emit(new AgentEvent.SubagentCompleted(
+                            result.summary() != null ? result.summary() : result.error(),
+                            result.success(),
+                            result.cancelled(),
+                            state.parentSessionId(),
+                            state.id(),
+                            name));
+                } catch (final Exception e) {
+                    final var message = "Subagent failed: " + e.getMessage();
+                    final var wasCancelled = state.isCancelled() || cancelled.getAsBoolean();
+                    subagentRegistry.complete(
+                            state.id(),
+                            wasCancelled
+                                    ? SubagentRegistry.SubagentResult.cancelled("")
+                                    : SubagentRegistry.SubagentResult.error(message, ""));
+                    emitter.emit(new AgentEvent.SubagentCompleted(
+                            message, false, wasCancelled, state.parentSessionId(), state.id(), name));
+                }
+            });
+        } catch (final java.util.concurrent.RejectedExecutionException e) {
+            final var message = "Subagent could not be scheduled: " + e.getMessage();
+            final var result = SubagentRegistry.SubagentResult.error(message, "");
+            subagentRegistry.complete(state.id(), result);
+            emitter.emit(new AgentEvent.SubagentCompleted(
+                    message, false, false, state.parentSessionId(), state.id(), name));
+        }
     }
 
     private SubagentRegistry.SubagentResult runSubagent(
@@ -279,6 +287,16 @@ public class SubagentRunner {
         }
         agentLoop.updateChatSettings(subagentSettings);
         agentLoop.allowedTools(state.allowedTools());
+        final var configuredCap = configuration.subagents() == null
+                        ? null
+                        : configuration.subagents().maxIterations();
+        var maxIterationsCap = configuredCap == null || configuredCap < 1
+                ? configuration.llm().maxIterations()
+                : configuredCap;
+        if (state.maxTurns() != null) {
+            maxIterationsCap = Math.min(maxIterationsCap, state.maxTurns());
+        }
+        agentLoop.maxIterationsCap(maxIterationsCap);
 
         final var fullConversation = new StringBuilder();
         fullConversation

@@ -123,8 +123,7 @@ public class SubagentRegistry {
 
     public void complete(final String subagentId, final SubagentResult result) {
         final var state = subagents.get(subagentId);
-        if (state != null) {
-            state.complete(result);
+        if (state != null && state.complete(result)) {
             activeCount.decrementAndGet();
             if (semaphore != null) {
                 semaphore.release();
@@ -134,9 +133,9 @@ public class SubagentRegistry {
     }
 
     public void cancel(final String subagentId) {
-        final var state = subagents.remove(subagentId);
-        if (state != null) {
-            state.cancel();
+        final var state = subagents.get(subagentId);
+        if (state != null && state.cancel()) {
+            subagents.remove(subagentId, state);
             activeCount.decrementAndGet();
             if (semaphore != null) {
                 semaphore.release();
@@ -332,18 +331,26 @@ public class SubagentRegistry {
             return completedAt;
         }
 
-        public synchronized void complete(final SubagentResult result) {
+        public synchronized boolean complete(final SubagentResult result) {
+            if (done) {
+                return false;
+            }
             this.result = result;
             this.done = true;
             this.completedAt = System.currentTimeMillis();
             notifyAll();
+            return true;
         }
 
-        public synchronized void cancel() {
+        public synchronized boolean cancel() {
+            if (done) {
+                return false;
+            }
             this.cancelled = true;
             this.done = true;
             this.completedAt = System.currentTimeMillis();
             notifyAll();
+            return true;
         }
 
         public synchronized SubagentResult awaitResult() throws InterruptedException {
