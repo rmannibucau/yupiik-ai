@@ -188,6 +188,18 @@ public class SubagentRunner {
             final BooleanSupplier cancelled) {
         final var subagentSessionId = state.parentSessionId() + "-subagent-" + state.id();
         final var subagentName = state.name() != null ? state.name() : state.id();
+        if (state.allowedTools() != null) {
+            final var available = toolRegistry.tools().stream()
+                    .filter(io.yupiik.ia.agent.core.tools.EmbeddedTool::usable)
+                    .map(io.yupiik.ia.agent.core.tools.EmbeddedTool::name)
+                    .collect(java.util.stream.Collectors.toSet());
+            final var unknown = new java.util.TreeSet<>(state.allowedTools());
+            unknown.removeAll(available);
+            if (!unknown.isEmpty()) {
+                return SubagentRegistry.SubagentResult.error(
+                        "Requested tools are not available: " + String.join(", ", unknown), "");
+            }
+        }
 
         // Create isolated services for this subagent: explicit instances built from the shared beans and the
         // spawning session's context (the parent permission state, feedback gate and usage are inherited).
@@ -266,6 +278,7 @@ public class SubagentRunner {
             }
         }
         agentLoop.updateChatSettings(subagentSettings);
+        agentLoop.allowedTools(state.allowedTools());
 
         final var fullConversation = new StringBuilder();
         fullConversation

@@ -216,6 +216,8 @@ public class AgentLoop {
     private final UserFeedbackService userFeedbackService;
     private final String subagentId;
     private final String subagentName;
+    /** Null means this is a regular agent turn; a non-null set is a subagent execution ceiling. */
+    private volatile Set<String> allowedTools;
     /**
      * Session this loop instance belongs to. Events are tagged with it so the
      * shell registry can route each stream to the tab that owns it. A loop
@@ -742,7 +744,7 @@ public class AgentLoop {
      * simply cannot call them - the strongest form of "plan must not build".
      */
     private List<Tool> wireTools() {
-        final var tools = toolRegistry.toWireTools();
+        final var tools = toolRegistry.toWireTools(tool -> allowedTools == null || allowedTools.contains(tool.name()));
         if (permissionService == null || permissionService.mode() != AgentMode.PLAN) {
             return tools;
         }
@@ -752,6 +754,11 @@ public class AgentLoop {
                     return embedded == null || embedded.category() != ToolCategory.EDIT;
                 })
                 .toList();
+    }
+
+    /** Installs a child run's tool ceiling before its first request. Null retains the registry's full set. */
+    public void allowedTools(final Set<String> names) {
+        this.allowedTools = names == null ? null : Set.copyOf(names);
     }
 
     public String run(
@@ -2973,6 +2980,13 @@ public class AgentLoop {
             final var diagnostic = "Unknown tool: " + name;
             unregisterRunningTool(ordinal);
             emit(toolFinished(name, unknownToolDiagnostic(name), false, ordinal));
+            return new ToolOutcome(call.id(), name, diagnostic, false, false);
+        }
+        final var childToolCeiling = allowedTools;
+        if (childToolCeiling != null && !childToolCeiling.contains(name)) {
+            final var diagnostic = "Tool is not allowed for this agent run: " + name;
+            unregisterRunningTool(ordinal);
+            emit(toolFinished(name, diagnostic, false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         // a tool that is served but was NOT offered in the current request's wire list must not be executed:
