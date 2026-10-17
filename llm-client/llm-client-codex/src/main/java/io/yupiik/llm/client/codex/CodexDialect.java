@@ -21,6 +21,8 @@ import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.codex.model.CodexModels;
 import io.yupiik.llm.client.model.LlmModel;
 import io.yupiik.llm.client.model.LlmModels;
+import io.yupiik.llm.client.model.LlmRequest;
+import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.openai.OpenAIResponsesDialect;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import java.net.URI;
@@ -91,6 +93,45 @@ public class CodexDialect extends OpenAIResponsesDialect {
     @Override
     protected String chatRouteSuffix() {
         return "/responses";
+    }
+
+    /**
+     * The ChatGPT Codex backend only accepts streaming requests ({@code stream:true}); any other
+     * call is rejected with {@code {"detail":"Stream must be set to true"}}. Force the wire flag on
+     * every request, including background single-shot calls.
+     *
+     * @return {@code true}, the Codex backend rejects non-streaming requests.
+     */
+    @Override
+    protected boolean forceStream() {
+        return true;
+    }
+
+    /**
+     * The Codex backend never serves a plain single-shot JSON body - it always streams SSE. Run the
+     * generated stream through {@link #assemble(LlmRequest, BooleanSupplier)} so background
+     * (non-streaming) chat callers get a single {@link LlmResponse} back.
+     *
+     * @param request the request to run as a single-shot completion.
+     * @return a stage completing with the assembled single-shot response.
+     */
+    @Override
+    public CompletionStage<LlmResponse> chat(final LlmRequest request) {
+        return chat(request, () -> false);
+    }
+
+    /**
+     * The Codex backend never serves a plain single-shot JSON body - it always streams SSE. Run the
+     * generated stream through {@link #assemble(LlmRequest, BooleanSupplier)} so background
+     * (non-streaming) chat callers get a single {@link LlmResponse} back.
+     *
+     * @param request the request to run as a single-shot completion.
+     * @param cancelled cancellation probe checked between frames.
+     * @return a stage completing with the assembled single-shot response.
+     */
+    @Override
+    public CompletionStage<LlmResponse> chat(final LlmRequest request, final BooleanSupplier cancelled) {
+        return assemble(request, cancelled == null ? () -> false : cancelled);
     }
 
     /**

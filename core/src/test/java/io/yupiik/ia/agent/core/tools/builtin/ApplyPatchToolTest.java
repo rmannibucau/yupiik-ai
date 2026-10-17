@@ -218,4 +218,44 @@ class ApplyPatchToolTest {
         assertTrue(result.success(), () -> result.output());
         assertEquals("a\nB\nc\nD\ne\n", Files.readString(file));
     }
+
+    @Test
+    void rejectsMultiHunkPatchMissingFileHeaderInsteadOfNpe() throws Exception {
+        // a second @@ hunk before any ---/+++ file header used to NPE on the null hunks list
+        final var patch = """
+                @@ -1,2 +1,3 @@
+                 a
+                -b
+                +B
+                @@ -5,1 +5,1 @@
+                -c
+                +C
+                """;
+        final var result = tool().execute(Map.of("patch", patch));
+        assertFalse(result.success(), () -> result.output());
+        assertTrue(result.output().contains("file header"), () -> result.output());
+    }
+
+    @Test
+    void rejectsSingleHunkWithoutFileHeaderInsteadOfSilentNoop() throws Exception {
+        // a single header-less hunk used to be silently ignored and yet report success
+        final var patch = """
+                @@ -1,2 +1,3 @@
+                 a
+                -b
+                +B
+                +c2
+                """;
+        final var result = tool().execute(Map.of("patch", patch));
+        assertFalse(result.success(), () -> result.output());
+        assertTrue(result.output().contains("file header"), () -> result.output());
+    }
+
+    @Test
+    void descriptionMakesFileHeadersMandatory() {
+        final var description = tool().description();
+        assertTrue(description.contains("--- a/"), description);
+        assertTrue(description.contains("+++ b/"), description);
+        assertTrue(description.contains("file headers"), description);
+    }
 }

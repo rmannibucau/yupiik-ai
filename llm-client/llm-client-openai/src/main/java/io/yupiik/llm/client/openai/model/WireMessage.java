@@ -52,20 +52,19 @@ public record WireMessage(
     public static WireMessage from(final LlmMessage message) {
         final var extensions = message.extensions();
         // volatileTail is an agent-loop hint consumed by dialects implementing explicit cache
-        // breakpoints; strip it so it never leaks as an unknown field on this wire
+        // breakpoints, and is_error is an internal failure flag preserved for session round-trips:
+        // strip both so neither ever leaks as an unknown field on this wire.
         final Map<String, Object> others;
         if (extensions == null || extensions.isEmpty()) {
             others = null;
-        } else if (extensions.containsKey("volatileTail")) {
+        } else {
             final var filtered = new LinkedHashMap<String, Object>();
             extensions.forEach((k, v) -> {
-                if (!"volatileTail".equals(k)) {
+                if (!"volatileTail".equals(k) && !"is_error".equals(k)) {
                     filtered.put(k, v);
                 }
             });
             others = filtered.isEmpty() ? null : filtered;
-        } else {
-            others = extensions;
         }
         return new WireMessage(
                 message.role(),

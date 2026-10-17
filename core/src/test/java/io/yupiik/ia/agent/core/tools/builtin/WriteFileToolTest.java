@@ -110,4 +110,19 @@ class WriteFileToolTest {
         assertTrue(result.success(), result.output());
         assertEquals("ok", Files.readString(target));
     }
+
+    @Test
+    void missingPathReturnsFriendlyErrorInsteadOfNpe() {
+        // a null/missing "path" must surface a clear "path is required", never Path.of(null) -> NPE
+        final var write = new WriteFileTool().execute(Map.of("content", "x"));
+        assertTrue(!write.success(), write.output());
+        assertEquals("path is required", write.output());
+    }
+
+    @Test
+    void missingPathForEditReturnsFriendlyErrorInsteadOfNpe() {
+        final var edit = new EditFileTool().execute(Map.of("oldString", "x", "newString", "y"));
+        assertTrue(!edit.success(), edit.output());
+        assertEquals("path is required", edit.output());
+    }
 }

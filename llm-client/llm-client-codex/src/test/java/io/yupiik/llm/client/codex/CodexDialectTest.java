@@ -23,6 +23,7 @@ import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClientConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.model.LlmModels;
+import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.spi.ProviderSpec;
 import io.yupiik.llm.client.test.TestJsonMapper;
 import java.io.IOException;
@@ -30,6 +31,7 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -174,6 +176,74 @@ class CodexDialectTest {
         latch.await();
         assertEquals("hello world", sb.toString(), "the streamed text must be produced, not buffered as an error");
         org.junit.jupiter.api.Assertions.assertNull(err.get(), "no stream error expected: " + err.get());
+    }
+
+    @Test
+    void chatForcesStreamTrueOnTheWire(final JsonMapper mapper) throws Exception {
+        // background (non-streaming) chat calls must still send stream:true, or the codex backend
+        // rejects them with {"detail":"Stream must be set to true"}.
+        final AtomicReference<String> reqBody = new AtomicReference<>();
+        server.createContext("/codex/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{}");
+        });
+
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
+        dialect.chat(request(), () -> false).toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        final var body = reqBody.get();
+        org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
+        assertTrue(body.contains("\"stream\":true"), "codex chat must send stream:true, got: " + body);
+    }
+
+    @Test
+    void chatCoalescesStreamedSseIntoSingleResponse(final JsonMapper mapper) throws Exception {
+        // the codex backend always streams SSE even for single-shot chat; the assembly helper must
+        // coalesce text deltas and function_call events into one LlmResponse with tool calls.
+        server.createContext("/codex/responses", exchange -> {
+            final byte[] sse = ("event: response.created\n"
+                            + "data: {\"type\":\"response.created\"}\n\n"
+                            + "event: response.output_text.delta\n"
+                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"output_index\":0}\n\n"
+                            + "event: response.output_text.delta\n"
+                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\" world\",\"output_index\":0}\n\n"
+                            + "event: response.output_item.added\n"
+                            + "data: {\"type\":\"response.output_item.added\",\"output_index\":1,"
+                            + "\"item\":{\"type\":\"function_call\",\"id\":\"call_1\",\"name\":\"bash\"}}\n\n"
+                            + "event: response.function_call_arguments.delta\n"
+                            + "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":1,"
+                            + "\"item_id\":\"call_1\",\"delta\":\"{\\\"command\\\":\\\"ls\\\"}\"}\n\n"
+                            + "event: response.completed\n"
+                            + "data: {\"type\":\"response.completed\",\"usage\":{\"input_tokens\":3,"
+                            + "\"output_tokens\":5,\"total_tokens\":8}}\n\n")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, sse.length);
+            exchange.getResponseBody().write(sse);
+            exchange.close();
+        });
+
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
+        final LlmResponse response =
+                dialect.chat(request(), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+
+        assertEquals("hello world", response.text(), "text deltas must be assembled into a single response");
+        final var first = response.first();
+        org.junit.jupiter.api.Assertions.assertNotNull(first, "expected at least one choice");
+        assertEquals(1, first.message().toolCalls().size(), "the streamed function call must survive assembly");
+        final var call = first.message().toolCalls().get(0);
+        assertEquals("call_1", call.id());
+        assertEquals("bash", call.function().name());
+        assertEquals("{\"command\":\"ls\"}", call.function().arguments());
+        org.junit.jupiter.api.Assertions.assertNotNull(response.usage(), "usage from the completed event must be kept");
+        assertEquals(8L, response.usage().total());
     }
 
     private io.yupiik.llm.client.model.LlmRequest request() {

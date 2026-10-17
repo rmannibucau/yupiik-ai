@@ -23,6 +23,9 @@ public record ToolsConfiguration(
         @Property(documentation = "Embedded (built-in) tools settings.")
         BuiltinToolsConfiguration builtin,
 
+        @Property(documentation = "Subagent catalog and model-routing allowlists.")
+        SpawnSubagentToolConfiguration spawnSubagent,
+
         @Property(documentation = "Web search tool settings.")
         WebSearchConfiguration websearch,
 

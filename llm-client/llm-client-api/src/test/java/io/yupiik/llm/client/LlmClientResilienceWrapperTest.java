@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.model.LlmMessage;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
@@ -28,11 +29,16 @@ import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.Dialect;
 import io.yupiik.llm.client.spi.StreamAttempt;
 import java.io.IOException;
+import java.lang.reflect.Type;
 import java.net.http.HttpResponse;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -52,13 +58,14 @@ import org.junit.jupiter.api.Test;
 class LlmClientResilienceWrapperTest {
 
     private static LlmResilienceConfig config(final int attempts, final long baseDelayMs, final int maxConcurrent) {
-        return new LlmResilienceConfig(attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L);
+        return new LlmResilienceConfig(
+                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, 1.0d, 900_000L, 3_600_000L);
     }
 
     private static LlmResilienceConfig config(
             final int attempts, final long baseDelayMs, final int maxConcurrent, final double waitScale) {
         return new LlmResilienceConfig(
-                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale, 900_000L);
+                attempts, baseDelayMs, 0, maxConcurrent, false, true, 300_000L, waitScale, 900_000L, 3_600_000L);
     }
 
     @Test
@@ -334,6 +341,100 @@ class LlmClientResilienceWrapperTest {
     }
 
     @Test
+    void usageLimitReachedWithLongWindowIsNotRetried() {
+        final var body = "{\"error\":{\"type\":\"usage_limit_reached\",\"limit_window_minutes\":43200,"
+                + "\"resets_in_seconds\":2500000,\"resets_at\":9999999999}}";
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, body, null));
+        final var wrapper = new LlmClientResilienceWrapper(
+                config(3, 0, 4), null, null, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), new MiniJsonMapper());
+
+        final var failure = assertThrows(
+                CompletionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertTrue(
+                failure.getCause() instanceof LlmHttpFailureException
+                        && failure.getCause().getMessage().contains("usage_limit_reached"),
+                "got: " + failure.getCause());
+        assertEquals(1, dial.calls.get(), "a long usage-limit window must not be retried");
+    }
+
+    @Test
+    void usageLimitReachedWithDistantResetIsNotRetried() {
+        // no limit_window_minutes, but resets_at is epochs beyond the 1h threshold (1h after epoch now)
+        final var body =
+                "{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":3600000," + "\"resets_at\":7200}}";
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, body, null));
+        final var wrapper = new LlmClientResilienceWrapper(
+                config(3, 0, 4), null, null, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), new MiniJsonMapper());
+
+        final var failure = assertThrows(
+                CompletionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(1, dial.calls.get(), "a resets_at beyond the threshold must not be retried");
+    }
+
+    @Test
+    void usageLimitReachedWithShortWindowIsRetried() {
+        // resets_at 30s after now: within the 1h threshold, must keep the normal retry behavior
+        final var body = "{\"error\":{\"type\":\"usage_limit_reached\",\"resets_in_seconds\":30,\"resets_at\":30}}";
+        final var dial = new ScriptedDialect(
+                new LlmHttpFailureException(429, body, null),
+                new LlmHttpFailureException(429, body, null),
+                new LlmHttpFailureException(429, body, null));
+        final var wrapper = new LlmClientResilienceWrapper(
+                config(3, 0, 4), null, null, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), new MiniJsonMapper());
+
+        assertThrows(
+                CompletionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(3, dial.calls.get(), "a short usage-limit window must still be retried");
+    }
+
+    @Test
+    void usageLimitReachedWithUnparseableBodyIsRetried() {
+        // unparseable JSON: the soft parse must fail closed (keep the normal retry behavior)
+        final var dial = new ScriptedDialect(
+                new LlmHttpFailureException(429, "{\"error\": oops-not-json", null),
+                new LlmHttpFailureException(429, "{\"error\": oops-not-json", null),
+                new LlmHttpFailureException(429, "{\"error\": oops-not-json", null));
+        final var wrapper = new LlmClientResilienceWrapper(
+                config(3, 0, 4), null, null, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), new MiniJsonMapper());
+
+        assertThrows(
+                CompletionException.class,
+                () -> wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join());
+
+        assertEquals(3, dial.calls.get(), "an unparseable 429 body must still be retried");
+    }
+
+    @Test
+    void nonUsageLimit429IsRetriedEvenWithMapper() {
+        final var body = "{\"error\":{\"type\":\"rate_limit_exceeded\"}}";
+        final var dial = new ScriptedDialect(new LlmHttpFailureException(429, body, null));
+        final var wrapper = new LlmClientResilienceWrapper(
+                config(2, 0, 4), null, null, Clock.fixed(Instant.EPOCH, ZoneOffset.UTC), new MiniJsonMapper());
+
+        assertEquals(
+                "ok",
+                wrapper.chat(dial, null, () -> false)
+                        .toCompletableFuture()
+                        .join()
+                        .text());
+        assertEquals(2, dial.calls.get(), "a rate_limit_exceeded 429 must still be retried");
+    }
+
+    @Test
     void http400IsNotRetried() {
         final var dial = new ScriptedDialect(new IOException("LLM request failed (400): bad request"));
         final var wrapper = new LlmClientResilienceWrapper(config(3, 0, 4), null);
@@ -538,6 +639,114 @@ class LlmClientResilienceWrapperTest {
                         0, new LlmMessage("assistant", "ok", null, null, null, null), "stop")),
                 null,
                 null);
+    }
+
+    /**
+     * Minimal {@link JsonMapper} test double: parses the tiny Codex-style error body
+     * {@code {"error":{"key":value,"key":number}}} into a {@code Map<String,Object>}. Covers only
+     * what the resilience wrapper reads (type, limit_window_minutes, resets_at); anything else
+     * throws so the soft-parse "ignore the body" path can be exercised.
+     */
+    @SuppressWarnings("unchecked")
+    private static final class MiniJsonMapper implements JsonMapper {
+        @Override
+        public <A> A fromString(final Class<A> type, final String body) {
+            return (A) parseBody(body);
+        }
+
+        @Override
+        public <A> A fromString(final Type type, final String body) {
+            return (A) parseBody(body);
+        }
+
+        @Override
+        public <A> A fromBytes(final Class<A> type, final byte[] bytes) {
+            return (A) parseBody(new String(bytes, StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public <A> A fromBytes(final Type type, final byte[] bytes) {
+            return (A) parseBody(new String(bytes, StandardCharsets.UTF_8));
+        }
+
+        @Override
+        public <A> A read(final Type type, final java.io.Reader reader) {
+            throw new UnsupportedOperationException("not needed");
+        }
+
+        @Override
+        public <A> A read(final Class<A> type, final java.io.Reader reader) {
+            throw new UnsupportedOperationException("not needed");
+        }
+
+        @Override
+        public <A> String toString(final A value) {
+            throw new UnsupportedOperationException("not needed");
+        }
+
+        @Override
+        public <A> void write(final A value, final java.io.Writer writer) {
+            throw new UnsupportedOperationException("not needed");
+        }
+
+        @Override
+        public <A> byte[] toBytes(final A value) {
+            throw new UnsupportedOperationException("not needed");
+        }
+
+        @Override
+        public void close() {
+            // no-op
+        }
+
+        private static Object parseBody(final String source) {
+            final var map = new LinkedHashMap<String, Object>();
+            var i = source.indexOf('{');
+            while ((i = source.indexOf('"', i)) >= 0) {
+                final var keyEnd = source.indexOf('"', i + 1);
+                if (keyEnd < 0) {
+                    break;
+                }
+                final var key = source.substring(i + 1, keyEnd);
+                final var colon = source.indexOf(':', keyEnd);
+                if (colon < 0) {
+                    break;
+                }
+                var v = colon + 1;
+                while (v < source.length() && Character.isWhitespace(source.charAt(v))) {
+                    v++;
+                }
+                map.put(key, parseValue(source, v));
+                i = colon + 1;
+            }
+            return map;
+        }
+
+        private static Object parseValue(final String source, final int start) {
+            if (start >= source.length()) {
+                throw new IllegalArgumentException("empty value");
+            }
+            final var c = source.charAt(start);
+            if (c == '"') {
+                final var end = source.indexOf('"', start + 1);
+                if (end < 0) {
+                    throw new IllegalArgumentException("unterminated string");
+                }
+                return source.substring(start + 1, end);
+            }
+            if (c == '{') {
+                return parseBody(source.substring(start, source.length()));
+            }
+            // number: consume digits (and optional sign)
+            int end = start;
+            while (end < source.length()
+                    && (Character.isDigit(source.charAt(end))
+                            || source.charAt(end) == '-'
+                            || source.charAt(end) == '.')) {
+                end++;
+            }
+            return Long.parseLong(source.substring(start, end));
+        }
     }
 
     private static class ScriptedDialect implements Dialect {

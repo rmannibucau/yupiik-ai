@@ -20,6 +20,7 @@ import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.StructuralCodeGraph;
 import io.yupiik.ia.agent.core.configuration.AgentMode;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.ModelVariantConfiguration;
 import io.yupiik.ia.agent.core.configuration.PlateauFeedbackMode;
 import io.yupiik.ia.agent.core.context.ContextManager;
 import io.yupiik.ia.agent.core.context.ContextView;
@@ -251,6 +252,16 @@ public class AgentLoop {
      * a selection. Plain holder - no scope, no thread-local.
      */
     private volatile ChatSettings chatSettings = ChatSettings.EMPTY;
+
+    /**
+     * Profile-level model tuning installed by {@code SubagentRunner} when it launches a subagent on a
+     * dedicated loop, applied to the wire request alongside the run settings. {@code skipConfiguredAgentModel}
+     * tells {@code doRun} not to let the profile's own model replace the already-resolved subagent
+     * selection (the profile only contributes its tuning, not its model, on the isolated child loop).
+     */
+    private volatile ModelVariantConfiguration agentModelTuning;
+
+    private volatile boolean skipConfiguredAgentModel;
     /**
      * Per-turn pause listener surfacing provider throttles and retry backoffs to the owning
      * tab. It is handed to each {@link ChatClient} call instead of being installed globally:
@@ -649,6 +660,16 @@ public class AgentLoop {
         }
     }
 
+    /** Sets optional profile-level model tuning for this loop (used by isolated subagent loops). */
+    public void agentModelTuning(final ModelVariantConfiguration value) {
+        this.agentModelTuning = value;
+    }
+
+    /** Prevents a subagent profile from replacing a model explicitly selected for this run. */
+    public void skipConfiguredAgentModel(final boolean value) {
+        this.skipConfiguredAgentModel = value;
+    }
+
     /**
      * Releases the session and fires the {@code yca.hooks.SessionEnded} hook once. Idempotent: the hook fires for the
      * first call only (a TUI may dispose a tab and later re-close, or the CLI and process shutdown may overlap).
@@ -799,7 +820,7 @@ public class AgentLoop {
             final String sessionId,
             final List<Message> history,
             final BooleanSupplier cancelled) {
-        return run(prompt, agentName, sessionId, history, cancelled, null);
+        return run(prompt, agentName, sessionId, history, cancelled, null, null);
     }
 
     /**
@@ -816,14 +837,24 @@ public class AgentLoop {
             final List<Message> history,
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt) {
-        attachSessionSettings();
-        return doRun(prompt, prompt, agentName, sessionId, history, cancelled, queuedPrompt);
+        return run(prompt, agentName, sessionId, history, cancelled, queuedPrompt, null);
+    }
+
+    public String run(
+            final String prompt,
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled,
+            final Supplier<String> queuedPrompt,
+            final String explicitModel) {
+        return doRun(prompt, prompt, agentName, sessionId, history, cancelled, queuedPrompt, explicitModel);
     }
 
     /** The per-session provider/model selection rides the session's {@link ChatSettings}; make the tracker see it. */
-    private void attachSessionSettings() {
+    private void attachSessionSettings(final ChatSettings settings) {
         if (usageTracker != null) {
-            usageTracker.attach(chatSettings);
+            usageTracker.attach(settings);
         }
     }
 
@@ -851,7 +882,18 @@ public class AgentLoop {
             final List<Message> history,
             final BooleanSupplier cancelled,
             final Supplier<String> queuedPrompt) {
-        return doRun(lastUserPrompt(history), null, agentName, sessionId, history, cancelled, queuedPrompt);
+        return doRun(lastUserPrompt(history), null, agentName, sessionId, history, cancelled, queuedPrompt, null);
+    }
+
+    public String resume(
+            final String agentName,
+            final String sessionId,
+            final List<Message> history,
+            final BooleanSupplier cancelled,
+            final Supplier<String> queuedPrompt,
+            final String explicitModel) {
+        return doRun(
+                lastUserPrompt(history), null, agentName, sessionId, history, cancelled, queuedPrompt, explicitModel);
     }
 
     private void emitResumeAfterCapNotice(final List<Message> history, final String sessionId) {
@@ -875,7 +917,8 @@ public class AgentLoop {
             final String sessionId,
             final List<Message> history,
             final BooleanSupplier cancelled,
-            final Supplier<String> queuedPrompt) {
+            final Supplier<String> queuedPrompt,
+            final String explicitModel) {
         // a probe is always a real supplier: every downstream use (loop iterations, compaction,
         // streaming, the tool context) dereferences it. A caller holding no interrupt flag passes
         // Cancellations.NEVER; a null is a caller bug and fails here, at the boundary, rather than
@@ -886,10 +929,28 @@ public class AgentLoop {
         final var agent = (agentName == null || agentName.isBlank() || agentProvider == null)
                 ? null
                 : agentProvider.byName(agentName);
+        final var contextualSettings = chatSettings;
+        final var contextualAgentTuning = agentModelTuning;
+        final var configuredAgentModel = agent == null || agent.model() == null
+                ? null
+                : AgentModelRouting.refName(agent.model().name());
+        final var useProfileModel = configuredAgentModel != null;
+        final var effectiveModel = EffectiveAgentModel.resolve(
+                providerManager != null && contextualSettings.providerId() != null ? providerManager : null,
+                contextualSettings,
+                skipConfiguredAgentModel ? null : agent,
+                explicitModel,
+                null);
+        final var runSettings =
+                !skipConfiguredAgentModel && useProfileModel ? effectiveModel.settings() : contextualSettings;
+        final var runTuning =
+                !skipConfiguredAgentModel && useProfileModel && (explicitModel == null || explicitModel.isBlank())
+                        ? agent.model()
+                        : contextualAgentTuning;
         structuralCodeGraph.ensureReadyAsync();
         // fresh per-turn loop-guard state: repeat counts must not leak across turns
         // (the threshold cascade is resolved here, once per turn, like the plateau guards)
-        repeats = new ToolRepeats(resolvedRepeatSuccessThreshold(resolvedModel()));
+        repeats = new ToolRepeats(resolvedRepeatSuccessThreshold(resolvedModel(runSettings)));
         noProgressRounds = 0;
         seenFiles.clear();
         plateauRounds = 0;
@@ -941,7 +1002,15 @@ public class AgentLoop {
         }
 
         try {
-            return loop(sessionId, messages, promptForBuilding, cancelled, queuedPrompt);
+            return loop(
+                    sessionId,
+                    messages,
+                    promptForBuilding,
+                    cancelled,
+                    queuedPrompt,
+                    useProfileModel,
+                    runSettings,
+                    runTuning);
         } catch (final IOException e) {
             if ("Cancelled".equals(e.getMessage())) {
                 // user interrupt surfaced through the stream/backoff paths: a normal end,
@@ -980,7 +1049,7 @@ public class AgentLoop {
                         switch (mode) {
                             case FULL -> false;
                             case LAZY -> true;
-                            case AUTO -> providerManager != null && providerManager.memoryUsesMainModel(chatSettings);
+                            case AUTO -> providerManager != null && providerManager.memoryUsesMainModel(runSettings);
                         };
                 final boolean eligible;
                 if (regimeLazy) {
@@ -1007,7 +1076,7 @@ public class AgentLoop {
                         eligible = true;
                     }
                 }
-                memoryExtractor.asyncExtractNow(messages, chatSettings, eligible);
+                memoryExtractor.asyncExtractNow(messages, runSettings, eligible);
             }
         }
     }
@@ -1089,7 +1158,10 @@ public class AgentLoop {
      * started the turn, never another concurrent session's.
      */
     private ToolContext toolContext(
-            final BooleanSupplier cancelled, final BooleanSupplier callCancelled, final long ordinal) {
+            final BooleanSupplier cancelled,
+            final BooleanSupplier callCancelled,
+            final long ordinal,
+            final ChatSettings settings) {
         return new ToolContext(
                 currentSessionId,
                 subagentId,
@@ -1101,7 +1173,7 @@ public class AgentLoop {
                 usageTracker,
                 contextView,
                 cancelled,
-                chatSettings,
+                settings,
                 callCancelled,
                 sessionWorkdir,
                 ordinal,
@@ -1258,17 +1330,24 @@ public class AgentLoop {
             final List<Message> messages,
             final String prompt,
             final BooleanSupplier cancelled,
-            final Supplier<String> queuedPrompt)
+            final Supplier<String> queuedPrompt,
+            final boolean useProfileModel,
+            final ChatSettings runSettings,
+            final ModelVariantConfiguration runTuning)
             throws IOException, InterruptedException {
         final var retryOnOverflow = configuration.llm().retryOnContextOverflow();
         // iteration window cap cascade: per-model behavior > per-provider tuning > global default;
         // the provider is the session's effective one (per-tab override or process default); only
         // these window caps are computed once here - the model is re-resolved for every request
         // below so a mid-turn /model or /provider switch applies from the next round.
-        final var resolved = resolvedModel();
+        final var resolved = resolvedModel(runSettings);
         final var maxIterations = resolvedMaxIterations(resolved);
         final var plateauLimit = resolvedPlateauRounds(resolved);
         final var plateauFeedback = resolvedPlateauFeedback(resolved);
+        final var explorationNudgeRounds = resolvedModelExplorationNudgeRounds(resolved);
+        final var turnContinuesOnTextEnd = resolved == null || providerManager == null
+                ? false
+                : providerManager.turnContinuesOnTextEnd(resolved.provider(), resolved.model());
         final var maxConsecutiveCompactions = MAX_CONSECUTIVE_COMPACTIONS;
         final var tools = wireTools();
         final var toolsTokens = toolTokens(tools);
@@ -1305,7 +1384,12 @@ public class AgentLoop {
         // todo continuations remain, making large --todos-maxContinues values unreachable.
         windowLoop:
         while (!cancelled.getAsBoolean()) {
-            for (var iteration = 0; iteration < maxIterations && !cancelled.getAsBoolean(); iteration++) {
+            // An unbounded window (maxIterations < 0) has no iteration budget: it runs until the turn
+            // genuinely ends. A positive maxIterations bounds this window; every todo auto-continuation
+            // starts a fresh window with a new maxIterations budget.
+            for (var iteration = 0;
+                    (maxIterations < 0 || iteration < maxIterations) && !cancelled.getAsBoolean();
+                    iteration++) {
                 if (contextView != null) {
                     contextView.publish(snapshot(messages, toolsTokens));
                 }
@@ -1343,7 +1427,7 @@ public class AgentLoop {
                     }
                 }
                 if (contextManager.compactNeeded(messages, toolsTokens)) {
-                    final var compacted = contextManager.compact(messages, false, null, 0, cancelled, chatSettings);
+                    final var compacted = contextManager.compact(messages, false, null, 0, cancelled, runSettings);
                     if (compacted.changed()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
@@ -1381,18 +1465,20 @@ public class AgentLoop {
                 // resolved (and tracked) per request: the window caps above stay the turn's ones but
                 // the selection the provider sees is the session's current one, so a /model run
                 // while busy lands on this round instead of only on the next turn
-                attachSessionSettings();
-                final var model = requestModel(resolved);
+                final var requestSettings = useProfileModel && !skipConfiguredAgentModel ? runSettings : chatSettings;
+                attachSessionSettings(requestSettings);
+                final var model = requestModel(resolved, requestSettings);
                 // secret redaction: let observer(s) (the default SecretRedactor, or custom
                 // extensions) transform the outgoing messages before they reach the provider
-                final var outbound = new OutboundLlmRequest(messages, chatSettings, sessionId);
+                final var outbound = new OutboundLlmRequest(messages, requestSettings, sessionId);
                 emitter.emit(outbound);
                 final var wireMessages = outbound.messages();
                 lastLlmPayload = new LlmPayload(
                         sessionId, model, List.copyOf(wireMessages), List.copyOf(tools), "auto", toolsTokens);
                 final var request = new ChatCompletionRequest(
                                 model, wireMessages, null, null, null, tools, "auto", null, null, null)
-                        .withSettings(chatSettings);
+                        .withSettings(requestSettings)
+                        .withTuning(runTuning);
                 final var usage = new io.yupiik.ia.agent.core.llm.Usage[] {io.yupiik.ia.agent.core.llm.Usage.EMPTY};
                 final var finishReason = new String[] {null};
                 Message assistant;
@@ -1454,7 +1540,7 @@ public class AgentLoop {
                             AgentEvent.Notice.Level.INFO,
                             "Context window exceeded; compacting and retrying (assumed window reduced to " + shrunken
                                     + " tokens)."));
-                    final var compacted = contextManager.compactForOverflow(messages, cancelled, chatSettings);
+                    final var compacted = contextManager.compactForOverflow(messages, cancelled, runSettings);
                     if (compacted.changed() && !compacted.messages().isEmpty()) {
                         messages.clear();
                         messages.addAll(compacted.messages());
@@ -1611,6 +1697,24 @@ public class AgentLoop {
                         continue windowLoop;
                     }
                     final var pending = unfinishedTodos(toolsRanThisTurn);
+                    // Codex-style round gate: models opted in via behavior.turnContinuesOnTextEnd=true
+                    // keep driving a turn that ends text-only while the todo list is unfinished, instead
+                    // of ending the turn and waiting for the user to send 'continue'. The model decides
+                    // the turn is genuinely over by producing a plain text end once todos are done (or by
+                    // hitting the iteration cap / a plateau hard-stop); nothing consumes the
+                    // yca.todos.maxContinues budget because this is bounded by the iteration window, not
+                    // by todo continuations. Only skipped when a prompt typed while running was injected
+                    // (the model just answered that message).
+                    if (turnContinuesOnTextEnd && pending != null && !userInjected) {
+                        emit(
+                                notice(
+                                        AgentEvent.Notice.Level.INFO,
+                                        "model ended its turn (finish_reason=" + reason + ") with " + pending.pending()
+                                                + '/' + pending.total()
+                                                + " todos still unfinished; continuing the round automatically (behavior.turnContinuesOnTextEnd)."));
+                        messages.add(Message.user(unfinishedTodoContinuePrompt(1)));
+                        continue windowLoop;
+                    }
                     if (pending != null) {
                         emit(unfinishedTodosNotice(pending, reason));
                     }
@@ -1626,6 +1730,7 @@ public class AgentLoop {
                 final var roundInformative = new boolean[] {false};
                 final var roundRefused = new boolean[] {false};
                 final var roundCoverage = new HashSet<String>();
+                final var roundMutatingBash = new boolean[] {false};
                 executeToolCalls(
                         sessionId,
                         messages,
@@ -1634,9 +1739,11 @@ public class AgentLoop {
                         staleReads,
                         toolsTokens,
                         cancelled,
+                        requestSettings,
                         roundInformative,
                         roundRefused,
-                        roundCoverage);
+                        roundCoverage,
+                        roundMutatingBash);
                 toolsRanThisTurn = true;
                 // a doom-loop refusal is surfaced to the model as ONE strategy-change nudge (never as a
                 // failed tool result): after the refused round completes, inject it and let the model adapt.
@@ -1674,29 +1781,34 @@ public class AgentLoop {
                 // files/results (novel call signatures, same targets) is not progress for flash-class
                 // models that explore one call per round: stop after the configured plateau rounds,
                 // keeping the todo auto-continue as the escape hatch when todos are open
-                if (plateauLimit > 0 && !roundCoverage.isEmpty() && isPlateauRound(roundCoverage)) {
+                if (plateauLimit != 0 && !roundCoverage.isEmpty() && isPlateauRound(roundCoverage)) {
                     if (unfinishedTodos(toolsRanThisTurn) != null) {
                         plateauRounds = 0;
                     } else {
                         plateauRounds++;
+                        final var plateauCap = Math.abs(plateauLimit);
+                        final var plateauStops = plateauLimit > 0;
                         // one-shot strategy-change nudge (plateauFeedback nudge_1 / nudge_2): before the
-                        // hard stop the model gets a chance to adapt instead of losing the whole turn
-                        final var nudgeAt = plateauFeedbackNudgeAt(plateauFeedback, plateauLimit);
+                        // hard stop the model gets a chance to adapt instead of losing the whole turn.
+                        // In nudge-only mode (plateauLimit < 0) the guard never hard-stops, so the nudge
+                        // fires when the streak reaches the cap (abs value) to remind without killing the turn.
+                        final int nudgeAt =
+                                plateauStops ? plateauFeedbackNudgeAt(plateauFeedback, plateauCap) : plateauCap;
                         if (nudgeAt > 0 && !plateauNudged && plateauRounds >= nudgeAt) {
                             plateauNudged = true;
                             emit(notice(
                                     AgentEvent.Notice.Level.INFO,
                                     "exploration-plateau nudge sent to the model (round " + plateauRounds + '/'
-                                            + plateauLimit + ")"));
+                                            + plateauCap + (plateauStops ? "" : ",nudge-only") + ")"));
                             messages.add(Message.user(PLATEAU_NUDGE_PROMPT));
                             continue windowLoop;
                         }
-                        if (plateauRounds >= plateauLimit) {
+                        if (plateauStops && plateauRounds >= plateauCap) {
                             persistStopNotice(
                                     sessionId,
-                                    "Exploration plateau: the model made " + plateauLimit
+                                    "Exploration plateau: the model made " + plateauCap
                                             + " consecutive read-only tool rounds re-covering only already-seen files/results.");
-                            emit(error("Exploration plateau: the model made " + plateauLimit
+                            emit(error("Exploration plateau: the model made " + plateauCap
                                     + " consecutive read-only tool rounds re-covering only already-seen files/results."
                                     + " Stopping the turn."));
                             emitTurnMetrics(null, turnStartNanos);
@@ -1711,11 +1823,13 @@ public class AgentLoop {
                 // and slips through. After llm.explorationNudgeRounds such consecutive rounds without
                 // an answer, inject a one-shot wrap-up directive (no hard stop: a genuinely deep task
                 // can still continue gathering - the model decides).
-                final var readOnlyRound = !roundCoverage.contains(WRITE_MARKER) && !roundCoverage.isEmpty();
+                final var readOnlyRound =
+                        !roundCoverage.contains(WRITE_MARKER) && !roundCoverage.isEmpty() && !roundMutatingBash[0];
                 if (readOnlyRound && roundInformative[0]) {
                     explorationRounds++;
-                    final var nudgeRounds = configuration.llm().explorationNudgeRounds();
-                    if (nudgeRounds > 0 && !explorationNudged && explorationRounds >= nudgeRounds) {
+                    if (explorationNudgeRounds > 0
+                            && !explorationNudged
+                            && explorationRounds >= explorationNudgeRounds) {
                         explorationNudged = true;
                         emit(notice(
                                 AgentEvent.Notice.Level.INFO,
@@ -1745,11 +1859,20 @@ public class AgentLoop {
             if (tryTodoAutoContinue(messages, "max_iterations", toolsRanThisTurn, userInjected)) {
                 continue windowLoop;
             }
+            // an unbounded window never exhausts its budget: reaching here means the loop was broken
+            // out of (eg. context kept filling up), so there is no "iteration cap" to report
+            final var capReached = maxIterations > 0;
             persistStopNotice(
                     sessionId,
-                    "Maximum iterations reached (" + maxIterations + "): turn stopped; resume starts a fresh window.");
-            turnState.iterationLimitReached = true;
-            emit(error("Maximum iterations reached (" + maxIterations + ")"));
+                    capReached
+                            ? "Maximum iterations reached (" + maxIterations
+                                    + "): turn stopped; resume starts a fresh window."
+                            : "Turn ended without an iteration cap; resume continues the remaining work.");
+            turnState.iterationLimitReached = capReached;
+            emit(error(
+                    capReached
+                            ? "Maximum iterations reached (" + maxIterations + ")"
+                            : "Turn ended before completion"));
             emitTurnMetrics(null, turnStartNanos);
             return null;
         }
@@ -1948,7 +2071,7 @@ public class AgentLoop {
                         chatSettings);
         if (!result.changed()) {
             emit(notice(
-                    AgentEvent.Notice.Level.WARN,
+                    AgentEvent.Notice.Level.INFO,
                     "manage_context " + directive.action() + " had nothing to reclaim; context left untouched."));
             return;
         }
@@ -2370,13 +2493,16 @@ public class AgentLoop {
      * the name the UI reads from {@code chatClient.model(settings)}.
      */
     private ProviderManager.ResolvedModel resolvedModel() {
+        return resolvedModel(chatSettings);
+    }
+
+    private ProviderManager.ResolvedModel resolvedModel(final ChatSettings settings) {
         if (providerManager == null) {
             return null;
         }
-        final var overrideModel =
-                chatSettings.model() == null || chatSettings.model().isBlank() ? null : chatSettings.model();
-        if (chatSettings.providerId() != null) {
-            final var provider = providerManager.provider(chatSettings.providerId());
+        final var overrideModel = settings.model() == null || settings.model().isBlank() ? null : settings.model();
+        if (settings.providerId() != null) {
+            final var provider = providerManager.provider(settings.providerId());
             if (provider != null) {
                 return new ProviderManager.ResolvedModel(
                         provider, overrideModel != null ? overrideModel : provider.model());
@@ -2405,29 +2531,55 @@ public class AgentLoop {
         return current == null ? (windowModel == null ? null : windowModel.model()) : current.model();
     }
 
+    private String requestModel(final ProviderManager.ResolvedModel windowModel, final ChatSettings settings) {
+        final var current = resolvedModel(settings);
+        return current == null ? (windowModel == null ? null : windowModel.model()) : current.model();
+    }
+
     /**
      * Iteration window cap cascade: per-model behavior.maxIterations > per-provider tuning.maxIterations
-     * > the global llm.maxIterations default. The provider/model come from {@code resolved} (the
-     * default provider resolved at loop start).
+     * > the global llm.maxIterations default. A negative override (< 0) means an UNBOUNDED window: the
+     * turn runs until it genuinely ends (the model finishes, a plateau/no-progress guard stops it,
+     * context overflows, or the turn is cancelled). A positive {@code maxIterationsCap} (always set for
+     * sub-agents) bounds the window regardless, so unbounded applies only to top-level turns with no cap.
+     * The provider/model come from {@code resolved} (the default provider resolved at loop start).
      */
     private int resolvedMaxIterations(final ProviderManager.ResolvedModel resolved) {
+        final var cap = maxIterationsCap;
+        if (cap != null) {
+            // sub-agent / hard window cap always bounds; unbounded requires no cap AND a negative override
+            return cap;
+        }
         final var override = resolved == null || providerManager == null
                 ? 0
                 : providerManager.maxIterationsOverride(resolved.provider(), resolved.model());
-        final var configured = override > 0 ? override : configuration.llm().maxIterations();
-        final var cap = maxIterationsCap;
-        return cap == null ? configured : Math.min(configured, cap);
+        return override != 0 ? override : configuration.llm().maxIterations();
     }
 
     /**
      * Exploration-plateau limit cascade: per-model behavior.plateauRounds > per-provider
-     * tuning.plateauRounds > the global llm.plateauRounds default (8). 0 disables the guard.
+     * tuning.plateauRounds > the global llm.plateauRounds default (8). A non-zero resolved value wins
+     * verbatim: a negative one means nudge-only (the plateau nudges but never hard-stops the turn), a
+     * positive one is the nudge + hard-stop limit, and 0 (only reachable via an explicit global
+     * llm.plateauRounds=0, since a per-model/provider 0 falls through the chain) disables the guard.
      */
     private int resolvedPlateauRounds(final ProviderManager.ResolvedModel resolved) {
         final var override = resolved == null || providerManager == null
                 ? 0
                 : providerManager.plateauRounds(resolved.provider(), resolved.model());
-        return override > 0 ? override : configuration.llm().plateauRounds();
+        return override != 0 ? override : configuration.llm().plateauRounds();
+    }
+
+    /**
+     * Exploration-nudge cascade: per-model behavior.explorationNudgeRounds > per-provider
+     * tuning.explorationNudgeRounds > the global llm.explorationNudgeRounds default (12). 0 disables
+     * the nudge (or falls back to the provider/global when only set to 0 higher up the chain).
+     */
+    private int resolvedModelExplorationNudgeRounds(final ProviderManager.ResolvedModel resolved) {
+        final var override = resolved == null || providerManager == null
+                ? 0
+                : providerManager.explorationNudgeRounds(resolved.provider(), resolved.model());
+        return override > 0 ? override : configuration.llm().explorationNudgeRounds();
     }
 
     /**
@@ -2660,23 +2812,32 @@ public class AgentLoop {
             final StaleReads staleReads,
             final int toolsTokens,
             final BooleanSupplier cancelled,
+            final ChatSettings settings,
             final boolean[] roundInformative,
             final boolean[] roundRefused,
-            final Set<String> roundCoverage)
+            final Set<String> roundCoverage,
+            final boolean[] roundMutatingBash)
             throws InterruptedException {
         return toolCallCoordinator.execute(
                 calls,
                 cancelled,
                 this::isParallelizable,
                 executor != null && parallelReadonlyEnabled(),
-                call -> runGuarded(call, repeats, cancelled),
+                call -> runGuarded(call, repeats, cancelled, settings),
                 call -> {
                     // Workers never touch ToolRepeats: register the signature on this loop thread first.
                     repeats.register(call, this::normalizedArguments);
-                    return executor.submit(() -> runTool(call, cancelled));
+                    return executor.submit(() -> runTool(call, cancelled, settings));
                 },
                 outcome -> appendToolResult(
-                        sessionId, messages, outcome, staleReads, roundInformative, roundRefused, roundCoverage),
+                        sessionId,
+                        messages,
+                        outcome,
+                        staleReads,
+                        roundInformative,
+                        roundRefused,
+                        roundCoverage,
+                        roundMutatingBash),
                 this::awaitTool,
                 () -> checkRoundBudget(sessionId, messages, toolsTokens),
                 precisionDurationMarker::now,
@@ -2684,21 +2845,25 @@ public class AgentLoop {
                 () -> roundInformative[0]);
     }
 
-    private ToolOutcome runGuarded(final ToolCall call, final ToolRepeats repeats, final BooleanSupplier cancelled) {
+    private ToolOutcome runGuarded(
+            final ToolCall call,
+            final ToolRepeats repeats,
+            final BooleanSupplier cancelled,
+            final ChatSettings settings) {
         // register the callId -> signature mapping on the loop thread (before any dispatch) so record()
         // can match the result back for reads too, feeding the per-signature no-progress decision.
         repeats.register(call, this::normalizedArguments);
         // the doom-loop guard targets state-changing/bash calls only: read-only rounds are owned by
         // the exploration-plateau guard (semantic re-coverage), so a read is never signature-refused here.
         if (isReadOnly(call)) {
-            return runTool(call, cancelled);
+            return runTool(call, cancelled, settings);
         }
         final var repeated = repeats.rejectIfRepeated(call, this::normalizedArguments);
         if (repeated != null) {
             emit(toolFinished(repeated.name(), repeated.output(), false, -1));
             return repeated;
         }
-        return runTool(call, cancelled);
+        return runTool(call, cancelled, settings);
     }
 
     /** File tools whose results participate in stale-read invalidation. */
@@ -3009,7 +3174,7 @@ public class AgentLoop {
     }
 
     /** Runs one tool call (lookup, arguments parsing, permission gate, execution) without touching the conversation. */
-    private ToolOutcome runTool(final ToolCall call, final BooleanSupplier cancelled) {
+    private ToolOutcome runTool(final ToolCall call, final BooleanSupplier cancelled, final ChatSettings settings) {
         final var name = call.function() == null || call.function().name() == null
                 ? ""
                 : call.function().name();
@@ -3069,7 +3234,8 @@ public class AgentLoop {
         final var toolStartNanos = precisionDurationMarker.now();
         final ToolResult result;
         try {
-            result = toolExecutionService.execute(tool, args, toolContext(cancelled, callCancel::get, ordinal));
+            result = toolExecutionService.execute(
+                    tool, args, toolContext(cancelled, callCancel::get, ordinal, settings));
         } finally {
             unregisterRunningTool(ordinal);
             // the turn keeps running after a per-call cancel: only the tool result is marked
@@ -3189,7 +3355,8 @@ public class AgentLoop {
             final StaleReads staleReads,
             final boolean[] roundInformative,
             final boolean[] roundRefused,
-            final Set<String> roundCoverage) {
+            final Set<String> roundCoverage,
+            final boolean[] roundMutatingBash) {
         // a refused doom-loop call is NOT delivered as a failed tool result (that shape reads as "the
         // tool errored, retry it" and feeds the very loop we are stopping): it only nudges the model at
         // the round boundary and surfaces a UI event. So skip the conversation/session mutation entirely.
@@ -3232,6 +3399,17 @@ public class AgentLoop {
                     roundCoverage.add(seen ? key : REDUNDANT_MARKER + key);
                 }
             }
+        }
+        // mutating-bash detection for the exploration-nudge spiral: a bash command that is NOT a recognized
+        // read-only family (empty coverage - eg. builds, mvn, npm, git commit, rm) is real work, so it
+        // resets the novel-spiral counter instead of counting as exploration. This applies whether it
+        // succeeded or failed (a failing build is still the intended work, not exploration). Read-only
+        // bash (git log, cat, ls, grep -r) produces coverage keys and is NOT flagged here, so it keeps
+        // counting toward the spiral in both build and plan mode.
+        if ("bash".equals(outcome.name())
+                && roundMutatingBash != null
+                && outcome.coverage().isEmpty()) {
+            roundMutatingBash[0] = true;
         }
         if (outcome.persist()) {
             sessionStore.append(

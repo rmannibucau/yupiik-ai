@@ -109,6 +109,8 @@ class ModelConfigurationTest {
                 null,
                 PlateauFeedbackMode.NUDGE_2,
                 null,
+                null,
+                null,
                 List.of(),
                 "");
         assertNull(tuning.outputTokens());

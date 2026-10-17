@@ -68,12 +68,12 @@ public record ModelTuningConfiguration(
 
         @Property(
                 documentation =
-                        "Maximum number of consecutive read-only tool rounds that re-cover only already-seen files/results before the turn is stopped with an 'Exploration plateau' error. Unset or zero/negative keeps the provider tuning, then the global llm.plateauRounds default (8). Zero disables the guard entirely.")
+                        "Maximum number of consecutive read-only tool rounds that re-cover only already-seen files/results before the turn is stopped with an 'Exploration plateau' error. Negative keeps the provider tuning, then the global llm.plateauRounds default (8); zero disables the guard entirely; a negative resolved value (explicit per-model/provider < 0) disables the hard-stop so the plateau only nudges and never terminates the turn (nudge-only mode).")
         Integer plateauRounds,
 
         @Property(
                 documentation =
-                        "Iteration window cap override for this model (LLM round-trips per turn window). Unset or zero/negative keeps the provider tuning, then the global llm.maxIterations (250).")
+                        "Iteration window cap override for this model (LLM round-trips per turn window). Unset or zero/negative keeps the provider tuning, then the global llm.maxIterations (250). A negative value makes the window UNBOUNDED (the turn runs until it genuinely ends, bounded only by the other guards); zero falls through the chain.")
         Integer maxIterations,
 
         @Property(
@@ -81,6 +81,16 @@ public record ModelTuningConfiguration(
                 documentation =
                         "Feedback strategy when the exploration-plateau guard approaches its limit: NUDGE_2 nudges the model once at limit-2, NUDGE_1 at limit-1 (both then hard-stop at the limit), NONE never nudges. Unset keeps the provider tuning, then the global llm.plateauFeedback default (nudge_2).")
         PlateauFeedbackMode plateauFeedback,
+
+        @Property(
+                documentation =
+                        "Maximum number of consecutive informative read-only exploration rounds (novel reads/globs, no answer) after which a one-shot 'wrap up and answer' nudge is injected for this model. Unset/zero/negative keeps the provider tuning, then the global llm.explorationNudgeRounds default (12). Zero disables the nudge.")
+        Integer explorationNudgeRounds,
+
+        @Property(
+                documentation =
+                        "Whether a non-truncated text-only reply that leaves the todo list unfinished continues the turn automatically instead of ending it and waiting for the user to send 'continue' (Codex-style 'a turn continues while the last output was a tool call or the task is unfinished' round semantics). A nullable Boolean lets a per-model value override (including an explicit false) the provider-level one. Default absent/null keeps today's behavior: a text-only end with unfinished todos surfaces the 'send continue' banner and pauses. Set true only for capable models (eg. codex, deepseek-r1) that reliably keep driving tools; small models (eg. qwen) should keep it unset or false so they can stop and hand control back.")
+        Boolean turnContinuesOnTextEnd,
 
         @Property(
                 documentation =

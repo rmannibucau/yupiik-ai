@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.openai;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -611,6 +612,41 @@ class OpenAIDialectTest {
         assertEquals("grep", calls.get(1).function().name());
         assertEquals("{\"path\":\"a\"}", calls.get(0).function().arguments());
         assertEquals("{\"pattern\":\"x\"}", calls.get(1).function().arguments());
+    }
+
+    @Test
+    void responsesDialectMarksFailedToolOutputAsIncompleteWithoutCustomIsError(final JsonMapper mapper)
+            throws Exception {
+        server.createContext("/v1/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(new LlmMessage("tool", "command failed: boom", null, null, "t1", Map.of("is_error", true))),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        // the custom internal flag must never leak onto the wire (strict backends like codexi
+        // reject 'input[N].is_error'); the standard responses 'status' carries the failure instead
+        final var body = reqBody.get();
+        assertFalse(body.contains("is_error"), "custom is_error leaked onto the responses wire: " + body);
+        assertTrue(body.contains("\"output\":\"command failed: boom\""), body);
+        assertTrue(body.contains("\"status\":\"incomplete\""), "failed tool output must be marked incomplete: " + body);
     }
 
     @Test

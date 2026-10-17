@@ -35,9 +35,23 @@ public record AgentConfiguration(
 
         @Property(
                 documentation =
+                        "Short purpose and delegation hint used to help the parent select this agent. Keep this concise; the full role instructions belong in prompt.")
+        String description,
+
+        @Property(
+                documentation =
+                        "Optional model and tuning for this agent. The name is a model reference (bare model id or $provider/model); when unset, the contextual model is inherited.")
+        ModelVariantConfiguration model,
+
+        @Property(
+                documentation =
                         "Optional tool-name allowlist for this agent. When omitted all otherwise available tools are eligible; configured and session permission rules still apply.")
         List<String> tools) {
+    public AgentConfiguration(final String name, final String prompt, final List<String> tools) {
+        this(name, prompt, null, null, tools);
+    }
+
     public AgentConfiguration(final String name, final String prompt) {
-        this(name, prompt, null);
+        this(name, prompt, null, null, null);
     }
 }

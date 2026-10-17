@@ -31,6 +31,8 @@ import java.util.Map;
  * @param output JSON function result, for {@code function_call_output} items.
  * @param arguments JSON function arguments, for {@code function_call} items.
  * @param id item identifier.
+ * @param status completion status of a {@code function_call_output} item: {@code completed} or
+ *     {@code incomplete} (for a failed tool call).
  * @param others extra wire fields (e.g. {@code name} of a function call).
  */
 @JsonModel
@@ -43,6 +45,7 @@ public record ResponsesInput(
         @JsonProperty("output") String output,
         @JsonProperty("arguments") String arguments,
         @JsonProperty("id") String id,
+        String status,
         @JsonOthers Map<String, Object> others) {
 
     /**
@@ -53,7 +56,7 @@ public record ResponsesInput(
      * @return the input item.
      */
     public static ResponsesInput message(final String role, final String text) {
-        return new ResponsesInput("message", role, text, null, null, null, null, null, null);
+        return new ResponsesInput("message", role, text, null, null, null, null, null, null, null);
     }
 
     /**
@@ -66,7 +69,7 @@ public record ResponsesInput(
      */
     public static ResponsesInput functionCall(final String callId, final String name, final String arguments) {
         return new ResponsesInput(
-                "function_call", null, null, null, callId, null, arguments, null, Map.of("name", name));
+                "function_call", null, null, null, callId, null, arguments, null, null, Map.of("name", name));
     }
 
     /**
@@ -85,7 +88,8 @@ public record ResponsesInput(
      *
      * @param callId function call identifier.
      * @param output JSON function result.
-     * @param isError whether the tool call failed.
+     * @param isError whether the tool call failed (emitted as the standard responses {@code status}
+     *     {@code incomplete}, never as a custom field).
      * @return the input item.
      */
     public static ResponsesInput functionCallOutput(final String callId, final String output, final boolean isError) {
@@ -98,7 +102,8 @@ public record ResponsesInput(
                 output,
                 null,
                 null,
-                isError ? Map.of("is_error", true) : null);
+                isError ? "incomplete" : null,
+                null);
     }
 
     /**
@@ -109,6 +114,6 @@ public record ResponsesInput(
      * @return the input item.
      */
     public static ResponsesInput messageContent(final String role, final Object content) {
-        return new ResponsesInput("message", role, content, null, null, null, null, null, null);
+        return new ResponsesInput("message", role, content, null, null, null, null, null, null, null);
     }
 }

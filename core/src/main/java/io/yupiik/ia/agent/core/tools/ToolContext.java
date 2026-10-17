@@ -205,6 +205,9 @@ public record ToolContext(
      * from - the cross-root split that only {@code bash}/{@code apply_patch} honoured before.
      */
     public Path resolvePath(final String raw, final Path fallbackBase) {
+        if (raw == null) {
+            throw new IllegalArgumentException("path is required");
+        }
         final var path = Path.of(raw);
         if (path.isAbsolute()) {
             return path;

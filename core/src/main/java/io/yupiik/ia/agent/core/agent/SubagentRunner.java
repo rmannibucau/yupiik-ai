@@ -283,26 +283,31 @@ public class SubagentRunner {
                 subagentName,
                 parentContext == null ? null : parentContext.feedback(),
                 precisionDurationMarker);
-        // the sub-agent inherits its parent tab's provider/model/variant/sampling selection so a
-        // child spawned from tab B runs on B's provider, not the process default. An explicit
-        // model (spawn_subagent model=/defaultSubagentModel) overrides the selection: resolve the
-        // reference to a concrete (provider, model) pair via the provider manager machinery.
+        // The sub-agent runs on its own dedicated AgentLoop, so its model selection is per-run:
+        // inherit the parent tab's provider/model/variant/sampling selection so a child spawned from
+        // tab B runs on B's provider, not the process default. An explicit model (spawn_subagent
+        // model=/defaultSubagentModel) overrides the selection. Resolve one authoritative
+        // (provider, model) tuple here - the same one the spawn gate allowed - and install it as this
+        // loop's session selection.
+        final var requested = state.model();
         final var baseSettings =
                 agentLoop.chatSettings().inheritFrom(parentContext == null ? null : parentContext.settings());
-        ChatSettings subagentSettings = baseSettings;
-        final var requested = state.model();
-        if (requested != null && !requested.isBlank()) {
-            subagentSettings = routeSubagentModel(providerManager, requested, baseSettings);
-        } else {
-            final var provider = parentContext == null || parentContext.settings() == null
-                    ? null
-                    : providerManager.provider(parentContext.settings().providerId());
-            final var defaultModel = provider == null ? null : provider.defaultSubagentModel();
-            if (defaultModel != null && !defaultModel.isBlank()) {
-                subagentSettings = routeSubagentModel(providerManager, defaultModel, baseSettings);
-            }
-        }
+        final var effectiveModel = EffectiveAgentModel.resolve(
+                providerManager,
+                baseSettings,
+                profile,
+                requested,
+                parentContext == null || parentContext.settings() == null || providerManager == null
+                        ? null
+                        : providerManager.provider(parentContext.settings().providerId()) == null
+                                ? null
+                                : providerManager
+                                        .provider(parentContext.settings().providerId())
+                                        .defaultSubagentModel());
+        final var subagentSettings = effectiveModel.settings();
         agentLoop.updateChatSettings(subagentSettings);
+        agentLoop.agentModelTuning(profile == null ? null : profile.model());
+        agentLoop.skipConfiguredAgentModel(true);
         agentLoop.allowedTools(effectiveAllowedTools);
         final var configuredCap = configuration.subagents() == null
                 ? null

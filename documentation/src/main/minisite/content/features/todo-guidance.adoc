@@ -101,6 +101,17 @@ what blocks it) instead of repeating its progress report, and
 `yca.todos.continuePrompt` replaces the built-in instruction if you want to word it
 yourself.
 
+For capable, agentic models (codex, deepseek-r1, ...) there is a complementary
+*round gate* tuned per model: `behavior.turnContinuesOnTextEnd=true`. It is the
+Codex-style "a turn continues as long as there is unfinished work" semantics - a
+text-only reply that leaves the todo list unfinished re-asks the model to act on
+the next item instead of ending the turn and waiting for `continue`, bounded by
+the iteration window (not by `yca.todos.maxContinues`). Unlike
+`continueOnUnfinished`, it is per model/provider and explicit-only (it defaults
+to off for every model). Small models such as qwen should keep it off and rely on
+`yca.todos.continueOnUnfinished` instead. See
+`iteration-guards.adoc`'s *Model tuning by family* section for the JSON samples.
+
 The same continuation is attempted before giving up on the other mid-turn stops:
 when a whole iteration window is spent on tool calls (`yca.llm.maxIterations`
 reached), and when an empty completion (`yca.llm.emptyCompletionRetriesMax`) or a

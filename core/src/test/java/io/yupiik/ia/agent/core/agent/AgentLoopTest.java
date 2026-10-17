@@ -839,6 +839,122 @@ class AgentLoopTest {
     }
 
     /**
+     * Codex-style round gate: a model opted in via behavior.turnContinuesOnTextEnd=true keeps driving
+     * a turn that ends text-only while the todo list is unfinished, instead of ending the turn and
+     * waiting for the user to send 'continue'. This is independent of yca.todos.continueOnUnfinished
+     * (which stays off here) and is bounded by the iteration window, not the todo-continuation budget.
+     */
+    @Test
+    void turnContinuesOnTextEndKeepsGoingUntilTodosClose() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.provider.providers.length", "1",
+                        "yca.provider.providers.0.id", "p0",
+                        "yca.provider.providers.0.model", "test-model",
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.turnContinuesOnTextEnd", "true"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        providerManagerOverride = new ProviderManager(config, mapper);
+        try {
+            final var todoStore = mutableTodoStore(new TodoItem("running step", "in_progress"));
+            final var requests = new ArrayList<List<Message>>();
+            final var replies = new ArrayDeque<>(List.of(
+                    toolCallReply("t1", "noop"),
+                    new ScriptedReply("made progress", "stop", false),
+                    toolCallReply("t2", "close_todos"),
+                    new ScriptedReply("everything is done", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, requests),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("everything is done", result);
+            assertEquals(4, requests.size(), "the round gate must re-ask once after the mid-turn stop: " + requests);
+            assertTrue(
+                    requests.get(2).stream()
+                            .anyMatch(m -> "user".equals(m.role())
+                                    && String.valueOf(m.content())
+                                            .contains("todo list still has unfinished items (pending or in_progress)")),
+                    "the continuation must reach the model as an explicit instruction: " + requests.get(2));
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertEquals(1, notices.size(), "no warning banner: the round gate keeps the turn open: " + notices);
+            assertEquals(AgentEvent.Notice.Level.INFO, notices.getFirst().level());
+            assertTrue(
+                    notices.getFirst().message().contains("continuing the round automatically"),
+                    "the round-gate continuation must surface as an info notice: "
+                            + notices.getFirst().message());
+        } finally {
+            providerManagerOverride = null;
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
+     * The round gate only applies to models that opt in explicitly via
+     * behavior.turnContinuesOnTextEnd=true. The default (absent/false) keeps today's behavior: a
+     * text-only end with unfinished todos surfaces the warning banner and pauses for 'continue'.
+     */
+    @Test
+    void turnContinuesOnTextEndDefaultsToOff() {
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.provider.providers.length", "1",
+                        "yca.provider.providers.0.id", "p0",
+                        "yca.provider.providers.0.model", "test-model",
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        providerManagerOverride = new ProviderManager(config, mapper);
+        try {
+            final var todoStore = mutableTodoStore(new TodoItem("running step", "in_progress"));
+            final var replies = new ArrayDeque<>(
+                    List.of(toolCallReply("t1", "noop"), new ScriptedReply("made progress", "stop", false)));
+            final var result = loop(
+                            chatClient(replies, new ArrayList<>()),
+                            todoStore,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            todoToolsRegistry(todoStore),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+
+            assertEquals("made progress", result);
+            final var notices = events.stream()
+                    .filter(AgentEvent.Notice.class::isInstance)
+                    .map(AgentEvent.Notice.class::cast)
+                    .toList();
+            assertEquals(1, notices.size());
+            assertEquals(AgentEvent.Notice.Level.WARN, notices.getFirst().level());
+            assertTrue(notices.getFirst().message().contains("send 'continue' to resume"));
+        } finally {
+            providerManagerOverride = null;
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
      * A model stopping mid-implementation with pending todos is exactly what
      * {@code yca.todos.continueOnUnfinished} exists for: instead of returning, the loop re-asks the
      * model to act, and the turn only ends once the list is closed (here by the tool that completes
@@ -2112,6 +2228,62 @@ class AgentLoopTest {
     }
 
     /**
+     * P2e: a negative behavior.plateauRounds is nudge-only - the plateau guard nudges the model
+     * (one-shot wrap-up directive) but never hard-stops the turn, so the model can keep reading and
+     * eventually answer instead of losing the whole turn. This is the Codex-compatible mode for
+     * capable models (they decide when the turn is truly over).
+     */
+    @Test
+    void negativePlateauRoundsIsNudgeOnlyNeverStops() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 9 redundant read rounds on the same file (would hard-stop with a positive plateau), then an answer
+        final int[] offsets = {0, 100, 700, 1500, 100, 700, 1500, 0, 100};
+        for (var i = 0; i < offsets.length; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read", "{\"path\":\"/a.txt\",\"offset\":" + offsets[i] + ",\"limit\":" + (30 + i) + "}"));
+        }
+        replies.add(new ScriptedReply("done answering", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.plateauRounds", "-1"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertNotNull(result, "a nudge-only plateau must NOT stop the turn - the model answers");
+        assertEquals("done answering", result);
+        // the nudge fired once but the turn kept going past the redundant reads
+        final var nudges = events.stream()
+                .filter(AgentEvent.Notice.class::isInstance)
+                .map(AgentEvent.Notice.class::cast)
+                .filter(n -> n.message().contains("exploration-plateau nudge"))
+                .toList();
+        assertFalse(nudges.isEmpty(), "the plateau nudge must fire in nudge-only mode");
+        final var errors =
+                events.stream().filter(AgentEvent.Error.class::isInstance).toList();
+        assertTrue(errors.isEmpty(), "a nudge-only plateau must never hard-stop: " + errors);
+        assertTrue(
+                requests.size() >= 10,
+                "the turn must keep running through the redundant reads, not stop: " + requests.size());
+    }
+
+    /**
      * P2d: a write resets the plateau streak - the model may legitimately re-read files after
      * editing them. 2 redundant reads, a write, then 2 more redundant reads must NOT stop (the
      * write clears the counter).
@@ -2186,14 +2358,14 @@ class AgentLoopTest {
     /**
      * Exploration nudge: a spiral of NOVEL read-only rounds (fresh files every time - never redundant,
      * so the plateau/doom-loop guards stay silent) gets a one-shot wrap-up nudge injected as a user
-     * message after llm.explorationNudgeRounds (default 6) consecutive informative rounds. The turn
+     * message after llm.explorationNudgeRounds (default 12) consecutive informative rounds. The turn
      * keeps running: the nudge directs, it does not stop.
      */
     @Test
     void explorationNudgeFiresAfterConsecutiveNovelReadRounds() {
         final var replies = new ArrayDeque<ScriptedReply>();
-        // 8 distinct files (novel coverage, informative outputs) then an answer
-        for (var i = 0; i < 8; i++) {
+        // 14 distinct files (novel coverage, informative outputs) then an answer
+        for (var i = 0; i < 14; i++) {
             replies.add(toolCallReply("t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":30}"));
         }
         replies.add(new ScriptedReply("done", "stop", false));
@@ -2265,6 +2437,117 @@ class AgentLoopTest {
                 .flatMap(List::stream)
                 .anyMatch(m -> "user".equals(m.role()) && m.content().toString().contains("stop expanding the survey"));
         assertFalse(nudged, "explorationNudgeRounds=0 must suppress the nudge entirely");
+    }
+
+    /**
+     * Exploration nudge reset by mutating bash: a bash command that is not a read-only family (empty
+     * coverage - a build like mvn) is REAL WORK, so it must reset the novel-spiral counter. Here reads
+     * build to 3, then an mvn build resets, then only 3 more reads follow -> the streak never reaches
+     * the threshold (4): no wrap-up nudge. Without the reset the streak would be 7 and the nudge would
+     * fire - the build-mode false positive this change removes.
+     */
+    @Test
+    void mutatingBashResetsExplorationSpiral() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        replies.addAll(List.of(
+                toolCallReply("r0", "read", "{\"path\":\"/f0.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r1", "read", "{\"path\":\"/f1.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r2", "read", "{\"path\":\"/f2.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("b0", "bash", "{\"command\":\"mvn compile\"}"),
+                toolCallReply("r3", "read", "{\"path\":\"/f3.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r4", "read", "{\"path\":\"/f4.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r5", "read", "{\"path\":\"/f5.txt\",\"offset\":0,\"limit\":30}"),
+                new ScriptedReply("done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.llm.maxIterations", "50",
+                        "yca.llm.explorationNudgeRounds", "4"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var result = loop(
+                            client,
+                            null,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            readBashRegistry(),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+            assertNotNull(result, "the turn must still complete");
+            final var nudged = requests.stream()
+                    .flatMap(List::stream)
+                    .anyMatch(m -> "user".equals(m.role())
+                            && m.content() != null
+                            && m.content().toString().contains("stop expanding the survey"));
+            assertFalse(
+                    nudged,
+                    "a mutating bash (mvn) round must reset the exploration spiral, so no nudge fires: " + requests);
+        } finally {
+            permissionServiceOverride = null;
+        }
+    }
+
+    /**
+     * Exploration nudge NOT reset by read-only bash: a git log / cat / ls round carries coverage keys,
+     * so it still counts as novel exploration and keeps the spiral running. Here the reads plus the
+     * read-only bash cross the threshold (4): the wrap-up nudge still fires.
+     */
+    @Test
+    void readOnlyBashKeepsExplorationSpiral() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        replies.addAll(List.of(
+                toolCallReply("r0", "read", "{\"path\":\"/f0.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r1", "read", "{\"path\":\"/f1.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r2", "read", "{\"path\":\"/f2.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("b0", "bash", "{\"command\":\"git log --oneline\"}"),
+                toolCallReply("r3", "read", "{\"path\":\"/f3.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r4", "read", "{\"path\":\"/f4.txt\",\"offset\":0,\"limit\":30}"),
+                toolCallReply("r5", "read", "{\"path\":\"/f5.txt\",\"offset\":0,\"limit\":30}"),
+                new ScriptedReply("done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+        final var config = configuration(
+                true,
+                Map.of(
+                        "yca.mode", "build",
+                        "yca.permissions.mode", "yolo",
+                        "yca.llm.maxIterations", "50",
+                        "yca.llm.explorationNudgeRounds", "4"));
+        permissionServiceOverride = new PermissionService(config);
+        permissionServiceOverride.setMode(AgentMode.BUILD);
+        try {
+            final var result = loop(
+                            client,
+                            null,
+                            config,
+                            noContextManager(),
+                            noSessionStore(),
+                            null,
+                            readBashRegistry(),
+                            directExecutions(),
+                            null)
+                    .run("do it", null, "s1", null, () -> false);
+            assertNotNull(result, "the nudge must not stop the turn");
+            final var nudged = requests.stream()
+                    .flatMap(List::stream)
+                    .anyMatch(m -> "user".equals(m.role())
+                            && m.content() != null
+                            && m.content().toString().contains("stop expanding the survey"));
+            assertTrue(
+                    nudged,
+                    "a read-only bash (git log) round must keep counting toward the spiral, so the nudge fires: "
+                            + requests);
+        } finally {
+            permissionServiceOverride = null;
+        }
     }
 
     /**
@@ -2508,6 +2791,52 @@ class AgentLoopTest {
         assertTrue(
                 errors.getLast().message().contains("Maximum iterations reached"),
                 "the error must explain the capped window: " + errors.getLast().message());
+    }
+
+    /**
+     * A-tris: a negative behavior.maxIterations makes the window UNBOUNDED - the turn runs until the
+     * model genuinely finishes (the final text reply), instead of being cut off by an iteration cap.
+     * The loop reads many distinct files and only ends when the model answers.
+     */
+    @Test
+    void negativeMaxIterationsIsUnboundedRunsUntilTheModelFinishes() {
+        final var replies = new ArrayDeque<ScriptedReply>();
+        // 8 tool rounds then a text answer: a positive cap of e.g. 3 would stop the window early
+        for (var i = 0; i < 8; i++) {
+            replies.add(toolCallReply(
+                    "t" + i, "read", "{\"path\":\"/f" + i + ".txt\",\"offset\":0,\"limit\":" + (30 + i) + "}"));
+        }
+        replies.add(new ScriptedReply("all done, here is the answer", "stop", false));
+        final var requests = new ArrayList<List<Message>>();
+        final var client = chatClient(replies, requests);
+
+        final var cfg = configuration(
+                true,
+                Map.of(
+                        "yca.provider.providers.0.models.length", "1",
+                        "yca.provider.providers.0.models.0.model", "test-model",
+                        "yca.provider.providers.0.models.0.behavior.maxIterations", "-1"));
+        providerManagerOverride = new ProviderManager(cfg, mapper);
+
+        final var result = loop(
+                        client,
+                        null,
+                        cfg,
+                        noContextManager(),
+                        noSessionStore(),
+                        null,
+                        readFileRegistry(),
+                        directExecutions(),
+                        null)
+                .run("do it", null, "s1", null, () -> false);
+
+        assertEquals("all done, here is the answer", result, "the unbounded window must end on the model's answer");
+        assertTrue(
+                requests.size() >= 9,
+                "the unbounded window must run through all reads and the answer: " + requests.size());
+        final var errors =
+                events.stream().filter(AgentEvent.Error.class::isInstance).toList();
+        assertTrue(errors.isEmpty(), "an unbounded window must never hit an iteration-cap error: " + errors);
     }
 
     /**
@@ -5317,6 +5646,72 @@ class AgentLoopTest {
         });
     }
 
+    /**
+     * A registry exposing both a {@code read} tool and the {@code bash} tool, so exploration-spiral
+     * tests can interleave novel reads with bash commands (read-only for coverage, mutating for reset).
+     */
+    private ToolRegistry readBashRegistry() {
+        return registryOf(
+                new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "read";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "read a file";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.READ;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of("path", Map.of("type", "string"), "offset", Map.of("type", "integer"));
+                    }
+
+                    private int readCall;
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        final var path = args.get("path") instanceof final String p ? p : "?";
+                        final var offset = args.get("offset") instanceof final Number n ? n.intValue() : 0;
+                        return ToolResult.ok("content of " + path + " @" + offset + " #" + (readCall++));
+                    }
+                },
+                new EmbeddedTool() {
+                    @Override
+                    public String name() {
+                        return "bash";
+                    }
+
+                    @Override
+                    public String description() {
+                        return "run a command";
+                    }
+
+                    @Override
+                    public ToolCategory category() {
+                        return ToolCategory.BASH;
+                    }
+
+                    @Override
+                    public Map<String, Object> schema() {
+                        return Map.of("command", Map.of("type", "string"));
+                    }
+
+                    private int bashCall;
+
+                    @Override
+                    public ToolResult execute(final Map<String, Object> args) {
+                        return ToolResult.ok("ran " + args.get("command") + " #" + (bashCall++));
+                    }
+                });
+    }
+
     /** Whether a request sequence carries the injected doom-loop strategy nudge (refusal surfaced to the model). */
     private boolean hasDoomLoopNudge(final List<List<Message>> requests) {
         return requests.stream()
@@ -5551,6 +5946,15 @@ class AgentLoopTest {
                         return providerManagerOverride == null
                                 ? new ResolvedModel(null, "test-model")
                                 : providerManagerOverride.resolveDefault();
+                    }
+
+                    @Override
+                    public ResolvedModel resolve(final String modelReference) {
+                        // the bare fixture has no configuration: only a test-provided override can
+                        // resolve a reference; a null override conservatively uses the test default model
+                        return providerManagerOverride == null
+                                ? new ResolvedModel(null, "test-model")
+                                : providerManagerOverride.resolve(modelReference);
                     }
 
                     @Override

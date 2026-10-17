@@ -47,6 +47,16 @@ tool) and every covered key was already seen. Writes and first-time files reset
 the streak immediately, and the guard is skipped while pending todos exist (the
 todo auto-continuation is the intended escape hatch there).
 
+[NOTE]
+====
+`plateauRounds` has three modes: `0` disables the guard entirely, a positive
+value is the *nudge + hard-stop* limit, and a **negative** value switches the
+guard to *nudge-only*: the plateau still fires the feedback nudge but never
+hard-stops the turn, so a capable model keeps going until it genuinely decides
+its turn is over (Codex-compatible round semantics). The nudge-only mode is
+explicit-only - set it per model/provider, never as the implied default.
+====
+
 == Feedback before the stop
 
 With the built-in default (`plateauFeedback=nudge_2`) the model gets **one
@@ -59,6 +69,9 @@ stopped at the limit exactly as without the nudge. `nudge_1` sends the same
 nudge later (at `limit-1`, for models that profit from a last-minute hint);
 `none` disables the feedback entirely and the turn is hard-stopped at the limit
 with no model feedback (the pre-existing behavior).
+
+In nudge-only mode (a negative `plateauRounds`) the feedback fires when the
+streak reaches the absolute value of the limit, but no hard stop ever follows.
 
 [source,properties]
 ----
@@ -82,6 +95,9 @@ yca.provider.<id>.tuning.plateauRounds=5
 
 # per-model (wins over the provider and the global)
 yca.provider.<id>.models.0.behavior.plateauRounds=3
+
+# per-model: nudge-only, never hard-stop (capable models)
+yca.provider.<id>.models.0.behavior.plateauRounds=-1
 ----
 
 == Doom-loop guard
@@ -143,8 +159,8 @@ yca.provider.<id>.models.0.behavior.repeatSuccessThreshold=2
 `yca.llm.maxIterations` (default 250) bounds one iteration window: each
 response carrying tool calls consumes one iteration; when the budget runs out
 the loop stops (unless pending todos auto-continue, each continuation starting
-a fresh window). The cap itself can now be raised for a specific provider or
-model without touching the global default:
+a fresh window). The cap can be raised for a specific provider or model without
+touching the global default, or turned off entirely:
 
 [source,properties]
 ----
@@ -156,10 +172,23 @@ yca.provider.<id>.tuning.maxIterations=500
 
 # per-model
 yca.provider.<id>.models.0.behavior.maxIterations=500
+
+# per-model: unbounded window - run until the model genuinely finishes
+yca.provider.<id>.models.0.behavior.maxIterations=-1
 ----
 
+A negative value makes the window **unbounded**: the turn runs until it
+genuinely ends (the model finishes, a plateau/no-progress guard stops it, the
+context overflows, or the turn is cancelled), bounded only by those other
+guards - there is no iteration budget. This pairs naturally with the round gate
+(`behavior.turnContinuesOnTextEnd=true`) for capable models: a text-only end
+keeps re-asking until the work is done, and the unbounded window means the turn
+is never cut off mid-run by an iteration cap. Use it with capable models you
+trust to finish; small/flash models that can spin should keep a positive cap.
+
 Sub-agents inherit the same provider/model resolution, so a per-model cap applies
-to them too.
+to them too - a positive sub-agent window cap always bounds a sub-agent's window
+even when its model sets `maxIterations < 0`.
 
 == Persisted stop notices
 
@@ -170,3 +199,132 @@ These entries are *never* sent to the LLM (they are filtered out of the working
 history) but are rendered in the transcript on replay, so a capped turn no
 longer looks like one seamless run. Resuming after such a notice emits an
 informational "resuming after an iteration-cap stop" notice.
+
+== Model tuning by family
+
+How a model ends its turn, and how much slack each guard gives it, varies a lot
+across model families. yca lets you tune this per provider/`models[i]` entry so
+you can pick the right spirit for each model instead of one global setting.
+
+* **Capable agentic models** (`codex`, deepseek-r1, ...) are trustworthy enough
+  to keep driving tools until the work is done. For them enable the Codex-style
+  *round gate* (`behavior.turnContinuesOnTextEnd=true`): a text-only reply that
+  leaves the todo list unfinished no longer ends the turn and waits for
+  `continue` - the loop re-asks the model to act on the next item, bounded by the
+  iteration window. Turn the exploration plateau into *nudge-only*
+  (`behavior.plateauRounds=-1`) so redundant reads remind without risking losing
+  a deep search mid-way, and give the *novel-spiral nudge* more room
+  (`behavior.explorationNudgeRounds=12`). Set `behavior.maxIterations=-1` for an
+  unbounded window so the round gate is never cut off by an iteration cap.
+* **Flash / mid models** (`deepseek-v4-flash`, `glm-5.3-flash`, ...) read one
+  small novel call per round and genuinely need the plateau hard-stop to avoid
+  spinning. Keep a positive `plateauRounds`, leave `turnContinuesOnTextEnd`
+  unset (they narrate-and-stop and hand control back), and keep the window the
+  default.
+* **Small models** (`qwen3-coder`, ...) benefit from `yca.todos.continueOnUnfinished`
+  to keep a long task going across text-only ends, but should not enable
+  `turnContinuesOnTextEnd`: they stop and wait for instructions, and the plateau
+  stays a positive hard-stop.
+
+[NOTE]
+====
+`turnContinuesOnTextEnd` is explicit-only and defaults to **off for every
+model**: without it, a text-only end with unfinished todos surfaces the
+`send 'continue'` banner exactly as before. There is no automatic detection of
+"capable" models and no global default change - you opt each model/provider in.
+====
+
+The samples below are JSON (the provider/model `behavior` block maps to
+`yca.provider.<id>.providers[i].models[j].behavior` in the flat configuration
+scheme).
+
+*Small model - todo auto-continue, no round gate, plateau hard-stop:*
+
+[source,json]
+----
+{
+  "todos": {
+    "continueOnUnfinished": true,
+    "maxContinues": 25
+  },
+  "provider": {
+    "providers": [
+      {
+        "id": "qwen",
+        "model": "qwen3-coder",
+        "models": [
+          {
+            "model": "qwen3-coder",
+            "behavior": {
+              "plateauRounds": 8
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----
+
+*Flash models - need the plateau hard-stop, current maxIterations, no round gate:*
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "deepseek",
+        "model": "deepseek-v4-flash",
+        "models": [
+          {
+            "model": "deepseek-v4-flash",
+            "behavior": {
+              "plateauRounds": 10
+            }
+          }
+        ]
+      },
+      {
+        "id": "zhipu",
+        "model": "glm-5.3-flash",
+        "models": [
+          {
+            "model": "glm-5.3-flash",
+            "behavior": {
+              "plateauRounds": 10
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----
+
+*Capable model - round gate on, plateau nudge-only, roomier exploration and an unbounded window:*
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "codex",
+        "model": "gpt-6-codex",
+        "models": [
+          {
+            "model": "gpt-6-codex",
+            "behavior": {
+              "turnContinuesOnTextEnd": true,
+              "plateauRounds": -1,
+              "explorationNudgeRounds": 12,
+              "maxIterations": -1
+            }
+          }
+        ]
+      }
+    ]
+  }
+}
+----

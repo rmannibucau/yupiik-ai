@@ -54,7 +54,7 @@ public class ApplyPatchTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Apply a unified diff patch to the project files. Uses `---`/`+++` file headers with `@@` hunks; `/dev/null` creates or deletes a file. Fails on context mismatch without modifying anything.";
+        return "Apply a unified diff to the project files. Every patch MUST open with a `--- a/<file>` line, then a `+++ b/<file>` line, then one or more `@@ -old,count +new,count @@` hunk blocks (example: `--- a/Main.java` then `+++ b/Main.java` then `@@ -1,3 +1,4 @@`). A `/dev/null` path creates (from) or deletes (to) the file. NEVER emit `@@` hunks without the leading `---`/`+++` file headers. Fails on context mismatch without modifying anything.";
     }
 
     @Override
@@ -287,6 +287,9 @@ public class ApplyPatchTool implements EmbeddedTool {
                 newPath = line.substring(4).strip();
             } else if (line.startsWith("@@")) {
                 if (current != null) {
+                    if (hunks == null) {
+                        throw new PatchException("Hunk found before any ---/+++ file header");
+                    }
                     hunks.add(Hunk.of(currentHeader, current));
                 }
                 currentHeader = line;
@@ -301,6 +304,8 @@ public class ApplyPatchTool implements EmbeddedTool {
                 hunks.add(Hunk.of(currentHeader, current));
             }
             changes.add(Change.of(oldPath, newPath, hunks));
+        } else if (current != null) {
+            throw new PatchException("Hunk present without a ---/+++ file header");
         }
         return changes;
     }

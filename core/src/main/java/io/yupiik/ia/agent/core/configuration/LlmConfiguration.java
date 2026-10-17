@@ -46,6 +46,12 @@ public record LlmConfiguration(
         long retryAfterMaxWaitMs,
 
         @Property(
+                defaultValue = "3600000L",
+                documentation =
+                        "For a provider 429 'usage_limit_reached' error, the recovery-window threshold in milliseconds (default 1 hour): when the JSON body reports the quota resets beyond this (via limit_window_minutes or resets_at), the error is treated as non-retryable instead of being retried, since the quota will not clear in retry-seconds.")
+        long usageLimitRetryThresholdMs,
+
+        @Property(
                 defaultValue = "900000L",
                 documentation =
                         "Cooldown in milliseconds before relaxing a concurrency limit adapted from a provider 429 concurrency_limit_exceeded response back to the configured cap (default 15 minutes).")
@@ -60,17 +66,17 @@ public record LlmConfiguration(
         @Property(
                 defaultValue = "250",
                 documentation =
-                        "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. The turn is stopped with an error when exceeded, unless pending todos can auto-continue (yca.todos.continueOnUnfinished) - each todo continuation starts a fresh window with this same budget. A per-provider tuning or per-model behavior maxIterations wins over this value.")
+                        "Maximum number of iterations (LLM round-trips) in a single turn; each response carrying tool calls consumes one. Positive bounds the iteration window; a negative value makes the window UNBOUNDED - the turn runs until it genuinely ends (the model finishes, a plateau or no-progress guard stops it, the context overflows, or the turn is cancelled), bounded only by the other guards and by trust in the model. The turn is stopped with an error when a positive budget is exceeded, unless pending todos can auto-continue (yca.todos.continueOnUnfinished) - each todo continuation starts a fresh window with this same budget. A per-provider tuning or per-model behavior maxIterations wins over this value; a positive sub-agent cap always bounds the window regardless.")
         int maxIterations,
 
         @Property(
                 defaultValue = "8",
                 documentation =
-                        "Maximum number of consecutive read-only tool rounds that re-cover only already-seen files/results (an 'exploration plateau') before the turn is stopped with an error, for the models that do not set a per-model behavior or per-provider tuning plateauRounds. 0 disables the guard entirely.")
+                        "Maximum number of consecutive read-only tool rounds that re-cover only already-seen files/results (an 'exploration plateau') before the turn is stopped with an error, for the models that do not set a per-model behavior or per-provider tuning plateauRounds. 0 disables the guard entirely; a negative value enables the nudge but disables the hard-stop (nudge-only, the turn is never terminated on exploration).")
         int plateauRounds,
 
         @Property(
-                defaultValue = "6",
+                defaultValue = "12",
                 documentation =
                         "Consecutive informative read-only exploration rounds without an answer after which a one-shot 'wrap up and answer' nudge is injected. Complements the plateau guard: a spiral of NOVEL reads/globs (each round fresh, so never 'redundant' and never a plateau) still gets told to stop expanding and synthesize. No hard stop - the model can still gather if the nudge is wrong. 0 disables the nudge.")
         int explorationNudgeRounds,

@@ -55,7 +55,8 @@ public class EditFileTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Replace an exact string in a file by another. oldString must match exactly once unless replaceAll is true.";
+        return "Replace an exact string in a file by another. oldString must match exactly once unless replaceAll is true. "
+                + "Requires a non-empty \"path\" argument.";
     }
 
     @Override
@@ -84,6 +85,9 @@ public class EditFileTool implements EmbeddedTool {
     @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var raw = arg(args, "path");
+        if (raw == null || raw.isEmpty()) {
+            return ToolResult.error("path is required");
+        }
         final var path = context.resolvePath(raw, configuration == null ? null : configuration.resolveProjectDir());
         final var oldString = arg(args, "oldString");
         final var newString = arg(args, "newString");

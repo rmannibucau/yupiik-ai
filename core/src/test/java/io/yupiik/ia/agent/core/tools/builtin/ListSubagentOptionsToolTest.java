@@ -1,0 +1,110 @@
+/*
+ * Copyright (c) 2026 - Yupiik SAS - https://yupiik.io/
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *  http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package io.yupiik.ia.agent.core.tools.builtin;
+
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.ia.agent.core.agent.AgentProvider;
+import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.ia.agent.core.configuration.TestConfigs;
+import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import io.yupiik.ia.agent.test.TestJsonMapper;
+import java.util.HashMap;
+import java.util.Map;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+@ExtendWith(TestJsonMapper.class)
+class ListSubagentOptionsToolTest {
+    private JsonMapper mapper;
+
+    private CodingAgentConfiguration config(final Map<String, String> overrides) {
+        final var entries = new HashMap<String, String>();
+        entries.put("yca.provider.providers.length", "1");
+        entries.put("yca.provider.providers.0.id", "default");
+        entries.put("yca.provider.providers.0.model", "parent-model");
+        entries.put("yca.provider.providers.0.models.length", "2");
+        entries.put("yca.provider.providers.0.models.0.model", "parent-model");
+        entries.put("yca.provider.providers.0.models.1.model", "review-model");
+        entries.put("yca.agents.length", "2");
+        entries.put("yca.agents.0.name", "reviewer");
+        entries.put("yca.agents.0.description", "Reviews code for bugs and regressions.");
+        entries.put("yca.agents.0.prompt", "Full review instructions that should not appear in the catalog.");
+        entries.put("yca.agents.0.model.name", "review-model");
+        entries.put("yca.agents.1.name", "tester");
+        entries.put("yca.agents.1.description", "Creates tests.");
+        entries.put("yca.agents.1.prompt", "Write tests.");
+        entries.put("yca.tools.spawnSubagent.allowedAgents", "reviewer");
+        entries.putAll(overrides);
+        return TestConfigs.codingAgent(entries);
+    }
+
+    private ListSubagentOptionsTool tool(final CodingAgentConfiguration config) {
+        final var manager = new ProviderManager(config, mapper);
+        return new ListSubagentOptionsTool(new AgentProvider(config), manager, config, mapper);
+    }
+
+    @Test
+    void listsCompactFilteredProfilesAndModelsOnDemand(final JsonMapper mapper) {
+        this.mapper = mapper;
+        final var result = tool(config(Map.of())).execute(Map.of("kind", "all", "limit", 50));
+
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().contains("reviewer"), result.output());
+        assertTrue(result.output().contains("Reviews code for bugs"), result.output());
+        assertTrue(result.output().contains("review-model"), result.output());
+        assertFalse(result.output().contains("Full review instructions"), result.output());
+        assertFalse(result.output().contains("tester"), result.output());
+    }
+
+    @Test
+    void boundsPagesAndRejectsInvalidFilters(final JsonMapper mapper) {
+        this.mapper = mapper;
+        final var tool = tool(config(Map.of()));
+        final ToolResult page = tool.execute(Map.of("kind", "models", "limit", 100));
+        assertTrue(page.success(), page.output());
+        assertTrue(page.output().contains("\"limit\":50"), page.output());
+
+        final var invalid = tool.execute(Map.of("kind", "not-a-kind"));
+        assertFalse(invalid.success());
+    }
+
+    @Test
+    void rejectsInvalidPagination(final JsonMapper mapper) {
+        this.mapper = mapper;
+        final var tool = tool(config(Map.of()));
+        for (final var invalid : java.util.List.of(1.5d, Double.NaN, Double.POSITIVE_INFINITY, -1, Long.MAX_VALUE)) {
+            final var result = tool.execute(Map.of("offset", invalid));
+            assertFalse(result.success(), "pagination value should be rejected: " + invalid);
+        }
+        assertFalse(tool.execute(Map.of("offset", 100_001)).success());
+    }
+
+    @Test
+    void catalogRunsTheSameModelPolicyAsSpawn(final JsonMapper mapper) {
+        this.mapper = mapper;
+        // restrict allowed models to one the reviewer does not use: its routed $default/review-model
+        // reference is not allowed, so the profile row must be filtered out of the catalog, mirroring
+        // the spawn-time model gate.
+        final var cfg = config(Map.of("yca.tools.spawnSubagent.allowedModels", "$default/parent-model"));
+        final var result = tool(cfg).execute(Map.of("kind", "agents"));
+        assertTrue(result.success(), result.output());
+        assertFalse(result.output().contains("reviewer"), result.output());
+    }
+}

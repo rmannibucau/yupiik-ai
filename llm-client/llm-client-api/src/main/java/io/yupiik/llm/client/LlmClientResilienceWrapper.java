@@ -15,17 +15,20 @@
  */
 package io.yupiik.llm.client;
 
+import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.model.LlmModels;
 import io.yupiik.llm.client.model.LlmRequest;
 import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.spi.Dialect;
 import java.io.IOException;
+import java.time.Clock;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayDeque;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -73,6 +76,18 @@ public final class LlmClientResilienceWrapper {
      */
     private final ScheduledExecutorService scheduler;
     /**
+     * Clock used to decide whether a provider usage-limit window has really passed when the error
+     * body carries {@code resets_at}. Injected by the caller (assumed non-null in the init path);
+     * the {@code protected} subclass constructor leaves it null.
+     */
+    private final Clock clock;
+    /**
+     * Mapper used to softly parse a provider {@code 429} error body for {@code usage_limit_reached}.
+     * May be {@code null}: without it the quota window is never inspected and every 429 keeps the
+     * normal retry behavior.
+     */
+    private final JsonMapper mapper;
+    /**
      * Concurrency gate. May be {@code null} while the configured cap is unlimited
      * (negative/zero): the first provider {@code concurrency_limit_exceeded} response
      * lazily creates it bounded by the announced limit so the adaptation still applies
@@ -86,17 +101,37 @@ public final class LlmClientResilienceWrapper {
     private long adaptedUntilMs;
 
     /**
-     * Creates the wrapper with an explicit pause listener.
+     * Creates the wrapper with explicit clock and mapper.
      *
      * @param config resilience knobs (defaults applied when {@code null}).
      * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
+     * @param scheduler scheduler used to park retry waits and poll the cancellation probe; {@code null}
+     *     (the default) falls back to the JDK delayed executor where cancellation is checked before
+     *     the wait and when it elapses (no mid-wait polling). The scheduler is never shut down by the
+     *     wrapper: as the application-wide one, its owner owns its lifecycle.
+     * @param clock clock used to evaluate the {@code resets_at} of a {@code usage_limit_reached}
+     *     {@code 429} body (assumed non-null).
+     * @param mapper mapper used to softly parse a provider {@code 429} body for the usage-limit window;
+     *     when {@code null} the window is never inspected and every 429 keeps the normal retry behavior.
      */
-    public LlmClientResilienceWrapper(final LlmResilienceConfig config, final Consumer<PauseEvent> pauseListener) {
-        this(config, pauseListener, null);
+    public LlmClientResilienceWrapper(
+            final LlmResilienceConfig config,
+            final Consumer<PauseEvent> pauseListener,
+            final ScheduledExecutorService scheduler,
+            final Clock clock,
+            final JsonMapper mapper) {
+        this.config = config == null ? LlmResilienceConfig.defaults() : config;
+        this.pauseListener = pauseListener;
+        this.scheduler = scheduler;
+        this.clock = clock;
+        this.mapper = mapper;
+        this.semaphore = this.config.maxConcurrent() > 0 ? new Semaphore(this.config.maxConcurrent()) : null;
+        this.requestTimes = new ArrayDeque<>();
+        this.concurrencyLock = new ReentrantLock();
     }
 
     /**
-     * Creates the wrapper with an explicit pause listener and scheduler.
+     * Creates the wrapper with explicit pause listener and scheduler, no usage-limit body inspection.
      *
      * @param config resilience knobs (defaults applied when {@code null}).
      * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
@@ -109,12 +144,7 @@ public final class LlmClientResilienceWrapper {
             final LlmResilienceConfig config,
             final Consumer<PauseEvent> pauseListener,
             final ScheduledExecutorService scheduler) {
-        this.config = config == null ? LlmResilienceConfig.defaults() : config;
-        this.pauseListener = pauseListener;
-        this.scheduler = scheduler;
-        this.semaphore = this.config.maxConcurrent() > 0 ? new Semaphore(this.config.maxConcurrent()) : null;
-        this.requestTimes = new ArrayDeque<>();
-        this.concurrencyLock = new ReentrantLock();
+        this(config, pauseListener, scheduler, null, null);
     }
 
     /**
@@ -124,6 +154,16 @@ public final class LlmClientResilienceWrapper {
      */
     public LlmClientResilienceWrapper(final LlmResilienceConfig config) {
         this(config, null);
+    }
+
+    /**
+     * Creates the wrapper with an explicit pause listener.
+     *
+     * @param config resilience knobs (defaults applied when {@code null}).
+     * @param pauseListener listener notified of throttle/backoff pauses (may be {@code null}).
+     */
+    public LlmClientResilienceWrapper(final LlmResilienceConfig config, final Consumer<PauseEvent> pauseListener) {
+        this(config, pauseListener, null);
     }
 
     /**
@@ -271,10 +311,12 @@ public final class LlmClientResilienceWrapper {
      * Whether an error is worth retrying: HTTP 408, 429 and 5xx failures are, other explicit
      * provider rejections (eg. 400) are surfaced to the caller immediately. Typed failures are
      * classified from their status; legacy string-only failures fall back to message parsing.
+     * A {@code 429} whose body reports {@code usage_limit_reached} with a recovery window beyond
+     * the configured threshold is treated as non-retryable (see {@link #quotaExhaustedForLongWindow}).
      */
-    private static boolean retryable(final Throwable error) {
+    private boolean retryable(final Throwable error) {
         if (error instanceof LlmHttpFailureException http) {
-            return http.retryableStatus();
+            return http.retryableStatus() && !quotaExhaustedForLongWindow(http);
         }
         final var m = error.getMessage();
         if (m == null || !m.startsWith("LLM request failed (")) {
@@ -291,6 +333,50 @@ public final class LlmClientResilienceWrapper {
             }
         }
         return false;
+    }
+
+    /**
+     * Soft decision for a {@code 429}: when the body parses as JSON and the error type is
+     * {@code usage_limit_reached} with a recovery window beyond the configured threshold (either a
+     * {@code limit_window_minutes} greater than it, or a {@code resets_at} epoch further out from
+     * the injected clock), a retry would still fail, the quota does not clear in retry-seconds, so
+     * report {@code true} (not worth retrying). Any unparseable body, missing field, short window,
+     * other error type, or a {@code null} mapper falls back to the normal retry behavior ({@code false}).
+     *
+     * <p>Mirrors the Codex error shape
+     * {@code {"error":{"type":"usage_limit_reached","limit_window_minutes":43200,"resets_in_seconds":...,"resets_at":...}}}.</p>
+     *
+     * @param http the typed failure carrying the {@code 429} status and raw body.
+     * @return {@code true} when the quota window is long enough that retrying is pointless.
+     */
+    private boolean quotaExhaustedForLongWindow(final LlmHttpFailureException http) {
+        if (http.status() != 429 || mapper == null || clock == null) {
+            return false;
+        }
+        final var body = http.body();
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        try {
+            @SuppressWarnings("unchecked")
+            final var error =
+                    (Map<String, Object>) mapper.fromString(Map.class, body).get("error");
+            if (error == null || !"usage_limit_reached".equals(error.get("type"))) {
+                return false;
+            }
+            final var nowSeconds = clock.millis() / 1000L;
+            final var thresholdSeconds = config.usageLimitRetryThresholdMs() / 1000L;
+            final var windowMinutes = number(error.get("limit_window_minutes"));
+            final var resetsAt = number(error.get("resets_at"));
+            return (windowMinutes != null && TimeUnit.MINUTES.toSeconds(windowMinutes) > thresholdSeconds)
+                    || (resetsAt != null && resetsAt - nowSeconds > thresholdSeconds);
+        } catch (final RuntimeException e) {
+            return false; // unparseable or unexpected shape: ignore the body, keep current behavior
+        }
+    }
+
+    private static Long number(final Object value) {
+        return value instanceof Number n ? n.longValue() : null;
     }
 
     /**

@@ -267,11 +267,16 @@ public class ChatClient implements AutoCloseable {
                         true,
                         configuration.llm().retryAfterMaxWaitMs(),
                         1.0d,
-                        configuration.llm().concurrencyAdaptationMs()),
+                        configuration.llm().concurrencyAdaptationMs(),
+                        configuration.llm().usageLimitRetryThresholdMs()),
                 null,
                 // the shared scheduler makes the retry waits cancellable (interrupt during a
                 // 429/retry-after backoff ends the wait early); null keeps the JDK fallback
-                scheduler);
+                scheduler,
+                // injected clock + mapper let the wrapper soft-parse a 429 usage_limit_reached body
+                // and skip pointless retries when the quota window still holds
+                clock,
+                mapper);
     }
 
     protected ChatClient() {

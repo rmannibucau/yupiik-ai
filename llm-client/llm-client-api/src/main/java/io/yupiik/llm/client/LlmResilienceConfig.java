@@ -33,6 +33,10 @@ package io.yupiik.llm.client;
  * @param concurrencyAdaptationMs cooldown before relaxing a concurrency limit adapted from a
  *     provider {@code 429 concurrency_limit_exceeded} response back to the configured cap
  *     (default 15 minutes).
+ * @param usageLimitRetryThresholdMs a provider {@code 429} error body reporting {@code usage_limit_reached}
+ *     with a recovery window beyond this threshold (via {@code limit_window_minutes} or {@code resets_at})
+ *     is treated as non-retryable (the quota will not clear in retry-seconds); default 1 hour. Shorter
+ *     windows keep the normal retry behavior.
  */
 public record LlmResilienceConfig(
         int retriesMaxAttempts,
@@ -43,15 +47,17 @@ public record LlmResilienceConfig(
         boolean retryAfterEnabled,
         long retryAfterMaxWaitMs,
         double waitScale,
-        long concurrencyAdaptationMs) {
+        long concurrencyAdaptationMs,
+        long usageLimitRetryThresholdMs) {
 
     /**
      * The default configuration.
      *
      * @return 3 attempts, 500 ms base delay, throttling off, 4 concurrent, context overflow retry on,
-     *     retry-after honoring on capped at 5 minutes, 15 minutes concurrency adaptation cooldown.
+     *     retry-after honoring on capped at 5 minutes, 15 minutes concurrency adaptation cooldown,
+     *     1 hour usage-limit window threshold.
      */
     public static LlmResilienceConfig defaults() {
-        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d, 900_000L);
+        return new LlmResilienceConfig(3, 500, 0, 4, true, true, 300_000L, 1.0d, 900_000L, 3_600_000L);
     }
 }

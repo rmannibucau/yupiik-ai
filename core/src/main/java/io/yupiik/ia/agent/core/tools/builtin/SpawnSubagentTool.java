@@ -29,6 +29,7 @@ import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
 import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
+import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +41,22 @@ public class SpawnSubagentTool implements EmbeddedTool {
     private final SessionStore sessionStore;
     private final SnapshotStore snapshotStore;
     private final CodingAgentConfiguration configuration;
+    private final ProviderManager providerManager;
+
+    public SpawnSubagentTool(
+            final SubagentRegistry subagentRegistry,
+            final SubagentRunner subagentRunner,
+            final SessionStore sessionStore,
+            final SnapshotStore snapshotStore,
+            final CodingAgentConfiguration configuration,
+            final ProviderManager providerManager) {
+        this.subagentRegistry = subagentRegistry;
+        this.subagentRunner = subagentRunner;
+        this.sessionStore = sessionStore;
+        this.snapshotStore = snapshotStore;
+        this.configuration = configuration;
+        this.providerManager = providerManager;
+    }
 
     public SpawnSubagentTool(
             final SubagentRegistry subagentRegistry,
@@ -47,11 +64,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
             final SessionStore sessionStore,
             final SnapshotStore snapshotStore,
             final CodingAgentConfiguration configuration) {
-        this.subagentRegistry = subagentRegistry;
-        this.subagentRunner = subagentRunner;
-        this.sessionStore = sessionStore;
-        this.snapshotStore = snapshotStore;
-        this.configuration = configuration;
+        this(subagentRegistry, subagentRunner, sessionStore, snapshotStore, configuration, null);
     }
 
     protected SpawnSubagentTool() {
@@ -60,6 +73,7 @@ public class SpawnSubagentTool implements EmbeddedTool {
         this.sessionStore = null;
         this.snapshotStore = null;
         this.configuration = null;
+        this.providerManager = null;
     }
 
     @Override
@@ -72,7 +86,9 @@ public class SpawnSubagentTool implements EmbeddedTool {
         return "Launch a sub-agent to work on a task in parallel with isolated state. "
                 + "It inherits the parent's project context and permission ceiling, and has its own "
                 + "conversation history, permission grants, todo list, and snapshots. Optional agent profiles "
-                + "and the tools allowlist can further restrict which tools the child may use. max_turns sets a positive "
+                + "and the tools allowlist can further restrict which tools the child may use. Use list_subagent_options "
+                + "to discover configured profiles and model routes when needed. Delegate clear, independent tasks "
+                + "with a concrete expected result, then collect and synthesize the child result. max_turns sets a positive "
                 + "upper bound on the child's model round-trips; configured subagent and provider/model limits may lower it. "
                 + "Returns a subagent_id for tracking.";
     }
@@ -132,6 +148,37 @@ public class SpawnSubagentTool implements EmbeddedTool {
         final var name = arg(args, "name");
         final var profile = arg(args, "agent");
         final var model = arg(args, "model");
+        final var profileName = profile == null || profile.isBlank() ? null : profile.strip();
+        if (profile != null && profileName == null) {
+            return ToolResult.error("agent profile must not be blank");
+        }
+        final var selectedProfile = profileName == null || configuration.agents() == null
+                ? null
+                : configuration.agents().stream()
+                        .filter(a -> profileName.equals(
+                                a.name() == null ? null : a.name().strip()))
+                        .findFirst()
+                        .orElse(null);
+        if (profileName != null && selectedProfile == null) {
+            return ToolResult.error("Unknown agent profile: " + profileName);
+        }
+        if (model != null && model.isBlank()) {
+            return ToolResult.error("model must not be blank");
+        }
+        final var normalizedModel = model == null ? null : model.strip();
+        final var policy =
+                configuration.tools() == null ? null : configuration.tools().spawnSubagent();
+        if (policy != null && profileName != null && !policy.allowsAgent(profileName)) {
+            return ToolResult.error("Agent profile is not available for subagents: " + profileName);
+        }
+        if (policy != null) {
+            final var providerDefault = defaultModel(context);
+            final var effective = io.yupiik.ia.agent.core.agent.EffectiveAgentModel.resolve(
+                    providerManager, context.settings(), selectedProfile, normalizedModel, providerDefault);
+            if (!io.yupiik.ia.agent.core.agent.SubagentModelPolicy.allows(policy, effective)) {
+                return ToolResult.error("Model is not available for subagents: " + effective.routedReference());
+            }
+        }
         final var maxTurnsObj = args.get("max_turns");
         final Integer maxTurns = maxTurnsObj instanceof Number n ? n.intValue() : null;
         if (maxTurns != null && maxTurns < 1) {
@@ -144,7 +191,14 @@ public class SpawnSubagentTool implements EmbeddedTool {
                         .collect(java.util.stream.Collectors.toUnmodifiableSet())
                 : args.containsKey("tools") ? Set.of() : null;
         final var stateOpt = subagentRegistry.start(new AgentRunSpec(
-                context.sessionId(), task, name, profile, model, maxTurns, allowedTools, context.allowedTools()));
+                context.sessionId(),
+                task,
+                name,
+                profileName,
+                normalizedModel,
+                maxTurns,
+                allowedTools,
+                context.allowedTools()));
         if (stateOpt.isEmpty()) {
             return ToolResult.error("Cannot start sub-agent: maximum concurrent sub-agents reached ("
                     + subagentRegistry.maxConcurrent() + ").");
@@ -158,5 +212,11 @@ public class SpawnSubagentTool implements EmbeddedTool {
 
         final var displayName = state.name() != null ? state.name() : state.id();
         return ToolResult.ok("Sub-agent started: " + displayName + " (task: " + task + ")");
+    }
+
+    private String defaultModel(final ToolContext context) {
+        return providerManager == null
+                ? context.settings() == null ? null : context.settings().model()
+                : providerManager.effectiveSubagentDefault(context.settings());
     }
 }

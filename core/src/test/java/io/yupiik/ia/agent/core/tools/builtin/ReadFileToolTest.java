@@ -137,4 +137,12 @@ class ReadFileToolTest {
         assertFalse(result.output().contains("f1.txt"), result.output());
         assertTrue(result.output().contains("more entries below, use offset=4"), result.output());
     }
+
+    @Test
+    void missingPathReturnsFriendlyErrorInsteadOfNpe() {
+        // a null/missing "path" must surface a clear "path is required", never Path.of(null) -> NPE
+        final var result = new ReadFileTool().execute(Map.of());
+        assertFalse(result.success(), result.output());
+        assertEquals("path is required", result.output());
+    }
 }

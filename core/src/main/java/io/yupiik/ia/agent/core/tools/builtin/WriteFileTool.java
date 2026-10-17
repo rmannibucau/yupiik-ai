@@ -50,7 +50,8 @@ public class WriteFileTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Write content to a file, creating it (and parent directories) if needed. Overwrites the whole file.";
+        return "Write content to a file, creating it (and parent directories) if needed. Overwrites the whole file. "
+                + "Requires a non-empty \"path\" argument.";
     }
 
     @Override
@@ -76,6 +77,9 @@ public class WriteFileTool implements EmbeddedTool {
     @Override
     public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         final var raw = arg(args, "path");
+        if (raw == null || raw.isEmpty()) {
+            return ToolResult.error("path is required");
+        }
         final var path = context.resolvePath(raw, configuration == null ? null : configuration.resolveProjectDir());
         final var content = arg(args, "content");
         if (content == null) {

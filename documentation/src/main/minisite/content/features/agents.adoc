@@ -19,14 +19,18 @@ with `@<name> `.
 path whose content is loaded when it expands to an existing regular file (for
 example `prompt=~/.yupiik/coding-agent/agents/reviewer.md`). The optional `tools`
 list restricts the profile to those tool names; omitting it leaves the normal
-session and permission rules in force.
+session and permission rules in force. Set `description` to a short purpose and
+delegation hint for catalog discovery; keep detailed instructions in `prompt`.
+An optional `model` uses the same object as background model tuning: `name` is
+the model id or `$provider/model` route, and the remaining fields tune requests
+made by that agent. When absent, the agent uses the current contextual model.
 
 .Example configuration.json
 [source,json]
 ----
 {
   "agents": [
-    { "name": "reviewer", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md", "tools": ["read", "glob", "grep"] },
+    { "name": "reviewer", "description": "Reviews changes for bugs and regressions without editing files.", "prompt": "~/.yupiik/coding-agent/agents/reviewer.md", "tools": ["read", "glob", "grep"], "model": { "name": "$local/qwen3-coder", "reasoningEffort": "high" } },
     { "name": "tester", "prompt": "You are a meticulous test author. Prefer table-driven tests and always run them." }
   ]
 }
@@ -35,15 +39,48 @@ session and permission rules in force.
 == Sub-agent model routing
 
 A sub-agent spawned with `spawn_subagent model=<reference>` runs on the model
-(and provider) named by the reference: `$<provider>/<model>` routes to that
-provider explicitly, a bare name is pinned to whichever configured provider
-declares it (falling back to the parent session's provider). Without an explicit
-`model`, the spawning provider's `defaultSubagentModel` applies when set
-(blank keeps the historic behavior: the sub-agent inherits the parent session's
-provider/model). Resolution reuses the same `$provider/model` machinery as the
-background `compact`/`prune`/`memory` models, so a sub-agent can be pinned to a
-cheaper model or a different provider - including specialists routed away from
-the parent's frontier model, that report no tool output on their own provider.
+(and provider) named by the reference. `$<provider>/<model>` routes explicitly;
+a bare name is pinned to whichever configured provider declares it, falling
+back to the parent's provider. Model choice precedence is: explicit spawn
+`model`, selected profile's `model.name`, provider `defaultSubagentModel`, then
+the inherited contextual model. A configured profile model also applies when
+that profile is selected for a normal run. Profile model configuration is
+temporary to that run and does not replace the session's contextual selection.
+
+Resolution reuses the same `$provider/model` machinery as background model
+references, so specialists can use a cheaper model or a different provider.
+The resolved model of a running/recently-completed sub-agent is surfaced in the
+`/subagents` overlay when a reference was requested.
+
+== Discovering profiles and models
+
+The `list_subagent_options` tool searches agent profiles and configured model
+routes on demand. It accepts `kind` (`agents`, `models`, or `all`), a substring
+`query`, a provider filter, and pagination (`offset` and `limit`). The tool
+schema contains no profile or model list; results are returned only when called,
+with 20 entries by default and a hard maximum of 50 per page. Profile prompts
+are never returned, and descriptions are capped at 300 characters. Model
+results include configured provider model ids and provider defaults; the tool
+does not query live provider catalogs.
+
+Optional catalog and routing ceilings are configured under
+`yca.tools.spawnSubagent`:
+
+[source,json]
+----
+{
+  "tools": {
+    "spawnSubagent": {
+      "allowedAgents": ["reviewer", "tester"],
+      "allowedProviders": ["default", "local"],
+      "allowedModels": ["$local/qwen3-coder", "gpt-5-mini"]
+    }
+  }
+}
+----
+
+Empty or omitted allowlists leave that choice unrestricted. Restrictions filter
+catalog results and are checked again when a spawn request is made.
 
 The resolved model of a running/recently-completed sub-agent is surfaced in the
 `/subagents` overlay (list rows and the detail transcript) when a reference was

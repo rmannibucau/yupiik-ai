@@ -25,6 +25,7 @@ import io.yupiik.ia.agent.core.optimize.GenericOutputProcessor;
 import io.yupiik.ia.agent.core.optimize.MavenOutputProcessor;
 import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
+import io.yupiik.ia.agent.core.tools.builtin.EditFileTool;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -225,5 +226,28 @@ class ToolExecutionServiceTest {
                     }
                 },
                 processors);
+    }
+
+    @Test
+    void editFileMissingPathSurfacesFriendlyErrorNotNpe() {
+        // exercising the real edit_file through the execution service (the layer that historically wrapped
+        // the Path.of(null) NPE into "Tool edit_file failed: java.lang.NullPointerException"): a missing
+        // path must now come back as a clear "path is required" error, never a crash wrapper
+        final var reports = new ArrayList<String>();
+        final var configuration = config("10");
+        final var result = new ToolExecutionService(
+                        configuration,
+                        new Emitter() {
+                            @Override
+                            public <T> void emit(final T event) {
+                                // no-op
+                            }
+                        },
+                        List.of(new GenericOutputProcessor(configuration)))
+                .execute(new EditFileTool(configuration), Map.of("oldString", "x", "newString", "y"), context(reports));
+        assertFalse(result.success(), result.output());
+        assertTrue(result.output().contains("path is required"), result.output());
+        assertFalse(result.output().contains("NullPointerException"), result.output());
+        assertFalse(result.output().contains("Tool edit_file failed"), result.output());
     }
 }

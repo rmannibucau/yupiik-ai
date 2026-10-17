@@ -78,6 +78,18 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     }
 
     /**
+     * Whether this dialect can only call its backend in streaming mode. Some providers (eg. the
+     * ChatGPT Codex backend) reject any request whose {@code stream} field is not {@code true}, so
+     * single-shot {@link #chat(LlmRequest)} callers must still mark the request as streaming and
+     * reassemble the SSE back into a single {@link LlmResponse}. Defaults to {@code false}.
+     *
+     * @return {@code true} to force the wire {@code stream:true} flag even for non-streaming requests.
+     */
+    protected boolean forceStream() {
+        return false;
+    }
+
+    /**
      * Exposes the routing identifier of this dialect.
      *
      * @return the routing identifier of this dialect, {@code openai-responses}.
@@ -132,6 +144,113 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         } catch (final RuntimeException e) {
             return failed(e);
         }
+    }
+
+    /**
+     * Runs a request through the streaming pipeline but reassembles the resulting SSE events into a
+     * single {@link LlmResponse}. This is the single-shot equivalent of {@link #stream(LlmRequest,
+     * BooleanSupplier)} and is used by backends (eg. the ChatGPT Codex dialect) that reject any
+     * request unless {@code stream} is {@code true}, so a plain chat call still reaches them. Text is
+     * concatenated, tool-call argument deltas are coalesced by their output index, and the terminal
+     * event contributes the usage and finish reason.
+     *
+     * @param request the request to run as a single-shot completion.
+     * @param cancelled cancellation probe checked between frames.
+     * @return a stage completing with the assembled single-shot response.
+     */
+    protected CompletionStage<LlmResponse> assemble(final LlmRequest request, final BooleanSupplier cancelled) {
+        try {
+            streamedArgIds.clear();
+            final var payload = mapper.toBytes(toWire(request, true));
+            return openStream(payload, cancelled).thenCompose(attempt -> {
+                if (!attempt.ok()) {
+                    // mirror the streaming error classification but surface it on the single-shot stage
+                    return streamError(attempt)
+                            .thenCompose(ignored -> failed(new LlmResponseParseException(
+                                    name(),
+                                    provider.baseUrl(),
+                                    attempt.statusCode(),
+                                    attempt.headers().firstValue("content-type").orElse(null),
+                                    null,
+                                    new IllegalStateException("failed to assemble single-shot response"))));
+                }
+                final var future = new CompletableFuture<LlmResponse>();
+                Streams.toEvents(attempt.live(), cancelled, this::mapEvent, () -> null, onRawLine)
+                        .subscribe(new LlmResponseAssembler(future));
+                return future;
+            });
+        } catch (final RuntimeException e) {
+            return failed(e);
+        }
+    }
+
+    /** Subscriber accumulating streamed events into a single {@link LlmResponse}. */
+    private final class LlmResponseAssembler implements Flow.Subscriber<LlmStreamEvent> {
+        private final CompletableFuture<LlmResponse> future;
+        private final StringBuilder text = new StringBuilder();
+        private final Map<Integer, MutableToolCall> calls = new LinkedHashMap<>();
+        private Usage usage;
+        private String finishReason = "stop";
+
+        private LlmResponseAssembler(final CompletableFuture<LlmResponse> future) {
+            this.future = future;
+        }
+
+        @Override
+        public void onSubscribe(final Flow.Subscription subscription) {
+            subscription.request(Long.MAX_VALUE);
+        }
+
+        @Override
+        public void onNext(final LlmStreamEvent event) {
+            if (event instanceof final LlmStreamEvent.TextDelta t) {
+                text.append(t.text());
+            } else if (event instanceof final LlmStreamEvent.ToolCallDelta call) {
+                final var mutable = calls.computeIfAbsent(call.index(), i -> new MutableToolCall());
+                if (call.name() != null) {
+                    mutable.name = call.name();
+                }
+                if (call.id() != null) {
+                    mutable.id = call.id();
+                }
+                if (call.arguments() != null) {
+                    mutable.arguments.append(call.arguments());
+                }
+            } else if (event instanceof final LlmStreamEvent.End end) {
+                if (end.usage() != null) {
+                    usage = end.usage();
+                }
+                if (end.finishReason() != null) {
+                    finishReason = end.finishReason();
+                }
+            }
+        }
+
+        @Override
+        public void onError(final Throwable throwable) {
+            future.completeExceptionally(throwable);
+        }
+
+        @Override
+        public void onComplete() {
+            final var toolCalls = new ArrayList<LlmToolCall>();
+            calls.forEach((index, call) -> toolCalls.add(new LlmToolCall(
+                    call.id,
+                    "function",
+                    new LlmToolCall.FunctionCall(call.name == null ? "" : call.name, call.arguments.toString()),
+                    index)));
+            final var message = new LlmMessage(
+                    "assistant", text.toString(), null, toolCalls.isEmpty() ? null : toolCalls, null, Map.of());
+            final var choice = new LlmResponse.LlmChoice(0, message, finishReason);
+            future.complete(new LlmResponse(null, null, null, List.of(choice), usage, Map.of()));
+        }
+    }
+
+    /** Mutable tool-call accumulator, keyed by output index across streamed deltas. */
+    private static final class MutableToolCall {
+        private String id;
+        private String name;
+        private final StringBuilder arguments = new StringBuilder();
     }
 
     @Override
@@ -206,7 +325,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                 request.maxTokens(),
                 request.temperature(),
                 request.topP(),
-                stream ? Boolean.TRUE : null,
+                (stream || forceStream()) ? Boolean.TRUE : null,
                 tools.isEmpty() ? null : tools,
                 request.toolChoice(),
                 request.responseFormat(),

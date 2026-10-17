@@ -138,6 +138,29 @@ public class ProviderManager {
     }
 
     /**
+     * The effective default subagent model for a context, using the identical fallback in both
+     * {@code spawn_subagent} and the options catalog: the effective provider's
+     * {@code defaultSubagentModel}, then the contextual selection's model, then the provider default
+     * model. Centralizing it keeps the discovery view aligned with what a spawn really inherits.
+     */
+    public String effectiveSubagentDefault(final ChatSettings settings) {
+        final var ctx = settings == null ? ChatSettings.EMPTY : settings;
+        final var provider =
+                ctx.providerId() == null || ctx.providerId().isBlank() ? current() : provider(ctx.providerId());
+        if (provider != null
+                && provider.defaultSubagentModel() != null
+                && !provider.defaultSubagentModel().isBlank()) {
+            return provider.defaultSubagentModel().strip();
+        }
+        if (ctx.model() != null && !ctx.model().isBlank()) {
+            return ctx.model().strip();
+        }
+        return provider == null || provider.model() == null
+                ? null
+                : provider.model().strip();
+    }
+
+    /**
      * Resolve a model reference to a (provider, model) pair. A {@code $<id>/<model>} reference selects
      * the provider by id; a plain model name resolves against the current provider.
      */
@@ -490,22 +513,24 @@ public class ProviderManager {
 
     /**
      * Resolve the effective exploration-plateau round limit for a model of a provider: the
-     * {@code behavior.plateauRounds} of the first matching model entry when > 0, else the
-     * provider-level {@code tuning.plateauRounds} when > 0, else 0 so the caller applies the
-     * global {@code llm.plateauRounds} default (0 disables the guard entirely).
+     * {@code behavior.plateauRounds} of the first matching model entry when non-zero (a negative value
+     * is a nudge-only flag), else the provider-level {@code tuning.plateauRounds} when non-zero, else 0
+     * so the caller applies the global {@code llm.plateauRounds} default (0 disables the guard
+     * entirely, a negative resolved value disables the hard-stop and keeps only the nudge).
      */
     public int plateauRounds(final ProviderConfiguration provider, final String model) {
         final var entry = matchModel(provider, model);
         if (entry != null && entry.behavior() != null && entry.behavior().plateauRounds() != null) {
             final var rounds = entry.behavior().plateauRounds();
-            if (rounds > 0) {
+            if (rounds != 0) {
                 return rounds;
             }
         }
         final var tuning = providerTuning(provider);
-        return tuning != null && tuning.plateauRounds() != null && tuning.plateauRounds() > 0
-                ? tuning.plateauRounds()
-                : 0;
+        if (tuning != null && tuning.plateauRounds() != null && tuning.plateauRounds() != 0) {
+            return tuning.plateauRounds();
+        }
+        return 0;
     }
 
     /**
@@ -545,23 +570,63 @@ public class ProviderManager {
     }
 
     /**
+     * Resolve whether a non-truncated text-only reply with unfinished todos continues the turn
+     * automatically (Codex-style round semantics) for a model of a provider: the
+     * {@code behavior.turnContinuesOnTextEnd} of the first matching model entry, else the
+     * provider-level {@code tuning.turnContinuesOnTextEnd}, else false. Default false keeps today's
+     * behavior (a text-only end with unfinished todos surfaces the 'send continue' banner); the flag
+     * must be set explicitly to true. A nullable Boolean lets a per-model value override (including
+     * an explicit false) the provider-level one.
+     */
+    public boolean turnContinuesOnTextEnd(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().turnContinuesOnTextEnd() != null) {
+            return entry.behavior().turnContinuesOnTextEnd();
+        }
+        final var tuning = providerTuning(provider);
+        return tuning != null && tuning.turnContinuesOnTextEnd() != null && tuning.turnContinuesOnTextEnd();
+    }
+
+    /**
+     * Resolve the effective exploration-nudge round count for a model of a provider: the
+     * {@code behavior.explorationNudgeRounds} of the first matching model entry when non-null and
+     * non-zero, else the provider-level {@code tuning.explorationNudgeRounds} when non-null and
+     * non-zero, else 0 so the caller applies the global {@code llm.explorationNudgeRounds} default.
+     */
+    public int explorationNudgeRounds(final ProviderConfiguration provider, final String model) {
+        final var entry = matchModel(provider, model);
+        if (entry != null && entry.behavior() != null && entry.behavior().explorationNudgeRounds() != null) {
+            final var rounds = entry.behavior().explorationNudgeRounds();
+            if (rounds != 0) {
+                return rounds;
+            }
+        }
+        final var tuning = providerTuning(provider);
+        if (tuning != null && tuning.explorationNudgeRounds() != null && tuning.explorationNudgeRounds() != 0) {
+            return tuning.explorationNudgeRounds();
+        }
+        return 0;
+    }
+
+    /**
      * Resolve the effective iteration window cap override for a model of a provider: the
-     * {@code behavior.maxIterations} of the first matching model entry when > 0, else the
-     * provider-level {@code tuning.maxIterations} when > 0, else 0 so the caller applies the
-     * global {@code llm.maxIterations} default.
+     * {@code behavior.maxIterations} of the first matching model entry when non-zero (a negative value
+     * means an unbounded window), else the provider-level {@code tuning.maxIterations} when non-zero,
+     * else 0 so the caller applies the global {@code llm.maxIterations} default.
      */
     public int maxIterationsOverride(final ProviderConfiguration provider, final String model) {
         final var entry = matchModel(provider, model);
         if (entry != null && entry.behavior() != null && entry.behavior().maxIterations() != null) {
             final var iterations = entry.behavior().maxIterations();
-            if (iterations > 0) {
+            if (iterations != 0) {
                 return iterations;
             }
         }
         final var tuning = providerTuning(provider);
-        return tuning != null && tuning.maxIterations() != null && tuning.maxIterations() > 0
-                ? tuning.maxIterations()
-                : 0;
+        if (tuning != null && tuning.maxIterations() != null && tuning.maxIterations() != 0) {
+            return tuning.maxIterations();
+        }
+        return 0;
     }
 
     /**
