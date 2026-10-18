@@ -1819,6 +1819,119 @@ public class ChatClient implements AutoCloseable {
         return (Map<String, Object>) map;
     }
 
+    /**
+     * Transforms a caller JSON Schema into the OpenAI strict-mode shape that Responses-wire backends
+     * (the OpenAI {@code /responses} API and the ChatGPT Codex backend) enforce when {@code strict:
+     * true}: every object must set {@code additionalProperties:false} and every property in {@code
+     * properties} must be listed in {@code required}, with fields the caller did not actually require
+     * expressed as a nullable type ({@code ["<type>", "null"]}) so the model still emits them but may
+     * set them to {@code null}. Unsupported strict-mode keywords are dropped (see the strict-output
+     * keyword list) and the recursion covers {@code properties}/{@code items}/{$defs}. Idempotent: a
+     * schema already in that shape comes back unchanged.
+     */
+    public static Map<String, Object> strictSchema(final Map<String, Object> schema) {
+        if (schema == null) {
+            return null;
+        }
+        final var rawRequired = schema.get("required");
+        final var required = new HashSet<String>();
+        if (rawRequired instanceof List<?> list) {
+            for (final var r : list) {
+                if (r instanceof String s) {
+                    required.add(s);
+                }
+            }
+        }
+        final var out = new LinkedHashMap<String, Object>();
+        for (final var entry : schema.entrySet()) {
+            final var key = entry.getKey();
+            final var value = entry.getValue();
+            switch (key) {
+                // strict mode: unsupported validation keywords are dropped (they would be a 400)
+                case "minProperties",
+                        "maxProperties",
+                        "unevaluatedProperties",
+                        "propertyNames",
+                        "unevaluatedItems",
+                        "contains",
+                        "minContains",
+                        "maxContains",
+                        "uniqueItems" -> {
+                    // dropped
+                }
+                case "properties" -> out.put(key, strictProperties(value, required));
+                case "items", "$defs", "definitions" -> {
+                    if (value instanceof Map<?, ?> sub) {
+                        out.put(key, strictSchema(castMap(sub)));
+                    } else {
+                        out.put(key, value);
+                    }
+                }
+                case "required" -> {
+                    // recomputed below from properties, guaranteeing every property is listed
+                }
+                default -> out.put(key, value);
+            }
+        }
+        // every object must opt out of additional properties and require all its fields
+        if ("object".equals(out.get("type"))) {
+            out.put("additionalProperties", false);
+            final var props = out.get("properties");
+            if (props instanceof Map<?, ?> map) {
+                final var names = map.keySet().stream().map(String::valueOf).toList();
+                out.put("required", names);
+            } else if (!required.isEmpty()) {
+                out.put("required", new ArrayList<>(required));
+            }
+        }
+        return out;
+    }
+
+    /** Normalize every property value, widening non-required fields to a nullable type. */
+    private static Map<String, Object> strictProperties(final Object properties, final Set<String> required) {
+        if (!(properties instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        final var out = new LinkedHashMap<String, Object>();
+        for (final var entry : map.entrySet()) {
+            final var name = String.valueOf(entry.getKey());
+            final var value = entry.getValue();
+            if (value instanceof Map<?, ?> sub) {
+                final var normalized = strictSchema(castMap(sub));
+                if (!required.contains(name)) {
+                    out.put(name, nullableType(normalized));
+                } else {
+                    out.put(name, normalized);
+                }
+            } else {
+                out.put(name, value);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Widen a strict-normalized property schema to a nullable type ({@code type: ["<type>", "null"]})
+     * so the field satisfies the all-properties-required rule while staying semantically optional.
+     */
+    private static Map<String, Object> nullableType(final Map<String, Object> schema) {
+        if (schema == null) {
+            return new LinkedHashMap<>(Map.of("type", "null"));
+        }
+        final var out = new LinkedHashMap<String, Object>(schema);
+        final var t = schema.get("type");
+        if (t instanceof String s) {
+            out.put("type", List.of(s, "null"));
+        } else if (t instanceof List<?> list) {
+            final var widened = new ArrayList<Object>(list);
+            if (!widened.contains("null")) {
+                widened.add("null");
+            }
+            out.put("type", widened);
+        }
+        return out;
+    }
+
     private static final Set<String> SUPPORTED_FORMATS = Set.of(
             "date-time",
             "time",
@@ -1861,12 +1974,23 @@ public class ChatClient implements AutoCloseable {
                 outputConfig.put("format", Map.of("type", "json_schema", "schema", sanitizeSchema(schema)));
                 out.put("output_config", outputConfig);
             }
-            case RESPONSES ->
+            // RESPONSES and CODEX share the Responses wire ({@code text.format}): both backends
+            // enforce OpenAI strict-mode JSON Schemas (every object additionalProperties:false and
+            // every property in required), so the schema is normalized with strictSchema().
+            case RESPONSES, CODEX ->
                 out.put(
                         "text",
                         Map.of(
                                 "format",
-                                Map.of("type", "json_schema", "name", schemaName, "schema", schema, "strict", true)));
+                                Map.of(
+                                        "type",
+                                        "json_schema",
+                                        "name",
+                                        schemaName,
+                                        "schema",
+                                        strictSchema(schema),
+                                        "strict",
+                                        true)));
             case COMPLETIONS ->
                 out.put(
                         "response_format",

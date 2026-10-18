@@ -230,6 +230,86 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void chatStructuredUsesStrictTextFormatOnResponsesWire() throws Exception {
+        // RESPONSES and CODEX share the Responses wire: the structured field must be text.format with
+        // an OpenAI-strict schema (not the chat-completions response_format that codex rejects), and
+        // every property must be required (optional ones widened to a nullable type).
+        final var schema = Map.<String, Object>of(
+                "type",
+                "object",
+                "properties",
+                Map.of(
+                        "facts",
+                        Map.of(
+                                "type",
+                                "array",
+                                "items",
+                                Map.of(
+                                        "type",
+                                        "object",
+                                        "properties",
+                                        Map.of(
+                                                "text", Map.of("type", "string"),
+                                                "path", Map.of("type", "string")),
+                                        "required",
+                                        List.of("text")))),
+                "required",
+                List.of("facts"));
+        for (final String api : List.of("responses", "codex")) {
+            stop();
+            server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+            server.createContext("/v1/responses", exchange -> {
+                bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                respond(exchange, 200, """
+                        {"id":"r1","model":"test-model","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"{\\"facts\\":[]}"}],"usage":{}}]}""", "application/json");
+            });
+            server.start();
+            final var cfg = configuration(Map.of("yca.provider.providers.0.api", api));
+            client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+            final var result = client.chatStructured(request(), "memory_facts", schema);
+            assertTrue(result.structured(), api + " must produce a structured result");
+            assertEquals(ApiFlavor.valueOf(api.toUpperCase()), client.flavor(), api);
+            final var body = bodies.getLast();
+            // the Responses wire uses text.format, never the chat-completions response_format field
+            assertTrue(body.contains("\"text\":{\"format\":"), api + " must use text.format: " + body);
+            assertTrue(body.contains("\"type\":\"json_schema\""), api + " body: " + body);
+            assertTrue(!body.contains("\"response_format\""), api + " must not send response_format: " + body);
+            // strict mode on, and the schema normalized: additionalProperties:false + every property required
+            assertTrue(body.contains("\"strict\":true"), api + " body: " + body);
+            assertTrue(body.contains("\"additionalProperties\":false"), api + " body: " + body);
+            assertTrue(body.contains("\"required\":[\"facts\"]"), api + " top object required: " + body);
+            // the optional 'path' property is widened to a nullable type and listed in the item's required
+            assertTrue(
+                    body.contains("\"path\":{\"type\":[\"string\",\"null\"]}"),
+                    api + " optional property must widen to a nullable type: " + body);
+            // every item property must be required (order of the properties map is not deterministic)
+            assertTrue(
+                    body.matches("(?s).*\"required\":\\[\"(text|path)\",\"(text|path)\"\\].*")
+                            || body.contains("\"required\":[\"path\",\"text\"]")
+                            || body.contains("\"required\":[\"text\",\"path\"]"),
+                    api + " all item properties must be required: " + body);
+        }
+    }
+
+    @Test
+    void chatStructuredKeepsStrictFieldForAlreadyStrictSchemas() throws Exception {
+        // an already-conformant strict schema must be returned unchanged (the normalizer is idempotent)
+        final var schema = Map.<String, Object>of(
+                "type",
+                "object",
+                "properties",
+                Map.of("gav", Map.of("type", "string")),
+                "required",
+                List.of("gav"),
+                "additionalProperties",
+                false);
+        final var normalized = ChatClient.strictSchema(schema);
+        assertEquals(schema, normalized, "idempotency: a strict schema must come back unchanged");
+        assertEquals(List.of("gav"), normalized.get("required"));
+    }
+
+    @Test
     void chatStructuredDegradesOnceOnSchemaRejectionAndRemembersItPerModel() throws Exception {
         stop();
         final var structuredHits = new AtomicInteger();
