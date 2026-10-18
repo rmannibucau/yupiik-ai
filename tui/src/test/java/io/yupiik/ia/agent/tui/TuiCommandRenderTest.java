@@ -42,9 +42,8 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfigurations;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
+import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
-import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.llm.Usage;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
 import io.yupiik.ia.agent.core.mcp.McpManager;
@@ -1338,7 +1337,7 @@ class TuiCommandRenderTest {
                         sessionStore,
                         configuration,
                         Executors.newVirtualThreadPerTaskExecutor(),
-                        new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper()),
+                        new InBandToolCallExtractor(new MarkupToolCallScanner()),
                         null,
                         null,
                         null,

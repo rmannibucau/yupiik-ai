@@ -23,18 +23,16 @@ import java.util.List;
  * {@code content} channel. It is the single implementation of the block set used by both the main
  * agent loop and the {@code /btw} side conversation, so the two never drift.
  *
- * <p>Stateless: the parser and stripper are pure over their string input, so this bean can be
- * shared per request with no session state.</p>
+ * <p>Stateless: the scanner is pure over its string input, so this bean can be shared per
+ * request with no session state.</p>
  */
 @ApplicationScoped
 public class InBandToolCallExtractor {
 
-    private final ToolCallMarkupParser parser;
-    private final ToolCallMarkupStripper stripper;
+    private final MarkupToolCallScanner scanner;
 
-    public InBandToolCallExtractor(final ToolCallMarkupParser parser, final ToolCallMarkupStripper stripper) {
-        this.parser = parser;
-        this.stripper = stripper;
+    public InBandToolCallExtractor(final MarkupToolCallScanner scanner) {
+        this.scanner = scanner;
     }
 
     /**
@@ -45,7 +43,7 @@ public class InBandToolCallExtractor {
      * @return the extracted tool calls, empty when no markup is present.
      */
     public List<ToolCall> parse(final String raw) {
-        return parser.parse(raw);
+        return scanner.parse(raw);
     }
 
     /**
@@ -55,7 +53,7 @@ public class InBandToolCallExtractor {
      * @return the content without any tool-call markup, surrounding prose preserved.
      */
     public String strip(final String raw) {
-        return stripper.strip(raw);
+        return scanner.strip(raw);
     }
 
     /**
@@ -69,6 +67,6 @@ public class InBandToolCallExtractor {
      * @return {@code true} when any tool-call block markup is present.
      */
     public boolean containsMarkup(final String raw) {
-        return stripper.containsMarkup(raw);
+        return scanner.containsMarkup(raw);
     }
 }

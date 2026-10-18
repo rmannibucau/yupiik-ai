@@ -228,7 +228,7 @@ public class ChatClient implements AutoCloseable {
         this.clock = clock;
         this.toolCallArgumentsRepairer = toolCallArgumentsRepairer;
         this.inBandToolCallExtractor = inBandToolCallExtractor == null
-                ? new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper())
+                ? new InBandToolCallExtractor(new MarkupToolCallScanner())
                 : inBandToolCallExtractor;
         this.contextWindowCache = new ContextWindowCache(configuration, mapper, clock);
         this.httpClient = httpClient;
@@ -285,8 +285,7 @@ public class ChatClient implements AutoCloseable {
         this.providerManager = null;
         this.clock = null;
         this.toolCallArgumentsRepairer = null;
-        this.inBandToolCallExtractor =
-                new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper());
+        this.inBandToolCallExtractor = new InBandToolCallExtractor(new MarkupToolCallScanner());
         this.contextWindowCache = null;
         this.httpClient = null;
         this.ownsHttpClient = false;

@@ -27,9 +27,8 @@ import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.context.UsageTracker;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
+import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.llm.Message;
-import io.yupiik.ia.agent.core.llm.ToolCallMarkupParser;
-import io.yupiik.ia.agent.core.llm.ToolCallMarkupStripper;
 import io.yupiik.ia.agent.core.session.InMemorySessionStore;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
@@ -134,7 +133,7 @@ class BtwAnswererTest {
                 sessionStore,
                 configuration,
                 btwExecutor,
-                new InBandToolCallExtractor(new ToolCallMarkupParser(), new ToolCallMarkupStripper()),
+                new InBandToolCallExtractor(new MarkupToolCallScanner()),
                 toolRegistry,
                 new ToolExecutionService(configuration, NOOP, List.of()),
                 mapper,
