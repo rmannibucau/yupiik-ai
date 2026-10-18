@@ -139,6 +139,14 @@ public class ReadSymbolTool implements EmbeddedTool {
         if (exact != null) {
             return exact;
         }
+        // the index stores methods as Class.method while read_symbol accepts Class#method; translate before the
+        // fallback
+        if (symbol.indexOf('#') >= 0) {
+            final var dot = idx.resolve(symbol.replace('#', '.'));
+            if (dot != null) {
+                return dot;
+            }
+        }
         // strip a possible member suffix (`Foo#bar`) before falling back to the unique simple-name match
         final var name = symbol.indexOf('#') >= 0 ? symbol.substring(symbol.indexOf('#') + 1) : symbol;
         final var simple = name.lastIndexOf('.') >= 0 ? name.substring(name.lastIndexOf('.') + 1) : name;

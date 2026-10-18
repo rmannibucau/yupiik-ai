@@ -82,6 +82,61 @@ class ReadSymbolToolTest {
     }
 
     @Test
+    void resolvesHashFormMethodWhenIndexStoresDotForm(@TempDir final Path root) throws IOException {
+        final var src = root.resolve("src/Sample.java");
+        Files.createDirectories(src.getParent());
+        Files.writeString(
+                src,
+                "package p;\npublic class Sample {\n    int add(int a, int b) {\n        return a + b;\n    }\n}\n");
+        final var tool = new ReadSymbolTool(fake(
+                root,
+                new GraphStore(
+                        List.of(new GraphModel.Symbol(
+                                "p.Sample.add",
+                                GraphModel.Kind.METHOD,
+                                "src/Sample.java",
+                                3,
+                                5,
+                                "int add(int a, int b)")),
+                        List.of(),
+                        Map.of(),
+                        1L)));
+
+        final var result = tool.execute(Map.of("symbol", "p.Sample#add", "context", "0"));
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().contains("symbol METHOD p.Sample.add (src/Sample.java:3-5)"), result.output());
+        assertTrue(result.output().contains("signature int add(int a, int b)"), result.output());
+    }
+
+    @Test
+    void hashFormDisambiguatesSameNamedMethods(@TempDir final Path root) throws IOException {
+        final var a = root.resolve("src/A.java");
+        final var b = root.resolve("src/B.java");
+        Files.createDirectories(a.getParent());
+        Files.writeString(a, "package q;\npublic class A {\n    void run() {\n    }\n}\n");
+        Files.writeString(b, "package q;\npublic class B {\n    void run() {\n    }\n}\n");
+        final var tool = new ReadSymbolTool(fake(
+                root,
+                new GraphStore(
+                        List.of(
+                                new GraphModel.Symbol(
+                                        "q.A.run", GraphModel.Kind.METHOD, "src/A.java", 3, 4, "void run()"),
+                                new GraphModel.Symbol(
+                                        "q.B.run", GraphModel.Kind.METHOD, "src/B.java", 3, 4, "void run()")),
+                        List.of(),
+                        Map.of(),
+                        1L)));
+
+        final var aRes = tool.execute(Map.of("symbol", "q.A#run", "context", "0"));
+        assertTrue(aRes.success(), aRes.output());
+        assertTrue(aRes.output().contains("symbol METHOD q.A.run (src/A.java:3-4)"), aRes.output());
+
+        final var bRes = tool.execute(Map.of("symbol", "q.B#run", "context", "0"));
+        assertTrue(bRes.success(), bRes.output());
+        assertTrue(bRes.output().contains("symbol METHOD q.B.run (src/B.java:3-4)"), bRes.output());
+    }
+
+    @Test
     void errorsOnUnknownSymbolWithCodeFindHint() {
         final var tool = new ReadSymbolTool(fake(Path.of("."), GraphStore.empty()));
         final var result = tool.execute(Map.of("symbol", "NoSuch"));

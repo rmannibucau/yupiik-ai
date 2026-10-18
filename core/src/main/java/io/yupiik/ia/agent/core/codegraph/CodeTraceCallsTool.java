@@ -198,6 +198,13 @@ public class CodeTraceCallsTool implements EmbeddedTool {
         if (exact >= 0) {
             return exact;
         }
+        // the index stores methods as Class.method; translate the Class#method notation before the suffix fallback
+        if (symbol.indexOf('#') >= 0) {
+            final int dot = idx.indexOfFqn(symbol.replace('#', '.'));
+            if (dot >= 0) {
+                return dot;
+            }
+        }
         return idx.resolveSuffix(symbol);
     }
 
