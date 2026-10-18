@@ -88,9 +88,13 @@ public class SpawnSubagentTool implements EmbeddedTool {
                 + "conversation history, permission grants, todo list, and snapshots. Optional agent profiles "
                 + "and the tools allowlist can further restrict which tools the child may use. Use list_subagent_options "
                 + "to discover configured profiles and model routes when needed. Delegate clear, independent tasks "
-                + "with a concrete expected result, then collect and synthesize the child result. max_turns sets a positive "
-                + "upper bound on the child's model round-trips; configured subagent and provider/model limits may lower it. "
-                + "Returns a subagent_id for tracking.";
+                + "with a concrete expected result, then collect the result with check_subagents (collect waits until "
+                + "the sub-agent finishes and returns its summary). "
+                + "Do NOT sleep, poll, or repeatedly check on a sub-agent's progress: you will be notified automatically "
+                + "when it finishes. Avoid working on the same files or topics the sub-agent is using while it runs, and "
+                + "work on non-overlapping tasks or summarize to the user what you launched. "
+                + "max_turns sets a positive upper bound on the child's model round-trips; configured subagent and "
+                + "provider/model limits may lower it. Returns a subagent_id for tracking.";
     }
 
     @Override

@@ -25,8 +25,10 @@ public record SubagentConfiguration(
 
         @Property(
                 defaultValue = "4",
-                documentation =
-                        "Maximum concurrent sub-agents allowed globally. The actual limit is also bounded by the model provider's maxConcurrent minus one (reserved for the main agent).")
+                documentation = "Maximum number of simultaneous sub-agent AgentLoops allowed (a process-local budget, "
+                        + "independent of the provider's in-flight LLM budget enforced by the shared client). "
+                        + "Cap is also bounded by the model provider's maxConcurrent. Sub-agents queue on the "
+                        + "shared LLM client when their requests would exceed the provider's concurrency.")
         int maxConcurrent,
 
         @Property(

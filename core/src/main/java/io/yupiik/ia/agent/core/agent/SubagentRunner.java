@@ -168,6 +168,7 @@ public class SubagentRunner {
                             state.parentSessionId(),
                             state.id(),
                             name));
+                    deliverToParent(state, result.summary(), result.success(), result.cancelled());
                 } catch (final Exception e) {
                     final var message = "Subagent failed: " + e.getMessage();
                     final var wasCancelled = state.isCancelled() || cancelled.getAsBoolean();
@@ -178,6 +179,7 @@ public class SubagentRunner {
                                     : SubagentRegistry.SubagentResult.error(message, ""));
                     emitter.emit(new AgentEvent.SubagentCompleted(
                             message, false, wasCancelled, state.parentSessionId(), state.id(), name));
+                    deliverToParent(state, message, false, wasCancelled);
                 }
             });
         } catch (final java.util.concurrent.RejectedExecutionException e) {
@@ -186,7 +188,27 @@ public class SubagentRunner {
             subagentRegistry.complete(state.id(), result);
             emitter.emit(
                     new AgentEvent.SubagentCompleted(message, false, false, state.parentSessionId(), state.id(), name));
+            deliverToParent(state, message, false, false);
         }
+    }
+
+    /**
+     * Pushes a finished sub-agent's result to its parent turn through the {@link SubagentDeliveryBus}
+     * and emits a {@link AgentEvent.SubagentDelivered} so frontends can surface the delivery. Routing is
+     * by the immediate parent session id; the parent {@code AgentLoop} (the one with a null
+     * {@code subagentId}) drains the queue, so the result is never delivered to a nested child.
+     */
+    private void deliverToParent(
+            final SubagentRegistry.SubagentState state,
+            final String summary,
+            final boolean success,
+            final boolean cancelled) {
+        // the AgentLoop.integrateSubagentDeliveries emits the SubagentDelivered event when the parent
+        // drains the queue (on its next round); we only publish the payload here.
+        SubagentDeliveryBus.get()
+                .deliver(
+                        state.parentSessionId(),
+                        new SubagentDeliveryBus.Delivery(state.id(), state.name(), summary, success, cancelled));
     }
 
     private SubagentRegistry.SubagentResult runSubagent(

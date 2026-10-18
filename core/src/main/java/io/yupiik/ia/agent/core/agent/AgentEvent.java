@@ -84,18 +84,38 @@ public sealed interface AgentEvent {
             String name,
             String output,
             boolean success,
+            boolean pending,
             long ordinal,
             String sessionId,
             String subagentId,
             String subagentName)
             implements AgentEvent {
         public ToolFinished(String name, String output, boolean success, String sessionId) {
-            this(name, output, success, -1, sessionId, null, null);
+            this(name, output, success, false, -1, sessionId, null, null);
         }
 
         public ToolFinished(
                 String name, String output, boolean success, String sessionId, String subagentId, String subagentName) {
-            this(name, output, success, -1, sessionId, subagentId, subagentName);
+            this(name, output, success, false, -1, sessionId, subagentId, subagentName);
+        }
+
+        public ToolFinished(
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean pending,
+                final long ordinal,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName) {
+            this.name = name;
+            this.output = output;
+            this.success = success;
+            this.pending = pending;
+            this.ordinal = ordinal;
+            this.sessionId = sessionId;
+            this.subagentId = subagentId;
+            this.subagentName = subagentName;
         }
     }
 
@@ -258,6 +278,25 @@ public sealed interface AgentEvent {
                 final String subagentId,
                 final String subagentName) {
             this(summary, success, false, sessionId, subagentId, subagentName);
+        }
+    }
+
+    /**
+     * A finished sub-agent's result was injected into the parent turn's context as a model-visible
+     * message. Unlike {@link SubagentCompleted} (a transcript marker), this signals the push delivery
+     * so frontends can surface that the parent will now see the child's outcome on its next round.
+     */
+    record SubagentDelivered(
+            String summary,
+            boolean success,
+            boolean cancelled,
+            String sessionId,
+            String subagentId,
+            String subagentName)
+            implements AgentEvent {
+        public SubagentDelivered(
+                final String summary, final boolean success, final boolean cancelled, final String sessionId) {
+            this(summary, success, cancelled, sessionId, null, null);
         }
     }
 

@@ -1453,6 +1453,7 @@ public class TuiCommand implements Runnable {
                             argsValue == null ? "" : argsValue,
                             finished.output(),
                             !finished.success(),
+                            finished.pending(),
                             0));
         } else if (event instanceof AgentEvent.TurnDone || event instanceof AgentEvent.TurnCancelled) {
             // tab icon: the last turn finished (done or cancelled) until a new one starts;
@@ -4702,19 +4703,23 @@ public class TuiCommand implements Runnable {
      * the whole card header is clickable and opens the full-output overlay.
      */
     private List<Line> toolRunCardLines(final ToolCard card, final int innerW) {
-        final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
+        final var statusColor =
+                palette.color(card.pending() ? palette.warning() : card.failed() ? palette.error() : palette.success());
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var lines = new ArrayList<Line>();
         final var headerSpans = new ArrayList<Span>();
         headerSpans.add(Span.styled(
-                (card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check()) + " ",
+                (card.pending()
+                                ? glyphs.running()
+                                : card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check())
+                        + " ",
                 Style.EMPTY.fg(statusColor).bold()));
         headerSpans.add(Span.styled(card.name(), Style.EMPTY.bold().fg(Color.hex(palette.text()))));
         if (card.ordinal() >= 0) {
             headerSpans.add(Span.styled(" #" + card.ordinal(), muted));
         }
         if (!card.args().isBlank()) {
-            headerSpans.add(Span.styled((card.failed() ? "  " : " ") + card.args(), muted));
+            headerSpans.add(Span.styled((card.pending() || card.failed() ? "  " : " ") + card.args(), muted));
         }
         lines.add(Line.from(headerSpans.toArray(Span[]::new)));
         if (!card.output().isBlank()) {
@@ -4811,7 +4816,8 @@ public class TuiCommand implements Runnable {
             // tool name otherwise (read); the FIFO holds both keys
             final var ordinals = state.pendingToolOrdinals.get(card.name());
             if (ordinals != null && !ordinals.isEmpty()) {
-                card = new ToolCard(card.name(), card.args(), card.output(), false, 0, true, ordinals.peekLast());
+                card = new ToolCard(
+                        card.name(), card.args(), card.output(), false, false, 0, true, ordinals.peekLast());
             }
         }
         if (state.showToolActions == ToolOutputVisibility.HIDDEN) {
@@ -4840,7 +4846,8 @@ public class TuiCommand implements Runnable {
         // (or resolved by the renderer via pendingToolOrdinals), so clicking the live
         // block opens the running-tool overlay instead of doing nothing
         toolTops.add(new UiState.ToolTop(card.ordinal(), top, false));
-        final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
+        final var statusColor =
+                palette.color(card.pending() ? palette.warning() : card.failed() ? palette.error() : palette.success());
         final var blockBuilder = Block.builder()
                 .borders(Borders.ALL)
                 .borderType(BorderType.ROUNDED)
@@ -4854,14 +4861,16 @@ public class TuiCommand implements Runnable {
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var lines = new ArrayList<Line>();
         final var headerSpans = new ArrayList<Span>();
-        final var icon = card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check();
+        final var icon = card.pending()
+                ? glyphs.running()
+                : card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check();
         headerSpans.add(Span.styled(icon + " ", Style.EMPTY.fg(statusColor).bold()));
         headerSpans.add(Span.styled(card.name(), Style.EMPTY.bold().fg(Color.hex(palette.text()))));
         if (card.ordinal() >= 0) {
             headerSpans.add(Span.styled(" #" + card.ordinal(), muted));
         }
         if (!card.args().isBlank()) {
-            headerSpans.add(Span.styled((card.failed() ? "  " : " ") + card.args(), muted));
+            headerSpans.add(Span.styled((card.pending() || card.failed() ? "  " : " ") + card.args(), muted));
         }
         lines.add(Line.from(headerSpans.toArray(Span[]::new)));
         final var full = card.ordinal() >= 0 ? state.toolOutputs.get(card.ordinal()) : null;
@@ -4915,6 +4924,9 @@ public class TuiCommand implements Runnable {
     }
 
     private String blockTitle(final ToolCard card) {
+        if (card.pending()) {
+            return " pending ";
+        }
         if (card.failed()) {
             return " failed ";
         }
@@ -4942,7 +4954,8 @@ public class TuiCommand implements Runnable {
 
     /** Internal shared implementation of the collapsed one-liner. */
     static Line hiddenToolLine(final ToolCard card, final Palette palette, final Glyphs glyphs) {
-        final var statusColor = palette.color(card.failed() ? palette.error() : palette.success());
+        final var statusColor =
+                palette.color(card.pending() ? palette.warning() : card.failed() ? palette.error() : palette.success());
         final var label = new StringBuilder();
         if (card.running()) {
             // live cards carry the raw command as name: show its significant part
@@ -4957,17 +4970,27 @@ public class TuiCommand implements Runnable {
                 label.append(" - ").append(key);
             }
         }
-        if (card.running()) {
+        if (card.pending()) {
+            label.append(" - pending");
+        } else if (card.running()) {
             label.append(" - running...");
         } else if (card.elapsedMs() > 0) {
             label.append(" - ").append(DurationFormat.humanize(card.elapsedMs()));
         }
-        if (card.failed()) {
+        // a pending tool is not a failure: no "- failed" suffix, neutral glyph
+        if (card.pending()) {
+            // keep neutral, no suffix
+        } else if (card.failed()) {
             label.append(" - failed");
         }
         return Line.from(
                 Span.styled(
-                        (card.failed() ? glyphs.cross() : card.running() ? glyphs.running() : glyphs.check()) + " ",
+                        (card.pending()
+                                        ? glyphs.running()
+                                        : card.failed()
+                                                ? glyphs.cross()
+                                                : card.running() ? glyphs.running() : glyphs.check())
+                                + " ",
                         Style.EMPTY.fg(statusColor).bold()),
                 Span.styled(label.toString(), Style.EMPTY.fg(Color.hex(palette.textMuted()))));
     }
@@ -5510,16 +5533,15 @@ public class TuiCommand implements Runnable {
         final var muted = Style.EMPTY.fg(Color.hex(palette.textMuted()));
         final var parts = new ArrayList<Span>();
         final var busy = busyIndicator(state);
-        // While the agent is busy the busy label (calling <tool> / thinking (Ns) / working...)
-        // already lives on the call line directly above this strip (renderCalling), so the strip
-        // must not repeat it as its leading segment - it would duplicate the text on two adjacent
-        // rows. A leading space keeps the row padded so the mode/model segment starts at the same
-        // left edge as the idle status text. The idle (non-busy) status, e.g. "ready", stays here
-        // because renderCalling draws nothing then.
+        // The strip must never read blank while the agent is active or not finished. The animated
+        // phase label (calling <tool> / thinking (Ns) / agent is working...) lives on the call line
+        // directly above this strip (renderCalling), so instead of repeating that exact text here
+        // we paint a steady, short work word that never duplicates it; the leading column then
+        // stays aligned with the idle "ready" text. Idle (finished) renders the transcript status.
         if (busy == null) {
             parts.add(Span.styled(" " + state.model.status() + "  ", Style.EMPTY.fg(statusColor)));
         } else {
-            parts.add(Span.styled(" ", Style.EMPTY.fg(statusColor)));
+            parts.add(Span.styled("working  ", Style.EMPTY.fg(statusColor)));
         }
         final var statusModel = chatClient.model(state.session.chatSettings());
         final var activeModel = ellipsize(statusModel, 40);
@@ -6487,14 +6509,22 @@ public class TuiCommand implements Runnable {
         final var height = Math.min(Math.max(14, frame.height() * 4 / 5), frame.height());
         final var rect = Modal.rect(frame, width, height, 0.1);
         final var running = entry.running();
+        final var glyph =
+                running || entry.pending() ? glyphs.running() : entry.failed() ? glyphs.cross() : glyphs.check();
         final var title = " "
-                + (running ? glyphs.running() + " " : entry.failed() ? glyphs.cross() + " " : "")
-                + entry.name() + (running ? " - running " : " - full output ");
+                + glyph + " "
+                + entry.name()
+                + (running ? " - running " : entry.pending() ? " - pending " : " - full output ");
         final var inner = modal(
                 frame,
                 rect,
                 title,
-                Color.hex(running ? palette.textMuted() : entry.failed() ? palette.error() : palette.success()));
+                Color.hex(
+                        running
+                                ? palette.textMuted()
+                                : entry.pending()
+                                        ? palette.warning()
+                                        : entry.failed() ? palette.error() : palette.success()));
         if (inner == null) {
             return;
         }

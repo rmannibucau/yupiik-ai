@@ -46,6 +46,18 @@ class WebEventDtoTest {
         assertEquals("write_file", finished.message());
         assertEquals("ok", finished.data().get("output"));
         assertEquals(true, finished.data().get("success"));
+        assertEquals(false, finished.data().get("pending"));
+    }
+
+    @Test
+    void pendingToolFinishedCarriesThePendingFlag() {
+        // a pending tool (e.g. a collect wait that timed out) must surface as pending so the web chip
+        // renders it neutral rather than a hard failure
+        final var finished = WebEventDto.of(
+                new AgentEvent.ToolFinished("check_subagents", "pending", false, true, 3, "s1", null, null));
+        assertEquals("tool-finished", finished.type());
+        assertEquals(false, finished.data().get("success"));
+        assertEquals(true, finished.data().get("pending"));
     }
 
     @Test

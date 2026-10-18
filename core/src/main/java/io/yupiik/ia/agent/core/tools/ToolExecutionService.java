@@ -104,7 +104,9 @@ public class ToolExecutionService {
         }
         emitter.emit(new AgentEvent.ToolTimingEvent(
                 tool.name(), durationMs, durationMs, false, ctx.sessionId(), ctx.subagentId(), ctx.subagentName()));
-        return new ToolResult(result.success(), output);
+        // preserve the tri-state (OK/PENDING/ERROR) so a PENDING result is not collapsed to ERROR:
+        // use the status-preserving copy rather than the legacy boolean constructor.
+        return new ToolResult(result.status(), output);
     }
 
     private String optimizeOutput(

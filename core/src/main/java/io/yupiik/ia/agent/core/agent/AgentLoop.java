@@ -1243,8 +1243,9 @@ public class AgentLoop {
 
     /** Builds a ToolFinished event; the ordinal registration was already cleaned up at execution end. */
     private AgentEvent.ToolFinished toolFinished(
-            final String name, final String output, final boolean success, final long ordinal) {
-        return new AgentEvent.ToolFinished(name, output, success, ordinal, currentSessionId, subagentId, subagentName);
+            final String name, final String output, final boolean success, final boolean pending, final long ordinal) {
+        return new AgentEvent.ToolFinished(
+                name, output, success, pending, ordinal, currentSessionId, subagentId, subagentName);
     }
 
     private AgentEvent.UsageUpdated usageUpdated(
@@ -1397,6 +1398,9 @@ public class AgentLoop {
                     userInjected = true;
                     continue;
                 }
+                // a finished sub-agent's result is pushed into this (parent) turn's context here, at the
+                // round boundary, so the model's next round sees the child's completion inline.
+                integrateSubagentDeliveries(sessionId, messages);
                 // user/tool-requested context operations (manage_context, /compact while busy) are
                 // applied at the first safe checkpoint of the turn, at most one per turn
                 if (!toolDirectiveApplied && contextView != null) {
@@ -2013,6 +2017,39 @@ public class AgentLoop {
     }
 
     /**
+     * Drains the {@link SubagentDeliveryBus} for this parent session and injects each finished
+     * sub-agent's result as a {@code user}-role {@code <subagent ...>...</subagent>} message, so the
+     * parent model's next round sees the child's completion. Only the parent loop (the one with a null
+     * {@code subagentId}) drains: a child AgentLoop shares the same session id but must never receive
+     * its own siblings' results. The injected message rides in the in-loop {@code messages} list and is
+     * persisted through the same {@code sessionStore} so it survives compaction/pruning and is pruned by
+     * {@link #purgeDeliveredSubagents(List)} once old.
+     */
+    private void integrateSubagentDeliveries(final String sessionId, final List<Message> messages) {
+        if (subagentId != null) {
+            return; // a nested sub-agent never consumes its parent's deliveries
+        }
+        final var deliveries = SubagentDeliveryBus.get().drain(sessionId);
+        if (deliveries.isEmpty()) {
+            return;
+        }
+        for (final var delivery : deliveries) {
+            final var text = delivery.message();
+            messages.add(Message.user(text));
+            sessionStore.append(
+                    sessionId,
+                    SessionEntry.of(clock.millis(), "user", text, null, null, null, identityOthers(currentAgentName)));
+            emit(new AgentEvent.SubagentDelivered(
+                    delivery.summary(),
+                    delivery.success(),
+                    delivery.cancelled(),
+                    sessionId,
+                    delivery.subagentId(),
+                    delivery.name()));
+        }
+    }
+
+    /**
      * Whether a normalized stream finish reason means the reply was cut by the output token budget:
      * the dialects map Anthropic {@code max_tokens} and OpenAI {@code length} to {@code length}.
      */
@@ -2209,6 +2246,10 @@ public class AgentLoop {
         if (p.purgeFailedToolInputs()) {
             purged = purgeFailedToolInputs(messages);
         }
+        var delivered = 0;
+        if (p.purgeDeliveredSubagents()) {
+            delivered = purgeDeliveredSubagents(messages);
+        }
         if (deduped > 0) {
             emit(compacted("dedup", "CLEARED"));
         }
@@ -2218,7 +2259,10 @@ public class AgentLoop {
         if (purged > 0) {
             emit(compacted("purge-errors", "CLEARED"));
         }
-        return deduped > 0 || superseded > 0 || purged > 0;
+        if (delivered > 0) {
+            emit(compacted("purge-subagents", "CLEARED"));
+        }
+        return deduped > 0 || superseded > 0 || purged > 0 || delivered > 0;
     }
 
     /** Tools whose calls/results are never deduplicated, superseded or input-purged (state/decisions). */
@@ -2423,6 +2467,71 @@ public class AgentLoop {
                 messages.set(i, replaceToolCall(messages.get(i), call.id(), newCall));
                 purged++;
             }
+        }
+        return purged;
+    }
+
+    /**
+     * Truncates old delivered <subagent> blocks to their first line (the sessionID/state/description
+     * metadata), keeping the "what just finished" signal without retaining the whole summary. The
+     * {@code last two} deliveries are always kept verbatim so the model still sees the most recent
+     * completed sub-agent's full outcome. Returns the number of blocks truncated.
+     */
+    int purgeDeliveredSubagents(final List<Message> messages) {
+        if (!configuration.pruning().purgeDeliveredSubagents()) {
+            return 0;
+        }
+        final var turns = configuration.pruning().purgeDeliveredSubagentsTurns();
+        // locate delivered blocks (user-role messages opened by the <subagent marker) and index them
+        final var delivered = new java.util.ArrayList<Integer>();
+        for (int i = 0; i < messages.size(); i++) {
+            final var m = messages.get(i);
+            final var content = m.content();
+            if (m.role() != null
+                    && "user".equals(m.role())
+                    && content instanceof String s
+                    && s.startsWith("<subagent ")) {
+                delivered.add(i);
+            }
+        }
+        if (delivered.size() <= 2) {
+            return 0; // always keep the last two verbatim
+        }
+        var purged = 0;
+        final int keepLast = 2;
+        for (var k = 0; k < delivered.size() - keepLast; k++) {
+            final var idx = delivered.get(k);
+            final var message = messages.get(idx);
+            // count user turns strictly after this block
+            var userTurnsAfter = 0;
+            for (int j = idx + 1; j < messages.size(); j++) {
+                if ("user".equals(messages.get(j).role())) {
+                    userTurnsAfter++;
+                }
+            }
+            if (turns > 0 && userTurnsAfter < turns) {
+                continue;
+            }
+            final var content = message.content() instanceof String s2 ? s2 : "";
+            final var nl = content.indexOf('\n');
+            if (nl <= 0) {
+                continue; // nothing to truncate (single-line already)
+            }
+            final var metadataLine = content.substring(0, nl);
+            final var compact = metadataLine + "\n[delivered sub-agent content pruned; see /subagents "
+                    + Integer.toHexString(content.hashCode()) + "]";
+            // Message is immutable: swap in a rebuilt message with the compacted body, keeping every
+            // other field (role user) unchanged so the block is still a plain delivered message.
+            messages.set(
+                    idx,
+                    new Message(
+                            message.role(),
+                            compact,
+                            message.name(),
+                            message.toolCalls(),
+                            message.toolCallId(),
+                            message.others()));
+            purged++;
         }
         return purged;
     }
@@ -2735,6 +2844,7 @@ public class AgentLoop {
             String name,
             String output,
             boolean success,
+            boolean pending,
             boolean persist,
             List<String> paths,
             long durationMs,
@@ -2747,12 +2857,41 @@ public class AgentLoop {
                 final String name,
                 final String output,
                 final boolean success,
+                final boolean pending,
                 final boolean persist,
                 final List<String> paths,
                 final long durationMs,
                 final boolean informative,
                 final List<String> coverage) {
-            this(callId, name, output, success, persist, paths, durationMs, informative, coverage, false);
+            this(callId, name, output, success, pending, persist, paths, durationMs, informative, coverage, false);
+        }
+
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist,
+                final List<String> paths,
+                final long durationMs,
+                final boolean informative,
+                final List<String> coverage) {
+            this(callId, name, output, success, false, persist, paths, durationMs, informative, coverage);
+        }
+
+        // refused-carrying 10-arg form (the model-loop doom-guard refusal path); pending is false
+        ToolOutcome(
+                final String callId,
+                final String name,
+                final String output,
+                final boolean success,
+                final boolean persist,
+                final List<String> paths,
+                final long durationMs,
+                final boolean informative,
+                final List<String> coverage,
+                final boolean refused) {
+            this(callId, name, output, success, false, persist, paths, durationMs, informative, coverage, refused);
         }
 
         ToolOutcome(
@@ -2860,7 +2999,7 @@ public class AgentLoop {
         }
         final var repeated = repeats.rejectIfRepeated(call, this::normalizedArguments);
         if (repeated != null) {
-            emit(toolFinished(repeated.name(), repeated.output(), false, -1));
+            emit(toolFinished(repeated.name(), repeated.output(), false, false, -1));
             return repeated;
         }
         return runTool(call, cancelled, settings);
@@ -3188,14 +3327,14 @@ public class AgentLoop {
         if (tool == null) {
             final var diagnostic = "Unknown tool: " + name;
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, unknownToolDiagnostic(name), false, ordinal));
+            emit(toolFinished(name, unknownToolDiagnostic(name), false, false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         final var childToolCeiling = effectiveAllowedTools();
         if (childToolCeiling != null && !childToolCeiling.contains(name)) {
             final var diagnostic = "Tool is not allowed for this agent run: " + name;
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, diagnostic, false, ordinal));
+            emit(toolFinished(name, diagnostic, false, false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         // a tool that is served but was NOT offered in the current request's wire list must not be executed:
@@ -3211,7 +3350,7 @@ public class AgentLoop {
                 && served.contains(name)) {
             final var modeDenial = hiddenToolDiagnostic(name);
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, modeDenial, false, ordinal));
+            emit(toolFinished(name, modeDenial, false, false, ordinal));
             return new ToolOutcome(call.id(), name, modeDenial, false, false);
         }
         final Map<String, Object> args;
@@ -3221,14 +3360,14 @@ public class AgentLoop {
         } catch (final RuntimeException e) {
             final var diagnostic = "Invalid tool arguments JSON: " + argsJson;
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, diagnostic, false, ordinal));
+            emit(toolFinished(name, diagnostic, false, false, ordinal));
             return new ToolOutcome(call.id(), name, diagnostic, false, false);
         }
         emit(toolStarted(name, argsJson, ordinal));
         final var gateDenial = gateTool(name, tool, args, call.id());
         if (gateDenial != null) {
             unregisterRunningTool(ordinal);
-            emit(toolFinished(name, gateDenial, false, ordinal));
+            emit(toolFinished(name, gateDenial, false, false, ordinal));
             return new ToolOutcome(call.id(), name, gateDenial, false, false);
         }
         final var toolStartNanos = precisionDurationMarker.now();
@@ -3241,16 +3380,19 @@ public class AgentLoop {
             // the turn keeps running after a per-call cancel: only the tool result is marked
         }
         final var toolDurationMs = (precisionDurationMarker.now() - toolStartNanos) / 1_000_000;
-        emit(toolFinished(name, result.output(), result.success(), ordinal));
+        emit(toolFinished(name, result.output(), result.success(), result.pending(), ordinal));
         return new ToolOutcome(
                 call.id(),
                 name,
                 result.output(),
                 result.success(),
+                result.pending(),
                 true,
                 touchedPaths(name, args),
                 toolDurationMs,
-                true,
+                // a pending result is not "new informative work" nor a failure: the model must not
+                // count a still-growing subagent wait as an exploration round or a signal to retry
+                !result.pending(),
                 coverageKeys(name, args));
     }
 
@@ -3372,7 +3514,8 @@ public class AgentLoop {
         // Computed before the message is appended: onLanded scans messages WITHOUT this result.
         final var stalePaths = staleReads.onLanded(messages, outcome);
         final var output = capIngestionOutput(stalePaths.isEmpty() ? raw : raw + staleNote(stalePaths));
-        messages.add(Message.tool(outcome.callId(), output, !outcome.success()));
+        final var isError = !outcome.success() && !outcome.pending();
+        messages.add(Message.tool(outcome.callId(), output, isError));
         // a round is informative when at least one result is new (same call, different output) or
         // a write succeeded: used by the no-progress termination (P2). Refused doom-loop calls are
         // explicitly non-informative (their diagnostic output would otherwise look "new"), and never
@@ -3421,7 +3564,9 @@ public class AgentLoop {
                             null,
                             outcome.callId(),
                             outcome.name(),
-                            outcome.success() ? null : Map.of("is_error", true)));
+                            // a pending tool is not a failure: the ephemeral "still running" result must
+                            // not be pruned as a failed tool input nor flagged as an error
+                            (!outcome.success() && !outcome.pending()) ? Map.of("is_error", true) : null));
         }
         if (!stalePaths.isEmpty()) {
             emit(status("invalidated " + stalePaths.size() + " stale read(s) of modified files"));

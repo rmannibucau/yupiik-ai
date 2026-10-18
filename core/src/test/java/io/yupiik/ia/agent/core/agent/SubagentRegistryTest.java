@@ -156,11 +156,80 @@ class SubagentRegistryTest {
 
     @Test
     void updateSemaphoreRecalculatesOnProviderChange() {
+        // the subagent budget is a process-local cap (number of simultaneous AgentLoops), not the
+        // provider's in-flight LLM budget - the shared client queues any LLM overflow, so there is
+        // no "minus one" reservation for the main session.
         final var registry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "3")), providerManager(2));
-        assertEquals(1, registry.maxConcurrent()); // min(2-1, 3) = 1
+        assertEquals(2, registry.maxConcurrent()); // min(2, 3) = 2
         final var newRegistry =
                 new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "3")), providerManager(5));
-        assertEquals(3, newRegistry.maxConcurrent()); // min(5-1, 3) = 3
+        assertEquals(3, newRegistry.maxConcurrent()); // min(5, 3) = 3
+    }
+
+    @Test
+    void updateSemaphoreBoundedByConfigAndProvider() {
+        // config cap is the binding constraint
+        final var cfgBounded =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "1")), providerManager(10));
+        assertEquals(1, cfgBounded.maxConcurrent()); // min(10, 1) = 1
+
+        // provider cap is the binding constraint
+        final var providerBounded =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "10")), providerManager(2));
+        assertEquals(2, providerBounded.maxConcurrent()); // min(2, 10) = 2
+
+        // provider with no explicit cap (maxConcurrent < 0) falls back to the global yca.llm.maxConcurrent
+        // (default 4 here); config cap wins over both
+        final var fallbackModelMax =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(-1));
+        assertEquals(2, fallbackModelMax.maxConcurrent()); // min(4, 2) = 2 via the llm fallback
+
+        // a provider budget of exactly the config cap keeps the cap, no longer degraded by -1
+        final var equal = new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(2));
+        assertEquals(2, equal.maxConcurrent()); // min(2, 2) = 2
+    }
+
+    @Test
+    void startSucceedsWithOneProviderSlot() {
+        // with provider maxConcurrent=1 the registry still allows one subagent: the shared client
+        // queues the LLM request rather than reserving the only slot for the (possibly idle) main.
+        final var registry =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "4")), providerManager(1));
+        assertEquals(1, registry.maxConcurrent()); // min(1, 4) = 1
+        assertTrue(registry.start("parent", "t1").isPresent());
+    }
+
+    @Test
+    void collectReturnsResultEvenAfterStateEvictedByCleanup() {
+        // the get -> collect race: once done states exceed maxCompletedStates, cleanup() evicts them
+        // from the subagents map, but collect must still return the finished result via the cache.
+        // provider=2, subagents=2 -> maxConcurrent=min(2,2)=2, maxCompletedStates=max(3,6)=6.
+        final var registry =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(2));
+        // complete more subagents than maxCompletedStates (6) so cleanup() LRU-evicts the oldest done
+        // state from the map. Each start acquires a permit and each complete releases it, so 10 cycles run.
+        final var ids = new java.util.ArrayList<String>();
+        for (int i = 0; i < 10; i++) {
+            final var s = registry.start("parent", "task" + i).orElseThrow();
+            ids.add(s.id());
+            registry.complete(s.id(), SubagentRegistry.SubagentResult.success("done-" + s.id(), "conv", List.of()));
+        }
+        final var oldest = ids.get(0);
+        // the result-cache (bound >= 64) keeps every completed result even after the matching state
+        // was LRU-evicted from the bounded state map, so a delayed collect still resolves
+        final var collected = registry.collect(oldest);
+        assertTrue(collected.isPresent(), "collect must return an evicted-but-uncollected result: " + oldest);
+        assertEquals("done-" + oldest, collected.get().summary());
+    }
+
+    @Test
+    void collectIsOneShot() {
+        final var registry =
+                new SubagentRegistry(config(Map.of("yca.subagents.maxConcurrent", "2")), providerManager(5));
+        final var state = registry.start("parent", "task").orElseThrow();
+        registry.complete(state.id(), SubagentRegistry.SubagentResult.success("done", "conv", List.of()));
+        assertTrue(registry.collect(state.id()).isPresent(), "first collect returns the result");
+        assertTrue(registry.collect(state.id()).isEmpty(), "second collect is empty (one-shot)");
     }
 }

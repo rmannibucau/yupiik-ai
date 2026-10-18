@@ -29,7 +29,14 @@ import java.util.regex.Pattern;
  * full outputs, {@code -1} when absent).
  */
 public record ToolCard(
-        String name, String args, String output, boolean failed, long elapsedMs, boolean running, long ordinal) {
+        String name,
+        String args,
+        String output,
+        boolean failed,
+        boolean pending,
+        long elapsedMs,
+        boolean running,
+        long ordinal) {
     private static final Pattern DURATION = Pattern.compile("\\(\\s*(?:#(\\d+)\\s*,\\s*)?(\\d+)\\s*ms\\s*\\)");
     /** Trailing {@code (#n)} ordinal suffix of a live running-tool header. */
     private static final Pattern RUNNING_ORDINAL = Pattern.compile("^(.*)\\(\\s*#(\\d+)\\s*\\)\\s*$");
@@ -41,6 +48,7 @@ public record ToolCard(
         final var newline = text.indexOf('\n');
         final var header = newline < 0 ? text : text.substring(0, newline);
         final var failed = header.contains(" failed: ");
+        final var pending = !failed && header.contains(" still running: ");
         // live running block from ConversationTranscript.markdown(): "`<spinner> running <command>`",
         // optionally carrying a trailing "(#ordinal)" so the UI can anchor the running card
         if (!failed && header.startsWith("`")) {
@@ -58,15 +66,16 @@ public record ToolCard(
                     ordinal = -1;
                 }
             }
-            return new ToolCard(command, "", extractCode(text), false, 0, true, ordinal);
+            return new ToolCard(command, "", extractCode(text), false, false, 0, true, ordinal);
         }
         final var name = nameOf(header);
-        final var argsAndDuration = failed ? failedArgs(header) : successArgs(header);
+        final var argsAndDuration = failed ? failedArgs(header) : pending ? pendingArgs(header) : successArgs(header);
         return new ToolCard(
                 name,
                 argsAndDuration.args(),
                 extractCode(text),
                 failed,
+                pending,
                 argsAndDuration.elapsed(),
                 false,
                 argsAndDuration.ordinal());
@@ -97,6 +106,15 @@ public record ToolCard(
             return stripDuration(header);
         }
         return stripDuration(header.substring(idx + " failed: ".length()).strip());
+    }
+
+    /** Extracts the "still running" descriptor after the pending marker (blank when absent). */
+    private static Args pendingArgs(final String header) {
+        final var idx = header.indexOf(" still running: ");
+        if (idx < 0) {
+            return stripDuration(header);
+        }
+        return stripDuration(header.substring(idx + " still running: ".length()).strip());
     }
 
     /** Removes a trailing {@code (#NNN, NNN ms)} then any trailing asterisk from an args/error string. */

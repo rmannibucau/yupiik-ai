@@ -112,6 +112,10 @@ outcome label, see xref:#outcome-labels[Outcome labels below]):
 - `yca.pruning.purgeFailedToolInputs` (default `true`) removes the (often
   large) input of failed tool calls after `yca.pruning.purgeFailedToolInputsTurns`
   turns (default `4`), keeping the error message.
+- `yca.pruning.purgeDeliveredSubagents` (default `true`) truncates delivered
+  sub-agent `<subagent>` blocks to their sessionID/state/description line after
+  `yca.pruning.purgeDeliveredSubagentsTurns` turns (default `10`), keeping the
+  last two deliveries verbatim so the model still sees "what just finished".
 
 State-bearing tools (`write_file`, `edit_file`, `apply_patch`, `todo_*`,
 `memory_write`) are never deduplicated, superseded or input-purged.

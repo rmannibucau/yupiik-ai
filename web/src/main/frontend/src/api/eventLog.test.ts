@@ -238,6 +238,20 @@ describe('eventsToBlocks - turn boundaries settle still-running tool cards as in
     const tools = blocks.filter((b) => b.kind === 'tool');
     expect(tools[0]).toMatchObject({ state: 'done', success: true });
   });
+
+  it('a pending tool-finished is done-but-pending (renders neutral, not a failure)', () => {
+    const blocks = eventsToBlocks([
+      ev({ type: 'tool-started', sessionId: 's1', message: 'check_subagents' }),
+      ev({
+        type: 'tool-finished',
+        sessionId: 's1',
+        message: 'check_subagents',
+        data: { ordinal: 1, output: '{"status":"pending"}', success: false, pending: true },
+      }),
+    ]);
+    const tools = blocks.filter((b) => b.kind === 'tool');
+    expect(tools[0]).toMatchObject({ state: 'done', success: false, pending: true });
+  });
 });
 
 describe('eventsToBlocks - turn-done supersedes the streamed tail (never appends)', () => {

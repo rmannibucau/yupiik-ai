@@ -57,6 +57,14 @@ class ToolCardTest {
     }
 
     @Test
+    void parsesPendingCardAsNeutralNotFailed() {
+        final var card = ToolCard.parse("> tool `check_subagents` still running: {\"status\":\"pending\"} (#3)");
+        assertTrue(card.pending(), "a 'still running' header parses as pending");
+        assertFalse(card.failed(), "a pending tool is not a failure");
+        assertTrue(card.args().contains("pending"));
+    }
+
+    @Test
     void parsesStarlessDuration() {
         final var card = ToolCard.parse("*streaming `git diff`: --stat* (5 ms)\n\n```text\n 1 file changed\n```");
         assertEquals("git diff", card.name());

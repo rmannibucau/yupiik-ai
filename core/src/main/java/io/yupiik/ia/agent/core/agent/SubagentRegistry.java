@@ -20,6 +20,8 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.shell.ConversationTranscript;
 import io.yupiik.ia.agent.core.shell.SpeakerLabels;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -28,13 +30,30 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Logger;
 
 @ApplicationScoped
 public class SubagentRegistry {
+    private static final Logger LOGGER = Logger.getLogger(SubagentRegistry.class.getName());
+
     private final CodingAgentConfiguration configuration;
     private final ProviderManager providerManager;
     private final Map<String, SubagentState> subagents = new ConcurrentHashMap<>();
     private final Map<String, ConversationTranscript> subagentTranscripts = new ConcurrentHashMap<>();
+    /**
+     * Completed sub-agent results keyed by sub-agent id. Kept separately from {@link #subagents} so
+     * {@code collect} can still return a finished result even after the state was LRU-evicted from
+     * {@link #subagents} (the {@code get -> collect} race). Bounded (via an insertion-ordered eviction
+     * policy) above the state-map bound so a result whose state was just evicted survives a delayed collect.
+     */
+    private final Map<String, SubagentResult> completedResults =
+            Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(final Map.Entry<String, SubagentResult> eldest) {
+                    return size() > Math.max(maxCompletedStates(), 64);
+                }
+            });
+
     private final AtomicInteger activeCount = new AtomicInteger(0);
     private volatile Semaphore semaphore;
     private volatile int maxConcurrent;
@@ -71,10 +90,20 @@ public class SubagentRegistry {
                         ? configuration.llm().maxConcurrent()
                         : -1);
 
+        // Process-local subagent budget (number of simultaneous Subagent AgentLoops), independent of
+        // the provider's in-flight LLM budget enforced by the shared ChatClient: an AgentLoop spends
+        // most of its wall-clock in tool execution, so provider.maxConcurrent is no longer "minus one"
+        // (the main session can be idle while a child runs) - the shared client queues any LLM overflow.
         int effectiveModelMax = modelMax > 0 ? modelMax : Integer.MAX_VALUE;
-        int actualMax = Math.min(effectiveModelMax - 1, configMax);
+        int actualMax = Math.min(effectiveModelMax, configMax);
         this.maxConcurrent = Math.max(0, actualMax);
         this.semaphore = this.maxConcurrent > 0 ? new Semaphore(this.maxConcurrent) : null;
+        if (this.maxConcurrent > 0 && modelMax > 0 && this.maxConcurrent > 2L * modelMax) {
+            LOGGER.warning(
+                    () -> "subagents.maxConcurrent=" + this.maxConcurrent + " exposes more simultaneous AgentLoops "
+                            + "than the provider LLM budget can serve (provider.maxConcurrent=" + modelMax
+                            + "): most subagents will queue on the shared client until an LLM permit frees.");
+        }
     }
 
     public int maxConcurrent() {
@@ -128,6 +157,7 @@ public class SubagentRegistry {
             if (semaphore != null) {
                 semaphore.release();
             }
+            completedResults.put(subagentId, result);
         }
         cleanup();
     }
@@ -202,24 +232,25 @@ public class SubagentRegistry {
     public Optional<SubagentResult> collect(final String subagentId) {
         final var state = subagents.remove(subagentId);
         if (state != null && state.isDone()) {
+            completedResults.remove(subagentId);
             return Optional.ofNullable(state.result());
         }
-        return Optional.empty();
+        // the state may have been LRU-evicted from the (bounded) subagents map by a concurrent
+        // complete() of another child in the get->collect window; the result cache still holds the
+        // finished outcome so a delayed collect is never a spurious "no result".
+        return Optional.ofNullable(completedResults.remove(subagentId));
     }
 
     public Optional<SubagentState> get(final String subagentId) {
-        cleanup();
         return Optional.ofNullable(subagents.get(subagentId));
     }
 
     public List<SubagentState> listActive() {
-        cleanup();
         return subagents.values().stream().filter(s -> !s.isDone()).toList();
     }
 
     /** Every tracked subagent of a parent session (running and recently completed). */
     public List<SubagentState> listAll(final String parentSessionId) {
-        cleanup();
         return subagents.values().stream()
                 .filter(s -> parentSessionId == null || parentSessionId.equals(s.parentSessionId()))
                 .sorted((a, b) -> Long.compare(a.startedAt(), b.startedAt()))

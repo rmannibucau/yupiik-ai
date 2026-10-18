@@ -244,6 +244,44 @@ class AgentLoopTest {
     }
 
     @Test
+    void subagentCompletionIsPushedIntoParentContext() {
+        // a finished sub-agent's result delivered through the bus must land in the parent's next LLM
+        // request (as a user-role <subagent> message), so the parent never has to poll for it.
+        final var replies = new ArrayDeque<>(List.of(new ScriptedReply("ok done", "stop", false)));
+        final var requests = new ArrayList<List<Message>>();
+        SubagentDeliveryBus.get()
+                .deliver("s1", new SubagentDeliveryBus.Delivery("child-1", "childName", "the summary", true, false));
+        try {
+            final var result = loop(chatClient(replies, requests), null, configuration(true))
+                    .run("do it", null, "s1", null, () -> false);
+            assertEquals("ok done", result);
+            assertFalse(requests.isEmpty(), "a request must have been sent");
+            final var injected = requests.getFirst().stream()
+                    .filter(m -> m.content() instanceof String s && s.startsWith("<subagent "))
+                    .findFirst();
+            assertTrue(injected.isPresent(), "the parent request must carry the injected <subagent> block");
+            assertTrue(injected.get().content().toString().contains("the summary"));
+            assertTrue(injected.get().content().toString().contains("child-1"));
+        } finally {
+            SubagentDeliveryBus.get().drain("s1"); // keep the static bus clean for other tests
+        }
+    }
+
+    @Test
+    void deliveryMessageShapeAndIdempotency() {
+        final var d = SubagentDeliveryBus.get();
+        final var normal = new SubagentDeliveryBus.Delivery("c", "name", "sum", true, false).message();
+        assertTrue(normal.contains("<subagent sessionID=\"c\" state=\"completed\""));
+        assertTrue(normal.contains("sum"));
+        final var cancelled = new SubagentDeliveryBus.Delivery("c", "n", "sum", false, true).message();
+        assertTrue(cancelled.contains("state=\"cancelled\""));
+        // same subagent id delivered twice stays once
+        d.deliver("sX", new SubagentDeliveryBus.Delivery("dupe", "n", "one", true, false));
+        d.deliver("sX", new SubagentDeliveryBus.Delivery("dupe", "n", "two", true, false));
+        assertEquals(1, d.drain("sX").size(), "a duplicate delivery for the same child is deduplicated");
+    }
+
+    @Test
     void truncatedReplyGivesUpAfterCapWithAnErrorNotice() {
         final var replies = new ArrayDeque<ScriptedReply>();
         for (var i = 0; i < 5; i++) {
@@ -3727,6 +3765,25 @@ class AgentLoopTest {
         assertEquals(1, loop.purgeFailedToolInputs(messages));
         assertEquals("{}", messages.get(0).toolCalls().get(0).function().arguments());
         assertEquals("boom", String.valueOf(messages.get(1).content()), "the error result must survive");
+    }
+
+    @Test
+    void oldDeliveredSubagentBlocksAreTruncatedButRecentKept() {
+        final var loop = loop(
+                scriptedToolClient(new ArrayList<>(), List.of()),
+                null,
+                configuration(true, Map.of("yca.pruning.purgeDeliveredSubagentsTurns", "0")));
+        final var messages = new ArrayList<Message>();
+        for (int i = 0; i < 4; i++) {
+            messages.add(Message.user("<subagent sessionID=\"c" + i + "\" state=\"completed\" description=\"name\">\n"
+                    + "long summary body " + i + "\n</subagent>"));
+        }
+        // 4 deliveries, last 2 kept verbatim -> 2 truncated
+        assertEquals(2, loop.purgeDeliveredSubagents(messages));
+        assertTrue(messages.get(0).content().toString().contains("[delivered sub-agent content pruned"));
+        assertTrue(messages.get(1).content().toString().contains("[delivered sub-agent content pruned"));
+        assertTrue(messages.get(2).content().toString().contains("long summary body 2"), "third (recent) kept");
+        assertTrue(messages.get(3).content().toString().contains("long summary body 3"), "fourth (recent) kept");
     }
 
     @Test

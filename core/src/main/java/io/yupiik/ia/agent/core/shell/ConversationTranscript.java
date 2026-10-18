@@ -362,6 +362,7 @@ public class ConversationTranscript {
                         String name,
                         String output,
                         boolean success,
+                        boolean pending,
                         long eventOrdinal,
                         String sessionId,
                         String subagentId,
@@ -418,7 +419,7 @@ public class ConversationTranscript {
                         .append(TOOL_END)
                         .append('\n');
             }
-            if (!success) {
+            if (!success && !pending) {
                 transcript
                         .append("\n\n")
                         .append(TOOL_BEGIN)
@@ -431,6 +432,22 @@ public class ConversationTranscript {
                         .append(", ")
                         .append(elapsedMs)
                         .append(" ms)\n")
+                        .append(TOOL_END)
+                        .append('\n');
+            } else if (pending) {
+                // a pending tool (e.g. check_subagents collect that timed out) is NOT a failure: render
+                // a neutral "still running" marker so the transcript never reads as a red error, while
+                // the tool card still exposes the pending output the model needs
+                transcript
+                        .append("\n\n")
+                        .append(TOOL_BEGIN)
+                        .append("\n> tool `")
+                        .append(name)
+                        .append("` still running: ")
+                        .append(firstLine(output))
+                        .append(" (#")
+                        .append(ordinal)
+                        .append(")\n")
                         .append(TOOL_END)
                         .append('\n');
             }

@@ -1457,11 +1457,11 @@ class TuiCommandRenderTest {
     }
 
     @Test
-    void busyLabelShowsOnlyOnTheCallLineNotOnTheStatusStrip() throws Exception {
-        // regression: while busy the same busy label (calling <tool> / thinking (Ns) / working...)
-        // used to be rendered on the call line AND repeated as the leading segment of the always-
-        // visible status strip directly below it. The label now lives only on the call line
-        // (renderCalling); the status strip starts directly with mode/model and must not duplicate it.
+    void statusStripStaysNonBlankAndDoesNotRepeatTheCallLineLabel() throws Exception {
+        // The strip must NEVER read blank while the agent is active or not finished. The animated
+        // phase label (calling <tool> / thinking (Ns) / agent is working...) lives only on the call
+        // line (renderCalling) right above the strip; the strip carries a steady "working" word so
+        // it is never blank AND never duplicates the exact busy label shown on the call line.
         final var shellRegistry = testRegistry();
         final var turnStarted = new CountDownLatch(1);
         final var releaseTurn = new CountDownLatch(1);
@@ -1518,6 +1518,11 @@ class TuiCommandRenderTest {
                 assertFalse(
                         lines[stripRow].contains("calling mvn test"),
                         "the always-visible status strip must not repeat the busy label shown on the call line:\n"
+                                + backend.text());
+                assertTrue(
+                        lines[stripRow].contains("working"),
+                        "the always-visible status strip must never be blank while the agent is active (expected a steady "
+                                + "'working' word):\n"
                                 + backend.text());
                 releaseTurn.countDown();
                 quit();
@@ -3432,11 +3437,12 @@ class TuiCommandRenderTest {
     }
 
     /**
-     * Same as {@link #configuration()} but with sub-agents enabled and enough
-     * headroom for the main agent (the effective limit is the model's max
-     * concurrency minus one): the default test config pins
-     * {@code yca.llm.maxConcurrent=1}, which makes {@code SubagentRegistry}
-     * compute zero free slots.
+     * Same as {@link #configuration()} but with sub-agents enabled and headroom
+     * for running them: the effective limit is the minimum of the model's
+     * max concurrency and the configured subagent cap (a process-local budget;
+     * the shared LLM client queues any overflow). The default test config
+     * {@code yca.llm.maxConcurrent=4} with {@code yca.subagents.maxConcurrent=4}
+     * leaves slots free.
      */
     private CodingAgentConfiguration subagentConfiguration() {
         final var map = new HashMap<String, String>();

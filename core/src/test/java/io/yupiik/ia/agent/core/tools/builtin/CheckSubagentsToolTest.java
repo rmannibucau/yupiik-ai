@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.ProviderConfiguration;
 import io.yupiik.ia.agent.core.configuration.TestConfigs;
 import io.yupiik.ia.agent.core.llm.ApiFlavor;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Path;
@@ -114,13 +115,49 @@ class CheckSubagentsToolTest {
     }
 
     @Test
-    void collectFailsWhenStillRunning(final JsonMapper mapper) {
+    void collectReturnsPendingWhenStillRunning(final JsonMapper mapper) {
         final var reg = registry(config(Map.of()));
         final var state = reg.start("parent", "task").orElseThrow();
         final var tool = new CheckSubagentsTool(reg, mapper);
-        final var result = tool.execute(Map.of("action", "collect", "subagent_id", state.id()));
+        // a still-running sub-agent must NOT surface as a hard error: with a short max_wait_ms the
+        // collect returns a neutral "pending" result the model can act on (proceed or retry later).
+        final var result = tool.execute(Map.of("action", "collect", "subagent_id", state.id(), "max_wait_ms", "100"));
         assertFalse(result.success(), result.output());
-        assertTrue(result.output().contains("still running"));
+        assertTrue(result.pending(), "a still-running collect must be pending, not an error: " + result.output());
+        assertTrue(result.output().contains("\"status\":\"pending\""));
+    }
+
+    @Test
+    void collectInterruptsOnCancelledProbe(final JsonMapper mapper) {
+        final var reg = registry(config(Map.of()));
+        final var state = reg.start("parent", "task").orElseThrow();
+        final var tool = new CheckSubagentsTool(reg, mapper);
+        // the turn's cancellation probe (not per-call) aborts the blocking collect early and returns
+        // a clean "cancelled" result rather than failing or waiting the whole max_wait_ms
+        final var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        final var context = ToolContext.empty();
+        final var ctx = new ToolContext(
+                context.sessionId(),
+                context.subagentId(),
+                context.subagentName(),
+                context.permissions(),
+                context.feedback(),
+                context.todos(),
+                context.statusReporter(),
+                context.usage(),
+                context.contextView(),
+                cancelled::get,
+                context.settings(),
+                context.callCancelled(),
+                context.projectDir(),
+                context.ordinal(),
+                context.allowedTools());
+        cancelled.set(true);
+        final var result =
+                tool.execute(Map.of("action", "collect", "subagent_id", state.id(), "max_wait_ms", "5000"), ctx);
+        // the turn cancelled: the collect reports it cleanly (ok, status=cancelled), not as a failure
+        assertTrue(result.success(), result.output());
+        assertTrue(result.output().contains("\"status\":\"cancelled\""));
     }
 
     @Test

@@ -310,6 +310,9 @@ public class CompactionCoordinator {
             out.addAll(leadingSystem);
             out.add(Message.user(
                     COMPACTED_MARKER + "\n" + outcome.summary() + "\n</compacted-context>\n\n" + DIGEST_GUIDANCE));
+            // high-recall anchoring: delivered <subagent> blocks in the summarized region are kept
+            // verbatim right after the digest so a sub-agent's outcome is never paraphrased away.
+            out.addAll(subagentBlocks(messages.subList(from, boundary)));
             out.addAll(messages.subList(boundary, messages.size()));
             final var lastUser = lastUserMessageIndex(messages);
             if (lastUser >= 0 && lastUser < boundary) {
@@ -413,6 +416,22 @@ public class CompactionCoordinator {
             return content.substring(bodyStart + 1, end).strip();
         }
         return null;
+    }
+
+    /**
+     * The delivered {@code <subagent ...>...</subagent>} user messages in a region, in order. Kept
+     * verbatim through compaction so a sub-agent's outcome survives the summarizer (a high-recall
+     * anchor: never paraphrased away, only pruned by {@code purgeDeliveredSubagents} once old).
+     */
+    private static List<Message> subagentBlocks(final List<Message> region) {
+        final var out = new java.util.ArrayList<Message>();
+        for (final var m : region) {
+            final var content = m.content() instanceof String s ? s : null;
+            if (m.role() != null && "user".equals(m.role()) && content != null && content.startsWith("<subagent ")) {
+                out.add(m);
+            }
+        }
+        return out;
     }
 
     /** Index of the last real user message (skipping compaction digests and truncation nudges), or -1. */

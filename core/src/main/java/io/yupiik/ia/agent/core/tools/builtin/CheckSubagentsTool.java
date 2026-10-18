@@ -23,12 +23,23 @@ import io.yupiik.ia.agent.core.agent.SubagentRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
 import io.yupiik.ia.agent.core.tools.Schemas;
 import io.yupiik.ia.agent.core.tools.ToolCategory;
+import io.yupiik.ia.agent.core.tools.ToolContext;
 import io.yupiik.ia.agent.core.tools.ToolResult;
 import java.util.ArrayList;
 import java.util.Map;
+import java.util.function.BooleanSupplier;
 
 @ApplicationScoped
 public class CheckSubagentsTool implements EmbeddedTool {
+    /**
+     * Default bound on a blocking {@code collect} wait (ms). The model may override per call through
+     * the {@code max_wait_ms} arg; a hung sub-agent can never pin the parent turn beyond this (the
+     * call returns a {@code pending} result instead).
+     */
+    private static final long DEFAULT_MAX_WAIT_MS = 30_000L;
+
+    private static final long MAX_WAIT_CAP_MS = 300_000L;
+
     private final SubagentRegistry subagentRegistry;
     private final JsonMapper mapper;
 
@@ -49,7 +60,12 @@ public class CheckSubagentsTool implements EmbeddedTool {
 
     @Override
     public String description() {
-        return "Monitor and manage spawned sub-agents. Actions: poll (list active), collect (get result), cancel (terminate).";
+        return "Monitor and manage spawned sub-agents. "
+                + "Actions: 'poll' (list active + status), 'collect' (block up to max_wait_ms, default "
+                + DEFAULT_MAX_WAIT_MS / 1000
+                + "s, until the sub-agent finishes, then return its summary; returns status='pending' if the wait "
+                + "expires), 'cancel' (terminate). "
+                + "Prefer 'collect' over 'poll': it waits for the result instead of forcing you to retry.";
     }
 
     @Override
@@ -62,12 +78,20 @@ public class CheckSubagentsTool implements EmbeddedTool {
         return Schemas.object(
                 Map.of(
                         "action", Schemas.str("Action to perform: 'poll', 'collect', or 'cancel'."),
-                        "subagent_id", Schemas.str("Sub-agent ID (required for 'collect' and 'cancel').")),
+                        "subagent_id", Schemas.str("Sub-agent ID (required for 'collect' and 'cancel')."),
+                        "max_wait_ms",
+                                Schemas.str("Max milliseconds to block a 'collect' for a still-running "
+                                        + "sub-agent (default " + DEFAULT_MAX_WAIT_MS + ").")),
                 "action");
     }
 
     @Override
     public ToolResult execute(final Map<String, Object> args) {
+        return execute(args, ToolContext.empty());
+    }
+
+    @Override
+    public ToolResult execute(final Map<String, Object> args, final ToolContext context) {
         if (!subagentRegistry.enabled()) {
             return ToolResult.error("Sub-agents are disabled.");
         }
@@ -78,10 +102,24 @@ public class CheckSubagentsTool implements EmbeddedTool {
 
         return switch (action) {
             case "poll" -> poll();
-            case "collect" -> collect(arg(args, "subagent_id"));
+            // collect may block: honour the running turn's cancellation probe so an Esc/interrupt
+            // during the wait surfaces as a cancellation of the collect, never as a spurious failure
+            case "collect" -> collect(arg(args, "subagent_id"), maxWaitMs(args), context.cancelled());
             case "cancel" -> cancel(arg(args, "subagent_id"));
             default -> ToolResult.error("Invalid action: " + action + " (must be poll, collect, or cancel)");
         };
+    }
+
+    private long maxWaitMs(final Map<String, Object> args) {
+        final var raw = arg(args, "max_wait_ms");
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_MAX_WAIT_MS;
+        }
+        try {
+            return Math.min(Math.max(0L, Long.parseLong(raw)), MAX_WAIT_CAP_MS);
+        } catch (final NumberFormatException e) {
+            return DEFAULT_MAX_WAIT_MS;
+        }
     }
 
     private ToolResult poll() {
@@ -101,25 +139,60 @@ public class CheckSubagentsTool implements EmbeddedTool {
         }
     }
 
-    private ToolResult collect(final String subagentId) {
+    private ToolResult collect(final String subagentId, final long maxWaitMs, final BooleanSupplier cancelled) {
         if (subagentId == null || subagentId.isBlank()) {
             return ToolResult.error("subagent_id is required for collect action");
         }
-        // First check if subagent exists and its status
         final var stateOpt = subagentRegistry.get(subagentId);
         if (stateOpt.isEmpty()) {
             return ToolResult.error("Sub-agent not found: " + subagentId);
         }
         final var state = stateOpt.get();
+        // Wait for a still-running sub-agent up to maxWaitMs. The cancellation probe is the *turn*
+        // probe (not per-call) so the whole turn's interrupt terminates the wait; we never `cancel`
+        // the child here - that is owned by the parent's turn interrupt (cancelByParentSession).
         if (!state.isDone()) {
-            return ToolResult.error("Sub-agent still running: " + subagentId);
+            final long deadline = System.nanoTime() + maxWaitMs * 1_000_000L;
+            while (!state.isDone() && System.nanoTime() < deadline) {
+                if (cancelled.getAsBoolean()) {
+                    try {
+                        return ToolResult.ok(mapper.toString(
+                                Map.of("subagent_id", subagentId, "status", "cancelled", "completed", false)));
+                    } catch (final RuntimeException e) {
+                        return ToolResult.error("Failed to serialize result: " + e.getMessage());
+                    }
+                }
+                sleep(50L);
+            }
+            if (!state.isDone()) {
+                // wait expired: NOT an error - a neutral "still running" the model can act on
+                try {
+                    return ToolResult.pending(
+                            mapper.toString(
+                                    Map.of(
+                                            "subagent_id",
+                                            subagentId,
+                                            "status",
+                                            "pending",
+                                            "waited_ms",
+                                            maxWaitMs,
+                                            "hint",
+                                            "The sub-agent is still running. You will be notified automatically when it finishes; "
+                                                    + "you may proceed with other work or call collect again with a longer max_wait_ms.")));
+                } catch (final RuntimeException e) {
+                    return ToolResult.error("Failed to serialize result: " + e.getMessage());
+                }
+            }
         }
         // Now try to collect (will remove state)
         final var resultOpt = subagentRegistry.collect(subagentId);
         if (resultOpt.isEmpty()) {
             return ToolResult.error("Sub-agent has no result: " + subagentId);
         }
-        final var result = resultOpt.get();
+        return result(resultOpt.get(), subagentId);
+    }
+
+    private ToolResult result(final SubagentRegistry.SubagentResult result, final String subagentId) {
         if (result.success()) {
             try {
                 return ToolResult.ok(mapper.toString(Map.of(
@@ -136,20 +209,27 @@ public class CheckSubagentsTool implements EmbeddedTool {
             } catch (final RuntimeException e) {
                 return ToolResult.error("Failed to serialize result: " + e.getMessage());
             }
-        } else {
-            try {
-                return ToolResult.error(mapper.toString(Map.of(
-                        "subagent_id",
-                        subagentId,
-                        "error",
-                        result.error(),
-                        "status",
-                        result.status().name().toLowerCase(java.util.Locale.ROOT),
-                        "completed",
-                        true)));
-            } catch (final RuntimeException e) {
-                return ToolResult.error("Sub-agent failed: " + result.error());
-            }
+        }
+        try {
+            return ToolResult.error(mapper.toString(Map.of(
+                    "subagent_id",
+                    subagentId,
+                    "error",
+                    result.error(),
+                    "status",
+                    result.status().name().toLowerCase(java.util.Locale.ROOT),
+                    "completed",
+                    true)));
+        } catch (final RuntimeException e) {
+            return ToolResult.error("Sub-agent failed: " + result.error());
+        }
+    }
+
+    private static void sleep(final long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

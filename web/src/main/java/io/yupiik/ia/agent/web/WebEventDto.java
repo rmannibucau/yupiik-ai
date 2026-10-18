@@ -58,6 +58,7 @@ public record WebEventDto(
             case AgentEvent.Error _ -> "error";
             case AgentEvent.SubagentStarted _ -> "subagent-started";
             case AgentEvent.SubagentCompleted _ -> "subagent-completed";
+            case AgentEvent.SubagentDelivered _ -> "subagent-delivered";
             case AgentEvent.PromptIntegrated _ -> "prompt-integrated";
             case AgentEvent.ToolTimingEvent _ -> "tool-timing";
         };
@@ -82,6 +83,7 @@ public record WebEventDto(
             case AgentEvent.Error t -> t.message();
             case AgentEvent.SubagentStarted t -> t.task();
             case AgentEvent.SubagentCompleted t -> t.summary();
+            case AgentEvent.SubagentDelivered t -> t.summary();
             case AgentEvent.PromptIntegrated t -> t.text();
             case AgentEvent.ToolTimingEvent t -> t.toolName();
         };
@@ -93,7 +95,15 @@ public record WebEventDto(
             case AgentEvent.ToolStream t ->
                 Map.of("stream", true, "fragment", t.fragment() == null ? "" : t.fragment(), "ordinal", t.ordinal());
             case AgentEvent.ToolFinished t ->
-                Map.of("output", t.output() == null ? "" : t.output(), "success", t.success(), "ordinal", t.ordinal());
+                Map.of(
+                        "output",
+                        t.output() == null ? "" : t.output(),
+                        "success",
+                        t.success(),
+                        "pending",
+                        t.pending(),
+                        "ordinal",
+                        t.ordinal());
             case AgentEvent.UsageUpdated t ->
                 Map.of(
                         "promptTokens", t.usage() == null ? 0 : t.usage().promptTokens(),
@@ -128,6 +138,11 @@ public record WebEventDto(
                 Map.of(
                         "success", t.success(),
                         "cancelled", t.cancelled());
+            case AgentEvent.SubagentDelivered t ->
+                Map.of(
+                        "success", t.success(),
+                        "cancelled", t.cancelled(),
+                        "subagentId", t.subagentId() == null ? "" : t.subagentId());
             default -> Map.of();
         };
     }

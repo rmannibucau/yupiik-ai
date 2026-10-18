@@ -94,6 +94,18 @@ public record PruningConfiguration(
         int purgeFailedToolInputsTurns,
 
         @Property(
+                defaultValue = "true",
+                documentation =
+                        "Purge the full text of delivered sub-agent <subagent> blocks after purgeDeliveredSubagentsTurns user turns, keeping the sub-agent sessionID/state/description metadata line so the parent keeps 'what just finished' visible without retaining the whole summary.")
+        boolean purgeDeliveredSubagents,
+
+        @Property(
+                defaultValue = "10",
+                documentation =
+                        "Number of user turns after which a delivered sub-agent <subagent> block is truncated to its metadata line (0 = immediately; the last two deliveries are always kept verbatim).")
+        int purgeDeliveredSubagentsTurns,
+
+        @Property(
                 defaultValue = "55",
                 documentation =
                         "Soft context-usage threshold (percent of the usable window) above which, once the nudge iteration threshold is met, a short nudge is appended to the session state to invite the model to finish or to compact; 0 disables the nudge. See xref:features/context.adoc#soft-context-usage-nudge[Soft context-usage nudge].")

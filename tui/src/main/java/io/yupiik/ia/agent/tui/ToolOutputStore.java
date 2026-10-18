@@ -32,10 +32,16 @@ import java.util.Map;
  */
 public final class ToolOutputStore {
     /** Full, uncapped record of a finished tool call; {@code elapsedMs < 0} marks a still-running call. */
-    public record Entry(String name, String args, String output, boolean failed, long elapsedMs) {
+    public record Entry(String name, String args, String output, boolean failed, boolean pending, long elapsedMs) {
         /** Whether the call is still running (no final output/elapsed yet). */
         public boolean running() {
             return elapsedMs < 0;
+        }
+
+        /** Backward-compatible 5-arg form: a non-pending (terminal) tool result. */
+        public Entry(
+                final String name, final String args, final String output, final boolean failed, final long elapsedMs) {
+            this(name, args, output, failed, false, elapsedMs);
         }
     }
 

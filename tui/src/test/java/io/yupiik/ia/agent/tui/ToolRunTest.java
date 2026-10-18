@@ -26,7 +26,7 @@ class ToolRunTest {
 
     private ToolCard card(
             final long ordinal, final String name, final String args, final long elapsed, final boolean failed) {
-        return new ToolCard(name, args, "", failed, elapsed, false, ordinal);
+        return new ToolCard(name, args, "", failed, false, elapsed, false, ordinal);
     }
 
     @Test
@@ -54,7 +54,7 @@ class ToolRunTest {
         final var builder = ToolRun.builder(new ToolRun.Member(card(1, "bash", "ls", 10, false), "r1"));
         // a running (still streaming) card must not join an existing run
         assertFalse(ToolRun.of(List.of(new ToolRun.Member(card(2, "bash", "sleep 5", 0, false), "r2")))
-                .canExtend(new ToolCard("bash", "sleep 5", "", false, 0, true, 2)));
+                .canExtend(new ToolCard("bash", "sleep 5", "", false, false, 0, true, 2)));
     }
 
     @Test
@@ -69,7 +69,7 @@ class ToolRunTest {
     void canExtendRejectsRunningAndNull() {
         final var finished = ToolRun.of(List.of(new ToolRun.Member(card(1, "bash", "ls", 1, false), "r1")));
         assertTrue(finished.canExtend(card(2, "bash", "pwd", 1, false)));
-        assertFalse(finished.canExtend(new ToolCard("bash", "sleep 5", "", false, 0, true, 3)));
+        assertFalse(finished.canExtend(new ToolCard("bash", "sleep 5", "", false, false, 0, true, 3)));
         assertFalse(finished.canExtend(null));
     }
 

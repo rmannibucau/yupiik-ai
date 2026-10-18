@@ -209,6 +209,16 @@ class SpawnSubagentToolTest {
     }
 
     @Test
+    void descriptionCoachesAgainstPollingAndPromisesNotification() {
+        final var cfg = config(Map.of());
+        final var description = new SpawnSubagentTool(registry(cfg), null, null, null, cfg).description();
+        assertTrue(description.contains("you will be notified automatically"), description);
+        assertTrue(description.contains("NOT sleep"), description);
+        assertTrue(description.contains("poll"), description);
+        assertTrue(description.contains("collect"), description);
+    }
+
+    @Test
     void forwardsTheParentTurnCancellationProbe() {
         // an interrupt on the parent turn must reach the sub-agent: it would otherwise keep
         // burning tokens on an abandoned task (the registry latch stays available for a

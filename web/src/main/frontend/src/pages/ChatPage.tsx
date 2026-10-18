@@ -1732,8 +1732,10 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
   if (block.kind === 'tool') {
     const running = block.state === 'running';
     const interrupted = block.state === 'interrupted';
-    const failed = !running && !interrupted && block.success === false;
+    const pending = block.pending === true;
+    const failed = !running && !interrupted && !pending && block.success === false;
     // Issue #2/#4: a running tool shows its live stream and a spinner; a failed tool is styled red.
+    // A pending tool (still running watermark, e.g. a collect wait that timed out) is neutral, never red.
     const streamed = (block.content || '').trim();
     const shownOutput = block.output || streamed;
     // best-effort language detection for tool output syntax coloring (read_file path, bash command...).
@@ -1748,7 +1750,9 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
       <div
         className="rounded border px-3 py-1 text-[15px]"
         style={{
-          borderColor: failed
+          borderColor: pending
+            ? 'var(--yca-yellow, #e5c07b)'
+            : failed
             ? 'rgba(255, 85, 85, 0.5)'
             : running
             ? 'var(--yca-accent)'
@@ -1769,6 +1773,8 @@ const BlockView = memo(function BlockView({ block, globalCollapsed }: { block: B
             <span className="shrink-0" style={{ color: 'var(--yca-accent)' }}>▶ working…</span>
           ) : interrupted ? (
             <span className="shrink-0" style={{ color: 'var(--yca-yellow, #e5c07b)' }}>◧ interrupted</span>
+          ) : pending ? (
+            <span className="shrink-0" style={{ color: 'var(--yca-yellow, #e5c07b)' }}>◷ pending</span>
           ) : failed ? (
             <span className="shrink-0" style={{ color: '#ff6b6b' }}>✗</span>
           ) : (

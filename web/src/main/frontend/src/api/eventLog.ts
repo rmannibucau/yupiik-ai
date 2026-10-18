@@ -29,6 +29,9 @@ export type Block =
       args?: string;
       output?: string;
       success?: boolean;
+      // a tool that finished but is not done (e.g. check_subagents collect timed out): renders neutral,
+      // distinct from both a success and a hard failure
+      pending?: boolean;
       toolOrdinal?: number;
     };
 
@@ -244,6 +247,7 @@ export function eventsToBlocks(events: WebEvent[]): Block[] {
         toolBlock.state = 'done';
         toolBlock.output = (ev.data?.output as string) ?? '';
         toolBlock.success = ev.data?.success !== false;
+        toolBlock.pending = ev.data?.pending === true;
       }
     } else if (ev.type === 'user') {
       settle();

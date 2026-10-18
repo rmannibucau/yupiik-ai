@@ -148,6 +148,49 @@ class ContextManagerTest {
     }
 
     @Test
+    void deliveredSubagentBlocksSurviveCompactionAsHighRecallAnchors() {
+        final var digest = "summary: things happened";
+        final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
+        final var chat = new ChatClient() {
+            @Override
+            public ChatResult chat(
+                    final ChatCompletionRequest request,
+                    final Consumer<io.yupiik.ia.agent.core.llm.PauseEvent> listener,
+                    final BooleanSupplier cancelled) {
+                return new ChatResult(Message.assistant(digest, null), Usage.EMPTY);
+            }
+        };
+        final var manager = new ContextManager(
+                cfg,
+                new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                new CompactionCoordinator(
+                        cfg,
+                        chat,
+                        new UsageTracker(providerManager(cfg), chat, null, Clock.systemUTC()),
+                        providerManager(cfg),
+                        null,
+                        "s1"));
+        final var messages = new ArrayList<Message>();
+        messages.add(Message.system("system"));
+        for (var i = 0; i < 5; i++) {
+            messages.add(Message.user("step " + i));
+        }
+        // a delivered sub-agent completion that must survive the summarizer as a high-recall anchor
+        messages.add(Message.user("<subagent sessionID=\"c1\" state=\"completed\" description=\"child\">\n"
+                + "the child finished a task\n</subagent>"));
+        messages.add(Message.user("step 5 " + "y".repeat(4_000)));
+        final var forced = manager.compact(messages, true);
+        assertEquals(CompactionResult.Mode.SUMMARY, forced.mode());
+        // the sub-agent block must be kept verbatim (not paraphrased away) in the compacted output
+        assertTrue(
+                forced.messages().stream()
+                        .anyMatch(m -> m.content() instanceof String s
+                                && s.startsWith("<subagent sessionID=\"c1\"")
+                                && s.contains("the child finished a task")),
+                "a delivered <subagent> block must be anchored verbatim through compaction: " + forced.messages());
+    }
+
+    @Test
     void focusAndKeepLastAreForwardedToTheCompactor() {
         // tiny tail budget + a weighty tail turn (as in the force test) so the compaction actually runs
         final var cfg = config(6, 3_000, Map.of("yca.compaction.tailBudgetTokens", "1"));
