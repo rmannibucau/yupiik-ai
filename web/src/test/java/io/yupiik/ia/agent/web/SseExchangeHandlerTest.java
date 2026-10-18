@@ -314,7 +314,7 @@ class SseExchangeHandlerTest {
         assertEquals("tool-started", events.get(2).type());
         assertEquals("read", events.get(2).message());
         // the persisted tool-call arguments must survive the replay so the frontend can build its
-        // command/path summary (bash/read_file cards) - was previously dropped as an empty map.
+        // command/path summary (bash/read cards) - was previously dropped as an empty map.
         assertEquals("{\"path\":\"src/Main.java\"}", ((Map<?, ?>) events.get(2).data()).get("args"));
         assertEquals("tool-finished", events.get(3).type());
         assertEquals("read", events.get(3).message());
