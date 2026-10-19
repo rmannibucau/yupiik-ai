@@ -24,21 +24,16 @@ import java.util.function.Function;
  *
  * <p>The returned value is used as-is (inline and sub-expression calls are HTML-escaped by the engine, block calls
  * are not), so helpers render plain text or pre-formatted ANSI accordingly.</p>
+ *
+ * <p>A {@link Function} whose {@code apply} receives the {@link HelperContext} (positional arguments, {@code key=value}
+ * hash and block/inverse renderers) and returns the helper output.</p>
  */
-public interface PromptHandlebarsHelper {
+public interface PromptHandlebarsHelper extends Function<HelperContext, Object> {
     /** The helper name usable in the template, e.g. {@code {{time}}}. */
     String name();
 
     /** A short description used to document the helper. */
     String description();
-
-    /**
-     * Applies the helper.
-     *
-     * @param context the evaluated positional arguments, the {@code key=value} hash and the block/inverse renderers.
-     * @return the helper output (may be null to render nothing).
-     */
-    Object apply(HelperContext context);
 
     /**
      * The {@code systemProperty} helper as a lambda: reads a system property from 1 positional argument
@@ -48,10 +43,10 @@ public interface PromptHandlebarsHelper {
      */
     static Function<HelperContext, Object> systemProperty() {
         return context -> {
-            if (context.args().size() < 1 || context.args().size() > 2) {
+            if (context.args().isEmpty() || context.args().size() > 2) {
                 throw new IllegalArgumentException("systemProperty expects 1 or 2 arguments (key [default])");
             }
-            final var key = String.valueOf(context.args().get(0));
+            final var key = String.valueOf(context.args().getFirst());
             final var value = System.getProperty(key);
             if (value != null) {
                 return value;

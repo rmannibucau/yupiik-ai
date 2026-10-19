@@ -1,0 +1,92 @@
+= Custom headers
+:minisite-breadcrumb: Home[index.html] > Features > Custom headers
+:minisite-nav-prev-link: provider-tuning.html
+:minisite-nav-prev-label: Provider tuning
+
+A provider authenticates with HTTP headers. Besides the built-in header helpers
+(`{{exec ...}}` and the Codex `{{codexAuth}}` family - see
+xref:configuration.adoc[Configuration]) you can register your own handlebars
+helper to compute request headers, typically to inject a custom authentication
+scheme.
+
+## The `CustomDynamicHeaderTemplateHelper` SPI
+
+A custom helper is an `@ApplicationScoped` bean implementing
+`io.yupiik.ia.agent.core.llm.CustomDynamicHeaderTemplateHelper`, a
+`Function<HelperContext, Object>` plus a `name()`:
+
+[source,java]
+----
+import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
+import io.yupiik.fusion.framework.handlebars.helper.HelperContext;
+import io.yupiik.fusion.framework.handlebars.helper.SafeString;
+import io.yupiik.ia.agent.core.llm.CustomDynamicHeaderTemplateHelper;
+
+@ApplicationScoped
+public class MyAuthHeaderHelper implements CustomDynamicHeaderTemplateHelper {
+
+    private final TokenService tokenService;
+
+    // the token service is injected like any Fusion bean; the helper itself is
+    // application-scoped, so it can hold shared clients/resources
+    public MyAuthHeaderHelper(final TokenService tokenService) {
+        this.tokenService = tokenService;
+    }
+
+    @Override
+    public String name() {
+        return "myAuth";
+    }
+
+    @Override
+    public Object apply(final HelperContext context) {
+        // context.args() is the positional arguments of {{myAuth "..."}}
+        final var scope = context.args().getFirst();
+        final var token = tokenService.lease(scope); // any signing / SSO dance
+        return new SafeString("Bearer " + token);    // raw, no HTML escaping
+    }
+}
+----
+
+Every injected `CustomDynamicHeaderTemplateHelper` bean is registered under its
+`name()` after the built-in helpers, so a name collision with a built-in keeps
+the built-in. The returned value is inserted into the header verbatim; return a
+`SafeString` for raw text (a plain `String` works too). Returning `null` or an
+empty value skips the header. Throwing a runtime exception fails the render and
+the request is not sent, so a misconfigured helper surfaces loudly instead of
+silently sending a broken header.
+
+## Wiring and rendering
+
+The bean is discovered by the agent container (classpath scanning of the Fusion
+CDI beans) and injected into the provider header renderer, so no manual
+registration is needed.
+
+## Reference the helper from a provider
+
+Use the helper name inside a `dynamicHeaders` value, exactly like the built-in
+ones:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "default",
+        "baseUrl": "https://gateway.example.com/v1",
+        "api": "completions",
+        "dynamicHeaders": {
+          "authorization": "Bearer {{myAuth \"my-provider\"}}",
+          "x-tenant": "acme"
+        }
+      }
+    ]
+  }
+}
+----
+
+The header is rendered at each request, so a helper whose value rotates (a lease
+or a short-lived token) stays fresh without manual reconfiguration. A dynamic
+header named `authorization` overrides the default `apiKey` header for that
+provider.

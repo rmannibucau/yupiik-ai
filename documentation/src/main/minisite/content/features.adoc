@@ -338,6 +338,17 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
       </div>
     </div>
   </div>
+  <div class="col-12 col-lg-4 py-3">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h5 class="card-title"><a href="features/custom-headers.html">Custom headers</a></h5>
+        <div class="card-text">
+          Implement a custom handlebars helper to inject your own authentication or request headers.
+        </div>
+        <a title="Custom headers" class="card-link-mask" href="features/custom-headers.html"></a>
+      </div>
+    </div>
+  </div>
 
       </div>
     </div>

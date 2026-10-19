@@ -97,8 +97,10 @@ public class ChatClient implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     /** Provides the {@code {{exec}}} handlebars helper for dynamic provider headers; {@code null} in tests/programmatic use. */
     private final ExecTemplateHelper execTemplateHelper;
-    /** Provides the {@code {{codexAuth}}} handlebars helper for Codex-flavored providers; {@code null} when not wired. */
+    /** Provides the {@code {{codexAuth}}} handlebars helper for Codex-flavored providers; injected so never null. */
     private final CodexAuthTemplateHelper codexAuthTemplateHelper;
+    /** User-registered custom dynamic-header helpers, injected after the built-in ones; empty when none. */
+    private final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers;
 
     private final Map<ClientKey, DialectLlmClient> dialectClients = new HashMap<>();
     private final Map<ClientKey, LlmClientResilienceWrapper> resiliences = new HashMap<>();
@@ -125,7 +127,8 @@ public class ChatClient implements AutoCloseable {
             final InBandToolCallExtractor inBandToolCallExtractor,
             final ScheduledExecutorService scheduler,
             final ExecTemplateHelper execTemplateHelper,
-            final CodexAuthTemplateHelper codexAuthTemplateHelper) {
+            final CodexAuthTemplateHelper codexAuthTemplateHelper,
+            final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers) {
         this(
                 configuration,
                 mapper,
@@ -137,7 +140,8 @@ public class ChatClient implements AutoCloseable {
                 false,
                 scheduler,
                 execTemplateHelper,
-                codexAuthTemplateHelper);
+                codexAuthTemplateHelper,
+                customDynamicHeaderTemplateHelpers);
     }
 
     public ChatClient(
@@ -158,7 +162,8 @@ public class ChatClient implements AutoCloseable {
                 false,
                 null,
                 null,
-                null);
+                null,
+                List.of());
     }
 
     /**
@@ -183,7 +188,8 @@ public class ChatClient implements AutoCloseable {
                 false,
                 null,
                 null,
-                null);
+                null,
+                List.of());
     }
 
     /**
@@ -207,7 +213,8 @@ public class ChatClient implements AutoCloseable {
                 true,
                 null,
                 null,
-                null);
+                null,
+                List.of());
     }
 
     private ChatClient(
@@ -221,7 +228,8 @@ public class ChatClient implements AutoCloseable {
             final boolean ownsHttpClient,
             final ScheduledExecutorService scheduler,
             final ExecTemplateHelper execTemplateHelper,
-            final CodexAuthTemplateHelper codexAuthTemplateHelper) {
+            final CodexAuthTemplateHelper codexAuthTemplateHelper,
+            final List<CustomDynamicHeaderTemplateHelper> customDynamicHeaderTemplateHelpers) {
         this.configuration = configuration;
         this.mapper = mapper;
         this.providerManager = providerManager;
@@ -236,6 +244,9 @@ public class ChatClient implements AutoCloseable {
         this.scheduler = scheduler;
         this.execTemplateHelper = execTemplateHelper;
         this.codexAuthTemplateHelper = codexAuthTemplateHelper;
+        this.customDynamicHeaderTemplateHelpers = customDynamicHeaderTemplateHelpers == null
+                ? List.of()
+                : List.copyOf(customDynamicHeaderTemplateHelpers);
         // context overflow is handled by the agent loop (context compaction), retries after are
         // honored by the library resilience layer; per-provider clients get their own resilience
         // wrapper so the concurrency budget is scoped to one provider base URL
@@ -292,6 +303,7 @@ public class ChatClient implements AutoCloseable {
         this.scheduler = null;
         this.execTemplateHelper = null;
         this.codexAuthTemplateHelper = null;
+        this.customDynamicHeaderTemplateHelpers = List.of();
     }
 
     /** Cache key: a resilient dialect client is built per (flavor, provider) pair. */
@@ -391,18 +403,13 @@ public class ChatClient implements AutoCloseable {
         final var exec = execTemplateHelper.exec();
         final var helpers = new LinkedHashMap<String, Function<HelperContext, Object>>();
         helpers.put("exec", exec);
-        final var codexAuth = codexAuthTemplateHelper == null ? null : codexAuthTemplateHelper.codexAuth();
-        if (codexAuth != null) {
-            helpers.put("codexAuth", codexAuth);
-        }
-        final var codexAgentAssertion =
-                codexAuthTemplateHelper == null ? null : codexAuthTemplateHelper.codexAgentAssertion();
-        if (codexAgentAssertion != null) {
-            helpers.put("codexAgentAssertion", codexAgentAssertion);
-        }
-        final var codexAccountId = codexAuthTemplateHelper == null ? null : codexAuthTemplateHelper.codexAccountId();
-        if (codexAccountId != null) {
-            helpers.put("codexAccountId", codexAccountId);
+        // the codex helpers are injected, so they can never be null here
+        helpers.put("codexAuth", codexAuthTemplateHelper.codexAuth());
+        helpers.put("codexAgentAssertion", codexAuthTemplateHelper.codexAgentAssertion());
+        helpers.put("codexAccountId", codexAuthTemplateHelper.codexAccountId());
+        // user-registered helpers come after the built-ins: the built-ins win on a name conflict
+        for (final var custom : customDynamicHeaderTemplateHelpers) {
+            helpers.putIfAbsent(custom.name(), custom);
         }
         return builder -> {
             staticHeaders.forEach((k, v) -> {

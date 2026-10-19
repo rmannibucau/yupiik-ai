@@ -191,6 +191,36 @@ backend catalog (eg. `160` for `0.160.x`, or `200` for `0.200.x`). It is an
 internal option: it is consumed by the dialect when listing models and is never
 sent on the wire. Omit it for the default of `160`.
 
+== Custom authentication and headers
+
+A provider authenticates with HTTP headers, resolved per request in this order,
+highest priority last:
+
+. the default `Authorization: Bearer <apiKey>` header sent from `apiKey`;
+. the static `headers` map (fixed `Name: value` pairs);
+. the `dynamicHeaders` map - handlebars templates rendered at each request.
+
+A header targeting the same name wins over the lower-precedence ones, so a
+`dynamicHeaders` (or static `headers`) entry named `authorization` replaces the
+default `apiKey` header. Rendered blank values are skipped.
+
+Out of the box the providers have these helpers available in a `dynamicHeaders`
+template:
+
+- `{{exec ...}}` runs a command and returns its stdout (cached with the
+  `exec_options=ttl=...` option) - for token commands and short-lived secrets;
+- `{{codexAuth "<providerId>"}}`, `{{codexAgentAssertion "<providerId>"}}` and
+  `{{codexAccountId "<providerId>"}}` resolve the Codex OAuth / Agent Identity
+  session, as described in the sections above.
+
+When none of the built-ins fit your signing flow (a gateway-scoped token, a
+lease-based credential, a corporate SSO dance), you can register your own
+handlebars helper: implement a small
+`CustomDynamicHeaderTemplateHelper` bean and inject it through the agent
+container. A complete walkthrough - including a signed-header example and the
+matching provider configuration - is in
+xref:features/custom-headers.adoc[Custom headers].
+
 The models a subscription exposes often come with per-model behavior or
 variants (eg. reasoning-effort presets for a `gpt-6-luna`). Declare them under
 `provider.models`, each entry matching by id or substring, with per-model
