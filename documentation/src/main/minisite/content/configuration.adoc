@@ -150,6 +150,14 @@ Enroll a provider with the `--enterprise` flag:
 /codex login <provider> --enterprise
 ----
 
+For a user in several workspaces, pin the enrollment to a specific
+workspace/organization with `--workspace` (the account must belong to it):
+
+[source]
+----
+/codex login <provider> --enterprise --workspace <org-id>
+----
+
 This runs the OAuth login first, then registers a fresh Ed25519 identity with
 OpenAI's auth API (agent runtime + run task) and persists it next to the OAuth
 tokens. Once enrolled, the provider authenticates every request with the

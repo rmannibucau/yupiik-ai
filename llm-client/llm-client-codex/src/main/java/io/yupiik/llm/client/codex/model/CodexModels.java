@@ -49,7 +49,7 @@ public record CodexModels(List<CodexModel> models) {
 
         /** True when the model is publicly selectable (listed, API-backed and not internal). */
         public boolean selectable() {
-            return supportedInApi != Boolean.FALSE && "list".equalsIgnoreCase(visibility);
+            return !Boolean.FALSE.equals(supportedInApi) && "list".equalsIgnoreCase(visibility);
         }
 
         /**

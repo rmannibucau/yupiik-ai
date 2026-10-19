@@ -184,11 +184,15 @@ final class CodexBrowserFlow {
             final String verifier,
             final String challenge,
             final String redirectUri) {
+        // Default scope when the config does not override it (matches the Codex CLI's required scopes).
+        final String scopes = config.scopes() == null || config.scopes().isBlank()
+                ? "openid profile email offline_access api.connectors.read api.connectors.invoke"
+                : config.scopes();
         final String raw = config.issuer() + "/oauth/authorize"
                 + "?response_type=code"
                 + "&client_id=" + urlEncode(config.clientId())
                 + "&redirect_uri=" + urlEncode(redirectUri)
-                + "&scope=" + urlEncode("openid profile email offline_access api.connectors.read api.connectors.invoke")
+                + "&scope=" + urlEncode(scopes)
                 + "&code_challenge=" + urlEncode(challenge)
                 + "&code_challenge_method=S256"
                 + "&state=" + urlEncode(state)

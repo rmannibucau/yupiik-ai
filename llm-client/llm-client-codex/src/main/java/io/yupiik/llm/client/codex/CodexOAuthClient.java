@@ -273,13 +273,10 @@ public class CodexOAuthClient {
     /** The store derived from a token payload; the account id derives from the id_token when present. */
     CodexTokenStore toStore(final Map<String, Object> tokens) {
         final var idToken = string(tokens, "id_token");
+        final var accessToken = string(tokens, "access_token");
         final var accountId = parseIdTokenClaims(idToken, mapper).accountId();
         return new CodexTokenStore(
-                string(tokens, "access_token"),
-                string(tokens, "refresh_token"),
-                accountId,
-                expiry(tokens, null),
-                idToken);
+                accessToken, string(tokens, "refresh_token"), accountId, expiry(tokens, accessToken), idToken);
     }
 
     /** Exchanges a code (with optional PKCE verifier) at the token endpoint, returning the parsed payload. */
@@ -297,17 +294,45 @@ public class CodexOAuthClient {
         return parse(body);
     }
 
-    /** Build the expiry (epoch millis) from {@code expires_in}, falling back to {@code fallbackToken}'s expiry. */
-    private static Long expiry(final Map<String, Object> tokens, final String fallbackToken) {
+    /**
+     * Builds the expiry (epoch millis) from {@code expires_in}; when absent reads the {@code exp}
+     * claim of the (JWT) access token; as a last resort uses a 1h best-effort default.
+     */
+    private static Long expiry(final Map<String, Object> tokens, final String accessToken) {
         final var expiresIn = tokens.get("expires_in");
         if (expiresIn instanceof Number n) {
             return System.currentTimeMillis() + n.longValue() * 1000;
         }
-        if (fallbackToken == null) {
+        final Long accessTokenExp = accessTokenExpMillis(accessToken);
+        if (accessTokenExp != null) {
+            return accessTokenExp;
+        }
+        if (accessToken == null) {
             return null;
         }
         // best effort: 1h default for a ChatGPT account access token
         return System.currentTimeMillis() + 3600_000;
+    }
+
+    /** Decodes the {@code exp} (epoch seconds) claim of a JWT access token, in epoch millis, else null. */
+    private static Long accessTokenExpMillis(final String accessToken) {
+        if (accessToken == null || accessToken.isBlank()) {
+            return null;
+        }
+        try {
+            final var parts = accessToken.split("\\.");
+            if (parts.length < 2) {
+                return null;
+            }
+            final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
+            final var json = new String(decoded, UTF_8);
+            final var exp =
+                    java.util.regex.Pattern.compile("\"exp\"\\s*:\\s*([0-9]+)").matcher(json);
+            return exp.find() ? Long.parseLong(exp.group(1)) * 1000 : null;
+        } catch (final RuntimeException e) {
+            LOGGER.fine(() -> "Cannot decode access token exp claim: " + e.getMessage());
+            return null;
+        }
     }
 
     /**

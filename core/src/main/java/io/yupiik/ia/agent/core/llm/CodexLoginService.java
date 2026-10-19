@@ -53,8 +53,17 @@ public class CodexLoginService {
         this.mapper = mapper;
         this.httpClient = httpClient;
         final String home = configuration == null ? null : configuration.resolveStorageHome();
-        this.providersHome = Path.of(home == null || home.isBlank() ? "~/.yupiik/coding-agent" : home)
-                .resolve("providers");
+        final String resolvedHome = home == null || home.isBlank() ? "~/.yupiik/coding-agent" : home;
+        this.providersHome = Path.of(resolveHome(resolvedHome)).resolve("providers");
+    }
+
+    /** Expands a leading {@code ~} to the user home directory; POSIX-style, best effort. */
+    private static String resolveHome(final String path) {
+        if (path == null || path.isBlank() || !path.startsWith("~/")) {
+            return path;
+        }
+        final String userHome = System.getProperty("user.home");
+        return userHome == null || userHome.isBlank() ? path : userHome + path.substring(1);
     }
 
     /**
@@ -112,17 +121,47 @@ public class CodexLoginService {
             final boolean device,
             final Consumer<String> urlSink,
             final Predicate<Boolean> cancelled) {
+        return signInAgent(provider, device, urlSink, cancelled, null);
+    }
+
+    /**
+     * Like {@link #signInAgent(String, boolean, Consumer, Predicate)}, but pins the enrollment to a
+     * specific workspace/organization id. When {@code forcedWorkspaceId} is non-blank it must belong
+     * to the signed-in account (the id token lists the organizations): the enrollment uses that id as
+     * the account id, and fails loudly if the account is not a member - so a user in several
+     * workspaces can pick the enterprise one instead of silently using the default.
+     *
+     * @param provider the provider id to sign in.
+     * @param device true to use the device-code flow instead of the browser flow.
+     * @param urlSink receives the authorize (or verification) URL to open.
+     * @param cancelled cancellation probe.
+     * @param forcedWorkspaceId an organization/workspace id to pin, or null/blank for the default.
+     * @return the authenticated session carrying the Agent Identity registration.
+     */
+    public CodexTokenStore signInAgent(
+            final String provider,
+            final boolean device,
+            final Consumer<String> urlSink,
+            final Predicate<Boolean> cancelled,
+            final String forcedWorkspaceId) {
         final CodexTokenStore oauthSession = signIn(provider, device, urlSink, cancelled);
         if (oauthSession.accessToken() == null || oauthSession.accessToken().isBlank()) {
             throw new IllegalStateException("ChatGPT/Codex login succeeded but produced no access token");
         }
 
         // derive the account metadata (plan/user/fedramp) off the already stored id token
-        final var claims = oauthSession.idToken() == null
+        final String idToken = oauthSession.idToken();
+        final var claims = idToken == null
                 ? null
-                : io.yupiik.llm.client.codex.CodexOAuthClient.parseIdTokenClaims(oauthSession.idToken(), mapper);
-        final String accountId =
-                claims != null && claims.accountId() != null ? claims.accountId() : oauthSession.accountId();
+                : io.yupiik.llm.client.codex.CodexOAuthClient.parseIdTokenClaims(idToken, mapper);
+        String accountId = claims != null && claims.accountId() != null ? claims.accountId() : oauthSession.accountId();
+        if (forcedWorkspaceId != null && !forcedWorkspaceId.isBlank()) {
+            if (!hasOrganization(idToken, forcedWorkspaceId)) {
+                throw new IllegalStateException("Account is not a member of workspace '" + forcedWorkspaceId
+                        + "'; cannot pin the " + "enterprise enrollment to it");
+            }
+            accountId = forcedWorkspaceId;
+        }
         final String chatgptUserId = claims == null ? null : claims.chatgptUserId();
         final String planType = claims == null ? null : claims.planType();
         final boolean fedramp = claims != null && claims.chatgptAccountIsFedramp();
@@ -142,6 +181,28 @@ public class CodexLoginService {
         final CodexTokenStore enrolled = oauthSession.withAgentIdentity(record);
         save(provider, enrolled);
         return enrolled;
+    }
+
+    /** True when the id-token payload lists {@code workspaceId} among its organizations. */
+    private boolean hasOrganization(final String idToken, final String workspaceId) {
+        if (idToken == null || idToken.isBlank()) {
+            return false;
+        }
+        try {
+            final var parts = idToken.split("\\.");
+            if (parts.length < 2) {
+                return false;
+            }
+            final byte[] decoded = java.util.Base64.getUrlDecoder().decode(parts[1]);
+            final var payload = mapper.fromString(
+                    io.yupiik.llm.client.codex.model.IdTokenPayload.class,
+                    new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+            return payload != null
+                    && payload.organizations() != null
+                    && payload.organizations().stream().anyMatch(org -> workspaceId.equals(org.id()));
+        } catch (final RuntimeException e) {
+            return false;
+        }
     }
 
     /** The token store for a provider, or {@code null} when no session exists yet. */

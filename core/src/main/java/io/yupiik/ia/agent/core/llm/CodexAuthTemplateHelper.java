@@ -69,6 +69,7 @@ public class CodexAuthTemplateHelper {
     private volatile CodexOAuthClient oauth;
     private volatile CodexAgentIdentityClient agentIdentity;
     private final ConcurrentHashMap<String, Lock> refreshLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CodexTokenStore> authCache = new ConcurrentHashMap<>();
 
     public CodexAuthTemplateHelper(
             final JsonMapper mapper,
@@ -79,8 +80,17 @@ public class CodexAuthTemplateHelper {
         this.oauth = null; // built lazily on first use (or via setOAuthConfig in tests)
         this.agentIdentity = null; // built lazily on first use (or via setAgentIdentityConfig in tests)
         final String home = configuration == null ? null : configuration.resolveStorageHome();
-        this.providersHome = Path.of(home == null || home.isBlank() ? "~/.yupiik/coding-agent" : home)
-                .resolve("providers");
+        final String resolvedHome = home == null || home.isBlank() ? "~/.yupiik/coding-agent" : home;
+        this.providersHome = Path.of(resolveHome(resolvedHome)).resolve("providers");
+    }
+
+    /** Expands a leading {@code ~} to the user home directory; POSIX-style, best effort. */
+    private static String resolveHome(final String path) {
+        if (path == null || path.isBlank() || !path.startsWith("~/")) {
+            return path;
+        }
+        final String userHome = System.getProperty("user.home");
+        return userHome == null || userHome.isBlank() ? path : userHome + path.substring(1);
     }
 
     /**
@@ -307,12 +317,18 @@ public class CodexAuthTemplateHelper {
     }
 
     private CodexTokenStore load(final String providerName) {
+        final CodexTokenStore cached = authCache.get(providerName);
+        if (cached != null) {
+            return cached;
+        }
         final Path file = codexAuthFile(providerName);
         if (!Files.exists(file)) {
             return null;
         }
         try {
-            return mapper.fromBytes(CodexTokenStore.class, Files.readAllBytes(file));
+            final CodexTokenStore store = mapper.fromBytes(CodexTokenStore.class, Files.readAllBytes(file));
+            authCache.put(providerName, store);
+            return store;
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot read the Codex auth file " + file + ": " + e.getMessage(), e);
         }
@@ -332,6 +348,7 @@ public class CodexAuthTemplateHelper {
                 Files.deleteIfExists(tmp);
                 throw moveFailure;
             }
+            authCache.put(providerName, store);
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot write the Codex auth file " + file + ": " + e.getMessage(), e);
         }

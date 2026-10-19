@@ -145,7 +145,12 @@ class CodexOAuthClientTest {
     @Test
     void browserAuthorizeUrlUsesLoopbackRedirectAndCodexParams() {
         final var url = CodexBrowserFlow.authorizeUrl(
-                new CodexOAuthConfig(issuerUrl, "cid", "openid", "vurl", 1455),
+                new CodexOAuthConfig(
+                        issuerUrl,
+                        "cid",
+                        "openid profile email offline_access api.connectors.read api.connectors.invoke",
+                        "vurl",
+                        1455),
                 "st",
                 "verifier",
                 "challenge",

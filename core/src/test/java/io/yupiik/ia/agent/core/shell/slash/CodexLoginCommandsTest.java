@@ -15,7 +15,9 @@
  */
 package io.yupiik.ia.agent.core.shell.slash;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.yupiik.fusion.json.JsonMapper;
@@ -64,6 +66,18 @@ class CodexLoginCommandsTest {
         final ShellOutcome outcome = result.toCompletableFuture().get();
         assertInstanceOf(ShellOutcome.Error.class, outcome, outcome.toString());
         assertTrue(((ShellOutcome.Error) outcome).message().contains("provider"), outcome.toString());
+    }
+
+    @Test
+    void optionValueParsing() {
+        assertNull(CodexLoginCommands.optionValue(List.of("login", "codex", "--enterprise"), "--workspace"));
+        assertEquals(
+                "ws-1",
+                CodexLoginCommands.optionValue(List.of("login", "codex", "--workspace", "ws-1"), "--workspace"));
+        assertEquals(
+                "ws-2",
+                CodexLoginCommands.optionValue(
+                        List.of("login", "codex", "--enterprise", "--workspace", "ws-2", "--device"), "--workspace"));
     }
 
     private static CodexLoginCommands commands(final JsonMapper mapper, final Path storage) {

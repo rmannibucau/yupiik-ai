@@ -26,7 +26,8 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 /**
- * Codex subscription login commands: {@code /codex login <provider> [--device]} runs the
+ * Codex subscription login commands: {@code /codex login <provider> [--device] [--enterprise]
+ * [--workspace <org-id>]} runs the
  * ChatGPT/Codex OAuth flow for a provider and persists the resulting session to
  * {@code <storageHome>/providers/<provider>/codex.auth.json} so the {@code {{codexAuth}}}
  * dynamic-header helper (see {@link CodexAuthTemplateHelper}) can refresh/use it on request.
@@ -55,11 +56,21 @@ public class CodexLoginCommands implements SlashCommandSet {
         final SlashCommand login = SlashCommand.of(
                 new SlashCommandSpec(
                         "/codex",
-                        "login <provider> [--device] [--enterprise]",
-                        "Sign in a codex-flavored provider through the ChatGPT/Codex OAuth browser flow (default; --device uses the device-code flow, like the Codex CLI's --device-auth) and cache the session. --enterprise additionally enrolls the account in the Codex Agent Identity flow (for managed/company plans), switching requests to a signed AgentAssertion header.",
+                        "login <provider> [--device] [--enterprise] [--workspace <org-id>]",
+                        "Sign in a codex-flavored provider through the ChatGPT/Codex OAuth browser flow (default; --device uses the device-code flow, like the Codex CLI's --device-auth) and cache the session. --enterprise additionally enrolls the account in the Codex Agent Identity flow (for managed/company plans), switching requests to a signed AgentAssertion header. --workspace pins the enterprise enrollment to a specific workspace/organization (must be one the account belongs to).",
                         SlashGroup.OTHER),
                 (arg, env) -> CompletableFuture.supplyAsync(() -> runLogin(arg == null ? "" : arg.strip(), env)));
         return List.of(login);
+    }
+
+    /** Returns the single value following {@code option} (eg. --workspace X), else null. */
+    static String optionValue(final java.util.List<String> tokens, final String option) {
+        for (int i = 0; i + 1 < tokens.size(); i++) {
+            if (option.equalsIgnoreCase(tokens.get(i))) {
+                return tokens.get(i + 1);
+            }
+        }
+        return null;
     }
 
     private ShellOutcome runLogin(final String arg, final ShellEnv env) {
@@ -75,6 +86,8 @@ public class CodexLoginCommands implements SlashCommandSet {
         }
         final var device = tokens.stream().anyMatch("--device"::equalsIgnoreCase);
         final var enterprise = tokens.stream().anyMatch("--enterprise"::equalsIgnoreCase);
+        // --workspace <org-id>: pin the enterprise enrollment to a specific workspace/organization
+        final var forcedWorkspace = optionValue(tokens, "--workspace");
         final var provider =
                 tokens.stream().filter(p -> !p.startsWith("--")).findFirst().orElse("");
         if (provider.isBlank()) {
@@ -90,7 +103,8 @@ public class CodexLoginCommands implements SlashCommandSet {
                                 env.frontend().transcript(url + "\n\nWaiting for authorization...");
                             }
                         },
-                        b -> false);
+                        b -> false,
+                        forcedWorkspace);
                 return ShellOutcome.status("Codex enterprise (Agent Identity) login complete for provider '"
                         + provider + "' (account: " + (store.accountId() == null ? "unknown" : store.accountId())
                         + (store.agentIdentity() != null
