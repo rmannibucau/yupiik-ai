@@ -103,26 +103,30 @@ from the `.../codex/models` catalog):
   "provider": {
     "providers": [
       {
-        "id": "default",
+        "id": "codex",
         "baseUrl": "https://chatgpt.com/backend-api/codex",
         "api": "auto",
         "model": "gpt-6-luna",
         "contextWindow": 400000,
         "providerSpecificOptions": "{\"codex_client_version\": 160}",
-        "dynamicHeaders": {
-          "authorization": "Bearer {{codexAuth \"default\"}}"
-        },
-        "headers": {
-          "ChatGPT-Account-Id": "<your-chatgpt-account-id>"
-        }
+        "dynamicHeaders": "authorization: Bearer {{codexAuth \"codex\"}}",
+        "headers": "ChatGPT-Account-Id: xxxx-yyyy-zzzzz\nOpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream"
       }
     ]
   }
 }
 ----
 
-`dynamicHeaders`, `headers` and the default `{{exec}}` helper work exactly as
-described above.
+`dynamicHeaders` and `headers` are properties-text strings: one `Name: value`
+per line, newline (`\n`) separated - not JSON objects. The default `{{exec}}`
+helper works exactly as described above.
+
+The ChatGPT backend requires three extra request headers that are not sent by
+default, so declare them in the provider `headers` string: `OpenAI-Beta:
+responses=experimental`, the lowercase `originator: codex_cli_rs` (the backend
+is case-sensitive about this one - a valid bearer or assertion still gets an
+HTTP error without it), and `accept: text/event-stream` (every codex call is
+streaming). These apply to both the regular and the enterprise flows.
 
 The `{{codexAuth "<providerId>"}}` handlebars helper resolves the OAuth session
 access token for that provider and returns it raw (prepend `Bearer ` in the
@@ -157,16 +161,12 @@ signed assertion. Configure the provider headers using the two extra helpers:
   "provider": {
     "providers": [
       {
-        "id": "default",
+        "id": "codex",
         "baseUrl": "https://chatgpt.com/backend-api/codex",
         "api": "auto",
         "model": "gpt-6-luna",
-        "dynamicHeaders": {
-          "authorization": "{{codexAgentAssertion \"default\"}}"
-        },
-        "headers": {
-          "ChatGPT-Account-ID": "{{codexAccountId \"default\"}}"
-        }
+        "dynamicHeaders": "authorization: {{codexAgentAssertion \"codex\"}}",
+        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nChatGPT-Account-ID: {{codexAccountId \"codex\"}}"
       }
     ]
   }
@@ -179,7 +179,8 @@ signed assertion. Configure the provider headers using the two extra helpers:
 `ChatGPT-Account-ID` header - from the agent identity when present, else from
 the OAuth session - so you never need to hardcode it. A plain OAuth session
 (no `--enterprise`) rejects `{{codexAgentAssertion}}` with a message telling you
-to enroll first.
+to enroll first. As with the regular flow, `dynamicHeaders` and `headers` are
+`Name: value` properties-text strings, not JSON objects.
 
 For FedRAMP accounts the enrollment also stamps `X-OpenAI-Fedramp: true` and
 every signed request carries the matching account id.
