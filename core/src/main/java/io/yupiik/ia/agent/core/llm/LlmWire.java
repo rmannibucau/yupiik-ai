@@ -44,6 +44,8 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * Neutral model translation and blocking bridge between the core request/response types and the
@@ -55,6 +57,8 @@ final class LlmWire {
     private LlmWire() {
         // utility
     }
+
+    private static final Logger LOGGER = Logger.getLogger(LlmWire.class.getName());
 
     static LlmRequest toLlmRequest(final ChatCompletionRequest request) {
         final Map<String, Object> extensions = request.others() == null ? Map.of() : request.others();
@@ -234,9 +238,9 @@ final class LlmWire {
                     }
                     if (event instanceof TextDelta(String t)) {
                         delivered[0] = true;
-                        text.append(t);
+                        text.append(t == null ? "" : t);
                         onDelta.accept(event);
-                    } else if (event instanceof ReasoningDelta) {
+                    } else if (event instanceof ReasoningDelta(final String text) && text != null) {
                         delivered[0] = true;
                         onDelta.accept(event);
                     } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
@@ -266,8 +270,17 @@ final class LlmWire {
             public void onError(final Throwable throwable) {
                 synchronized (mergeLock) {
                     if (delivered[0]) {
+                        // the wrapped exception's message only carries the cause's toString(), which
+                        // is uninformative for a bare NullPointerException; log the full throwable
+                        // (with its stack trace) here so the real failing frame survives. The
+                        // mid-stream category includes both transport drops and runtime faults that
+                        // escaped the caller's onDelta consumer (reactive publishers forward an
+                        // onNext exception to this onError).
+                        LOGGER.log(Level.WARNING, "Streaming failed after partial content was delivered", throwable);
                         done.completeExceptionally(new MidStreamFailureException(
-                                "stream interrupted after " + text.length() + " chars of partial content: " + throwable,
+                                "stream interrupted after " + text.length() + " chars of partial content: "
+                                        + throwable.getClass().getSimpleName()
+                                        + (throwable.getMessage() == null ? "" : ": " + throwable.getMessage()),
                                 throwable,
                                 visibleText(text),
                                 creationOrder.isEmpty()

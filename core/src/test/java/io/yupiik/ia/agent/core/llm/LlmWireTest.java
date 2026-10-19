@@ -110,4 +110,87 @@ class LlmWireTest {
         assertNotNull(message, "pump must return a partial message on interrupt");
         assertTrue(subscriptionCancelled.get(), "the no-frame abort must cancel the subscription");
     }
+
+    /**
+     * A mid-stream failure after partial content must surface a {@link MidStreamFailureException}
+     * whose message names the cause class (and its message when present) rather than a bare
+     * {@code throwable.toString()}: the latter is uninformative for a message-less NPE and reads like
+     * a transport drop even when the fault escaped the caller's {@code onDelta} consumer.
+     */
+    @Test
+    void midStreamFailureMessageNamesTheCauseClass() {
+        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> failing =
+                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                    @Override
+                    public void request(final long n) {
+                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta("partial answer"));
+                        subscriber.onError(new NullPointerException("boom"));
+                    }
+
+                    @Override
+                    public void cancel() {
+                        // nothing to release
+                    }
+                });
+
+        final var ex = org.junit.jupiter.api.Assertions.assertThrows(
+                MidStreamFailureException.class, () -> LlmWire.pump(failing, event -> {}, () -> false));
+        assertTrue(ex.getMessage().contains("stream interrupted after"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("NullPointerException"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("boom"), ex.getMessage());
+    }
+
+    /**
+     * A mid-stream failure carrying a cause without a message (eg. an auto-unbox bare NPE) must not
+     * append a dangling ': ' to the surfaced message.
+     */
+    @Test
+    void midStreamFailureWithoutCauseMessageHasNoTrailingColon() {
+        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> failing =
+                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                    @Override
+                    public void request(final long n) {
+                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta("partial answer"));
+                        subscriber.onError(new NullPointerException());
+                    }
+
+                    @Override
+                    public void cancel() {
+                        // nothing to release
+                    }
+                });
+
+        final var ex = org.junit.jupiter.api.Assertions.assertThrows(
+                MidStreamFailureException.class, () -> LlmWire.pump(failing, event -> {}, () -> false));
+        assertTrue(ex.getMessage().contains("NullPointerException"), ex.getMessage());
+        assertFalse(
+                ex.getMessage().matches(".*NullPointerException:\\s.*"),
+                "no dangling ': ' after the cause class: " + ex.getMessage());
+    }
+
+    /**
+     * A {@link TextDelta} with a null fragment must not blow up {@code text.append(null)} and must
+     * not be swallowed that would crash the consumer mid-stream: it streams through as an empty delta.
+     */
+    @Test
+    void textDeltaWithNullTextDoesNotNpeAndIsForwarded() {
+        final var seen = new java.util.concurrent.atomic.AtomicInteger();
+        final Flow.Publisher<io.yupiik.llm.client.model.LlmStreamEvent> publisher =
+                subscriber -> subscriber.onSubscribe(new Flow.Subscription() {
+                    @Override
+                    public void request(final long n) {
+                        subscriber.onNext(new io.yupiik.llm.client.model.LlmStreamEvent.TextDelta(null));
+                        subscriber.onComplete();
+                    }
+
+                    @Override
+                    public void cancel() {
+                        // nothing to release
+                    }
+                });
+
+        final var message = org.junit.jupiter.api.Assertions.assertDoesNotThrow(
+                () -> LlmWire.pump(publisher, event -> seen.incrementAndGet(), () -> false));
+        org.junit.jupiter.api.Assertions.assertEquals(1, seen.get(), "the null-text delta must still be forwarded");
+    }
 }
