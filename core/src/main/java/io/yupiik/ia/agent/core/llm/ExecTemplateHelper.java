@@ -21,7 +21,7 @@ import io.yupiik.fusion.framework.handlebars.helper.SafeString;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.Writer;
+import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -171,26 +171,6 @@ public class ExecTemplateHelper {
         return sb.toString();
     }
 
-    /** A {@link Writer} appending to {@code target} (a virtual-thread-friendly string sink). */
-    private static Writer appendWriter(final StringBuilder target) {
-        return new Writer() {
-            @Override
-            public void write(final char[] cbuf, final int off, final int len) {
-                target.append(cbuf, off, len);
-            }
-
-            @Override
-            public void flush() {
-                // no-op
-            }
-
-            @Override
-            public void close() {
-                // no-op
-            }
-        };
-    }
-
     private static String run(final List<String> command, final Map<String, String> env) {
         final ProcessBuilder pb;
         try {
@@ -205,12 +185,12 @@ public class ExecTemplateHelper {
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot start " + command.get(0) + ": " + e.getMessage(), e);
         }
-        final var out = new StringBuilder();
-        final var err = new StringBuilder();
+        final var out = new StringWriter();
+        final var err = new StringWriter();
         final var outThread = Thread.ofVirtual().start(() -> {
             try (final var reader =
                     new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-                reader.transferTo(appendWriter(out));
+                reader.transferTo(out);
             } catch (final IOException e) {
                 // ignored: the exit status below is the source of truth
             }
@@ -220,7 +200,7 @@ public class ExecTemplateHelper {
         final var errThread = Thread.ofVirtual().start(() -> {
             try (final var reader =
                     new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
-                reader.transferTo(appendWriter(err));
+                reader.transferTo(err);
             } catch (final IOException e) {
                 // ignored
             }
@@ -231,7 +211,7 @@ public class ExecTemplateHelper {
             errThread.join();
             if (exit != 0) {
                 var message = "exec failed (" + exit + ") for " + command.get(0);
-                if (!err.isEmpty()) {
+                if (!err.toString().isBlank()) {
                     final var tail = err.toString().strip();
                     message += ": " + (tail.length() > 500 ? tail.substring(0, 497) + "..." : tail);
                 }
