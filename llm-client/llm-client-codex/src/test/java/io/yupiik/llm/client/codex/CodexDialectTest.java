@@ -246,6 +246,133 @@ class CodexDialectTest {
         assertEquals(8L, response.usage().total());
     }
 
+    @Test
+    void delegatedAccessRejectionAutoUpgradesToAgentAssertion(final JsonMapper mapper) throws Exception {
+        // the backend rejects the OAuth bearer with 3p_delegated_access_policy_denied (workspace
+        // policy) - the dialect must invoke the upgrader (lazy enterprise enrollment) and re-send
+        // once with the signed AgentAssertion header, then stream the successful response.
+        final AtomicReference<Integer> authCount = new AtomicReference<>(0);
+        final AtomicReference<String> firstAuth = new AtomicReference<>();
+        final AtomicReference<String> secondAuth = new AtomicReference<>();
+        server.createContext("/codex/responses", exchange -> {
+            final String auth = exchange.getRequestHeaders().getFirst("authorization");
+            if (authCount.getAndUpdate(v -> v + 1) == 0) {
+                firstAuth.set(auth);
+                // delegated-access workspace policy block
+                respond(exchange, 403, "{\"error\":\"3p_delegated_access_policy_denied\"}");
+                return;
+            }
+            secondAuth.set(auth);
+            final byte[] sse = ("event: response.created\n"
+                            + "data: {\"type\":\"response.created\"}\n\n"
+                            + "event: response.output_text.delta\n"
+                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"output_index\":0}\n\n"
+                            + "event: response.completed\n"
+                            + "data: {\"type\":\"response.completed\"}\n\n")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, sse.length);
+            exchange.getResponseBody().write(sse);
+            exchange.close();
+        });
+
+        final AtomicReference<Integer> upgradeCalls = new AtomicReference<>(0);
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses",
+                        "key",
+                        null,
+                        null,
+                        b -> b.setHeader("authorization", "Bearer oauth-token")),
+                160,
+                providerIdIgnored -> {
+                    upgradeCalls.getAndUpdate(v -> v + 1);
+                    return "AgentAssertion {\"agent_runtime_id\":\"r\",\"task_id\":\"t\"}";
+                });
+
+        final var sb = new StringBuilder();
+        final var err = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        final var latch = new java.util.concurrent.CountDownLatch(1);
+        dialect.stream(request(), () -> false)
+                .toCompletableFuture()
+                .join()
+                .subscribe(new java.util.concurrent.Flow.Subscriber<>() {
+                    @Override
+                    public void onSubscribe(java.util.concurrent.Flow.Subscription s) {
+                        s.request(Long.MAX_VALUE);
+                    }
+
+                    @Override
+                    public void onNext(io.yupiik.llm.client.model.LlmStreamEvent e) {
+                        if (e instanceof io.yupiik.llm.client.model.LlmStreamEvent.TextDelta t) {
+                            sb.append(t.text());
+                        }
+                    }
+
+                    @Override
+                    public void onError(Throwable t) {
+                        err.set(t);
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void onComplete() {
+                        latch.countDown();
+                    }
+                });
+        latch.await();
+
+        assertEquals("Bearer oauth-token", firstAuth.get(), "the original request sends the OAuth bearer");
+        assertEquals(
+                "AgentAssertion {\"agent_runtime_id\":\"r\",\"task_id\":\"t\"}",
+                secondAuth.get(),
+                "the retried request must carry the signed AgentAssertion header");
+        assertEquals(1, upgradeCalls.get(), "the upgrader must be invoked exactly once");
+        assertEquals("ok", sb.toString(), "the successful retried stream is surfaced");
+        org.junit.jupiter.api.Assertions.assertNull(err.get(), "no error after the auto-upgrade");
+    }
+
+    @Test
+    void nonDelegated4xxPassesThroughWithoutUpgrade(final JsonMapper mapper) throws Exception {
+        // any failure that is NOT the delegated-access policy block must surface unchanged and must
+        // NOT invoke the upgrader (no silent enrollment on unrelated errors)
+        final AtomicReference<Integer> authCount = new AtomicReference<>(0);
+        server.createContext("/codex/responses", exchange -> {
+            authCount.getAndUpdate(v -> v + 1);
+            // a plain 4xx: rate-limit style rejection, not the delegated-access block
+            respond(exchange, 429, "{\"error\":\"rate_limit_exceeded\"}");
+        });
+
+        final AtomicReference<Integer> upgradeCalls = new AtomicReference<>(0);
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")),
+                160,
+                providerIdIgnored -> {
+                    upgradeCalls.getAndUpdate(v -> v + 1);
+                    return "AgentAssertion {}";
+                });
+
+        final AtomicReference<Throwable> stageError = new AtomicReference<>();
+        dialect.stream(request(), () -> false)
+                .whenComplete((result, error) -> stageError.set(error))
+                .handle((result, error) -> null)
+                .toCompletableFuture()
+                .join();
+
+        assertEquals(0, upgradeCalls.get(), "a non-delegated 4xx must not trigger the upgrader");
+        final Throwable cause = stageError.get() instanceof java.util.concurrent.CompletionException ce
+                ? ce.getCause()
+                : stageError.get();
+        org.junit.jupiter.api.Assertions.assertTrue(
+                cause instanceof io.yupiik.llm.client.LlmHttpFailureException, "" + cause);
+        assertEquals(429, ((io.yupiik.llm.client.LlmHttpFailureException) cause).status());
+        assertEquals(1, authCount.get(), "only the original request is sent, no silent retry");
+    }
+
     private io.yupiik.llm.client.model.LlmRequest request() {
         return new io.yupiik.llm.client.model.LlmRequest(
                 "gpt-6-luna",

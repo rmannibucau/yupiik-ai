@@ -154,31 +154,51 @@ public class CodexAuthTemplateHelper {
     }
 
     /**
+     * Resolves the signed {@code AgentAssertion {...}} header value for {@code providerName},
+     * lazily enrolling the enterprise identity on first use (no OAuth refresh on a ready session).
+     * This is the programmatic counterpart of {@link #codexAgentAssertion()} used by the codex
+     * dialect's 3p auto-upgrade when a delegated-access rejection is retried.
+     *
+     * @param providerName the provider id.
+     * @return the {@code AgentAssertion {...}} header value.
+     */
+    public String resolveAgentAssertion(final String providerName) {
+        final CodexTokenStore store = ensureEnrolled(providerName, /*refreshWhenIdle*/ false);
+        final var record = store.agentIdentity();
+        if (record == null) {
+            throw new IllegalStateException("provider '" + providerName
+                    + "' could not resolve an Agent Identity; run /codex login <provider> --enterprise");
+        }
+        return agentIdentity().assertionHeader(record);
+    }
+
+    /**
      * The {@code codexAgentAssertion} helper: resolves the signed {@code AgentAssertion {...}} header
      * value for {@code providerName} when the session carries an Agent Identity registration
      * (enterprise/company plans). Use it as the {@code authorization} value in a codex provider's
      * {@code dynamicHeaders}, e.g.:
      * {@code "authorization": "{{codexAgentAssertion \"default\"}}"}.
      *
-     * <p>The assertion is signed with the stored Ed25519 key and does not need the OAuth access
-     * token, so this helper never triggers a refresh and keeps working even when the refresh token
-     * has been revoked or expired by an enterprise session-lifetime policy. If the run task id is
-     * missing or stale it is lazily re-registered with the stored key, so an expired task id does
-     * not force a re-login.</p>
-     *
-     * <p>Only valid for Agent Identity sessions: the helper fails loudly (and tells the user to run
-     * {@code /codex login --enterprise}) when the session is only a regular OAuth one.</p>
+     * <p>A plain, non-enterprise OAuth session self-enrolls lazily on the first assertion render
+     * (there is no need to run {@code /codex login --enterprise} upfront). The assertion itself is
+     * signed with the stored Ed25519 key and does not need the OAuth access token, so once enrolled it
+     * keeps working even when the refresh token has been revoked or expired by an enterprise
+     * session-lifetime policy. On repeat renders no OAuth refresh is triggered and the run task is
+     * re-registered lazily when missing or stale.</p>
      *
      * @return the helper function.
      */
     public Function<HelperContext, Object> codexAgentAssertion() {
         return context -> {
             final String providerName = providerName(context, "codexAgentAssertion");
-            final CodexTokenStore store = load(providerName);
-            if (store == null) {
-                throw new CodexNotAuthenticatedException(providerName);
+            // enroll lazily if needed, but do not force an OAuth refresh on a ready session
+            // (the assertion signs with the stored Ed25519 key only)
+            final CodexTokenStore store = ensureEnrolled(providerName, /*refreshWhenIdle*/ false);
+            final var record = store.agentIdentity();
+            if (record == null) {
+                throw new IllegalStateException("provider '" + providerName
+                        + "' could not resolve an Agent Identity; run /codex login <provider> --enterprise");
             }
-            final var record = ensureEnrolledTask(providerName, store);
             return new SafeString(agentIdentity().assertionHeader(record));
         };
     }
@@ -187,17 +207,15 @@ public class CodexAuthTemplateHelper {
      * The {@code codexAccountId} helper: resolves the account id for {@code providerName} (from the
      * Agent Identity record when present, else from the OAuth session). Use it as the
      * {@code ChatGPT-Account-ID} header value so the account id is always correct without manual
-     * configuration. Never triggers an OAuth refresh; the id is read from the stored session.
+     * configuration. Resolves lazily through {@link #resolveSession}; on a personal (non-enterprise)
+     * session it falls back to the OAuth account id.
      *
      * @return the helper function.
      */
     public Function<HelperContext, Object> codexAccountId() {
         return context -> {
             final String providerName = providerName(context, "codexAccountId");
-            final CodexTokenStore store = load(providerName);
-            if (store == null) {
-                throw new CodexNotAuthenticatedException(providerName);
-            }
+            final CodexTokenStore store = resolveSession(providerName, /*refreshWhenIdle*/ true);
             final String accountId = store.agentIdentity() != null
                             && store.agentIdentity().accountId() != null
                             && !store.agentIdentity().accountId().isBlank()
@@ -205,39 +223,6 @@ public class CodexAuthTemplateHelper {
                     : store.accountId();
             return new SafeString(accountId == null ? "" : accountId);
         };
-    }
-
-    /**
-     * Returns the Agent Identity record for {@code providerName}, lazily re-registering the run task
-     * (from the stored key + agent runtime) when the recorded task id is missing or stale. Uses the
-     * stored state - no OAuth refresh - so a revoked/expired refresh token cannot block the assertion.
-     */
-    private io.yupiik.llm.client.codex.model.AgentIdentityRecord ensureEnrolledTask(
-            final String providerName, final CodexTokenStore store) {
-        final var record = store.agentIdentity();
-        if (record == null) {
-            throw new IllegalStateException("provider '" + providerName + "' is not enrolled in Agent Identity; "
-                    + "run /codex login <provider> --enterprise");
-        }
-        if (!record.needsTaskRegistration()) {
-            return record;
-        }
-        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
-        lock.lock();
-        try {
-            final CodexTokenStore current = load(providerName);
-            final var fresh = current == null ? store : current;
-            final var freshRecord = fresh.agentIdentity();
-            if (freshRecord != null && !freshRecord.needsTaskRegistration()) {
-                return freshRecord;
-            }
-            final var registered = agentIdentity().registerTask(freshRecord == null ? record : freshRecord);
-            final CodexTokenStore updated = fresh.withAgentIdentity(registered);
-            save(providerName, updated);
-            return registered;
-        } finally {
-            lock.unlock();
-        }
     }
 
     /**
@@ -252,10 +237,7 @@ public class CodexAuthTemplateHelper {
     public Function<HelperContext, Object> codexFedramp() {
         return context -> {
             final String providerName = providerName(context, "codexFedramp");
-            final CodexTokenStore store = load(providerName);
-            if (store == null) {
-                throw new CodexNotAuthenticatedException(providerName);
-            }
+            final CodexTokenStore store = resolveSession(providerName, /*refreshWhenIdle*/ true);
             final boolean fedramp =
                     store.agentIdentity() != null && store.agentIdentity().chatgptAccountIsFedramp();
             return new SafeString(fedramp ? "true" : "");
@@ -276,15 +258,102 @@ public class CodexAuthTemplateHelper {
 
     private Object apply(final HelperContext context) {
         final var providerName = providerName(context, "codexAuth");
-        final CodexTokenStore store = load(providerName);
-        if (store == null) {
-            throw new CodexNotAuthenticatedException(providerName);
-        }
-        final CodexTokenStore resolved = ensureFresh(providerName, store);
+        final CodexTokenStore resolved = resolveSession(providerName, /*refreshWhenIdle*/ true);
         return new SafeString(resolved.accessToken() == null ? "" : resolved.accessToken());
     }
 
-    private CodexTokenStore ensureFresh(final String providerName, final CodexTokenStore store) {
+    /**
+     * Resolves the session for {@code providerName} under a single-flight per-provider lock, without
+     * touching the enterprise identity: loads the session (failing loudly when absent) and refreshes
+     * the OAuth access token when it is expired. Used by the {@code codexAuth}/{@code codexAccountId}/
+     * {@code codexFedramp} helpers on any plan. The {@code refreshWhenIdle} flag is kept for symmetry
+     * with {@link #ensureEnrolled}; only the Agent Assertion path uses {@code false} (signing with the
+     * stored key must not force a refresh).
+     *
+     * @param providerName the provider id.
+     * @param refreshWhenIdle whether to refresh the OAuth access token when expired.
+     * @return the resolved session (never {@code null}).
+     */
+    private CodexTokenStore resolveSession(final String providerName, final boolean refreshWhenIdle) {
+        final CodexTokenStore initial = load(providerName);
+        if (initial == null) {
+            throw new CodexNotAuthenticatedException(providerName);
+        }
+        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            final CodexTokenStore store = load(providerName) == null ? initial : load(providerName);
+            return refreshWhenIdle ? refreshIfExpired(providerName, store) : store;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Resolves the session and guarantees an enterprise Agent Identity registration, enrolling lazily
+     * on first use (or re-registering a missing run task). This is the path used by the Agent Assertion
+     * helper and the 3p auto-upgrade; it is the only codex path that triggers enrollment. A plain OAuth
+     * session self-enrolls here on its first request.
+     *
+     * <p>Runs under the same per-provider single-flight lock as {@link #resolveSession}. {@code
+     * refreshWhenIdle} is {@code false} for the assertion path: once enrolled it must not force an OAuth
+     * refresh (which could fail when the enterprise refresh token is revoked by a session-lifetime
+     * policy); enrollment itself still refreshes the access token first since it is the registration
+     * anchor.</p>
+     *
+     * @param providerName the provider id.
+     * @param refreshWhenIdle whether to refresh the OAuth access token when the session is already
+     *     enrolled but expired.
+     * @return the resolved session carrying an Agent Identity registration (never {@code null}).
+     */
+    private CodexTokenStore ensureEnrolled(final String providerName, final boolean refreshWhenIdle) {
+        final CodexTokenStore initial = load(providerName);
+        if (initial == null) {
+            throw new CodexNotAuthenticatedException(providerName);
+        }
+        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            final CodexTokenStore store = load(providerName) == null ? initial : load(providerName);
+            if (store.agentIdentity() == null) {
+                // first request for an enterprise-backed provider: enroll the identity lazily,
+                // using the OAuth access token (refreshed first) as the registration anchor
+                return enrollLazily(providerName, store);
+            }
+            if (store.agentIdentity().needsTaskRegistration()) {
+                final var registered = agentIdentity().registerTask(store.agentIdentity());
+                final CodexTokenStore updated = store.withAgentIdentity(registered);
+                save(providerName, updated);
+                return updated;
+            }
+            if (refreshWhenIdle) {
+                return refreshIfExpired(providerName, store);
+            }
+            return store;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * Performs the first-use enterprise enrollment: refreshes the OAuth access token (the identity
+     * registration must be authenticated with a valid bearer), then runs the two-phase enrollment and
+     * persists the resulting store.
+     */
+    private CodexTokenStore enrollLazily(final String providerName, final CodexTokenStore store) {
+        final CodexTokenStore anchored = refreshIfExpired(providerName, store);
+        final var record = agentIdentity()
+                .enroll(anchored.accessToken(), anchored.idToken(), anchored.accountId(), /*forcedWorkspaceId*/ null);
+        final CodexTokenStore enrolled = anchored.withAgentIdentity(record);
+        save(providerName, enrolled);
+        return enrolled;
+    }
+
+    /**
+     * Refreshes the OAuth access token when it is expired or absent. Assumes the caller already holds
+     * the per-provider single-flight lock (re-checks under it); may persist the rotated refresh token.
+     */
+    private CodexTokenStore refreshIfExpired(final String providerName, final CodexTokenStore store) {
         final long now = System.currentTimeMillis();
         if (!store.expired(now)) {
             return store;
@@ -294,26 +363,14 @@ public class CodexAuthTemplateHelper {
                     "Codex access token for provider '" + providerName + "' has no refresh token; re-login needed");
             return store;
         }
-        // single-flight per provider so a burst of concurrent renders triggers at most one refresh
-        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
-        lock.lock();
-        try {
-            // re-check after acquiring the lock: another thread may have refreshed already
-            final CodexTokenStore current = load(providerName);
-            if (current != null && !current.expired(System.currentTimeMillis())) {
-                return current;
-            }
-            final CodexTokenStore refreshed = oauth().refresh(current == null ? store : current);
-            if (refreshed.accessToken() == null || refreshed.accessToken().isBlank()) {
-                throw new IllegalStateException(
-                        "Codex refresh for provider '" + providerName + "' returned no access token");
-            }
-            // refresh() already carries the Agent Identity and the previous id token through
-            save(providerName, refreshed);
-            return refreshed;
-        } finally {
-            lock.unlock();
+        final CodexTokenStore refreshed = oauth().refresh(store);
+        if (refreshed.accessToken() == null || refreshed.accessToken().isBlank()) {
+            throw new IllegalStateException(
+                    "Codex refresh for provider '" + providerName + "' returned no access token");
         }
+        // refresh() already carries the Agent Identity and the previous id token through
+        save(providerName, refreshed);
+        return refreshed;
     }
 
     private CodexTokenStore load(final String providerName) {

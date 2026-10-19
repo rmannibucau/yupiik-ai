@@ -21,6 +21,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
+import io.yupiik.llm.client.codex.model.IdTokenPayload;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpRequest;
@@ -184,6 +185,84 @@ public class CodexAgentIdentityClient {
             throw new IllegalStateException("Agent task registration omitted a task id: " + response.body());
         }
         return record.withTaskId(taskId);
+    }
+
+    /**
+     * Runs the complete two-phase enterprise enrollment for a ChatGPT/Codex session: derives the
+     * account routing metadata from the id_token (defaulting to the default organization when no
+     * workspace is pinned, mirroring codex's {@code forced_chatgpt_workspace_id} being optional),
+     * generates a fresh Ed25519 key, registers the device identity (agent runtime) with the auth API,
+     * then registers a run task and returns the resulting durable {@link AgentIdentityRecord}.
+     *
+     * <p>This is the shared primitive used both by the lazy request-time enrollment ({@code
+     * io.yupiik.ia.agent.core.llm.CodexAuthTemplateHelper}) and by the eager {@code /codex login
+     * --enterprise} force path.</p>
+     *
+     * @param accessToken the ChatGPT OAuth access token used to authenticate the identity registration.
+     * @param idToken the raw id token (bearer of the account metadata claims); may be null/blank.
+     * @param fallbackAccountId the account id to use when the id token does not carry one.
+     * @param forcedWorkspaceId an organization/workspace id to pin the enrollment to, or null/blank to
+     *     use the account's default organization.
+     * @return the newly enrolled identity record.
+     */
+    public AgentIdentityRecord enroll(
+            final String accessToken,
+            final String idToken,
+            final String fallbackAccountId,
+            final String forcedWorkspaceId) {
+        if (accessToken == null || accessToken.isBlank()) {
+            throw new IllegalStateException("ChatGPT/Codex login produced no access token; cannot enroll");
+        }
+        final var claims =
+                idToken == null || idToken.isBlank() ? null : CodexOAuthClient.parseIdTokenClaims(idToken, mapper);
+        String accountId = claims != null && claims.accountId() != null ? claims.accountId() : fallbackAccountId;
+        if (forcedWorkspaceId != null && !forcedWorkspaceId.isBlank()) {
+            if (!hasOrganization(idToken, forcedWorkspaceId)) {
+                throw new IllegalStateException("Account is not a member of workspace '" + forcedWorkspaceId
+                        + "'; cannot pin the enterprise enrollment to it");
+            }
+            accountId = forcedWorkspaceId;
+        }
+        final String chatgptUserId = claims == null ? null : claims.chatgptUserId();
+        final String planType = claims == null ? null : claims.planType();
+        final boolean fedramp = claims != null && claims.chatgptAccountIsFedramp();
+
+        final var key = Ed25519Util.generate();
+        final String runtimeId = registerAgentRuntime(accessToken, key, fedramp);
+        final AgentIdentityRecord record = registerTask(new AgentIdentityRecord(
+                runtimeId,
+                key.privateKeyPkcs8Base64(),
+                accountId,
+                chatgptUserId,
+                claims == null ? null : claims.email(),
+                planType,
+                fedramp,
+                null));
+        if (record.needsTaskRegistration()) {
+            throw new IllegalStateException("Agent identity enrollment produced no run task id");
+        }
+        return record;
+    }
+
+    /** True when the id-token payload lists {@code workspaceId} among its organizations. */
+    private boolean hasOrganization(final String idToken, final String workspaceId) {
+        if (idToken == null || idToken.isBlank()) {
+            return false;
+        }
+        try {
+            final var parts = idToken.split("\\.");
+            if (parts.length < 2) {
+                return false;
+            }
+            final byte[] decoded = java.util.Base64.getUrlDecoder().decode(parts[1]);
+            final IdTokenPayload payload = mapper.fromString(
+                    IdTokenPayload.class, new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+            return payload != null
+                    && payload.organizations() != null
+                    && payload.organizations().stream().anyMatch(org -> workspaceId.equals(org.id()));
+        } catch (final RuntimeException e) {
+            return false;
+        }
     }
 
     /**

@@ -460,7 +460,18 @@ public class ChatClient implements AutoCloseable {
                 yield d;
             }
             case CODEX -> {
-                final var d = new CodexDialect(mapper, httpClient, spec, codexClientVersion(provider));
+                final var providerId = provider == null ? null : provider.id();
+                final var d = new CodexDialect(
+                        mapper,
+                        httpClient,
+                        spec,
+                        codexClientVersion(provider),
+                        // 3p delegated-access (workspace policy) auto-upgrade: on a
+                        // 3p_delegated_access_policy_denied 4xx the dialect lazily enrolls the
+                        // enterprise Agent Identity and retries once with the signed assertion.
+                        providerId == null || providerId.isBlank()
+                                ? null
+                                : ignored -> codexAuthTemplateHelper.resolveAgentAssertion(providerId));
                 if (debugLogger != null) {
                     d.setOnRawLine(debugLogger::fine);
                 }

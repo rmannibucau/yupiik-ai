@@ -219,6 +219,40 @@ class CodexAgentIdentityClientTest {
     }
 
     @Test
+    void enrollUsesDefaultOrganizationWhenNoWorkspacePinned(final JsonMapper mapper) throws Exception {
+        // the shared enrollment primitive picks the default org from the id_token when no workspace
+        // is pinned (matching codex's optional forced_chatgpt_workspace_id)
+        final String jwt = headerDot("{\"email\":\"a@b.c\",\"organizations\":["
+                        + "{\"id\":\"default-org\",\"is_default\":true,\"is_active\":true},"
+                        + "{\"id\":\"other-org\",\"is_default\":false,\"is_active\":false}]}")
+                + ".sig";
+        final var codex = client(mapper);
+        final var record = codex.enroll("access-token-5", jwt, "fallback-acc", null);
+        assertEquals("default-org", record.accountId(), "default org must win over the OAuth fallback");
+        assertEquals("task-1", record.taskId(), "enroll must complete the run task registration");
+        assertFalse(record.needsTaskRegistration());
+        assertFalse(record.needsEnrollment(), "a completed enroll has a runtime id");
+        assertEquals(2, captured.size(), "enroll runs register then registerTask");
+        assertTrue(captured.get(0).path().endsWith("/v1/agent/register"));
+        assertTrue(captured.get(1).path().endsWith("/task/register"));
+    }
+
+    @Test
+    void enrollPinsForcedWorkspaceAndRejectsNonMember(final JsonMapper mapper) throws Exception {
+        final String jwt =
+                headerDot("{\"organizations\":[{\"id\":\"member-org\",\"is_default\":false,\"is_active\":false}]}")
+                        + ".sig";
+        final var codex = client(mapper);
+        // a workspace the account belongs to: pinned account id
+        final var pinned = codex.enroll("access-token-6", jwt, "fallback", "member-org");
+        assertEquals("member-org", pinned.accountId());
+        // a workspace the account is NOT a member of: loud failure
+        final var e = assertThrows(
+                IllegalStateException.class, () -> codex.enroll("access-token-7", jwt, "fallback", "not-member"));
+        assertTrue(e.getMessage().contains("not a member"), e.getMessage());
+    }
+
+    @Test
     void idTokenClaimsParsing(final JsonMapper mapper) {
         // id_token payload with the namespaced auth claims codex reads
         final String jwt = headerDot("{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acc-9\","

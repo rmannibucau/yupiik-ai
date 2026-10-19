@@ -143,7 +143,14 @@ accounts into a separate *Agent Identity* flow - a registered device identity
 whose requests are authenticated with a signed `AgentAssertion` header instead
 of a bearer token.
 
-Enroll a provider with the `--enterprise` flag:
+Enrollment is lazy: a plain `/codex login <provider>` (the OAuth session) is
+enough. The first request that resolves `{{codexAgentAssertion "<provider>"}}`
+enrolls the account on the spot - it derives the account metadata from the
+id token, registers a fresh Ed25519 device identity with OpenAI's auth API
+(agent runtime + run task) and persists it next to the OAuth tokens. No
+separate enrollment command is required.
+
+To enroll eagerly (or pin a specific workspace), use the force flag:
 
 [source]
 ----
@@ -157,6 +164,10 @@ workspace/organization with `--workspace` (the account must belong to it):
 ----
 /codex login <provider> --enterprise --workspace <org-id>
 ----
+
+The workspace pin is optional: when omitted, enrollment uses the account's
+default organization (matching the Codex CLI's optional
+`forced_chatgpt_workspace_id`).
 
 This runs the OAuth login first, then registers a fresh Ed25519 identity with
 OpenAI's auth API (agent runtime + run task) and persists it next to the OAuth
@@ -187,12 +198,20 @@ in `dynamicHeaders`, not in `headers`:
 
 `{{codexAgentAssertion "<providerId>"}}` renders the full
 `AgentAssertion {...}` header value (use it as `authorization`, no leading
-`Bearer `). `{{codexAccountId "<providerId>"}}` renders the account id for the
+`Bearer `). It enrolls lazily on first use, so a plain OAuth session (no
+`/codex login --enterprise` needed) upgrades to the assertion flow on its first
+request. `{{codexAccountId "<providerId>"}}` renders the account id for the
 `ChatGPT-Account-ID` header - from the agent identity when present, else from
-the OAuth session - so you never need to hardcode it. A plain OAuth session
-(no `--enterprise`) rejects `{{codexAgentAssertion}}` with a message telling you
-to enroll first. As with the regular flow, `dynamicHeaders` and `headers` are
-`Name: value` properties-text strings, not JSON objects.
+the OAuth session - so you never need to hardcode it. As with the regular flow,
+`dynamicHeaders` and `headers` are `Name: value` properties-text strings, not
+JSON objects.
+
+When a provider is configured with the `{{codexAuth}}` bearer and the
+ChatGPT backend rejects it with `3p_delegated_access_policy_denied` (a managed
+workspace not reachable by delegated OAuth), the codex dialect notices and
+lazily enrolls the enterprise identity on the spot, then retries the request
+once with the signed `AgentAssertion` header - so a managed workspace is
+reached transparently. Any other error surfaces unchanged.
 
 `{{codexFedramp "<providerId>"}}` renders `true` when the enrolled Agent Identity
 is a FedRAMP account and an empty string otherwise (blank header values are

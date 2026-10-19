@@ -23,7 +23,6 @@ import io.yupiik.llm.client.codex.CodexAgentIdentityClient;
 import io.yupiik.llm.client.codex.CodexAgentIdentityConfig;
 import io.yupiik.llm.client.codex.CodexOAuthClient;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
-import io.yupiik.llm.client.codex.Ed25519Util;
 import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
@@ -108,7 +107,8 @@ public class CodexLoginService {
      * anchor, registers a fresh Ed25519 device identity with the auth API
      * ({@code /v1/agent/register}), registers a run task ({@code /v1/agent/{id}/task/register}), and
      * persists the resulting {@link AgentIdentityRecord} next to the OAuth tokens so requests are
-     * authenticated with a signed {@code AgentAssertion} header.</p>
+     * authenticated with a signed {@code AgentAssertion} header. This is the eager/forced variant: the
+     * same enrollment happens lazily on first {@code {{codexAgentAssertion}} use for a plain session.</p>
      *
      * @param provider the provider id to sign in.
      * @param device true to use the device-code flow instead of the browser flow.
@@ -129,7 +129,8 @@ public class CodexLoginService {
      * specific workspace/organization id. When {@code forcedWorkspaceId} is non-blank it must belong
      * to the signed-in account (the id token lists the organizations): the enrollment uses that id as
      * the account id, and fails loudly if the account is not a member - so a user in several
-     * workspaces can pick the enterprise one instead of silently using the default.
+     * workspaces can pick the enterprise one instead of silently using the default. When it is blank
+     * (the common case), enrollment uses the account's default organization, matching codex.
      *
      * @param provider the provider id to sign in.
      * @param device true to use the device-code flow instead of the browser flow.
@@ -145,64 +146,31 @@ public class CodexLoginService {
             final Predicate<Boolean> cancelled,
             final String forcedWorkspaceId) {
         final CodexTokenStore oauthSession = signIn(provider, device, urlSink, cancelled);
+        return enrollNow(provider, oauthSession, forcedWorkspaceId);
+    }
+
+    /**
+     * Eagerly enrolls an existing OAuth session in the enterprise Agent Identity flow and persists the
+     * result. Used by the forced {@code /codex login --enterprise} path; the shared enrollment logic
+     * lives on {@link CodexAgentIdentityClient#enroll}. {@code forcedWorkspaceId} is optional - when
+     * blank the enrollment uses the account's default organization.
+     *
+     * @param provider the provider id.
+     * @param oauthSession the already-signed-in OAuth session.
+     * @param forcedWorkspaceId an organization/workspace id to pin, or null/blank for the default.
+     * @return the session carrying the Agent Identity registration.
+     */
+    public CodexTokenStore enrollNow(
+            final String provider, final CodexTokenStore oauthSession, final String forcedWorkspaceId) {
         if (oauthSession.accessToken() == null || oauthSession.accessToken().isBlank()) {
             throw new IllegalStateException("ChatGPT/Codex login succeeded but produced no access token");
         }
-
-        // derive the account metadata (plan/user/fedramp) off the already stored id token
-        final String idToken = oauthSession.idToken();
-        final var claims = idToken == null
-                ? null
-                : io.yupiik.llm.client.codex.CodexOAuthClient.parseIdTokenClaims(idToken, mapper);
-        String accountId = claims != null && claims.accountId() != null ? claims.accountId() : oauthSession.accountId();
-        if (forcedWorkspaceId != null && !forcedWorkspaceId.isBlank()) {
-            if (!hasOrganization(idToken, forcedWorkspaceId)) {
-                throw new IllegalStateException("Account is not a member of workspace '" + forcedWorkspaceId
-                        + "'; cannot pin the " + "enterprise enrollment to it");
-            }
-            accountId = forcedWorkspaceId;
-        }
-        final String chatgptUserId = claims == null ? null : claims.chatgptUserId();
-        final String planType = claims == null ? null : claims.planType();
-        final boolean fedramp = claims != null && claims.chatgptAccountIsFedramp();
-
         final var agentIdentity = new CodexAgentIdentityClient(mapper, httpClient, CodexAgentIdentityConfig.DEFAULT);
-        final var key = Ed25519Util.generate();
-        final String runtimeId = agentIdentity.registerAgentRuntime(oauthSession.accessToken(), key, fedramp);
-        final AgentIdentityRecord record = agentIdentity.registerTask(new AgentIdentityRecord(
-                runtimeId,
-                key.privateKeyPkcs8Base64(),
-                accountId,
-                chatgptUserId,
-                claims == null ? null : claims.email(),
-                planType,
-                fedramp,
-                null));
+        final var record = agentIdentity.enroll(
+                oauthSession.accessToken(), oauthSession.idToken(), oauthSession.accountId(), forcedWorkspaceId);
         final CodexTokenStore enrolled = oauthSession.withAgentIdentity(record);
         save(provider, enrolled);
         return enrolled;
-    }
-
-    /** True when the id-token payload lists {@code workspaceId} among its organizations. */
-    private boolean hasOrganization(final String idToken, final String workspaceId) {
-        if (idToken == null || idToken.isBlank()) {
-            return false;
-        }
-        try {
-            final var parts = idToken.split("\\.");
-            if (parts.length < 2) {
-                return false;
-            }
-            final byte[] decoded = java.util.Base64.getUrlDecoder().decode(parts[1]);
-            final var payload = mapper.fromString(
-                    io.yupiik.llm.client.codex.model.IdTokenPayload.class,
-                    new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
-            return payload != null
-                    && payload.organizations() != null
-                    && payload.organizations().stream().anyMatch(org -> workspaceId.equals(org.id()));
-        } catch (final RuntimeException e) {
-            return false;
-        }
     }
 
     /** The token store for a provider, or {@code null} when no session exists yet. */

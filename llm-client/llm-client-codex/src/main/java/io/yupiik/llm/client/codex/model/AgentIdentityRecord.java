@@ -56,6 +56,11 @@ public record AgentIdentityRecord(
         return taskId == null || taskId.isBlank();
     }
 
+    /** True when there is not even a device identity yet (no agent route id / runtime). */
+    public boolean needsEnrollment() {
+        return agentRuntimeId == null || agentRuntimeId.isBlank();
+    }
+
     /** Copy of this record carrying a (fresh) run task id. */
     public AgentIdentityRecord withTaskId(final String runTaskId) {
         return new AgentIdentityRecord(

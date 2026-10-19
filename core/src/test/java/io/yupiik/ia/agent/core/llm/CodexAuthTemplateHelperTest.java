@@ -80,6 +80,8 @@ class CodexAuthTemplateHelperTest {
         issuer.createContext("/v1/agent", exchange -> {
             if (exchange.getRequestURI().getPath().matches(".*/v1/agent/[^/]+/task/register")) {
                 respond(exchange, 200, "{\"task_id\":\"fresh-task\"}");
+            } else if (exchange.getRequestURI().getPath().endsWith("/v1/agent/register")) {
+                respond(exchange, 200, "{\"agent_runtime_id\":\"runtime-lazy\"}");
             } else {
                 respond(exchange, 404, "{}");
             }
@@ -218,15 +220,59 @@ class CodexAuthTemplateHelperTest {
     }
 
     @Test
-    void codexAgentAssertionRejectsPlainOAuthSession(final JsonMapper mapper) throws Exception {
+    void codexAgentAssertionLazilyEnrollsPlainOAuthSession(final JsonMapper mapper) throws Exception {
+        // a plain OAuth session (no Agent Identity yet) self-enrolls lazily on the first
+        // {{codexAgentAssertion}} render: register + registerTask against the mock auth API
         seed(mapper, "plain-agent", new CodexTokenStore("access", "refresh", "acc", farFuture(), "id"));
-        final var helper = helper(mapper);
-        assertThrows(
-                IllegalStateException.class,
-                () -> render(
-                        helper,
-                        "{{codexAgentAssertion \"plain-agent\"}}",
-                        Map.of("codexAgentAssertion", helper.codexAgentAssertion())));
+        final var agentConfig =
+                new io.yupiik.llm.client.codex.CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
+        final var helper = helper(mapper, agentConfig);
+        final var rendered = render(
+                helper,
+                "{{codexAgentAssertion \"plain-agent\"}}",
+                Map.of("codexAgentAssertion", helper.codexAgentAssertion()));
+        assertTrue(rendered.startsWith("AgentAssertion "), "lazily enrolled assertion: " + rendered);
+        assertTrue(rendered.contains("\"agent_runtime_id\":\"runtime-lazy\""), rendered);
+        // the enrollment must be persisted so a later render does not re-register the identity
+        final CodexTokenStore saved = mapper.fromBytes(
+                CodexTokenStore.class, Files.readAllBytes(storage.resolve("providers/plain-agent/codex.auth.json")));
+        final var record = saved.agentIdentity();
+        assertTrue(record != null && record.agentRuntimeId() != null, "enrollment persisted");
+    }
+
+    @Test
+    void codexAgentAssertionDoesNotChurnDeviceIdentity(final JsonMapper mapper) throws Exception {
+        // after the first lazy enrollment a second render reuses the stored identity; the mock's
+        // register counter must not grow (no device-identity churn on repeated renders)
+        seed(mapper, "plain-again", new CodexTokenStore("access", "refresh", "acc", farFuture(), "id"));
+        final var agentConfig =
+                new io.yupiik.llm.client.codex.CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
+        final var helper = helper(mapper, agentConfig);
+        final var first = render(
+                helper,
+                "{{codexAgentAssertion \"plain-again\"}}",
+                Map.of("codexAgentAssertion", helper.codexAgentAssertion()));
+        assertTrue(first.startsWith("AgentAssertion "), first);
+        final var second = render(
+                helper,
+                "{{codexAgentAssertion \"plain-again\"}}",
+                Map.of("codexAgentAssertion", helper.codexAgentAssertion()));
+        assertTrue(second.contains("\"agent_runtime_id\":\"runtime-lazy\""), second);
+        // same runtime id on both renders => no re-registration happened
+        assertEquals(
+                sub("agent_runtime_id", first),
+                sub("agent_runtime_id", second),
+                "repeated renders must reuse the enrolled device identity");
+    }
+
+    private static String sub(final String key, final String assertion) {
+        final var marker = "\"" + key + "\":\"";
+        final var start = assertion.indexOf(marker);
+        if (start < 0) {
+            return "";
+        }
+        final var end = assertion.indexOf('"', start + marker.length());
+        return assertion.substring(start + marker.length(), end);
     }
 
     @Test

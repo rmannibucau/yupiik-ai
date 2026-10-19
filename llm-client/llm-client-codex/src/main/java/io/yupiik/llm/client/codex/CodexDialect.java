@@ -17,6 +17,7 @@ package io.yupiik.llm.client.codex;
 
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.codex.model.CodexModels;
 import io.yupiik.llm.client.model.LlmModel;
@@ -52,7 +53,17 @@ public class CodexDialect extends OpenAIResponsesDialect {
     /** Default Codex client version advertised for model gating (whole part of 0.N.x). */
     static final int DEFAULT_CLIENT_VERSION = 160;
 
+    /** The backend error marker for a workspace policy that rejects delegated (3p) OAuth access. */
+    private static final String DELEGATED_ACCESS_POLICY = "3p_delegated_access_policy_denied";
+
     private final int clientVersion;
+
+    /**
+     * Optional 3p auto-upgrade: given the provider, returns the signed {@code AgentAssertion {...}}
+     * header value for the retry (it lazily enrolls the enterprise identity on first use). {@code null}
+     * (the default) disables the auto-upgrade, in which case the delegated-access 4xx surfaces as-is.
+     */
+    private final java.util.function.Function<String, String> assertionUpgrader;
 
     /**
      * Creates the dialect advertising the default Codex client version.
@@ -79,8 +90,30 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final ExtendedHttpClient client,
             final ProviderSpec provider,
             final int clientVersion) {
+        this(mapper, client, provider, clientVersion, null);
+    }
+
+    /**
+     * Creates the dialect with a tunable Codex client version and an optional 3p auto-upgrade callback.
+     *
+     * @param mapper JSON mapper used for wire serialization.
+     * @param client HTTP client used for provider calls.
+     * @param provider provider coordinates; {@code baseUrl} should end in {@code .../codex/responses}.
+     * @param clientVersion the whole part of the Codex client version this dialect advertises (eg. 160 for 0.160.x).
+     * @param assertionUpgrader when non-null, invoked on a {@code 3p_delegated_access_policy_denied}
+     *     rejection with the provider id to produce the signed {@code AgentAssertion {...}} header for
+     *     a single retry (it lazily enrolls the enterprise identity); {@code null} disables the
+     *     auto-upgrade. See {@link #DELEGATED_ACCESS_POLICY}.
+     */
+    public CodexDialect(
+            final JsonMapper mapper,
+            final ExtendedHttpClient client,
+            final ProviderSpec provider,
+            final int clientVersion,
+            final java.util.function.Function<String, String> assertionUpgrader) {
         super(mapper, client, provider);
         this.clientVersion = clientVersion <= 0 ? DEFAULT_CLIENT_VERSION : clientVersion;
+        this.assertionUpgrader = assertionUpgrader;
     }
 
     /** The routing identifier of this dialect. */
@@ -145,6 +178,63 @@ public class CodexDialect extends OpenAIResponsesDialect {
             final byte[] payload, final BooleanSupplier cancelled) {
         try {
             return client.sendAsync(http(payload), java.net.http.HttpResponse.BodyHandlers.ofPublisher())
+                    .thenCompose(response -> {
+                        if (response.statusCode() >= 200 && response.statusCode() <= 299) {
+                            return CompletableFuture.completedFuture(new io.yupiik.llm.client.spi.StreamAttempt(
+                                    response.statusCode(), response.headers(), response.body(), null));
+                        }
+                        return collect(response.body())
+                                .thenApply(body -> new io.yupiik.llm.client.spi.StreamAttempt(
+                                        response.statusCode(), response.headers(), null, body));
+                    })
+                    .thenCompose(attempt -> isDelegatedAccessBlocked(attempt)
+                            ? retryWithAgentAssertion(payload, cancelled)
+                            : CompletableFuture.completedFuture(attempt));
+        } catch (final RuntimeException e) {
+            return failed(e);
+        }
+    }
+
+    /** True when the failed stream attempt is the delegated-access (3p) workspace-policy rejection. */
+    private boolean isDelegatedAccessBlocked(final io.yupiik.llm.client.spi.StreamAttempt attempt) {
+        if (attempt.statusCode() < 400
+                || assertionUpgrader == null
+                || attempt.errorBody() == null
+                || attempt.errorBody().length == 0) {
+            return false;
+        }
+        final var body = new String(attempt.errorBody(), java.nio.charset.StandardCharsets.UTF_8);
+        return body.contains(DELEGATED_ACCESS_POLICY);
+    }
+
+    /**
+     * Recovers from a {@code 3p_delegated_access_policy_denied} rejection: lazily enrolls the
+     * enterprise (Agent Identity) identity through the injected upgrader and re-sends the exact same
+     * request once, replacing the bearer authorization with the signed {@code AgentAssertion} header.
+     * The failure happened before any SSE event was produced, so re-sending the stream payload is safe.
+     * If the upgrader itself fails, the original 4xx (the truthful cause) surfaces unchanged.
+     */
+    private CompletionStage<io.yupiik.llm.client.spi.StreamAttempt> retryWithAgentAssertion(
+            final byte[] payload, final BooleanSupplier cancelled) {
+        final String assertion;
+        try {
+            // the upgrader closes over the provider id in core's resolver
+            assertion = assertionUpgrader.apply(provider.baseUrl());
+        } catch (final RuntimeException e) {
+            return failed(new LlmHttpFailureException(403, DELEGATED_ACCESS_POLICY, null));
+        }
+        final var builder = HttpRequest.newBuilder()
+                .uri(URI.create(provider.baseUrl()))
+                .timeout(provider.timeout())
+                .header("content-type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofByteArray(payload));
+        authenticate(builder);
+        provider.headersCustomizer().accept(builder);
+        // the assertion must win over the rendered {{codexAuth}}/{{codexAgentAssertion}} dynamic header:
+        // apply it last so the enterprise signature replaces the rejected bearer
+        builder.setHeader("authorization", assertion);
+        try {
+            return client.sendAsync(builder.build(), java.net.http.HttpResponse.BodyHandlers.ofPublisher())
                     .thenCompose(response -> {
                         if (response.statusCode() >= 200 && response.statusCode() <= 299) {
                             return CompletableFuture.completedFuture(new io.yupiik.llm.client.spi.StreamAttempt(
