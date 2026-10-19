@@ -101,6 +101,30 @@ class SecretRedactorTest {
     }
 
     @Test
+    void harvestedTokenKeepsPrefixAndRestores() {
+        // a harvested prefix-token must be disguised through the matcher (prefix preserved) just like
+        // an inline one, and still round-trip through the provenance vault.
+        final var ghp = "ghp_" + "0aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890aB";
+        final var pat = "github_pat_" + "0aBcDeFgHiJkLmNoPqRsTuVwXyZ1234567890aBcDeFgH";
+        final var redactor = new SecretRedactor(registryWithHarvest(List.of(ghp, pat)), new SecretSessionModes());
+        final var text = "Authorization: Bearer " + ghp + " and " + pat;
+        final var redacted = redactor.redact(text, "s");
+        // the real values never leak
+        // the real values never leak
+        assertFalse(redacted.contains(ghp));
+        assertFalse(redacted.contains(pat));
+        // prefix is preserved for both families, body is regenerated
+        assertTrue(redacted.startsWith("Authorization: Bearer ghp_"));
+        assertFalse(redacted.contains("ghp_" + ghp.substring(4)), "ghp body must be regenerated");
+        assertTrue(redacted.contains("github_pat_"));
+        assertFalse(redacted.contains("github_pat_" + pat.substring("github_pat_".length())));
+        // the fakes round-trip back to the real values
+        final var restored = redactor.restore(redacted, "s");
+        assertTrue(restored.contains(ghp));
+        assertTrue(restored.contains(pat));
+    }
+
+    @Test
     void restoreOnlyEmitted() {
         final var redactor = redactorWithMatchers();
         final var value = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789ABCDEF";

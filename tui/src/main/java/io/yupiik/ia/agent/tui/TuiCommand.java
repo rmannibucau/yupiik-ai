@@ -1308,8 +1308,10 @@ public class TuiCommand implements Runnable {
                 final var selected = fq.selectedIndex() >= 0 && fq.selectedIndex() < opts
                         ? fq.question.options().get(fq.selectedIndex())
                         : null;
-                answers.put(
-                        fq.question.id(), fq.selectedIndex() == opts && opts > 0 && !own.isEmpty() ? own : selected);
+                // a question with no predefined options only has the free-text field: the answer
+                // is the typed text (opts == 0), never a (null) selected option
+                final var value = opts == 0 ? own : fq.selectedIndex() == opts && !own.isEmpty() ? own : selected;
+                answers.put(fq.question.id(), value);
             }
         }
         prompt.answered().set(true);
@@ -7418,7 +7420,8 @@ public class TuiCommand implements Runnable {
                 final var selected = fq.selectedIndex() >= 0 && fq.selectedIndex() < opts
                         ? fq.question.options().get(fq.selectedIndex())
                         : null;
-                final var value = fq.selectedIndex() == opts && opts > 0 && !own.isEmpty() ? own : selected;
+                // a no-options question answers from the free-text field, not a (null) option
+                final var value = opts == 0 ? own : fq.selectedIndex() == opts && !own.isEmpty() ? own : selected;
                 if (value != null) {
                     lines.add(Line.from(Span.styled("  - " + value, Style.EMPTY.fg(Color.hex(palette.text())))));
                     any = true;

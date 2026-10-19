@@ -39,6 +39,11 @@ import java.util.regex.Pattern;
  * value); token-shaped secrets come from the injected {@link SecretMatcher}s applied to contiguous
  * word tokens; PEM blocks are handled separately (they span lines); custom {@code patterns} run as
  * substring regexes. Everything runs once per message, never per-word regex over the environment.</p>
+ *
+ * <p>Whatever the detection source (harvested exact value or inline token), every value is rendered
+ * through the same replacement chain: the highest-priority {@link SecretMatcher} that recognizes it
+ * produces the shape-preserving fake (prefix kept, body regenerated), falling back to the shape-blind
+ * regenerator only for values no matcher claims. A value therefore looks the same inline or harvested.</p>
  */
 @ApplicationScoped
 public class SecretRedactor {
@@ -231,7 +236,7 @@ public class SecretRedactor {
             }
             int idx = out.indexOf(value);
             while (idx >= 0) {
-                final var fake = ensureFake(sessionId, value);
+                final var fake = replacementFor(sessionId, value);
                 out = out.substring(0, idx) + fake + out.substring(idx + value.length());
                 idx = out.indexOf(fake, idx + fake.length());
             }
@@ -317,10 +322,30 @@ public class SecretRedactor {
         return out;
     }
 
+    /**
+     * Resolves the fake for a candidate value regardless of where it was detected (harvested exact
+     * value, inline token, ...): the highest-priority ({@link SecretMatcher#order()}) matcher that
+     * {@link SecretMatcher#matches matches} wins and produces a shape-preserving fake (prefix kept,
+     * body regenerated); values no matcher recognizes fall back to the shape-blind
+     * {@link #fakeOf(String)} regenerator. Unifying the source here guarantees a value is disguised
+     * identically whether it was harvested or seen inline.
+     */
+    private String replacementFor(final String sessionId, final String value) {
+        for (final var matcher : registry.matchers()) {
+            if (matcher.matches(value)) {
+                return ensureFake(sessionId, value, matcher::replace);
+            }
+        }
+        return ensureFake(sessionId, value);
+    }
+
     /** Apply the provenance-safe replacement for {@code real}; records the mapping. */
     private String ensureFake(final String sessionId, final String real) {
         if (vault == null) {
             return fakeOf(real);
+        }
+        if (isEmittedFake(sessionId, real)) {
+            return real; // already a placeholder we emitted; never re-randomize it
         }
         final var existing = vault.fakeOf(sessionId, real);
         if (existing != null) {
@@ -340,6 +365,9 @@ public class SecretRedactor {
         if (vault == null) {
             return replacement.apply(real);
         }
+        if (isEmittedFake(sessionId, real)) {
+            return real; // already a placeholder we emitted; never re-randomize it
+        }
         final var existing = vault.fakeOf(sessionId, real);
         if (existing != null) {
             return existing;
@@ -350,6 +378,15 @@ public class SecretRedactor {
         } while (isTaken(sessionId, fake, real));
         vault.record(sessionId, fake, real);
         return fake;
+    }
+
+    /**
+     * True when {@code value} is already a fake this redactor emitted in the session. With
+     * prefix-preserving fakes, a later pass (e.g. token scanning) can see a placeholder and mistake it
+     * for a fresh real secret; this guard stops re-randomizing our own output so it keeps round-tripping.
+     */
+    private boolean isEmittedFake(final String sessionId, final String value) {
+        return vault.realOf(sessionId, value) != null;
     }
 
     /** True when {@code fake} is already bound to a different real value (a collision to avoid). */

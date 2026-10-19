@@ -45,6 +45,7 @@ import io.yupiik.ia.agent.core.cli.FormatDatePromptHelper;
 import io.yupiik.ia.agent.core.llm.InBandToolCallExtractor;
 import io.yupiik.ia.agent.core.llm.MarkupToolCallScanner;
 import io.yupiik.ia.agent.core.maven.MavenRepositoryKnowledgeService;
+import io.yupiik.ia.agent.core.question.Question;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.shell.SessionRuntimeFactory;
 import io.yupiik.ia.agent.core.shell.ShellRegistry;
@@ -64,10 +65,13 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Handler;
@@ -254,6 +258,76 @@ class TuiCommandHeadlessTest {
 
         tuiRef.get().dispatch(KeyEvent.ofChar('c', KeyModifiers.CTRL));
         uiThread.join(TIMEOUT_MS);
+    }
+
+    /**
+     * Reproduces a crash in {@code TuiCommand.confirmAnswers}: a single (non-multiple) question with
+     * no predefined options has no dropdown, so the only answer is the free-text field. The old logic
+     * stored the (null) "selected" option into the answers map, and {@code ConcurrentHashMap} rejects
+     * null values with a {@link NullPointerException}. The answer must come from the typed text.
+     */
+    @Test
+    void confirmAnswersStoresFreeTextForNoOptionQuestion() throws Exception {
+        final var command = newUiCommand(container, deps);
+
+        final var answers = new ConcurrentHashMap<String, Object>();
+        final var answered = new AtomicBoolean();
+        final var latch = new CountDownLatch(1);
+        final var prompt = newFeedbackPromptReflection(
+                command, List.of(new Question("q1", "what?", List.of(), false)), answers, answered, latch);
+
+        // the user types a free-text answer (no options to pick)
+        final var own = promptQuestionReflection(prompt, 0);
+        setTextArea(own, "my typed answer");
+
+        invokeConfirmAnswers(command, new TuiCommand.UiState(deps.thinkTags(), Clock.systemUTC()), prompt);
+
+        assertEquals("my typed answer", answers.get("q1"), "a no-options free-text answer must be stored");
+        assertTrue(answered.get(), "confirm marks the prompt as answered");
+        assertEquals(0, latch.getCount(), "confirm counts down the wait latch");
+    }
+
+    // --- reflection access to the private TuiCommand feedback internals, since the
+    // FeedbackPrompt / FeedbackQuestion types and confirmAnswers have no public seam ---
+
+    private static Object newFeedbackPromptReflection(
+            final TuiCommand command,
+            final List<Question> raw,
+            final Map<String, Object> answers,
+            final AtomicBoolean answered,
+            final CountDownLatch latch)
+            throws Exception {
+        final var ctor = nestedClass("FeedbackPrompt")
+                .getDeclaredConstructor(List.class, CountDownLatch.class, Map.class, AtomicBoolean.class);
+        ctor.setAccessible(true);
+        return ctor.newInstance(raw, latch, answers, answered);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Object promptQuestionReflection(final Object prompt, final int index) throws Exception {
+        final var questions = nestedClass("FeedbackPrompt").getDeclaredMethod("questions");
+        questions.setAccessible(true);
+        return ((List<Object>) questions.invoke(prompt)).get(index);
+    }
+
+    private static void setTextArea(final Object feedbackQuestion, final String text) throws Exception {
+        final var field = nestedClass("FeedbackQuestion").getDeclaredField("ownAnswer");
+        field.setAccessible(true);
+        final var state = field.get(feedbackQuestion);
+        final var setText = state.getClass().getMethod("setText", String.class);
+        setText.invoke(state, text);
+    }
+
+    private static void invokeConfirmAnswers(
+            final TuiCommand command, final TuiCommand.UiState state, final Object prompt) throws Exception {
+        final var method = TuiCommand.class.getDeclaredMethod(
+                "confirmAnswers", TuiCommand.UiState.class, nestedClass("FeedbackPrompt"));
+        method.setAccessible(true);
+        method.invoke(command, state, prompt);
+    }
+
+    private static Class<?> nestedClass(final String simpleName) throws ClassNotFoundException {
+        return Class.forName("io.yupiik.ia.agent.tui.TuiCommand$" + simpleName);
     }
 
     @Test

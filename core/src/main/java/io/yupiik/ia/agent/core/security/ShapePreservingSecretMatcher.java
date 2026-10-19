@@ -67,8 +67,10 @@ public abstract class ShapePreservingSecretMatcher implements SecretMatcher {
     /**
      * Builds a random format-preserving fake of the same length and shape as {@code value}: every
      * alphanumeric is replaced with a random one from {@link #DEFAULT_ALPHABET}, separators/hyphens are
-     * kept. Used by the matchers and by exact-harvested-value redaction (so two values of equal length
-     * get distinct fakes and never collide on the restore side).
+     * kept. Used when a matcher produces the fake and as the shape-blind fallback of the redactor for
+     * values no matcher recognizes (e.g. opaque exact-harvested values, custom {@code patterns}), so
+     * two values of equal length get distinct fakes and never collide on the restore side. Recognized
+     * prefix values always go through {@link #replace} so their leading prefix is preserved.
      */
     public static String regenerate(final String value) {
         if (value == null) {
