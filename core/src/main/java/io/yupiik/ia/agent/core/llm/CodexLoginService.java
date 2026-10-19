@@ -19,8 +19,12 @@ import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.llm.client.codex.CodexAgentIdentityClient;
+import io.yupiik.llm.client.codex.CodexAgentIdentityConfig;
 import io.yupiik.llm.client.codex.CodexOAuthClient;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
+import io.yupiik.llm.client.codex.Ed25519Util;
+import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -84,6 +88,60 @@ public class CodexLoginService {
         }
         save(provider, store);
         return store;
+    }
+
+    /**
+     * Runs the ChatGPT/Codex login for a provider and additionally enrolls the account in the
+     * enterprise Agent Identity flow ({@code /codex login <provider> --enterprise}). This is the path
+     * for managed/company (workspace) plans that the plain OAuth browser/device flows cannot reach.
+     *
+     * <p>It reuses {@link #signIn} to obtain the OAuth session, then, with that access token as the
+     * anchor, registers a fresh Ed25519 device identity with the auth API
+     * ({@code /v1/agent/register}), registers a run task ({@code /v1/agent/{id}/task/register}), and
+     * persists the resulting {@link AgentIdentityRecord} next to the OAuth tokens so requests are
+     * authenticated with a signed {@code AgentAssertion} header.</p>
+     *
+     * @param provider the provider id to sign in.
+     * @param device true to use the device-code flow instead of the browser flow.
+     * @param urlSink receives the authorize (or verification) URL to open.
+     * @param cancelled cancellation probe.
+     * @return the authenticated session carrying the Agent Identity registration.
+     */
+    public CodexTokenStore signInAgent(
+            final String provider,
+            final boolean device,
+            final Consumer<String> urlSink,
+            final Predicate<Boolean> cancelled) {
+        final CodexTokenStore oauthSession = signIn(provider, device, urlSink, cancelled);
+        if (oauthSession.accessToken() == null || oauthSession.accessToken().isBlank()) {
+            throw new IllegalStateException("ChatGPT/Codex login succeeded but produced no access token");
+        }
+
+        // derive the account metadata (plan/user/fedramp) off the already stored id token
+        final var claims = oauthSession.idToken() == null
+                ? null
+                : io.yupiik.llm.client.codex.CodexOAuthClient.parseIdTokenClaims(oauthSession.idToken());
+        final String accountId =
+                claims != null && claims.accountId() != null ? claims.accountId() : oauthSession.accountId();
+        final String chatgptUserId = claims == null ? null : claims.chatgptUserId();
+        final String planType = claims == null ? null : claims.planType();
+        final boolean fedramp = claims != null && claims.chatgptAccountIsFedramp();
+
+        final var agentIdentity = new CodexAgentIdentityClient(mapper, httpClient, CodexAgentIdentityConfig.DEFAULT);
+        final var key = Ed25519Util.generate();
+        final String runtimeId = agentIdentity.registerAgentRuntime(oauthSession.accessToken(), key, fedramp);
+        final AgentIdentityRecord record = agentIdentity.registerTask(new AgentIdentityRecord(
+                runtimeId,
+                key.privateKeyPkcs8Base64(),
+                accountId,
+                chatgptUserId,
+                claims == null ? null : claims.email(),
+                planType,
+                fedramp,
+                null));
+        final CodexTokenStore enrolled = oauthSession.withAgentIdentity(record);
+        save(provider, enrolled);
+        return enrolled;
     }
 
     /** The token store for a provider, or {@code null} when no session exists yet. */

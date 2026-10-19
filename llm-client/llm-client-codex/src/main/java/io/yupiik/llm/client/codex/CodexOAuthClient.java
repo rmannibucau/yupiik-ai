@@ -331,6 +331,81 @@ public class CodexOAuthClient {
         return org.find() ? org.group(1) : null;
     }
 
+    /**
+     * The account-relevant claims parsed (without signature verification) from a Codex access/id
+     * token, mirroring {@code codex-rs/login/src/token_data.rs IdTokenInfo}. Signature checking is
+     * deliberately skipped: this only reads our own token to derive routing/product decisions, as
+     * the Codex CLI does.
+     *
+     * @param accountId the {@code chatgpt_account_id}.
+     * @param chatgptUserId the {@code chatgpt_user_id}.
+     * @param email the account email, when present.
+     * @param planType the ChatGPT subscription plan (eg. free, plus, pro, business, enterprise, edu).
+     * @param chatgptAccountIsFedramp whether the account routes through the FedRAMP edge.
+     */
+    public record IdTokenClaims(
+            String accountId, String chatgptUserId, String email, String planType, boolean chatgptAccountIsFedramp) {
+
+        /** True when the account belongs to a managed workspace plan (Team/Business/Enterprise style). */
+        public boolean isWorkspacePlan() {
+            if (planType == null || planType.isBlank()) {
+                return false;
+            }
+            final var p = planType.toLowerCase(java.util.Locale.ROOT);
+            return p.contains("business") || p.contains("enterprise") || p.contains("team") || p.contains("edu");
+        }
+    }
+
+    /**
+     * Parses the account claims out of a Codex JWT payload (access or id token). Falls back to the
+     * organization id for the account id when the namespaced claims are absent, exactly like the
+     * Codex CLI.
+     *
+     * @param token the access or id token, possibly null/blank.
+     * @return the parsed claims, never {@code null} (fields may be null).
+     */
+    public static IdTokenClaims parseIdTokenClaims(final String token) {
+        if (token == null || token.isBlank()) {
+            return new IdTokenClaims(null, null, null, null, false);
+        }
+        try {
+            final var parts = token.split("\\.");
+            if (parts.length < 2) {
+                return new IdTokenClaims(null, null, null, null, false);
+            }
+            final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
+            final var json = new String(decoded, UTF_8);
+            return claimsFrom(json);
+        } catch (final RuntimeException e) {
+            LOGGER.fine(() -> "Cannot decode id_token claims: " + e.getMessage());
+            return new IdTokenClaims(null, null, null, null, false);
+        }
+    }
+
+    /** Reads all id_token claims from a decoded JWT payload JSON. */
+    private static IdTokenClaims claimsFrom(final String json) {
+        // plan type / user id / fedramp lookups on the bare claim or the namespaced auth claim.
+        final String plan = firstJsonString(
+                json, new String[] {"https://api.openai.com/auth.chatgpt_plan_type", "chatgpt_plan_type"});
+        final String userId =
+                firstJsonString(json, new String[] {"https://api.openai.com/auth.chatgpt_user_id", "chatgpt_user_id"});
+        final String email = firstJsonString(json, new String[] {"email", "preferred_username"});
+        final boolean fedramp = json.contains("\"chatgpt_account_is_fedramp\"")
+                && !json.contains("\"chatgpt_account_is_fedramp\":false");
+        return new IdTokenClaims(extractClaim(json), userId, email, plan, fedramp);
+    }
+
+    private static String firstJsonString(final String json, final String[] candidates) {
+        for (final String candidate : candidates) {
+            final Matcher m = Pattern.compile("\"" + Pattern.quote(candidate) + "\"\\s*:\\s*\"([^\"]+)\"")
+                    .matcher(json);
+            if (m.find()) {
+                return m.group(1);
+            }
+        }
+        return null;
+    }
+
     // ----- HTTP and JSON plumbing -----
 
     private String postJson(final String url, final String json, final String contentType) {

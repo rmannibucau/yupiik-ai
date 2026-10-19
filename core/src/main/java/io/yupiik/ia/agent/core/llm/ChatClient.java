@@ -395,6 +395,15 @@ public class ChatClient implements AutoCloseable {
         if (codexAuth != null) {
             helpers.put("codexAuth", codexAuth);
         }
+        final var codexAgentAssertion =
+                codexAuthTemplateHelper == null ? null : codexAuthTemplateHelper.codexAgentAssertion();
+        if (codexAgentAssertion != null) {
+            helpers.put("codexAgentAssertion", codexAgentAssertion);
+        }
+        final var codexAccountId = codexAuthTemplateHelper == null ? null : codexAuthTemplateHelper.codexAccountId();
+        if (codexAccountId != null) {
+            helpers.put("codexAccountId", codexAccountId);
+        }
         return builder -> {
             staticHeaders.forEach((k, v) -> {
                 if (k != null && !k.isBlank() && v != null && !v.isBlank()) {

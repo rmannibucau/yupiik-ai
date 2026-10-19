@@ -30,6 +30,8 @@ import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration$FusionConfigurationFactory;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
+import io.yupiik.llm.client.codex.Ed25519Util;
+import io.yupiik.llm.client.codex.model.AgentIdentityRecord;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -129,6 +131,96 @@ class CodexAuthTemplateHelperTest {
         assertTrue(e.getMessage().contains("interactive login"), e.getMessage());
     }
 
+    @Test
+    void codexAccountIdUsesAgentIdentityAccountWhenPresent(final JsonMapper mapper) throws Exception {
+        final var key = Ed25519Util.generate();
+        seed(
+                mapper,
+                "agent-p",
+                new CodexTokenStore(
+                        "access",
+                        "refresh",
+                        "oauth-account",
+                        farFuture(),
+                        "id",
+                        // the agent identity carries a different (managed workspace) account id
+                        new AgentIdentityRecord(
+                                "runtime-1",
+                                key.privateKeyPkcs8Base64(),
+                                "workspace-account",
+                                "user-9",
+                                null,
+                                "enterprise",
+                                false,
+                                "task-1")));
+        final var helper = helper(mapper);
+        final var rendered =
+                render(helper, "{{codexAccountId \"agent-p\"}}", Map.of("codexAccountId", helper.codexAccountId()));
+        assertEquals("workspace-account", rendered, "agent identity account id wins over the oauth one");
+    }
+
+    @Test
+    void codexAccountIdFallsBackToOAuthAccount(final JsonMapper mapper) throws Exception {
+        seed(mapper, "plain-p", new CodexTokenStore("access", "refresh", "oauth-account", farFuture(), "id"));
+        final var helper = helper(mapper);
+        final var rendered =
+                render(helper, "{{codexAccountId \"plain-p\"}}", Map.of("codexAccountId", helper.codexAccountId()));
+        assertEquals("oauth-account", rendered);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void codexAgentAssertionProducesVerifiableSignedHeader(final JsonMapper mapper) throws Exception {
+        final var key = Ed25519Util.generate();
+        seed(
+                mapper,
+                "agent-a",
+                new CodexTokenStore(
+                        "access",
+                        "refresh",
+                        "workspace-account",
+                        farFuture(),
+                        "id",
+                        new AgentIdentityRecord(
+                                "runtime-9",
+                                key.privateKeyPkcs8Base64(),
+                                "workspace-account",
+                                "user-9",
+                                null,
+                                "business",
+                                false,
+                                "task-77")));
+        final var helper = helper(mapper);
+        final var rendered = render(
+                helper,
+                "{{codexAgentAssertion \"agent-a\"}}",
+                Map.of("codexAgentAssertion", helper.codexAgentAssertion()));
+        assertTrue(rendered.startsWith("AgentAssertion "), rendered);
+        // decode the envelope and verify the signature against the stored Ed25519 private key,
+        // exactly the guarantee codex relies on when the server checks the assertion
+        final String envelope = rendered.substring("AgentAssertion ".length());
+        final Map<String, Object> parsed = mapper.fromString(Map.class, envelope);
+        assertEquals("runtime-9", parsed.get("agent_runtime_id"));
+        assertEquals("task-77", parsed.get("task_id"));
+        final String timestamp = String.valueOf(parsed.get("timestamp"));
+        final String signature = String.valueOf(parsed.get("signature"));
+        assertTrue(
+                Ed25519Util.verify(key.privateKeyPkcs8Base64(), "runtime-9:task-77:" + timestamp, signature),
+                "assertion signature must verify against the seeded key");
+    }
+
+    @Test
+    void codexAgentAssertionRejectsPlainOAuthSession(final JsonMapper mapper) throws Exception {
+        seed(mapper, "plain-agent", new CodexTokenStore("access", "refresh", "acc", farFuture(), "id"));
+        final var helper = helper(mapper);
+        assertThrows(
+                IllegalStateException.class,
+                () -> render(
+                        helper,
+                        "{{codexAgentAssertion \"plain-agent\"}}",
+                        Map.of("codexAgentAssertion", helper.codexAgentAssertion())));
+    }
+
     private CodingAgentConfiguration config() {
         final var map = new HashMap<String, String>();
         map.put("yca.storageHome", storage.toString());
@@ -160,10 +252,16 @@ class CodexAuthTemplateHelperTest {
     }
 
     private static String render(final CodexAuthTemplateHelper helper, final String source) {
-        final Function<HelperContext, Object> codexAuth = helper.codexAuth();
+        return render(helper, source, Map.of("codexAuth", helper.codexAuth()));
+    }
+
+    private static String render(
+            final CodexAuthTemplateHelper helper,
+            final String source,
+            final Map<String, Function<HelperContext, Object>> helpers) {
         final Template template = new HandlebarsCompiler()
                 .compile(new HandlebarsCompiler.CompilationContext(
-                        new HandlebarsCompiler.Settings().helpers(Map.of("codexAuth", codexAuth)), source));
+                        new HandlebarsCompiler.Settings().helpers(helpers), source));
         return template.render(Map.of());
     }
 

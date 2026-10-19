@@ -55,8 +55,8 @@ public class CodexLoginCommands implements SlashCommandSet {
         final SlashCommand login = SlashCommand.of(
                 new SlashCommandSpec(
                         "/codex",
-                        "login <provider> [--device]",
-                        "Sign in a codex-flavored provider through the ChatGPT/Codex OAuth browser flow (default; --device uses the device-code flow, like the Codex CLI's --device-auth) and cache the session.",
+                        "login <provider> [--device] [--enterprise]",
+                        "Sign in a codex-flavored provider through the ChatGPT/Codex OAuth browser flow (default; --device uses the device-code flow, like the Codex CLI's --device-auth) and cache the session. --enterprise additionally enrolls the account in the Codex Agent Identity flow (for managed/company plans), switching requests to a signed AgentAssertion header.",
                         SlashGroup.OTHER),
                 (arg, env) -> CompletableFuture.supplyAsync(() -> runLogin(arg == null ? "" : arg.strip(), env)));
         return List.of(login);
@@ -74,12 +74,31 @@ public class CodexLoginCommands implements SlashCommandSet {
             tokens.remove(0); // strip the subcommand word
         }
         final var device = tokens.stream().anyMatch("--device"::equalsIgnoreCase);
+        final var enterprise = tokens.stream().anyMatch("--enterprise"::equalsIgnoreCase);
         final var provider =
                 tokens.stream().filter(p -> !p.startsWith("--")).findFirst().orElse("");
         if (provider.isBlank()) {
             return ShellOutcome.error("/codex login expects a provider name, eg. /codex login default");
         }
         try {
+            if (enterprise) {
+                final var store = loginService.signInAgent(
+                        provider,
+                        device,
+                        url -> {
+                            if (env != null) {
+                                env.frontend().transcript(url + "\n\nWaiting for authorization...");
+                            }
+                        },
+                        b -> false);
+                return ShellOutcome.status("Codex enterprise (Agent Identity) login complete for provider '"
+                        + provider + "' (account: " + (store.accountId() == null ? "unknown" : store.accountId())
+                        + (store.agentIdentity() != null
+                                        && store.agentIdentity().planType() != null
+                                ? ", plan: " + store.agentIdentity().planType()
+                                : "")
+                        + "). Requests will use the signed AgentAssertion header.");
+            }
             final var store = loginService.signIn(
                     provider,
                     device,

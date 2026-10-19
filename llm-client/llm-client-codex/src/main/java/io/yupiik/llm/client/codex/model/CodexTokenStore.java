@@ -16,6 +16,7 @@
 package io.yupiik.llm.client.codex.model;
 
 import io.yupiik.fusion.framework.build.api.json.JsonModel;
+import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 
 /**
  * The cached Codex OAuth session, largely mirroring the shape of the Codex CLI
@@ -24,16 +25,56 @@ import io.yupiik.fusion.framework.build.api.json.JsonModel;
  * home). The access token is short lived (about an hour); the refresh token may rotate on every
  * refresh and must be persisted each time.
  *
+ * <p>When the account is signed into through the enterprise/Agent Identity flow, an optional
+ * {@link AgentIdentityRecord} is attached ({@code agentIdentity}). Its presence flips the per-request
+ * authentication from {@code Authorization: Bearer <access_token>} to a signed
+ * {@code Authorization: AgentAssertion {...}} header (see the {@code {{codexAgentAssertion}}}
+ * helper).</p>
+ *
  * @param accessToken the short-lived ChatGPT account access token.
  * @param refreshToken the longer-lived refresh token (rotated on refresh).
  * @param accountId the {@code chatgpt_account_id} extracted from the id_token claim.
  * @param expiresAt epoch millis when the access token expires.
  * @param idToken the raw id token (bearer of the account id claim); kept for re-deriving the
  *     account id without a round trip.
+ * @param agentIdentity the optional enterprise Agent Identity registration, or {@code null} when the
+ *     account is only signed in through the regular ChatGPT OAuth flow.
  */
 @JsonModel
 public record CodexTokenStore(
-        String accessToken, String refreshToken, String accountId, Long expiresAt, String idToken) {
+        String accessToken,
+        String refreshToken,
+        String accountId,
+        Long expiresAt,
+        String idToken,
+        @JsonProperty("agent_identity") AgentIdentityRecord agentIdentity) {
+
+    /** Creates a store without an Agent Identity registration (the regular ChatGPT OAuth flow). */
+    public CodexTokenStore(
+            final String accessToken,
+            final String refreshToken,
+            final String accountId,
+            final Long expiresAt,
+            final String idToken) {
+        this(accessToken, refreshToken, accountId, expiresAt, idToken, null);
+    }
+
+    /** Copy of this store with a different (or null) Agent Identity registration. */
+    public CodexTokenStore withAgentIdentity(final AgentIdentityRecord agentIdentity) {
+        return new CodexTokenStore(accessToken, refreshToken, accountId, expiresAt, idToken, agentIdentity);
+    }
+
+    /** Copy of this store with a refreshed/rotated access token (and optional new id token). */
+    public CodexTokenStore withTokens(
+            final String newAccessToken, final String newRefreshToken, final String newIdToken) {
+        return new CodexTokenStore(
+                newAccessToken,
+                newRefreshToken == null || newRefreshToken.isBlank() ? refreshToken : newRefreshToken,
+                accountId,
+                expiresAt,
+                newIdToken == null || newIdToken.isBlank() ? idToken : newIdToken,
+                agentIdentity);
+    }
 
     /** True when the access token is absent or already expired (with a small clock-skew guard). */
     public boolean expired(final long now) {
@@ -43,5 +84,10 @@ public record CodexTokenStore(
     /** True when a refresh token is present, ie. this session can be refreshed without re-login. */
     public boolean refreshable() {
         return refreshToken != null && !refreshToken.isBlank();
+    }
+
+    /** True when this session carries an enterprise Agent Identity registration. */
+    public boolean hasAgentIdentity() {
+        return agentIdentity != null;
     }
 }

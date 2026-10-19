@@ -130,6 +130,60 @@ template). It refreshes lazily - only when a request is actually made - and
 persists the (possibly rotated) refresh token to
 `<storageHome>/providers/<provider>/codex.auth.json`.
 
+=== Enterprise / company (Agent Identity) plans
+
+Managed/company workspaces (Team, Business, Enterprise) are not reachable with
+the plain OAuth browser/device login: their workspace policy rejects the
+delegated-access login (`3p_delegated_access_policy_denied`). Codex signs those
+accounts into a separate *Agent Identity* flow - a registered device identity
+whose requests are authenticated with a signed `AgentAssertion` header instead
+of a bearer token.
+
+Enroll a provider with the `--enterprise` flag:
+
+[source]
+----
+/codex login <provider> --enterprise
+----
+
+This runs the OAuth login first, then registers a fresh Ed25519 identity with
+OpenAI's auth API (agent runtime + run task) and persists it next to the OAuth
+tokens. Once enrolled, the provider authenticates every request with the
+signed assertion. Configure the provider headers using the two extra helpers:
+
+[source,json]
+----
+{
+  "provider": {
+    "providers": [
+      {
+        "id": "default",
+        "baseUrl": "https://chatgpt.com/backend-api/codex",
+        "api": "auto",
+        "model": "gpt-6-luna",
+        "dynamicHeaders": {
+          "authorization": "{{codexAgentAssertion \"default\"}}"
+        },
+        "headers": {
+          "ChatGPT-Account-ID": "{{codexAccountId \"default\"}}"
+        }
+      }
+    ]
+  }
+}
+----
+
+`{{codexAgentAssertion "<providerId>"}}` renders the full
+`AgentAssertion {...}` header value (use it as `authorization`, no leading
+`Bearer `). `{{codexAccountId "<providerId>"}}` renders the account id for the
+`ChatGPT-Account-ID` header - from the agent identity when present, else from
+the OAuth session - so you never need to hardcode it. A plain OAuth session
+(no `--enterprise`) rejects `{{codexAgentAssertion}}` with a message telling you
+to enroll first.
+
+For FedRAMP accounts the enrollment also stamps `X-OpenAI-Fedramp: true` and
+every signed request carries the matching account id.
+
 `providerSpecificOptions` may carry `codex_client_version`, the whole part of
 the Codex CLI version this provider advertises for model gating in the Codex
 backend catalog (eg. `160` for `0.160.x`, or `200` for `0.200.x`). It is an

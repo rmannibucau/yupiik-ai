@@ -21,6 +21,8 @@ import io.yupiik.fusion.framework.handlebars.helper.SafeString;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
+import io.yupiik.llm.client.codex.CodexAgentIdentityClient;
+import io.yupiik.llm.client.codex.CodexAgentIdentityConfig;
 import io.yupiik.llm.client.codex.CodexNotAuthenticatedException;
 import io.yupiik.llm.client.codex.CodexOAuthClient;
 import io.yupiik.llm.client.codex.CodexOAuthConfig;
@@ -33,18 +35,26 @@ import java.util.function.Function;
 import java.util.logging.Logger;
 
 /**
- * Provides the {@code codexAuth} handlebars helper used by a Codex-flavored provider {@code
- * dynamicHeaders} entry: {@code "authorization": "Bearer {{codexAuth \"mycodex\"}}"}. The helper
- * resolves the session access token for the named provider and returns it as a raw {@link
- * SafeString}.
+ * Provides the {@code codexAuth} handlebars helpers used by Codex-flavored provider {@code
+ * dynamicHeaders}/{@code headers} entries:
+ *
+ * <ul>
+ *   <li>{@code {{codexAuth "provider"}}} - the OAuth access token; typically {@code "authorization":
+ *       "Bearer {{codexAuth \"mycodex\"}}"} for a regular (non-enterprise) session.</li>
+ *   <li>{@code {{codexAgentAssertion "provider"}}} - the signed {@code AgentAssertion {...}} header
+ *       for an enterprise/Agent Identity session ({@code "authorization": "{{codexAgentAssertion
+ *       \"default\""}}).</li>
+ *   <li>{@code {{codexAccountId "provider"}}} - the account id for the {@code ChatGPT-Account-ID}
+ *       header, derived from the session (no manual configuration).</li>
+ * </ul>
  *
  * <p>The token store is cached under {@code <storageHome>/providers/&lt;providerName&gt;/codex.auth.json}
  * (mirroring the Codex CLI {@code auth.json} {@code tokens} shape). Access tokens are short lived: the
- * helper refreshes lazily — only on {@code {{codexAuth}}} render, i.e. only when a request for that
- * provider is actually made — and persists the possibly-rotated refresh token. If no session exists
- * yet (no prior {@code codex login}), the helper fails loudly so the caller is told to log in first.
- * A single-flight lock per provider prevents concurrent requests from triggering overlapping refreshes
- * that could race the refresh-token rotation.</p>
+ * helpers refresh lazily — only on render, i.e. only when a request for that provider is actually made
+ * — and persist the possibly-rotated refresh token (preserving any attached Agent Identity
+ * registration). If no session exists yet (no prior {@code codex login}), the helpers fail loudly so
+ * the caller is told to log in first. A single-flight lock per provider prevents concurrent requests
+ * from triggering overlapping refreshes that could race the refresh-token rotation.</p>
  */
 @ApplicationScoped
 public class CodexAuthTemplateHelper {
@@ -55,6 +65,7 @@ public class CodexAuthTemplateHelper {
     private final ExtendedHttpClient httpClient;
     private final Path providersHome;
     private volatile CodexOAuthClient oauth;
+    private volatile CodexAgentIdentityClient agentIdentity;
     private final ConcurrentHashMap<String, Object> refreshLocks = new ConcurrentHashMap<>();
 
     public CodexAuthTemplateHelper(
@@ -64,6 +75,7 @@ public class CodexAuthTemplateHelper {
         this.mapper = mapper;
         this.httpClient = httpClient;
         this.oauth = null; // built lazily on first use (or via setOAuthConfig in tests)
+        this.agentIdentity = null; // built lazily on first use (or via setAgentIdentityConfig in tests)
         final String home = configuration == null ? null : configuration.resolveStorageHome();
         this.providersHome = Path.of(home == null || home.isBlank() ? "~/.yupiik/coding-agent" : home)
                 .resolve("providers");
@@ -77,6 +89,16 @@ public class CodexAuthTemplateHelper {
      */
     public void setOAuthConfig(final CodexOAuthConfig config) {
         this.oauth = new CodexOAuthClient(mapper, httpClient, config);
+    }
+
+    /**
+     * Replaces the Agent Identity client with one bound to a different configuration. Mainly for
+     * tests that point at a mock auth API; the CDI path keeps {@link CodexAgentIdentityConfig#DEFAULT}.
+     *
+     * @param config the tunable Agent Identity settings.
+     */
+    public void setAgentIdentityConfig(final CodexAgentIdentityConfig config) {
+        this.agentIdentity = new CodexAgentIdentityClient(mapper, httpClient, config);
     }
 
     private CodexOAuthClient oauth() {
@@ -93,9 +115,25 @@ public class CodexAuthTemplateHelper {
         return client;
     }
 
+    private CodexAgentIdentityClient agentIdentity() {
+        var client = this.agentIdentity;
+        if (client == null) {
+            synchronized (this) {
+                client = this.agentIdentity;
+                if (client == null) {
+                    client = new CodexAgentIdentityClient(mapper, httpClient, CodexAgentIdentityConfig.DEFAULT);
+                    this.agentIdentity = client;
+                }
+            }
+        }
+        return client;
+    }
+
     /**
-     * The {@code codexAuth} helper: resolves an access token for {@code providerName}, refreshing it
-     * lazily if expired.
+     * The {@code codexAuth} helper: resolves the access token for {@code providerName}, refreshing it
+     * lazily if expired. When the session is an Agent Identity one, returns the access token anyway
+     * (it is still the OAuth anchor); most codex provider headers use {@link #codexAgentAssertion()}
+     * for that case instead.
      *
      * @return the helper function.
      */
@@ -103,15 +141,78 @@ public class CodexAuthTemplateHelper {
         return this::apply;
     }
 
-    private Object apply(final HelperContext context) {
+    /**
+     * The {@code codexAgentAssertion} helper: resolves the signed {@code AgentAssertion {...}} header
+     * value for {@code providerName} when the session carries an Agent Identity registration
+     * (enterprise/company plans). Use it as the {@code authorization} value in a codex provider's
+     * {@code dynamicHeaders}, e.g.:
+     * {@code "authorization": "{{codexAgentAssertion \"default\""}}.
+     *
+     * <p>Only valid for Agent Identity sessions: the assertion needs a registered run task, so the
+     * helper fails loudly (and tells the user to run {@code /codex login --enterprise}) when the
+     * session is only a regular OAuth one.</p>
+     *
+     * @return the helper function.
+     */
+    public Function<HelperContext, Object> codexAgentAssertion() {
+        return context -> {
+            final String providerName = providerName(context, "codexAgentAssertion");
+            final CodexTokenStore store = load(providerName);
+            if (store == null) {
+                throw new CodexNotAuthenticatedException(providerName);
+            }
+            final CodexTokenStore resolved = ensureFresh(providerName, store);
+            if (resolved.agentIdentity() == null) {
+                throw new IllegalStateException("provider '" + providerName + "' is not enrolled in Agent Identity; "
+                        + "run /codex login <provider> --enterprise");
+            }
+            if (resolved.agentIdentity().needsTaskRegistration()) {
+                throw new IllegalStateException("provider '" + providerName
+                        + "' Agent Identity has no run task; re-enroll with " + "/codex login <provider> --enterprise");
+            }
+            return new SafeString(agentIdentity().assertionHeader(resolved.agentIdentity()));
+        };
+    }
+
+    /**
+     * The {@code codexAccountId} helper: resolves the account id for {@code providerName} (from the
+     * Agent Identity record when present, else from the OAuth session). Use it as the
+     * {@code ChatGPT-Account-ID} header value so the account id is always correct without manual
+     * configuration.
+     *
+     * @return the helper function.
+     */
+    public Function<HelperContext, Object> codexAccountId() {
+        return context -> {
+            final String providerName = providerName(context, "codexAccountId");
+            final CodexTokenStore store = load(providerName);
+            if (store == null) {
+                throw new CodexNotAuthenticatedException(providerName);
+            }
+            final CodexTokenStore resolved = ensureFresh(providerName, store);
+            final String accountId = resolved.agentIdentity() != null
+                            && resolved.agentIdentity().accountId() != null
+                            && !resolved.agentIdentity().accountId().isBlank()
+                    ? resolved.agentIdentity().accountId()
+                    : resolved.accountId();
+            return new SafeString(accountId == null ? "" : accountId);
+        };
+    }
+
+    private static String providerName(final HelperContext context, final String helper) {
         final var args = context.args();
         if (args == null || args.isEmpty()) {
-            throw new IllegalArgumentException("codexAuth expects the provider name as its single argument");
+            throw new IllegalArgumentException(helper + " expects the provider name as its single argument");
         }
         final var providerName = String.valueOf(args.get(0));
         if (providerName.isBlank()) {
-            throw new IllegalArgumentException("codexAuth provider name must not be blank");
+            throw new IllegalArgumentException(helper + " provider name must not be blank");
         }
+        return providerName;
+    }
+
+    private Object apply(final HelperContext context) {
+        final var providerName = providerName(context, "codexAuth");
         final CodexTokenStore store = load(providerName);
         if (store == null) {
             throw new CodexNotAuthenticatedException(providerName);
@@ -143,8 +244,12 @@ public class CodexAuthTemplateHelper {
                 throw new IllegalStateException(
                         "Codex refresh for provider '" + providerName + "' returned no access token");
             }
-            save(providerName, refreshed);
-            return refreshed;
+            // the OAuth refresh drops the (agent identity) extras; re-attach them so a refreshed
+            // enterprise session keeps its identity registration across token rotation
+            final CodexTokenStore kept =
+                    refreshed.withAgentIdentity((current == null ? store : current).agentIdentity());
+            save(providerName, kept);
+            return kept;
         }
     }
 
