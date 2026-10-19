@@ -161,7 +161,11 @@ workspace/organization with `--workspace` (the account must belong to it):
 This runs the OAuth login first, then registers a fresh Ed25519 identity with
 OpenAI's auth API (agent runtime + run task) and persists it next to the OAuth
 tokens. Once enrolled, the provider authenticates every request with the
-signed assertion. Configure the provider headers using the two extra helpers:
+signed assertion. Headers come from two places: `dynamicHeaders` render handlebars
+templates per request (any `{{codex...}}` helper, eg. `authorization`,
+`ChatGPT-Account-ID`, `X-OpenAI-Fedramp`), while `headers` holds static values
+(eg. `OpenAI-Beta`, `originator`, `accept`). A handlebars template only works
+in `dynamicHeaders`, not in `headers`:
 
 [source,json]
 ----
@@ -173,8 +177,8 @@ signed assertion. Configure the provider headers using the two extra helpers:
         "baseUrl": "https://chatgpt.com/backend-api/codex",
         "api": "auto",
         "model": "gpt-6-luna",
-        "dynamicHeaders": "authorization: {{codexAgentAssertion \"codex\"}}",
-        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nChatGPT-Account-ID: {{codexAccountId \"codex\"}}\nX-OpenAI-Fedramp: {{codexFedramp \"codex\"}}"
+        "dynamicHeaders": "authorization: {{codexAgentAssertion \"codex\"}}\nChatGPT-Account-ID: {{codexAccountId \"codex\"}}\nX-OpenAI-Fedramp: {{codexFedramp \"codex\"}}",
+        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream"
       }
     ]
   }
