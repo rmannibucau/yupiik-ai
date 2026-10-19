@@ -36,7 +36,7 @@ public final class ModelRoundProcessor {
 
         void resetText();
 
-        void retrying(String message);
+        void retrying(String message, Throwable cause);
 
         void malformedToolArguments();
 
@@ -82,8 +82,9 @@ public final class ModelRoundProcessor {
                     break;
                 }
                 observer.resetText();
-                observer.retrying("Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/'
-                        + maxAttempts + ").");
+                observer.retrying(
+                        "Stream interrupted (" + causeSummary(e) + "); retrying (" + attempt + '/' + maxAttempts + ").",
+                        e);
                 final var backoffMs = streamRetryBackoffMs(attempt);
                 observer.paused(backoffMs);
                 if (cancelled.getAsBoolean() || !interruptibleSleep(backoffMs)) {

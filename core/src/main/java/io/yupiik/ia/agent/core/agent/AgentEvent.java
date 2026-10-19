@@ -198,7 +198,13 @@ public sealed interface AgentEvent {
      * including failures that would otherwise be silent.
      */
     record Notice(
-            Level level, String message, String finishReason, String sessionId, String subagentId, String subagentName)
+            Level level,
+            String message,
+            String finishReason,
+            String sessionId,
+            String subagentId,
+            String subagentName,
+            Throwable cause)
             implements AgentEvent {
 
         public enum Level {
@@ -208,11 +214,22 @@ public sealed interface AgentEvent {
         }
 
         public Notice(final Level level, final String message, final String sessionId) {
-            this(level, message, null, sessionId, null, null);
+            this(level, message, null, sessionId, null, null, null);
         }
 
         public Notice(final Level level, final String message, final String finishReason, final String sessionId) {
-            this(level, message, finishReason, sessionId, null, null);
+            this(level, message, finishReason, sessionId, null, null, null);
+        }
+
+        /** Cause-less construction keeping the pre-stack-trace arity; {@code cause} defaults to {@code null}. */
+        public Notice(
+                final Level level,
+                final String message,
+                final String finishReason,
+                final String sessionId,
+                final String subagentId,
+                final String subagentName) {
+            this(level, message, finishReason, sessionId, subagentId, subagentName, null);
         }
 
         public static Notice info(final String message, final String sessionId) {

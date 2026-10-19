@@ -602,6 +602,9 @@ class AgentLoopTest {
         assertEquals(AgentEvent.Notice.Level.WARN, notice.level());
         assertTrue(notice.message().contains("Stream interrupted (broken pipe)"), notice.message());
         assertTrue(notice.message().contains("retrying (1/3)"), notice.message());
+        assertNotNull(
+                notice.cause(),
+                "the retry notice must carry the underlying failure so the TUI can show/copy its stack trace");
         assertTrue(events.getLast() instanceof AgentEvent.TurnDone);
     }
 

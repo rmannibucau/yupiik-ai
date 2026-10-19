@@ -892,6 +892,44 @@ class TuiCommandRenderTest {
     }
 
     @Test
+    void errorModalShowsAndCopiesTheNoticeCauseStackTrace() throws Exception {
+        // the retry path now carries the underlying Throwable on the WARN notice; opening the
+        // Alt+E modal must render the full stack trace (not "(no stack trace)") so it can be read
+        // and copied - the `c` key copies message + stack to the clipboard
+        final var shellRegistry = testRegistry();
+        final var command = command(shellRegistry, stubAgentLoop());
+        uiThread = new Thread(command, "tui-error-stack-test");
+        uiThread.setDaemon(true);
+        uiThread.start();
+        awaitTui();
+        awaitText("yca coding agent");
+        awaitText("ready");
+
+        final var sessionId = shellRegistry.sessions().iterator().next();
+        final var cause = new IOException("Index 2 out of bounds for length 2");
+        shellRegistry
+                .active(sessionId)
+                .frontend()
+                .onEvent(new AgentEvent.Notice(
+                        AgentEvent.Notice.Level.WARN,
+                        "Stream interrupted (Index 2 out of bounds for length 2); retrying (1/3).",
+                        null,
+                        sessionId,
+                        null,
+                        null,
+                        cause));
+
+        awaitText("✗ Stream interrupted (Index 2 out of bounds for length 2)");
+        awaitText("ready");
+
+        // open the Alt+E error detail modal and assert the stack frame is rendered
+        tuiRef.get().dispatch(KeyEvent.ofChar('e', KeyModifiers.ALT));
+        awaitText("java.io.IOException");
+
+        quit();
+    }
+
+    @Test
     void pauseRendersInTrailingInfoSlotAndLeavesLeadingStatusUntouched() throws Exception {
         // provider-imposed delays (throttle/retry backoff) are transient side feedback: they must
         // land in the trailing ⓘ notification slot (right side) and never replace the leading

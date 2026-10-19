@@ -1284,6 +1284,14 @@ public class AgentLoop {
         return new AgentEvent.Notice(level, message, finishReason, currentSessionId, subagentId, subagentName);
     }
 
+    private AgentEvent.Notice notice(
+            final AgentEvent.Notice.Level level,
+            final String message,
+            final String finishReason,
+            final Throwable cause) {
+        return new AgentEvent.Notice(level, message, finishReason, currentSessionId, subagentId, subagentName, cause);
+    }
+
     private AgentEvent.TurnDone turnDone(final String content) {
         return new AgentEvent.TurnDone(content, currentSessionId, subagentId, subagentName);
     }
@@ -1509,8 +1517,8 @@ public class AgentLoop {
                                 }
 
                                 @Override
-                                public void retrying(final String message) {
-                                    emit(notice(AgentEvent.Notice.Level.WARN, message));
+                                public void retrying(final String message, final Throwable cause) {
+                                    emit(notice(AgentEvent.Notice.Level.WARN, message, null, cause));
                                 }
 
                                 @Override

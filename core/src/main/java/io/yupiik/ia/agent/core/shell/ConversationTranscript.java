@@ -512,7 +512,8 @@ public class ConversationTranscript {
                         String finishReason,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        Throwable cause)) {
             final var tag =
                     switch (level) {
                         case ERROR -> "⚠ error";

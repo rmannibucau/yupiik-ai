@@ -1363,7 +1363,7 @@ public class TuiCommand implements Runnable {
             // the trailing error slot (same as the web renders WARN prominently in red), keeping the
             // leading agent state (working) untouched. WARNs were previously only a muted inline
             // transcript line, which made background failures (eg. memory extraction) easy to miss.
-            modelError(state, notice.message());
+            modelError(state, notice.message(), notice.cause());
             final var leading = state.model.status();
             state.model.onEvent(event);
             state.model.status(leading);

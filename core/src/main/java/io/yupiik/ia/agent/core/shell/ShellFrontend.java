@@ -105,7 +105,8 @@ public interface ShellFrontend {
                         var finishReason,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        Throwable cause)) {
             notice(level, message);
         } else if (event
                 instanceof AgentEvent.Error(String message, String sessionId, String subagentId, String subagentName)) {

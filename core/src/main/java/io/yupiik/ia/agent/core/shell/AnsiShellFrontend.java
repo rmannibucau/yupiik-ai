@@ -474,7 +474,8 @@ public class AnsiShellFrontend implements ShellFrontend {
                         var finishReason,
                         String sessionId,
                         String subagentId,
-                        String subagentName)) {
+                        String subagentName,
+                        Throwable cause)) {
             notice(level, prefix + message);
         } else if (event
                 instanceof
@@ -539,7 +540,7 @@ public class AnsiShellFrontend implements ShellFrontend {
         } else if (event instanceof AgentEvent.Compacted(var _, var _, var _, String id, String name)) {
             subagentId = id;
             subagentName = name;
-        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name)) {
+        } else if (event instanceof AgentEvent.Notice(var _, var _, var _, var _, String id, String name, var _)) {
             subagentId = id;
             subagentName = name;
         } else if (event instanceof AgentEvent.Status(var _, var _, String id, String name)) {
