@@ -70,6 +70,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
@@ -357,7 +358,7 @@ public class StructuralCodeGraph implements AutoCloseable {
             Thread.currentThread().interrupt();
             return true;
         } catch (final ExecutionException e) {
-            LOGGER.warning("Code graph index preparation failed: " + e.getCause());
+            LOGGER.log(Level.WARNING, e.getCause(), () -> "Code graph index preparation failed: " + e.getMessage());
             return true;
         }
     }
