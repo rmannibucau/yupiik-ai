@@ -129,6 +129,7 @@ less than 20% are discarded. Enabled with `memory.compactEnabled` (default
 true) - this is the *quality* counterpart of the deterministic cap (which
 bounds size even when no model call is wanted).
 
+[[choosing-the-memory-model]]
 === Choosing the memory model
 
 The memory write path uses a dedicated background model, configured through
@@ -138,6 +139,11 @@ output tuning). When `name` is blank it falls back to the compact model, then
 to the session provider model. A `$<provider>/<model>` reference pins it to a
 specific provider - handy for running memory extraction on a cheap local model
 (eg. llama.cpp) while the main conversation uses a remote provider.
+
+The *cheapest and fastest* configuration routes memory to a small model via a
+per-provider `backgroundModelOverrides.memory` (same shape as the global
+`yca.model.memory`), so each provider chooses its own in-house summarizer without
+touching the main model.
 
 === Running memory on a local model (llama.cpp)
 
@@ -247,6 +253,47 @@ The selection is *greedy and scope-fair*:
 2. fill project with its top entries up to the other 50%,
 3. spill the remaining budget to whichever scope has the most relevant
    leftovers (global first - directives are usually higher value).
+
+=== Why plain markdown + BM25-lite (not a vector store)
+
+Memory holds a small, curated, metadata-rich set of durable directives, so the
+read side is deliberately *model-free*: a pure token scorer, fast and with no
+extra dependency. A vector store (eg. Lucene + an embedding model) is a
+heavier alternative that only pays off if memory ever grows into large,
+unstructured transcripts.
+
+[cols="1,3,3", options="header"]
+|===
+| | yca memory (current) | Vector store (eg. Lucene + embeddings)
+
+| Retrieval
+| BM25-lite lexical relevance against the prompt (plus the todo list); `p` / `@path` / topic metadata folded in
+| ANN vector similarity over embedded bullets (eg. Lucene `KnnFloatVectorField`)
+
+| Model needed
+| *Read/rank: none* - pure in-memory token scoring; *write/extract:* a cheap LLM (or none with manual `memory_write`)
+| an embedding model for both read and write (eg. on-device ONNX `all-MiniLM-L6-v2`, ~90 MB) plus the Lucene index
+
+| Storage
+| two plain `MEMORY.md` markdown files - human-editable, git-diffable/mergeable
+| opaque Lucene segment directories plus persisted vectors; schema changes need a reindex
+
+| Dependencies / footprint
+| JDK only, negligible memory
+| `lucene-core` + ONNX runtime + model on disk and in RAM
+
+| Latency
+| read = cached token hash, sub-ms; write = atomic append
+| first-call ONNX model load, then ms-level ANN; per-write embedding inference
+
+| Match strength
+| strong for exact / keyword and `@path`-anchored directives
+| strong for broad semantic topics; can miss exact-code directives
+|===
+
+The only model-dependent part (fact extraction) deliberately runs on a cheap,
+fast model pinned per provider (`yca.model.memory` / `backgroundModelOverrides.memory`,
+see <<choosing-the-memory-model>>), so reading memory never costs an LLM call.
 
 === Recency tie-break
 
