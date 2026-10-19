@@ -219,13 +219,13 @@ class CodexAgentIdentityClientTest {
     }
 
     @Test
-    void idTokenClaimsParsing() {
+    void idTokenClaimsParsing(final JsonMapper mapper) {
         // id_token payload with the namespaced auth claims codex reads
         final String jwt = headerDot("{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acc-9\","
                         + "\"chatgpt_user_id\":\"user-9\",\"chatgpt_plan_type\":\"pro\","
                         + "\"chatgpt_account_is_fedramp\":false},\"email\":\"a@b.c\"}")
                 + ".sig";
-        final var claims = CodexOAuthClient.parseIdTokenClaims(jwt);
+        final var claims = CodexOAuthClient.parseIdTokenClaims(jwt, mapper);
         assertEquals("acc-9", claims.accountId());
         assertEquals("user-9", claims.chatgptUserId());
         assertEquals("pro", claims.planType());
@@ -235,12 +235,43 @@ class CodexAgentIdentityClientTest {
     }
 
     @Test
-    void workspacePlanDetection() {
+    void fedrampDetectionIsFormattingSensitive(final JsonMapper mapper) {
+        // "chatgpt_account_is_fedramp": false WITH a space after the colon must still read as false
+        final String jwt = headerDot("{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acc-9\","
+                        + "\"chatgpt_user_id\":\"user-9\",\"chatgpt_plan_type\":\"enterprise\","
+                        + "\"chatgpt_account_is_fedramp\": false},\"email\":\"a@b.c\"}")
+                + ".sig";
+        assertFalse(CodexOAuthClient.parseIdTokenClaims(jwt, mapper).chatgptAccountIsFedramp());
+    }
+
+    @Test
+    void accountIdFallbackPrefersDefaultOrganization(final JsonMapper mapper) {
+        // no namespaced auth claim; two orgs, the default one must win over organizations[0]
+        final String jwt = headerDot("{\"email\":\"a@b.c\",\"organizations\":["
+                        + "{\"id\":\"first-org\",\"is_default\":false,\"is_active\":false},"
+                        + "{\"id\":\"default-org\",\"is_default\":true,\"is_active\":true}]}")
+                + ".sig";
+        assertEquals(
+                "default-org", CodexOAuthClient.parseIdTokenClaims(jwt, mapper).accountId());
+    }
+
+    @Test
+    void accountIdRegionFallsBackToFirstOrganization(final JsonMapper mapper) {
+        // no namespaced auth claim and no default/active flag: fall back to the first org
+        final String jwt =
+                headerDot("{\"organizations\":[{\"id\":\"only-org\",\"is_default\":false,\"is_active\":false}]}")
+                        + ".sig";
+        assertEquals(
+                "only-org", CodexOAuthClient.parseIdTokenClaims(jwt, mapper).accountId());
+    }
+
+    @Test
+    void workspacePlanDetection(final JsonMapper mapper) {
         final String jwt = headerDot("{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acc-9\","
                         + "\"chatgpt_user_id\":\"user-9\",\"chatgpt_plan_type\":\"enterprise\","
                         + "\"chatgpt_account_is_fedramp\":false}}")
                 + ".sig";
-        assertTrue(CodexOAuthClient.parseIdTokenClaims(jwt).isWorkspacePlan());
+        assertTrue(CodexOAuthClient.parseIdTokenClaims(jwt, mapper).isWorkspacePlan());
     }
 
     private static String headerDot(final String jsonClaims) {

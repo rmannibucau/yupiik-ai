@@ -76,6 +76,14 @@ class CodexAuthTemplateHelperTest {
                 respond(exchange, 200, "{\"access_token\":\"fresh\"}");
             }
         });
+        // mock Agent Identity run-task registration for the lazy re-registration test
+        issuer.createContext("/v1/agent", exchange -> {
+            if (exchange.getRequestURI().getPath().matches(".*/v1/agent/[^/]+/task/register")) {
+                respond(exchange, 200, "{\"task_id\":\"fresh-task\"}");
+            } else {
+                respond(exchange, 404, "{}");
+            }
+        });
         issuer.start();
         delegate = HttpClient.newBuilder().build();
         client = new ExtendedHttpClient(new ExtendedHttpClientConfiguration().setDelegate(delegate));
@@ -221,6 +229,112 @@ class CodexAuthTemplateHelperTest {
                         Map.of("codexAgentAssertion", helper.codexAgentAssertion())));
     }
 
+    @Test
+    void codexAgentAssertionDoesNotTriggerOAuthRefresh(final JsonMapper mapper) throws Exception {
+        // the assertion is signed with the Ed25519 key; even with an expired/rotated OAuth token the
+        // assertion must still render without forcing an OAuth refresh (refreshing could throw when
+        // the enterprise refresh token is revoked/expired)
+        final var key = Ed25519Util.generate();
+        seed(
+                mapper,
+                "agent-stale",
+                new CodexTokenStore(
+                        "expired-access",
+                        "refresh",
+                        "workspace-account",
+                        past(), // the access token is expired but we do NOT want a refresh for the assertion
+                        "id",
+                        new AgentIdentityRecord(
+                                "runtime-1",
+                                key.privateKeyPkcs8Base64(),
+                                "workspace-account",
+                                "user-9",
+                                null,
+                                "business",
+                                false,
+                                "task-1")));
+        final var helper = helper(mapper);
+        final var rendered = render(
+                helper,
+                "{{codexAgentAssertion \"agent-stale\"}}",
+                Map.of("codexAgentAssertion", helper.codexAgentAssertion()));
+        assertTrue(rendered.startsWith("AgentAssertion "), rendered);
+        assertEquals(0, refreshCalls.get(), "the assertion must not trigger an OAuth refresh");
+    }
+
+    @Test
+    void codexAgentAssertionLazilyRegistersMissingTask(final JsonMapper mapper) throws Exception {
+        // an enrolled agent identity whose run task id is missing/stale: the helper must re-register
+        // the task (mock /v1/agent/{id}/task/register) instead of failing until a re-login
+        final var key = Ed25519Util.generate();
+        seed(
+                mapper,
+                "agent-notask",
+                new CodexTokenStore(
+                        "access",
+                        "refresh",
+                        "workspace-account",
+                        farFuture(),
+                        "id",
+                        new AgentIdentityRecord(
+                                "runtime-5",
+                                key.privateKeyPkcs8Base64(),
+                                "workspace-account",
+                                "user-9",
+                                null,
+                                "enterprise",
+                                false,
+                                null))); // no task id -> needs re-registration
+        final var agentConfig =
+                new io.yupiik.llm.client.codex.CodexAgentIdentityConfig(issuerUrl, issuerUrl, null, null);
+        final var helper = helper(mapper, agentConfig);
+        final var rendered = render(
+                helper,
+                "{{codexAgentAssertion \"agent-notask\"}}",
+                Map.of("codexAgentAssertion", helper.codexAgentAssertion()));
+        assertTrue(rendered.contains("\"task_id\":\"fresh-task\""), "task re-registered: " + rendered);
+    }
+
+    @Test
+    void codexFedrampHelperRendersTrueForFedrampAccount(final JsonMapper mapper) throws Exception {
+        final var key = Ed25519Util.generate();
+        seed(
+                mapper,
+                "agent-fedramp",
+                new CodexTokenStore(
+                        "access",
+                        "refresh",
+                        "a",
+                        farFuture(),
+                        "id",
+                        new AgentIdentityRecord(
+                                "runtime-1", key.privateKeyPkcs8Base64(), "a", "u", null, "enterprise", true, "t")));
+        final var helper = helper(mapper);
+        assertEquals(
+                "true",
+                render(helper, "{{codexFedramp \"agent-fedramp\"}}", Map.of("codexFedramp", helper.codexFedramp())));
+    }
+
+    @Test
+    void codexFedrampHelperRendersBlankForNonFedramp(final JsonMapper mapper) throws Exception {
+        final var key = Ed25519Util.generate();
+        seed(
+                mapper,
+                "agent-nonfedramp",
+                new CodexTokenStore(
+                        "access",
+                        "refresh",
+                        "a",
+                        farFuture(),
+                        "id",
+                        new AgentIdentityRecord(
+                                "runtime-1", key.privateKeyPkcs8Base64(), "a", "u", null, "pro", false, "t")));
+        final var helper = helper(mapper);
+        assertEquals(
+                "",
+                render(helper, "{{codexFedramp \"agent-nonfedramp\"}}", Map.of("codexFedramp", helper.codexFedramp())));
+    }
+
     private CodingAgentConfiguration config() {
         final var map = new HashMap<String, String>();
         map.put("yca.storageHome", storage.toString());
@@ -232,8 +346,16 @@ class CodexAuthTemplateHelperTest {
     }
 
     private CodexAuthTemplateHelper helper(final JsonMapper mapper) {
+        return helper(mapper, null);
+    }
+
+    private CodexAuthTemplateHelper helper(
+            final JsonMapper mapper, final io.yupiik.llm.client.codex.CodexAgentIdentityConfig agentConfig) {
         final var helper = new CodexAuthTemplateHelper(mapper, client, config());
         helper.setOAuthConfig(oauthConfig());
+        if (agentConfig != null) {
+            helper.setAgentIdentityConfig(agentConfig);
+        }
         return helper;
     }
 

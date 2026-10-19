@@ -36,9 +36,16 @@ package io.yupiik.llm.client.codex;
 public record CodexAgentIdentityConfig(
         String authApiBaseUrl, String jwksBaseUrl, String agentVersion, String agentHarnessId) {
 
+    /**
+     * The agent version a fresh enrollment advertises in the {@code ABOM}. It should track the whole
+     * part {@link CodexDialect#DEFAULT_CLIENT_VERSION} the model-gating uses (eg. {@code 160} -> the
+     * {@code 0.160.x} line), so an inconsistent ABOM does not trigger gating on the backend.
+     */
+    public static final String DEFAULT_AGENT_VERSION = "0.160.0";
+
     /** Default public configuration (production). */
     public static final CodexAgentIdentityConfig DEFAULT = new CodexAgentIdentityConfig(
-            "https://auth.openai.com/api/accounts", "https://chatgpt.com", "0.200.0", "codex-cli");
+            "https://auth.openai.com/api/accounts", "https://chatgpt.com", DEFAULT_AGENT_VERSION, "codex-cli");
 
     /** Defaults any {@code null}/blank field to the {@link #DEFAULT} counterpart. */
     public CodexAgentIdentityConfig {

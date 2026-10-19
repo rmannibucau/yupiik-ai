@@ -166,7 +166,7 @@ signed assertion. Configure the provider headers using the two extra helpers:
         "api": "auto",
         "model": "gpt-6-luna",
         "dynamicHeaders": "authorization: {{codexAgentAssertion \"codex\"}}",
-        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nChatGPT-Account-ID: {{codexAccountId \"codex\"}}"
+        "headers": "OpenAI-Beta: responses=experimental\noriginator: codex_cli_rs\naccept: text/event-stream\nChatGPT-Account-ID: {{codexAccountId \"codex\"}}\nX-OpenAI-Fedramp: {{codexFedramp \"codex\"}}"
       }
     ]
   }
@@ -181,6 +181,10 @@ the OAuth session - so you never need to hardcode it. A plain OAuth session
 (no `--enterprise`) rejects `{{codexAgentAssertion}}` with a message telling you
 to enroll first. As with the regular flow, `dynamicHeaders` and `headers` are
 `Name: value` properties-text strings, not JSON objects.
+
+`{{codexFedramp "<providerId>"}}` renders `true` when the enrolled Agent Identity
+is a FedRAMP account and an empty string otherwise (blank header values are
+skipped), so FedRAMP accounts send the routing header automatically.
 
 For FedRAMP accounts the enrollment also stamps `X-OpenAI-Fedramp: true` and
 every signed request carries the matching account id.

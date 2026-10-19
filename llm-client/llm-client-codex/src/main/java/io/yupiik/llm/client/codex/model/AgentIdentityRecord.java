@@ -44,7 +44,7 @@ import io.yupiik.fusion.framework.build.api.json.JsonProperty;
 public record AgentIdentityRecord(
         @JsonProperty("agent_runtime_id") String agentRuntimeId,
         @JsonProperty("agent_private_key") String agentPrivateKeyPkcs8Base64,
-        String accountId,
+        @JsonProperty("account_id") String accountId,
         @JsonProperty("chatgpt_user_id") String chatgptUserId,
         String email,
         @JsonProperty("plan_type") String planType,

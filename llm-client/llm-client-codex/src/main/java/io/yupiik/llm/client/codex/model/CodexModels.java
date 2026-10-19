@@ -53,14 +53,24 @@ public record CodexModels(List<CodexModel> models) {
         }
 
         /**
-         * True when this model can be used by a client advertising {@code clientVersion} (a whole
-         * number, eg. 160 for 0.160.x): the model is usable when its minimal required client version
-         * is absent or {@code <= clientVersion}.
+         * True when this model can be used by a client advertising {@code clientVersion} (the whole
+         * part of {@code 0.<clientVersion>.0}). The {@code minimal_client_version} list is
+         * {@code [major, minor, patch]}; a model is usable when it requires no newer client than the
+         * one advertising. Codex's own versions are {@code 0.x.y} (major 0), so the effective bar is
+         * the minor: a model requiring a later major (eg. {@code [200,0,0]}) is gated, a minor
+         * ({@code [0,98,0]}) is usable only when {@code minor <= clientVersion}.
          */
         public boolean usableWith(final int clientVersion) {
-            return minimalClientVersion == null
-                    || minimalClientVersion.isEmpty()
-                    || minimalClientVersion.get(0) <= clientVersion;
+            if (minimalClientVersion == null || minimalClientVersion.isEmpty()) {
+                return true;
+            }
+            final Integer major = minimalClientVersion.get(0);
+            if (major != null && major > 0) {
+                // requires a (future) major-version client this client does not advertise
+                return false;
+            }
+            final Integer minor = minimalClientVersion.size() > 1 ? minimalClientVersion.get(1) : 0;
+            return minor == null || minor <= clientVersion;
         }
     }
 }

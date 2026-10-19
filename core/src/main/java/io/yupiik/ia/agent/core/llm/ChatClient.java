@@ -407,6 +407,7 @@ public class ChatClient implements AutoCloseable {
         helpers.put("codexAuth", codexAuthTemplateHelper.codexAuth());
         helpers.put("codexAgentAssertion", codexAuthTemplateHelper.codexAgentAssertion());
         helpers.put("codexAccountId", codexAuthTemplateHelper.codexAccountId());
+        helpers.put("codexFedramp", codexAuthTemplateHelper.codexFedramp());
         // user-registered helpers come after the built-ins: the built-ins win on a name conflict
         for (final var custom : customDynamicHeaderTemplateHelpers) {
             helpers.putIfAbsent(custom.name(), custom);

@@ -238,23 +238,23 @@ class CodexOAuthClientTest {
     }
 
     @Test
-    void accountIdExtraction() {
-        final String payload = "{\"https://api.openai.com/auth.chatgpt_account_id\":\"ns-1\"}";
+    void accountIdExtraction(final JsonMapper mapper) {
+        final String payload = "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"ns-1\"}}";
         final String token = "h."
                 + java.util.Base64.getUrlEncoder()
                         .withoutPadding()
                         .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
-        assertEquals("ns-1", CodexOAuthClient.extractAccountId(token));
+        assertEquals("ns-1", CodexOAuthClient.extractAccountId(token, mapper));
 
         final String bare = "{\"chatgpt_account_id\":\"bare-1\"}";
         final String bareToken = "h."
                 + java.util.Base64.getUrlEncoder()
                         .withoutPadding()
                         .encodeToString(bare.getBytes(StandardCharsets.UTF_8));
-        assertEquals("bare-1", CodexOAuthClient.extractAccountId(bareToken));
+        assertEquals("bare-1", CodexOAuthClient.extractAccountId(bareToken, mapper));
 
-        assertNull(CodexOAuthClient.extractAccountId("not-a-jwt"));
-        assertNull(CodexOAuthClient.extractAccountId(null));
+        assertNull(CodexOAuthClient.extractAccountId("not-a-jwt", mapper));
+        assertNull(CodexOAuthClient.extractAccountId(null, mapper));
     }
 
     @Test
@@ -268,7 +268,8 @@ class CodexOAuthClientTest {
         final var hidden = new CodexModels.CodexModel("hidden", "Hidden", null, "hide", true, List.of(0), null, null);
         final var listed = new CodexModels.CodexModel("listed", "Listed", null, "list", true, List.of(0), null, null);
         final var notApi = new CodexModels.CodexModel("notapi", "NoApi", null, "list", false, List.of(0), null, null);
-        final var gated = new CodexModels.CodexModel("gated", "Gated", null, "list", true, List.of(200), null, null);
+        final var gated =
+                new CodexModels.CodexModel("gated", "Gated", null, "list", true, List.of(0, 200, 0), null, null);
 
         assertFalse(hidden.selectable());
         assertTrue(listed.selectable());

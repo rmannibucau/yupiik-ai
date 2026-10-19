@@ -20,6 +20,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import io.yupiik.fusion.httpclient.core.ExtendedHttpClient;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.llm.client.codex.model.CodexTokenStore;
+import io.yupiik.llm.client.codex.model.IdTokenPayload;
 import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -31,8 +32,6 @@ import java.util.Map;
 import java.util.concurrent.CompletionException;
 import java.util.function.Predicate;
 import java.util.logging.Logger;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * OAuth2 client for the ChatGPT-backed Codex backend (the flow used by the Codex CLI and the VS Code
@@ -125,11 +124,20 @@ public class CodexOAuthClient {
                     map.get("interval") instanceof Number n ? n.intValue() : 5,
                     config.verificationUrl());
         } catch (final IllegalStateException e) {
-            // the usercode endpoint only fails when the device grant is disabled for this
-            // client/account: surface it clearly instead of forwarding an opaque server response
+            // Device grants being unavailable is only one of several reasons this can fail: a
+            // workspace policy block (eg. 3p_delegated_access_policy_denied) or a network error must
+            // NOT be masked as "device disabled". Surface those as-is; only wrap a plain 4xx (device
+            // grants not served for this account/client) into the device-disabled hint.
+            if (e.getMessage() == null
+                    || e.getMessage().toLowerCase(java.util.Locale.ROOT).contains("policy_denied")
+                    || e.getMessage().contains("3p_delegated_access")
+                    || !e.getMessage().startsWith("Codex OAuth HTTP")) {
+                throw e;
+            }
             throw new CodexDeviceAuthDisabledException(
                     "Device-code sign-in is not enabled for this ChatGPT account/client. "
-                            + "Use the default browser login (no --device), or enable device sign-in in your ChatGPT security settings.");
+                            + "Use the default browser login (no --device), or enable device sign-in in your ChatGPT security settings.",
+                    e);
         }
     }
 
@@ -152,11 +160,25 @@ public class CodexOAuthClient {
             if (cancelled != null && cancelled.test(Boolean.TRUE)) {
                 throw new IllegalStateException("Device-code authorization cancelled");
             }
-            final var body = postJson(
-                    issuer() + "/api/accounts/deviceauth/token",
-                    mapper.toString(
-                            Map.of("device_auth_id", challenge.deviceAuthId(), "user_code", challenge.userCode())),
-                    "application/json");
+            final String body;
+            try {
+                body = postJson(
+                        issuer() + "/api/accounts/deviceauth/token",
+                        mapper.toString(
+                                Map.of("device_auth_id", challenge.deviceAuthId(), "user_code", challenge.userCode())),
+                        "application/json");
+            } catch (final IllegalStateException e) {
+                // The device token endpoint answers a pending authorization with a non-2xx the Codex
+                // CLI treats as "still pending" (403/404). Only those are tolerated; anything else
+                // (revoked device grants, policy blocks, transport) aborts the poll.
+                final var message = e.getMessage();
+                if (message != null
+                        && (message.contains("Codex OAuth HTTP 403") || message.contains("Codex OAuth HTTP 404"))) {
+                    sleep(challenge.interval());
+                    continue;
+                }
+                throw e;
+            }
             final var map = parse(body);
             final var code = string(map, "authorization_code");
             if (code != null) {
@@ -166,14 +188,18 @@ public class CodexOAuthClient {
                 return toStore(tokens);
             }
             // authorization still pending (or a transient non-authorization body): wait and retry
-            try {
-                Thread.sleep(challenge.interval() <= 0 ? 5_000 : challenge.interval() * 1000L);
-            } catch (final InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException("Interrupted while polling device authorization", e);
-            }
+            sleep(challenge.interval());
         }
         throw new IllegalStateException("Device-code authorization timed out");
+    }
+
+    private void sleep(final int interval) {
+        try {
+            Thread.sleep(interval <= 0 ? 5_000 : interval * 1000L);
+        } catch (final InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while polling device authorization", e);
+        }
     }
 
     /**
@@ -215,7 +241,9 @@ public class CodexOAuthClient {
                 firstNonBlank(string(tokens, "refresh_token"), current.refreshToken()),
                 current.accountId(),
                 expiry(tokens, current.accessToken()),
-                string(tokens, "id_token"));
+                // keep the previous id token when the response omits one (common on refresh)
+                firstNonBlank(string(tokens, "id_token"), current.idToken()),
+                current.agentIdentity());
     }
 
     /**
@@ -245,7 +273,7 @@ public class CodexOAuthClient {
     /** The store derived from a token payload; the account id derives from the id_token when present. */
     CodexTokenStore toStore(final Map<String, Object> tokens) {
         final var idToken = string(tokens, "id_token");
-        final var accountId = extractAccountId(idToken);
+        final var accountId = parseIdTokenClaims(idToken, mapper).accountId();
         return new CodexTokenStore(
                 string(tokens, "access_token"),
                 string(tokens, "refresh_token"),
@@ -283,52 +311,15 @@ public class CodexOAuthClient {
     }
 
     /**
-     * Extracts the {@code chatgpt_account_id} from an id_token JWT payload claim (not validating the
+     * Extracts the {@code chatgpt_account_id} from an id_token JWT payload (not validating the
      * signature: this only reads our own token to derive the routing header, as the Codex CLI does).
      *
+     * @param idToken the id token, possibly null/blank.
+     * @param mapper the JSON mapper (needed to deserialize the typed payload).
      * @return the account id, or null when the token/claim is absent or malformed.
      */
-    public static String extractAccountId(final String idToken) {
-        if (idToken == null || idToken.isBlank()) {
-            return null;
-        }
-        try {
-            final var parts = idToken.split("\\.");
-            if (parts.length < 2) {
-                return null;
-            }
-            final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
-            final var json = new String(decoded, UTF_8);
-            return extractClaim(json);
-        } catch (final RuntimeException e) {
-            LOGGER.fine(() -> "Cannot decode id_token account claim: " + e.getMessage());
-            return null;
-        }
-    }
-
-    private static final Pattern ACCOUNT_CLAIM =
-            Pattern.compile("\"([^\"]*chatgpt_account_id[^\"]*)\"\\s*:\\s*\"([^\"]+)\"");
-
-    /** Reads the account id out of a decoded id_token payload JSON. */
-    private static String extractClaim(final String json) {
-        // preferred: the namespaced claim; fallback: the bare chatgpt_account_id
-        for (final String candidate :
-                new String[] {"https://api.openai.com/auth.chatgpt_account_id", "chatgpt_account_id"}) {
-            final String quoted = Pattern.quote(candidate);
-            final Matcher m =
-                    Pattern.compile("\"" + quoted + "\"\\s*:\\s*\"([^\"]+)\"").matcher(json);
-            if (m.find()) {
-                return m.group(1);
-            }
-        }
-        // organisation fallback: .chatgpt_account_id or organizations[0].id
-        final Matcher m = ACCOUNT_CLAIM.matcher(json);
-        if (m.find()) {
-            return m.group(2);
-        }
-        final Matcher org = Pattern.compile("\"organizations\"\\s*:\\s*\\[\\s*\\{\\s*\"id\"\\s*:\\s*\"([^\"]+)\"")
-                .matcher(json);
-        return org.find() ? org.group(1) : null;
+    public static String extractAccountId(final String idToken, final JsonMapper mapper) {
+        return parseIdTokenClaims(idToken, mapper).accountId();
     }
 
     /**
@@ -357,14 +348,16 @@ public class CodexOAuthClient {
     }
 
     /**
-     * Parses the account claims out of a Codex JWT payload (access or id token). Falls back to the
-     * organization id for the account id when the namespaced claims are absent, exactly like the
-     * Codex CLI.
+     * Parses the account claims out of a Codex JWT payload (access or id token) using the typed
+     * {@link IdTokenPayload} model, so parsing is robust to formatting and reaches the nested
+     * {@code https://api.openai.com/auth} claims. Falls back to the default/active organization id
+     * for the account id when the namespaced claims are absent, exactly like the Codex CLI.
      *
      * @param token the access or id token, possibly null/blank.
+     * @param mapper the JSON mapper (needed to deserialize the typed payload).
      * @return the parsed claims, never {@code null} (fields may be null).
      */
-    public static IdTokenClaims parseIdTokenClaims(final String token) {
+    public static IdTokenClaims parseIdTokenClaims(final String token, final JsonMapper mapper) {
         if (token == null || token.isBlank()) {
             return new IdTokenClaims(null, null, null, null, false);
         }
@@ -374,36 +367,43 @@ public class CodexOAuthClient {
                 return new IdTokenClaims(null, null, null, null, false);
             }
             final byte[] decoded = Base64.getUrlDecoder().decode(parts[1]);
-            final var json = new String(decoded, UTF_8);
-            return claimsFrom(json);
+            final var payload = mapper.fromString(IdTokenPayload.class, new String(decoded, UTF_8));
+            if (payload == null) {
+                return new IdTokenClaims(null, null, null, null, false);
+            }
+            final var auth = payload.auth();
+            final String accountId = auth != null
+                            && auth.accountId() != null
+                            && !auth.accountId().isBlank()
+                    ? auth.accountId()
+                    : firstNonBlank(payload.flatAuthAccountId(), payload.flatAccountId());
+            final String accountIdResolved =
+                    accountId != null && !accountId.isBlank() ? accountId : defaultOrganizationId(payload);
+            final String userId = auth != null && auth.userId() != null ? auth.userId() : null;
+            final String plan = auth != null && auth.planType() != null ? auth.planType() : null;
+            final boolean fedramp = auth != null && auth.chatgptAccountIsFedramp();
+            final String email = payload.email() != null ? payload.email() : payload.preferredUsername();
+            return new IdTokenClaims(accountIdResolved, userId, email, plan, fedramp);
         } catch (final RuntimeException e) {
             LOGGER.fine(() -> "Cannot decode id_token claims: " + e.getMessage());
             return new IdTokenClaims(null, null, null, null, false);
         }
     }
 
-    /** Reads all id_token claims from a decoded JWT payload JSON. */
-    private static IdTokenClaims claimsFrom(final String json) {
-        // plan type / user id / fedramp lookups on the bare claim or the namespaced auth claim.
-        final String plan = firstJsonString(
-                json, new String[] {"https://api.openai.com/auth.chatgpt_plan_type", "chatgpt_plan_type"});
-        final String userId =
-                firstJsonString(json, new String[] {"https://api.openai.com/auth.chatgpt_user_id", "chatgpt_user_id"});
-        final String email = firstJsonString(json, new String[] {"email", "preferred_username"});
-        final boolean fedramp = json.contains("\"chatgpt_account_is_fedramp\"")
-                && !json.contains("\"chatgpt_account_is_fedramp\":false");
-        return new IdTokenClaims(extractClaim(json), userId, email, plan, fedramp);
-    }
-
-    private static String firstJsonString(final String json, final String[] candidates) {
-        for (final String candidate : candidates) {
-            final Matcher m = Pattern.compile("\"" + Pattern.quote(candidate) + "\"\\s*:\\s*\"([^\"]+)\"")
-                    .matcher(json);
-            if (m.find()) {
-                return m.group(1);
-            }
+    /** The selected/default organization id, falling back to the first, else null. */
+    private static String defaultOrganizationId(final IdTokenPayload payload) {
+        if (payload.organizations() == null || payload.organizations().isEmpty()) {
+            return null;
         }
-        return null;
+        return payload.organizations().stream()
+                .filter(org -> org.id() != null && !org.id().isBlank())
+                .filter(org -> org.isDefault() || org.isActive())
+                .findFirst()
+                .or(() -> payload.organizations().stream()
+                        .filter(org -> org.id() != null && !org.id().isBlank())
+                        .findFirst())
+                .map(IdTokenPayload.Organization::id)
+                .orElse(null);
     }
 
     // ----- HTTP and JSON plumbing -----

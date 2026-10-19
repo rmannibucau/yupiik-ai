@@ -25,4 +25,9 @@ public class CodexDeviceAuthDisabledException extends IllegalStateException {
     public CodexDeviceAuthDisabledException(final String message) {
         super(message);
     }
+
+    /** Creates the exception with the underlying server/transport failure as the cause. */
+    public CodexDeviceAuthDisabledException(final String message, final Throwable cause) {
+        super(message, cause);
+    }
 }

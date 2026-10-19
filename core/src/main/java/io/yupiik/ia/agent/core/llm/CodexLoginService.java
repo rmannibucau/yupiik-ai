@@ -120,7 +120,7 @@ public class CodexLoginService {
         // derive the account metadata (plan/user/fedramp) off the already stored id token
         final var claims = oauthSession.idToken() == null
                 ? null
-                : io.yupiik.llm.client.codex.CodexOAuthClient.parseIdTokenClaims(oauthSession.idToken());
+                : io.yupiik.llm.client.codex.CodexOAuthClient.parseIdTokenClaims(oauthSession.idToken(), mapper);
         final String accountId =
                 claims != null && claims.accountId() != null ? claims.accountId() : oauthSession.accountId();
         final String chatgptUserId = claims == null ? null : claims.chatgptUserId();
@@ -157,16 +157,30 @@ public class CodexLoginService {
         }
     }
 
-    /** Persists a session atomically (temp file + move). */
+    /** Persists a session atomically (temp file + move, owner-only perms). */
     public void save(final String provider, final CodexTokenStore store) {
         final var file = codexAuthFile(provider);
         try {
             Files.createDirectories(file.getParent());
             final var tmp = file.resolveSibling(file.getFileName() + ".tmp");
             Files.write(tmp, mapper.toBytes(store));
+            restrictToOwner(tmp);
             Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot persist the Codex session to " + file + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** Restricts the auth file to owner-only reads/writes (POSIX 0600); best effort on non-POSIX. */
+    private static void restrictToOwner(final Path path) {
+        try {
+            Files.setPosixFilePermissions(
+                    path,
+                    java.util.Set.of(
+                            java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                            java.nio.file.attribute.PosixFilePermission.OWNER_WRITE));
+        } catch (final UnsupportedOperationException | IOException ignored) {
+            // non-POSIX filesystem: no-op
         }
     }
 

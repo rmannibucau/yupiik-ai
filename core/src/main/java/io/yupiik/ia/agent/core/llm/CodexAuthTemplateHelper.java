@@ -31,6 +31,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.logging.Logger;
 
@@ -66,7 +68,7 @@ public class CodexAuthTemplateHelper {
     private final Path providersHome;
     private volatile CodexOAuthClient oauth;
     private volatile CodexAgentIdentityClient agentIdentity;
-    private final ConcurrentHashMap<String, Object> refreshLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Lock> refreshLocks = new ConcurrentHashMap<>();
 
     public CodexAuthTemplateHelper(
             final JsonMapper mapper,
@@ -146,11 +148,16 @@ public class CodexAuthTemplateHelper {
      * value for {@code providerName} when the session carries an Agent Identity registration
      * (enterprise/company plans). Use it as the {@code authorization} value in a codex provider's
      * {@code dynamicHeaders}, e.g.:
-     * {@code "authorization": "{{codexAgentAssertion \"default\""}}.
+     * {@code "authorization": "{{codexAgentAssertion \"default\"}}"}.
      *
-     * <p>Only valid for Agent Identity sessions: the assertion needs a registered run task, so the
-     * helper fails loudly (and tells the user to run {@code /codex login --enterprise}) when the
-     * session is only a regular OAuth one.</p>
+     * <p>The assertion is signed with the stored Ed25519 key and does not need the OAuth access
+     * token, so this helper never triggers a refresh and keeps working even when the refresh token
+     * has been revoked or expired by an enterprise session-lifetime policy. If the run task id is
+     * missing or stale it is lazily re-registered with the stored key, so an expired task id does
+     * not force a re-login.</p>
+     *
+     * <p>Only valid for Agent Identity sessions: the helper fails loudly (and tells the user to run
+     * {@code /codex login --enterprise}) when the session is only a regular OAuth one.</p>
      *
      * @return the helper function.
      */
@@ -161,16 +168,8 @@ public class CodexAuthTemplateHelper {
             if (store == null) {
                 throw new CodexNotAuthenticatedException(providerName);
             }
-            final CodexTokenStore resolved = ensureFresh(providerName, store);
-            if (resolved.agentIdentity() == null) {
-                throw new IllegalStateException("provider '" + providerName + "' is not enrolled in Agent Identity; "
-                        + "run /codex login <provider> --enterprise");
-            }
-            if (resolved.agentIdentity().needsTaskRegistration()) {
-                throw new IllegalStateException("provider '" + providerName
-                        + "' Agent Identity has no run task; re-enroll with " + "/codex login <provider> --enterprise");
-            }
-            return new SafeString(agentIdentity().assertionHeader(resolved.agentIdentity()));
+            final var record = ensureEnrolledTask(providerName, store);
+            return new SafeString(agentIdentity().assertionHeader(record));
         };
     }
 
@@ -178,7 +177,7 @@ public class CodexAuthTemplateHelper {
      * The {@code codexAccountId} helper: resolves the account id for {@code providerName} (from the
      * Agent Identity record when present, else from the OAuth session). Use it as the
      * {@code ChatGPT-Account-ID} header value so the account id is always correct without manual
-     * configuration.
+     * configuration. Never triggers an OAuth refresh; the id is read from the stored session.
      *
      * @return the helper function.
      */
@@ -189,13 +188,67 @@ public class CodexAuthTemplateHelper {
             if (store == null) {
                 throw new CodexNotAuthenticatedException(providerName);
             }
-            final CodexTokenStore resolved = ensureFresh(providerName, store);
-            final String accountId = resolved.agentIdentity() != null
-                            && resolved.agentIdentity().accountId() != null
-                            && !resolved.agentIdentity().accountId().isBlank()
-                    ? resolved.agentIdentity().accountId()
-                    : resolved.accountId();
+            final String accountId = store.agentIdentity() != null
+                            && store.agentIdentity().accountId() != null
+                            && !store.agentIdentity().accountId().isBlank()
+                    ? store.agentIdentity().accountId()
+                    : store.accountId();
             return new SafeString(accountId == null ? "" : accountId);
+        };
+    }
+
+    /**
+     * Returns the Agent Identity record for {@code providerName}, lazily re-registering the run task
+     * (from the stored key + agent runtime) when the recorded task id is missing or stale. Uses the
+     * stored state - no OAuth refresh - so a revoked/expired refresh token cannot block the assertion.
+     */
+    private io.yupiik.llm.client.codex.model.AgentIdentityRecord ensureEnrolledTask(
+            final String providerName, final CodexTokenStore store) {
+        final var record = store.agentIdentity();
+        if (record == null) {
+            throw new IllegalStateException("provider '" + providerName + "' is not enrolled in Agent Identity; "
+                    + "run /codex login <provider> --enterprise");
+        }
+        if (!record.needsTaskRegistration()) {
+            return record;
+        }
+        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
+        lock.lock();
+        try {
+            final CodexTokenStore current = load(providerName);
+            final var fresh = current == null ? store : current;
+            final var freshRecord = fresh.agentIdentity();
+            if (freshRecord != null && !freshRecord.needsTaskRegistration()) {
+                return freshRecord;
+            }
+            final var registered = agentIdentity().registerTask(freshRecord == null ? record : freshRecord);
+            final CodexTokenStore updated = fresh.withAgentIdentity(registered);
+            save(providerName, updated);
+            return registered;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    /**
+     * The {@code codexFedramp} helper: resolves the {@code X-OpenAI-Fedramp} header value for
+     * {@code providerName} - {@code true} when the enrolled Agent Identity is a FedRAMP account,
+     * otherwise an empty string (blank renders are skipped by the headers customizer). Use it so
+     * FedRAMP accounts always send the routing header without manual configuration:
+     * {@code "X-OpenAI-Fedramp": "{{codexFedramp \"codex\"}}"}.
+     *
+     * @return the helper function.
+     */
+    public Function<HelperContext, Object> codexFedramp() {
+        return context -> {
+            final String providerName = providerName(context, "codexFedramp");
+            final CodexTokenStore store = load(providerName);
+            if (store == null) {
+                throw new CodexNotAuthenticatedException(providerName);
+            }
+            final boolean fedramp =
+                    store.agentIdentity() != null && store.agentIdentity().chatgptAccountIsFedramp();
+            return new SafeString(fedramp ? "true" : "");
         };
     }
 
@@ -232,8 +285,9 @@ public class CodexAuthTemplateHelper {
             return store;
         }
         // single-flight per provider so a burst of concurrent renders triggers at most one refresh
-        final Object lock = refreshLocks.computeIfAbsent(providerName, k -> new Object());
-        synchronized (lock) {
+        final Lock lock = refreshLocks.computeIfAbsent(providerName, k -> new ReentrantLock());
+        lock.lock();
+        try {
             // re-check after acquiring the lock: another thread may have refreshed already
             final CodexTokenStore current = load(providerName);
             if (current != null && !current.expired(System.currentTimeMillis())) {
@@ -244,12 +298,11 @@ public class CodexAuthTemplateHelper {
                 throw new IllegalStateException(
                         "Codex refresh for provider '" + providerName + "' returned no access token");
             }
-            // the OAuth refresh drops the (agent identity) extras; re-attach them so a refreshed
-            // enterprise session keeps its identity registration across token rotation
-            final CodexTokenStore kept =
-                    refreshed.withAgentIdentity((current == null ? store : current).agentIdentity());
-            save(providerName, kept);
-            return kept;
+            // refresh() already carries the Agent Identity and the previous id token through
+            save(providerName, refreshed);
+            return refreshed;
+        } finally {
+            lock.unlock();
         }
     }
 
@@ -272,6 +325,7 @@ public class CodexAuthTemplateHelper {
             // write atomically: a temp file in the same dir followed by a move avoids a reader seeing a partial JSON
             final Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
             Files.write(tmp, mapper.toBytes(store));
+            restrictToOwner(tmp);
             try {
                 Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             } catch (final IOException moveFailure) {
@@ -280,6 +334,22 @@ public class CodexAuthTemplateHelper {
             }
         } catch (final IOException e) {
             throw new IllegalStateException("Cannot write the Codex auth file " + file + ": " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Restricts {@code codex.auth.json} to owner-only reads/writes (POSIX 0600): the file holds the
+     * refresh token and the Agent Identity Ed25519 private key. Standard only, not enforced on FAT/exFAT.
+     */
+    private static void restrictToOwner(final Path path) {
+        try {
+            final java.nio.file.attribute.PosixFilePermission[] owner = {
+                java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                java.nio.file.attribute.PosixFilePermission.OWNER_WRITE
+            };
+            Files.setPosixFilePermissions(path, java.util.Set.of(owner));
+        } catch (final UnsupportedOperationException | IOException ignored) {
+            // non-POSIX filesystem: best effort
         }
     }
 
