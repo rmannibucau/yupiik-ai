@@ -161,7 +161,7 @@ yca is a terminal coding agent backed by any OpenAI-compatible endpoint.
           <span class="card-title-text">External sandboxing</span>
         </h4>
         <div class="card-text">
-          Wrapping the whole yca process in nono or AgentFS for kernel-level isolation and copy-on-write.
+          Wrapping the whole yca process in nono or AgentFS, or giving it an isx machine of its own, for kernel-level isolation and copy-on-write.
         </div>
         <a title="External sandboxing" class="card-link-mask" href="features/sandboxes.html"></a>
       </div>

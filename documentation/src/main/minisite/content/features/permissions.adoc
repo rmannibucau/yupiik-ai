@@ -3,7 +3,7 @@
 :minisite-nav-prev-link: modes.html
 :minisite-nav-prev-label: Plan and build modes
 :minisite-nav-next-link: sandboxes.html
-:minisite-nav-next-label: External sandboxing (nono, AgentFS)
+:minisite-nav-next-label: External sandboxing (nono, AgentFS, isx)
 
 yca gates tool calls behind configurable permission modes:
 

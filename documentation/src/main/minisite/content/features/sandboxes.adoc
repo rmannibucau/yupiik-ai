@@ -1,17 +1,17 @@
-= External sandboxing (nono, AgentFS)
-:minisite-breadcrumb: Home[index.html] > Features > External sandboxing (nono, AgentFS)
+= External sandboxing (nono, AgentFS, isx)
+:minisite-breadcrumb: Home[index.html] > Features > External sandboxing (nono, AgentFS, isx)
 :minisite-nav-prev-link: permissions.html
 :minisite-nav-prev-label: Permission modes
 :minisite-nav-next-link: ui.html
 :minisite-nav-next-label: Interactive UI and headless mode
-:minisite-keywords: sandbox, nono, agentfs, isolation, landlock, seatbelt, copy-on-write
+:minisite-keywords: sandbox, nono, agentfs, isx, isolation, landlock, seatbelt, copy-on-write, incus, kvm
 
 IMPORTANT: In every command below, `yca` is a shorthand for whichever entry point
 you run: the Java fatjar (`java -jar yca-bin-...-fatjar.jar ...`) or the optional
 native binary. Replace it with your actual command — for example
 `java -jar yca-bin-1.0.0-fatjar.jar tui` — or, if `yca` is already on your `PATH`
-(native binary), run it as shown. The sandbox wrapper (`nono`/`agentfs`) does not
-care how yca is launched; it wraps the process either way.
+(native binary), run it as shown. The sandbox wrappers (`nono`/`agentfs`) and isx
+do not care how yca is launched; they wrap or contain the process either way.
 
 yca's own xref:permissions.adoc[permission modes] are a *consent* gate: they decide
 whether the model is allowed to ask for a tool call. They are not an isolation
@@ -19,34 +19,38 @@ boundary — approve a `bash` command in `yolo` and that process runs with your 
 user privileges against your real filesystem, `~/.ssh`, and the real network.
 
 When you need kernel-level enforcement — least privilege *even after* an approval —
-wrap the whole yca process in an external sandbox. Two complementary tools cover
-different halves of the problem:
+wrap the whole yca process in an external sandbox. Three tools cover three
+different models, and each models isolation differently:
 
 * *nono* is a security boundary: a CLI that runs any command in an OS-enforced
   sandbox (Landlock on Linux, Seatbelt on macOS, a ptrace fallback on WSL2),
   with path-level allow/deny, automatic credential blocking, network control and
-  rollback.
+  rollback. It *confines the process* that already runs on your machine.
 * *AgentFS* is a state and audit layer: a SQLite-backed copy-on-write filesystem.
   `agentfs run` wraps a command so every write lands in a delta database and the
   host tree is never modified, with `diff` and `timeline` to review before
-  applying.
+  applying. It *snapshots the writes* to your tree.
+* *isx* gives the agent a machine of its own: a full Linux workstation (Incus
+  system container or KVM VM) that your host cannot touch, so it works in `yolo`
+  without your credentials ever entering it. It *removes the host from reach*
+  entirely.
 
 They complement (not replace) yca's permission modes: keep `ask`/`auto_edit` for
 consent and use one of these for isolation. They also complement each other —
 nono answers "how do I run this safely?", AgentFS answers "what happened and what
-is the state?".
+is the state?", isx answers "where can the agent just own everything?".
 
-== Two isolation models at a glance
+== Three isolation models at a glance
 
-[cols="1,2,2,2", opts=headers]
+[cols="1,2,2,2,2", opts=headers]
 |===
-| |yca permission modes |nono |AgentFS
-|Layer |application consent |kernel (Landlock/Seatbelt) |filesystem COW (FUSE/NFS)
-|Protects against |model acting without approval |any process touching denied paths/credentials |host filesystem mutation
-|Scope |tool call |whole process tree |write path
-|Isolation mechanism |allow/deny string matching |irreversible kernel policy at exec |copy-on-write overlay onto a SQLite delta
-|Reverses writes |no |opt-in (`--rollback`) |yes (`diff` before materializing)
-|Audits actions |transcript/session |audit trail |`timeline`
+| |yca permission modes |nono |AgentFS |isx
+|Layer |application consent |kernel (Landlock/Seatbelt) |filesystem COW (FUSE/NFS) |system container / KVM VM
+|Protects against |model acting without approval |any process touching denied paths/credentials |host filesystem mutation |anything the agent does (host is unreachable)
+|Scope |tool call |whole process tree |write path |whole machine (init, fs, network, processes)
+|Isolation mechanism |allow/deny string matching |irreversible kernel policy at exec |copy-on-write overlay onto a SQLite delta |CoW container/VM on a storage pool + host-side MITM credential proxy
+|Reverses writes |no |opt-in (`--rollback`) |yes (`diff` before materializing) |dispose the branch, re-branch clean
+|Audits actions |transcript/session |audit trail |`timeline` |git history via `isx://` remote
 |===
 
 Decide which fits your threat model:
@@ -55,12 +59,15 @@ Decide which fits your threat model:
 |If you need ... |use ...
 |Path-level allow/deny, credential blocking, network control around yca |nono
 |To review every change before it touches your repo, and revert at will |AgentFS
+|Full autonomy with zero credential exposure, on a disposable machine |isx
 |Both isolation *and* reversibility (expert, defense in depth) |nono + AgentFS
 |===
 
 WARNING: Running nono and AgentFS together is genuine defense-in-depth, but it
 stacks two kernel/FUSE enforcement layers and the add-ed friction. Prefer one as
-the primary boundary; combine only when you have a concrete reason.
+the primary boundary; combine only when you have a concrete reason. isx is a
+different bet — it *replaces* the boundary with a disposable machine rather than
+layering more rules, so mixing it with nono is usually pointless.
 
 == Sandboxing yca with nono
 
@@ -189,43 +196,130 @@ NOTE: The MCP path is a *separate* window into the delta DB, not the way AgentFS
 isolates the process. Prefer `agentfs run` as the primary sandbox; use `serve mcp`
 only when you specifically want to drive the sandboxed files through tools.
 
+== Sandboxing yca with isx
+
+*isx* (https://isx.run/) gives the agent the opposite answer to the two tools
+above: instead of confining a process or snapshotting your tree, it gives yca a
+*laptop of its own* — a full Linux workstation that your real machine can never
+touch, because it is a separate system. On it, yca is not being watched by your
+kernel, your files, or your credentials. It has nothing worth stealing.
+
+=== The underlying mechanism
+
+An isx sandbox is a real machine, not an application container:
+
+* It is an *Incus system container* by default (a full system with its own init,
+  filesystem, network stack and process tree), or a *KVM virtual machine* with
+  `--vm` when you want the strongest isolation — a separate kernel and hardware
+  level separation.
+* Inside, the agent has root, can `dnf install`, run services and nested
+  containers, attach debuggers — whatever the investigation turns out to need.
+* Everything runs on a copy-on-write storage pool (btrfs/zfs/lvm), which powers
+  the cheap branching below.
+
+That is what makes it safe enough for the punchline at the end of this section.
+
+=== Copy-on-write branches and templates
+
+A *template* is a machine image built once — OS, tools, repos, warm dependency
+caches. There is no yca template in isx's registry, so define your own (add a
+`tools:` entry or a custom template that installs yca). `isx branch` then creates
+an instant copy-on-write clone: it shares everything unchanged with the template
+and costs only what it changes, so a fresh branch takes about a second.
+
+```
+isx init              # one-time host setup (Incus, storage pool, proxy, auth)
+isx build tpl-yca     # build your template
+isx branch fix-auth --from tpl-yca   # instant CoW clone, yca available inside
+```
+
+When the agent wrecks its box, `isx destroy` plus a fresh branch replaces it in a
+second — discarding the tainted machine instead of repairing it.
+
+=== No credential ever enters the environment
+
+Keys and tokens never land inside the container in any form. A host-side MITM
+proxy is the mechanism: bridge-level DNS overrides plus a custom CA make the
+container transparently route the intercepted domains (your LLM endpoint,
+`github.com`, and so on) through the proxy, which terminates TLS, injects the real
+authentication headers upstream, and forwards it. Inside, `yca`, `git`, `gh` and
+`curl` work unmodified, but they only ever see placeholder values
+(`sk-ant-placeholder`) that cannot authenticate against anything real. The
+injection happens entirely outside the sandbox's trust boundary.
+
+```shell
+isx account add claude     # real credential lives on the host, never in the box
+isx branch fix-auth --from tpl-yca
+```
+
+Because the container holds nothing worth stealing, you get to do the one thing
+this page has repeatedly warned against. Yes — run yca in `yolo`. On a disposable
+machine that holds no credentials, `yolo` has all the weight of a gentle
+suggestion: the agent can do whatever it likes, and the blast radius is a branch
+you will destroy anyway. Every `ask`-mode warning above is for *your* machine,
+where an approved command runs with your privileges. isx is the exception that
+proves the rule — go wild, that machine is the point.
+
+=== Get the work back as commits, not a mount
+
+isx deliberately never mounts your host directory read-write (a writable mount
+lets an agent's files execute on your host through a build or an IDE). Instead work
+comes back the way git does — a commit, fetched and reviewed:
+
+```shell
+git fetch fix-auth          # immutable snapshot of exactly what it did
+git diff main..fix-auth/main
+git cherry-pick fix-auth/main   # take what you want
+```
+
+This trades yca's normal edit-in-place loop for "branch, let it commit, fetch,
+review, merge" — a real workflow change, but one where your review is always of a
+specific commit the agent can no longer mutate.
+
+TIP: Inside the container yca uses `git` over HTTPS (isx routes it through the
+proxy); commit signing inside the container is not supported yet, so fetch and
+rebase/sign on your host instead of expecting signed commits from the sandbox.
+
 == Enabling and disabling security features
 
-[cols="3,3,3,3", opts=headers]
+[cols="3,3,3,3,3", opts=headers]
 |===
-|Goal |nono |AgentFS |yca side
-|Restrict to working dir only |`--allow .` |overlay cwd by default |`yca.permissions.bash.rules` read-only families
-|Add the yca scratch dir |`--allow /tmp/yca` |`--allow /tmp/yca` |yca writes scratch to `/tmp/yca`
-|Block outbound network |`--block-net` |n/a (no network control) |endpoint reachability is a prerequisite
-|Network domain allow-list |`--allow-domain https://<endpoint>` |n/a |LLM endpoint must be reachable
-|Block credential paths by default |automatic |no — scope reads via the base tree |`yca.permissions.deny`
-|Disable default allows |default profile is minimal |`--no-default-allows` |—
-|Ask before each tool call |keep `ask` on the yca side |keep `ask` |`/permissions ask` / `auto_edit` / `yolo`
-|Extra kernel enforcement |nono's own |`--experimental-sandbox` (ptrace, Linux) |—
-|Detached + rollback |`nono run --detached --rollback` |no rollback; `diff`/`timeline` review |sessions JSONL
-|Auditing |nono audit trail |`agentfs timeline` |yca transcript/sessions
+|Goal |nono |AgentFS |isx |yca side
+|Restrict to working dir only |`--allow .` |overlay cwd by default |template `repos:` clones the project |`yca.permissions.bash.rules` read-only families
+|Add the yca scratch dir |`--allow /tmp/yca` |`--allow /tmp/yca` |inside the branch |yca writes scratch to `/tmp/yca`
+|Block outbound network |`--block-net` |n/a (no network control) |airgap / proxy-only egress / full net |endpoint reachability is a prerequisite
+|Network domain allow-list |`--allow-domain https://<endpoint>` |n/a |proxy-only egress mode |LLM endpoint must be reachable
+|Block credential paths by default |automatic |no — scope reads via the base tree |nothing to block, no keys present |`yca.permissions.deny`
+|Disable default allows |default profile is minimal |`--no-default-allows` |— |—
+|Ask before each tool call |keep `ask` on the yca side |keep `ask` |`yolo` is fine (disposable machine) |`/permissions ask` / `auto_edit` / `yolo`
+|Extra kernel enforcement |nono's own |`--experimental-sandbox` (ptrace, Linux) |KVM `--vm` |—
+|Detached + rollback |`nono run --detached --rollback` |no rollback; `diff`/`timeline` review |destroy + re-branch |sessions JSONL
+|Auditing |nono audit trail |`agentfs timeline` |git history via `isx://` remote |yca transcript/sessions
 |===
 
 IMPORTANT: strict network blocking (`--block-net`, or an Allow-list that does not
 include your model endpoint) stops yca from reaching the LLM provider. Two options:
-allow-list the exact endpoint, or keep network open and rely on nono's credential
-injection so keys never enter the sandbox. Plan this before you wrap, or the run
-fails at the first model call.
+allow-list the exact endpoint, or keep network open and rely on nono's or isx's
+credential injection so keys never enter the sandbox. Plan this before you wrap, or
+the run fails at the first model call.
 
-TIP: When running under nono, keep yca's permission mode at `ask` (at most
-`auto_edit`). The point of combining them is *consent then isolation* — nono
-enforces the boundary while yca still asks before each tool.
+TIP: Keep yca's permission mode at `ask` (at most `auto_edit`) under nono or
+AgentFS — the point is *consent then isolation*. Under isx that falls away: the
+machine is disposable and holds no credentials, so `yolo` stops being the risky
+choice and becomes the obvious one.
 
 == Platform and stability notes
 
-* Both tools are **Linux-first**; nono supports macOS (Seatbelt) with partial WSL2
-  coverage, AgentFS is Linux and macOS with FUSE/NFS mounts.
-* Both move fast — nono's registry/packs and AgentFS's "beta" status mean releases
-  churn. The samples above use long-lived core flags; re-validate profile and pack
-  names before trusting them.
+* All three tools are **Linux-first**; nono supports macOS (Seatbelt) with partial
+  WSL2 coverage, AgentFS is Linux and macOS with FUSE/NFS mounts, and isx runs on
+  Linux or macOS 15+ (macOS uses a VM appliance).
+* All three move fast — nono's registry/packs, AgentFS's "beta" status and isx's
+  active development mean releases churn. The samples above use long-lived core
+  flags; re-validate profile, pack and template names before trusting them.
 * yca must be able to write its session, transcript and memory inside the granted
   dirs for sessions to resume inside a sandbox — point config at `/tmp/yca` or
-  grant the real config path read/write.
+  grant the real config path read/write. Inside an isx branch, yca's scratch and
+  config live in the branch's own filesystem.
 
 == See also
 
@@ -234,3 +328,5 @@ enforces the boundary while yca still asks before each tool.
 * xref:modes.adoc[Plan and build modes] — the orthogonal read-only/build axis.
 * xref:mcp.adoc[MCP support] — wiring `agentfs serve mcp` into the tool registry.
 * xref:../configuration.adoc[Configuration] — `yca.permissions.*` and `mcps` keys.
+* isx documentation ((https://isx.run/)) — templates, credential accounts and the
+  `isx mcp` delegation server for running branches from an agent.
