@@ -199,12 +199,56 @@ final class SelectionState {
             for (var x = span.startX; x <= span.endX; x++) {
                 row.append(grid[y][x]);
             }
-            rows.add(row.toString().stripTrailing());
+            // A boxed code block (Borders.ALL + padding) fills the whole copy zone, so its
+            // right vertical border and its top/bottom rules fall inside the selection cut
+            // and would otherwise pollute the clipboard (the left border is already excluded
+            // by the zone clip, prose lines end in text, so only these box glyphs leak).
+            final var stripped = stripBoxFraming(row.toString());
+            if (stripped != null) {
+                rows.add(stripped);
+            }
         }
         while (!rows.isEmpty() && rows.getLast().isEmpty()) {
             rows.removeLast();
         }
         return String.join("\n", rows);
+    }
+
+    /** Box vertical border glyphs (a code block's left/right walls). */
+    private static final String BOX_VERTICALS = "\u2502\u2503";
+
+    /** Box horizontal rule glyphs (a code block's top/bottom walls and corners). */
+    private static final String BOX_HORIZONTALS = "\u2500\u256D\u256E\u2570\u256F";
+
+    /**
+     * Removes the framing a boxed code block contributes to a copied row: the
+     * right vertical border (plus the padding that precedes it) and rows that
+     * are nothing but a horizontal rule (the block's top or bottom wall).
+     * The left border is already excluded by the zone clip, so only these
+     * right/rule glyphs reach here.
+     *
+     * @param raw the raw cell string for the row in the selected column span
+     * @return the row without its box frame, or null when the row is a block
+     *         border (the top/bottom rule) that must not be copied at all
+     */
+    private static String stripBoxFraming(final String raw) {
+        var row = raw.stripTrailing();
+        if (row.isEmpty()) {
+            return row;
+        }
+        // a row that is nothing but box rule glyphs is the block's top/bottom wall:
+        // drop it entirely so a full-block selection copies only the code lines
+        final var body = row.stripLeading();
+        if (!body.isEmpty() && body.chars().allMatch(c -> BOX_HORIZONTALS.indexOf(c) >= 0)) {
+            return null;
+        }
+        // a trailing vertical border flags a boxed row: drop it and the padding on both
+        // sides (the left padding leaks past the zone clip), while untouched prose keeps
+        // its leading indentation
+        if (BOX_VERTICALS.indexOf(row.charAt(row.length() - 1)) >= 0) {
+            row = row.substring(0, row.length() - 1).stripTrailing().stripLeading();
+        }
+        return row;
     }
 
     /**

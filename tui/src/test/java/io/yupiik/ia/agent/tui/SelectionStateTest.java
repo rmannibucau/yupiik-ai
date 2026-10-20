@@ -371,6 +371,60 @@ class SelectionStateTest {
     }
 
     @Test
+    void boxedCodeBlockCopyStripsTheRightBorderAndPadding() {
+        final var selection = new SelectionState();
+        // a boxed code block rendered in the body: the zone clip starts at column 2
+        // (past the excluded left border and one padding cell), like the real copyZone
+        final var grid = SelectionState.grid(
+                List.of("\u2502  hello   \u2502", "\u2502  world   \u2502", "\u2502  again   \u2502"));
+        final var zone = new Rect(2, 0, 10, 3);
+        selection.press(2, 0, grid, List.of(zone));
+        selection.drag(11, 2, grid);
+        // the leading padding, the trailing padding and the right vertical border are
+        // all stripped so a code block copies clean code, not its box frame
+        assertEquals("hello\nworld\nagain", selection.copy(grid));
+    }
+
+    @Test
+    void boxedCodeBlockCopyKeepsInteriorBlankLines() {
+        final var selection = new SelectionState();
+        final var grid =
+                SelectionState.grid(List.of("\u2502  a      \u2502", "\u2502         \u2502", "\u2502  b      \u2502"));
+        final var zone = new Rect(2, 0, 10, 3);
+        selection.press(2, 0, grid, List.of(zone));
+        selection.drag(11, 2, grid);
+        // a blank line inside the block is content, not framing: it stays as an empty row
+        assertEquals("a\n\nb", selection.copy(grid));
+    }
+
+    @Test
+    void boxedCodeBlockCopyDropsTheTopAndBottomRules() {
+        final var selection = new SelectionState();
+        final var grid = SelectionState.grid(List.of(
+                "\u256D\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256E",
+                "\u2502  hello   \u2502",
+                "\u2502  world   \u2502",
+                "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256F"));
+        final var zone = new Rect(2, 0, 10, 4);
+        selection.press(2, 0, grid, List.of(zone));
+        selection.drag(11, 3, grid);
+        // the horizontal-rule rows (top and bottom walls) are not content and are removed
+        assertEquals("hello\nworld", selection.copy(grid));
+    }
+
+    @Test
+    void proseLinesEndingInBoxGlyphsAreLeftUntouched() {
+        final var selection = new SelectionState();
+        // a normal (non-boxed) prose line never ends with a box glyph, so this stays intact:
+        // only rows actually carrying the right vertical border are stripped
+        final var grid = SelectionState.grid(List.of("print('x')", "done"));
+        final var zone = new Rect(0, 0, 11, 2);
+        selection.press(0, 0, grid, List.of(zone));
+        selection.drag(10, 1, grid);
+        assertEquals("print('x')\ndone", selection.copy(grid));
+    }
+
+    @Test
     void osc52PayloadEncodesUtf8Text() {
         assertEquals("\u001B]52;c;aGk=\u0007", SelectionState.osc52Payload("hi"));
         assertEquals(
