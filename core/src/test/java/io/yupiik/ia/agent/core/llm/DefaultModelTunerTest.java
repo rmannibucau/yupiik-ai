@@ -140,6 +140,20 @@ class DefaultModelTunerTest {
     }
 
     @Test
+    void codexFlavorExposesTheSameReasoningTiersAsTheResponsesWire() {
+        // a codex-flavored provider (ApiFlavor.CODEX) must route into the openai tiering so the
+        // gpt-5.x-codex efforts (none..xhigh) apply, not fall through to the empty default
+        final var variants = DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5.3-codex", "default", ApiFlavor.CODEX, null, null));
+        assertEquals(List.of("none", "low", "medium", "high", "xhigh"), namesOf(variants));
+
+        // a non-codex gpt-5 id still gets the widely-supported tiers for the numberless releases
+        final var baseline = namesOf(DefaultModelTuner.variants(
+                new DefaultModelTuner.ModelContext("gpt-5", "default", ApiFlavor.CODEX, null, null)));
+        assertEquals(List.of("minimal", "low", "medium", "high"), baseline);
+    }
+
+    @Test
     void o1MiniHasNoVariantsOnAzure() {
         assertEquals(
                 0,

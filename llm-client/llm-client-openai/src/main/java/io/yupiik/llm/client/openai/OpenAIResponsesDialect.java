@@ -56,6 +56,14 @@ public class OpenAIResponsesDialect extends AbstractDialect {
     private final Set<String> streamedArgIds = ConcurrentHashMap.newKeySet();
 
     /**
+     * Extension key on an assistant {@link LlmMessage} carrying the opaque reasoning items to replay as
+     * {@code type:reasoning} input items (see {@link #replayReasoningItems}). Produced by the loop from
+     * the {@code encrypted_content} blobs it captured and persisted; consumed here so the same model can
+     * recover its multi-turn reasoning continuity on the Responses wire.
+     */
+    static final String REASONING_ITEMS_KEY = "reasoningItems";
+
+    /**
      * Creates the dialect.
      *
      * @param mapper JSON mapper used for wire serialization.
@@ -87,6 +95,33 @@ public class OpenAIResponsesDialect extends AbstractDialect {
      */
     protected boolean forceStream() {
         return false;
+    }
+
+    /**
+     * Whether the reasoning {@code include} directive should request the opaque {@code encrypted_content}
+     * reasoning blob from the backend, so a stateless client can replay it verbatim on later turns for
+     * multi-turn reasoning continuity (decrypted only server-side). Defaults to {@code true}: any
+     * Responses-capable reasoning backend (ChatGPT Codex, Azure AI, gateways) mints the blob when asked
+     * and the directive is advisory on providers that do not support it, so requesting it only adds
+     * continuity where available.
+     *
+     * @return {@code true} to request the encrypted reasoning blob.
+     */
+    protected boolean includeEncryptedReasoning() {
+        return true;
+    }
+
+    /**
+     * The {@code reasoning} request config: the effort plus the summary mode (which is what makes the
+     * backend stream the displayable reasoning-summary deltas at all). When
+     * {@link #includeEncryptedReasoning()} is true, also requests the opaque replayable
+     * {@code encrypted_content} blob via {@code include}.
+     */
+    private Map<String, Object> reasoningConfig(final String effort) {
+        if (!includeEncryptedReasoning()) {
+            return Map.of("effort", effort, "summary", "auto");
+        }
+        return Map.of("effort", effort, "summary", "auto", "include", List.of("reasoning.encrypted_content"));
     }
 
     /**
@@ -281,6 +316,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                 switch (message.role()) {
                     case "system", "developer" -> instructions.add(str(message.content()));
                     case "assistant" -> {
+                        replayReasoningItems(message, input);
                         final var text = str(message.content());
                         if (text != null && !text.isBlank()) {
                             input.add(ResponsesInput.message("assistant", text));
@@ -315,9 +351,7 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         }
         // 'summary' is required by the official API to stream reasoning deltas at all
         // (gateways often emit them unrequested); 'auto' keeps the payload small
-        final var reasoning = request.reasoningEffort() == null
-                ? null
-                : Map.<String, Object>of("effort", request.reasoningEffort(), "summary", "auto");
+        final var reasoning = request.reasoningEffort() == null ? null : reasoningConfig(request.reasoningEffort());
         return new ResponsesRequest(
                 request.model(),
                 input,
@@ -424,22 +458,35 @@ public class OpenAIResponsesDialect extends AbstractDialect {
                     }
                 }
                 case "response.output_item.added", "response.output_item.done" -> {
-                    if (root.get("item") instanceof Map<?, ?> item && "function_call".equals(str(item.get("type")))) {
-                        // output_item.added carries the name; output_item.done carries the fully
-                        // assembled arguments.
-                        final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
-                        final var id = str(item.get("id"));
-                        result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, str(item.get("name")), null));
-                        final var assembled = str(item.get("arguments"));
-                        if ("response.output_item.done".equals(type)
-                                && assembled != null
-                                && !assembled.isEmpty()
-                                && id != null
-                                && !streamedArgIds.contains(id)) {
-                            // no incremental delta was seen for this call: emit the assembled
-                            // arguments so the coalesced tool call is complete (prevents an empty
-                            // 'command is required' failure when a provider skips the delta events).
-                            result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, null, assembled));
+                    if (root.get("item") instanceof Map<?, ?> item) {
+                        final var itemType = str(item.get("type"));
+                        if ("function_call".equals(itemType)) {
+                            // output_item.added carries the name; output_item.done carries the fully
+                            // assembled arguments.
+                            final var outputIndex = root.get("output_index") instanceof Number n ? n.intValue() : 0;
+                            final var id = str(item.get("id"));
+                            result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, str(item.get("name")), null));
+                            final var assembled = str(item.get("arguments"));
+                            if ("response.output_item.done".equals(type)
+                                    && assembled != null
+                                    && !assembled.isEmpty()
+                                    && id != null
+                                    && !streamedArgIds.contains(id)) {
+                                // no incremental delta was seen for this call: emit the assembled
+                                // arguments so the coalesced tool call is complete (prevents an empty
+                                // 'command is required' failure when a provider skips the delta events).
+                                result.add(new LlmStreamEvent.ToolCallDelta(outputIndex, id, null, assembled));
+                            }
+                        } else if ("response.output_item.done".equals(type) && "reasoning".equals(itemType)) {
+                            // A completed reasoning item: the displayable summaries already streamed as
+                            // response.reasoning_summary_text.delta, but the item also carries the opaque
+                            // encrypted_content blob that must be replayed verbatim on later turns for the
+                            // same model to recover its reasoning continuity. Surface it so the loop can
+                            // persist and re-emit it (never displayed).
+                            final var enc = str(item.get("encrypted_content"));
+                            if (enc != null && !enc.isEmpty()) {
+                                result.add(new LlmStreamEvent.ReasoningItem(str(item.get("id")), summaryOf(item), enc));
+                            }
                         }
                     }
                 }
@@ -455,6 +502,73 @@ public class OpenAIResponsesDialect extends AbstractDialect {
         } catch (final RuntimeException e) {
             return List.of();
         }
+    }
+
+    /**
+     * Replays the opaque reasoning items persisted on an assistant message as {@code type:reasoning}
+     * input items, in their original order (before the assistant's own message), so the same model recovers
+     * its multi-turn reasoning continuity. The persisted payload is the list of maps written by the loop
+     * ({@code id}, {@code summary}, {@code encrypted_content}). Entries without an {@code encrypted_content}
+     * blob are skipped.
+     */
+    private static void replayReasoningItems(final LlmMessage message, final List<ResponsesInput> input) {
+        final var raw =
+                message.extensions() == null ? null : message.extensions().get(REASONING_ITEMS_KEY);
+        if (!(raw instanceof List<?> items)) {
+            return;
+        }
+        for (final var entry : items) {
+            if (!(entry instanceof Map<?, ?> map)) {
+                continue;
+            }
+            String id = null;
+            Object summary = null;
+            String encrypted = null;
+            for (final var e : map.entrySet()) {
+                final var key = String.valueOf(e.getKey());
+                switch (key) {
+                    case "id" -> {
+                        if (e.getValue() instanceof final String s) {
+                            id = s;
+                        }
+                    }
+                    case "summary" -> summary = e.getValue();
+                    case "encrypted_content" -> {
+                        if (e.getValue() instanceof final String s) {
+                            encrypted = s;
+                        }
+                    }
+                    default -> {}
+                }
+            }
+            if (encrypted == null || encrypted.isEmpty()) {
+                continue;
+            }
+            input.add(ResponsesInput.reasoning(id, summary, encrypted, Map.of()));
+        }
+    }
+
+    /**
+     * Extracts the displayable {@code summary} array of a reasoning item as wire-shaped map parts
+     * ({@code {type:"summary_text",text:"..."}}), for replaying the reasoning item verbatim. Returns an
+     * empty list when the item carries no summary.
+     */
+    private static List<Map<String, Object>> summaryOf(final Map<?, ?> item) {
+        final var raw = item.get("summary");
+        if (!(raw instanceof List<?> list)) {
+            return List.of();
+        }
+        final var out = new ArrayList<Map<String, Object>>();
+        for (final var part : list) {
+            if (part instanceof Map<?, ?> map) {
+                final var asMap = new LinkedHashMap<String, Object>();
+                for (final var e : map.entrySet()) {
+                    asMap.put(String.valueOf(e.getKey()), e.getValue());
+                }
+                out.add(asMap);
+            }
+        }
+        return out;
     }
 
     private static Usage usage(final Object value) {

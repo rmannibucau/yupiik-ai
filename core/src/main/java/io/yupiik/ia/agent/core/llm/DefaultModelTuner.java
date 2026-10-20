@@ -184,7 +184,10 @@ public final class DefaultModelTuner {
         }
         final var dialect = ctx.dialect() == null ? ApiFlavor.COMPLETIONS : ctx.dialect();
         final boolean anthropic = dialect == ApiFlavor.ANTHROPIC;
-        final boolean openaiWire = dialect == ApiFlavor.COMPLETIONS || dialect == ApiFlavor.RESPONSES;
+        // CODEX speaks the OpenAI Responses wire (reasoning effort / summaries), so it shares the
+        // openai-compatible variant scheme (minus the provider-slug branches that never apply).
+        final boolean openaiWire =
+                dialect == ApiFlavor.COMPLETIONS || dialect == ApiFlavor.RESPONSES || dialect == ApiFlavor.CODEX;
 
         // deepseek names excluded by opencode before any other resolution.
         if (m.contains("deepseek-chat")
@@ -265,6 +268,14 @@ public final class DefaultModelTuner {
     private static List<ModelVariantConfiguration> openAiCompatibleVariants(final ModelContext ctx, final String m) {
         if (m.contains("north-mini-code")) {
             return List.of(variant("none", "none", null), variant("high", "high", null));
+        }
+
+        // The Codex backend (chatgpt.com/backend-api/codex) speaks the OpenAI Responses wire with the
+        // full OpenAI reasoning-effort set (none/none gated by the model/release date). The provider id
+        // for a codex-flavored provider is user-chosen (eg. "default"), never a catalog slug, so route
+        // on the dialect instead: the openai-tier resolution already carries gpt5CodexReasoningEfforts.
+        if (ctx.dialect() == ApiFlavor.CODEX) {
+            return efforts(openAiReasoningEfforts(m, ctx.releaseDate()), DefaultModelTuner::openAiReasoningSuffix);
         }
 
         final var providerId = ctx.providerId();

@@ -586,6 +586,11 @@ class OpenAIDialectTest {
         // 'summary' is what makes official OpenAI stream reasoning deltas at all
         assertTrue(reqBody.get().contains("\"summary\":\"auto\""), reqBody.get());
         assertTrue(reqBody.get().contains("\"effort\":\"low\""), reqBody.get());
+        // every Responses dialect now requests the opaque encrypted_content blob, so stateless clients can
+        // replay it across turns for reasoning continuity (advisory on backends that do not support it)
+        assertTrue(
+                reqBody.get().contains("\"include\":[\"reasoning.encrypted_content\"]"),
+                "responses must request the replayable encrypted reasoning blob: " + reqBody.get());
     }
 
     @Test
@@ -678,6 +683,89 @@ class OpenAIDialectTest {
                         new LlmStreamEvent.TextDelta("lo"),
                         new LlmStreamEvent.End("stop", Usage.EMPTY)),
                 events);
+    }
+
+    @Test
+    void responsesDialectEmitsReasoningItemForEncryptedBlob(final JsonMapper mapper) throws Exception {
+        // the Codex backend mints an opaque encrypted_content blob on the reasoning item; the dialect
+        // surfaces it as a ReasoningItem so the loop can persist and replay it (never displayed)
+        final var sse = String.join(
+                "\n",
+                "event: response.output_item.done",
+                "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\","
+                        + "\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"let me think\"}],"
+                        + "\"encrypted_content\":\"gAAAAEncryptedBlob\"}}",
+                "",
+                "event: response.output_text.delta",
+                "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"i\",\"output_index\":0,\"delta\":\"done\"}",
+                "",
+                "event: response.completed",
+                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"model\":\"m\",\"output\":[]}}",
+                "",
+                "");
+        server.createContext("/v1/responses", exchange -> respond(exchange, 200, "text/event-stream", sse));
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var publisher =
+                dialect.stream(request(true), () -> false).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var events = collect(publisher);
+        final var reasoning = events.stream()
+                .filter(LlmStreamEvent.ReasoningItem.class::isInstance)
+                .map(LlmStreamEvent.ReasoningItem.class::cast)
+                .findFirst()
+                .orElseThrow();
+        assertEquals("rs_1", reasoning.id());
+        assertEquals("gAAAAEncryptedBlob", reasoning.encryptedContent());
+        assertEquals(1, reasoning.summary().size());
+    }
+
+    @Test
+    void responsesDialectReplaysPersistedReasoningItems(final JsonMapper mapper) throws Exception {
+        server.createContext("/v1/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "application/json", "{\"id\":\"r1\",\"model\":\"m\",\"output\":[],\"usage\":{}}");
+        });
+        server.start();
+        final var dialect = new OpenAIResponsesDialect(
+                mapper,
+                client,
+                ProviderSpec.of("http://localhost:" + server.getAddress().getPort() + "/v1/responses", "sk-test"));
+        final var request = new LlmRequest(
+                "m",
+                List.of(
+                        LlmMessage.user("hi"),
+                        new LlmMessage(
+                                "assistant",
+                                "answer",
+                                null,
+                                null,
+                                null,
+                                Map.of(
+                                        "reasoningItems",
+                                        List.of(Map.of(
+                                                "id", "rs_1",
+                                                "encrypted_content", "gAAAAReplay",
+                                                "summary", List.of(Map.of("type", "summary_text", "text", "s"))))))),
+                null,
+                null,
+                64,
+                null,
+                null,
+                null,
+                null,
+                null,
+                false,
+                false,
+                Map.of());
+        dialect.chat(request).toCompletableFuture().get(5, TimeUnit.SECONDS);
+        final var body = reqBody.get();
+        // the reasoning item is replayed as a type:reasoning input item, in sequence before the assistant message
+        assertTrue(body.contains("\"type\":\"reasoning\""), body);
+        assertTrue(body.contains("\"encrypted_content\":\"gAAAAReplay\""), body);
+        assertTrue(body.contains("\"type\":\"message\""), body);
     }
 
     @Test

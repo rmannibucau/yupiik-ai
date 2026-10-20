@@ -34,6 +34,7 @@ import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.llm.client.DialectLlmClient;
 import io.yupiik.llm.client.DialectNotSupportedException;
 import io.yupiik.llm.client.LlmClientResilienceWrapper;
+import io.yupiik.llm.client.LlmHttpFailureException;
 import io.yupiik.llm.client.LlmResilienceConfig;
 import io.yupiik.llm.client.LlmResponseParseException;
 import io.yupiik.llm.client.RoutingLlmClient;
@@ -1236,7 +1237,7 @@ public class ChatClient implements AutoCloseable {
      * already carries one, null keeps the dedicated field unset so the provider option flows to the wire
      * through the extras.
      */
-    private static String resolveReasoningEffort(
+    private String resolveReasoningEffort(
             final String requestEffort,
             final Map<String, Object> merged,
             final String model,
@@ -1254,6 +1255,13 @@ public class ChatClient implements AutoCloseable {
         }
         if (configEffort != null && !configEffort.isBlank()) {
             return configEffort;
+        }
+        // The Codex backend (chatgpt.com) streams no reasoning unless the request asks for it, and the
+        // upstream Codex CLI always sends one. Default an unconfigured codex session to "medium" so a
+        // thought block is actually produced; this matches the user-selected alignment with OpenAI's
+        // documented best starting point and is put-if-absent (an explicit variant/config still wins above).
+        if (effectiveFlavor() == ApiFlavor.CODEX) {
+            return "medium";
         }
         // opencode parity: do not force an implicit reasoning effort on the wire. The provider's
         // own default applies unless the user selected a variant or configured one explicitly
@@ -2185,6 +2193,17 @@ public class ChatClient implements AutoCloseable {
             final boolean stream,
             final Consumer<LlmStreamEvent> onDelta)
             throws IOException, InterruptedException {
+        return doWithFallback(request, pauseListener, cancelled, stream, onDelta, false);
+    }
+
+    private <A> A doWithFallback(
+            final ChatCompletionRequest request,
+            final Consumer<PauseEvent> pauseListener,
+            final BooleanSupplier cancelled,
+            final boolean stream,
+            final Consumer<LlmStreamEvent> onDelta,
+            final boolean reasoningAlreadyDropped)
+            throws IOException, InterruptedException {
         final Consumer<LlmStreamEvent> onDeltaSafe = onDelta == null ? event -> {} : onDelta;
         final var settings = request.settings();
         final var provider = provider(settings);
@@ -2211,8 +2230,77 @@ public class ChatClient implements AutoCloseable {
             }
             // AUTO probed the responses route first: pin the fallback for this provider
             resolvedFlavors.put(providerId, ApiFlavor.COMPLETIONS);
-            return doWithFallback(request, pauseListener, cancelled, stream, onDelta);
+            return doWithFallback(request, pauseListener, cancelled, stream, onDelta, reasoningAlreadyDropped);
+        } catch (final IOException e) {
+            // The Codex backend rejects a request carrying a stale reasoning blob (its encryption keys
+            // rotated on the server, or the model changed) with 400 invalid_encrypted_content. Drop the
+            // opaque reasoning items from the history and retry once without them rather than failing the
+            // whole turn; the model simply re-derives its reasoning.
+            if (!reasoningAlreadyDropped && isInvalidEncryptedContent(flavor, e)) {
+                return doWithFallback(stripReasoningItems(request), pauseListener, cancelled, stream, onDelta, true);
+            }
+            throw e;
         }
+    }
+
+    /**
+     * True when the failure is a stale encrypted-reasoning rejection on a Responses-family wire (the blob
+     * was minted under server keys that rotated, or the model changed): the backend refuses to decrypt it.
+     * Applies to any Responses dialect now that {@code include:["reasoning.encrypted_content"]} is requested
+     * uniformly (ChatGPT Codex, Azure AI, gateways).
+     */
+    private static boolean isInvalidEncryptedContent(final ApiFlavor flavor, final IOException error) {
+        if ((flavor != ApiFlavor.CODEX && flavor != ApiFlavor.RESPONSES)
+                || !(error instanceof LlmHttpFailureException failure)) {
+            return false;
+        }
+        return failure.status() == 400
+                && failure.body() != null
+                && failure.body().contains("invalid_encrypted_content");
+    }
+
+    /** Returns {@code request} with the opaque reasoning items stripped from every assistant message. */
+    private static ChatCompletionRequest stripReasoningItems(final ChatCompletionRequest request) {
+        if (request.messages() == null || request.messages().isEmpty()) {
+            return request;
+        }
+        var changed = false;
+        final var cleaned = new ArrayList<Message>(request.messages().size());
+        for (final var message : request.messages()) {
+            final var others = message.others();
+            if (others != null && !others.isEmpty() && others.containsKey(LlmWire.REASONING_ITEMS_KEY)) {
+                final var reduced = new LinkedHashMap<String, Object>();
+                for (final var e : others.entrySet()) {
+                    if (!LlmWire.REASONING_ITEMS_KEY.equals(e.getKey())) {
+                        reduced.put(e.getKey(), e.getValue());
+                    }
+                }
+                cleaned.add(new Message(
+                        message.role(),
+                        message.content(),
+                        message.name(),
+                        message.toolCalls(),
+                        message.toolCallId(),
+                        reduced.isEmpty() ? null : reduced));
+                changed = true;
+            } else {
+                cleaned.add(message);
+            }
+        }
+        return changed
+                ? new ChatCompletionRequest(
+                        request.model(),
+                        cleaned,
+                        request.temperature(),
+                        request.topP(),
+                        request.stream(),
+                        request.tools(),
+                        request.toolChoice(),
+                        request.maxTokens(),
+                        request.reasoningEffort(),
+                        request.others(),
+                        request.settings())
+                : request;
     }
 
     /** The provider id used to key the per-provider caches; {@code "default"} when the provider is unresolved. */

@@ -871,6 +871,96 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void codexDefaultsToMediumReasoningEffortOnTheWire() throws Exception {
+        stop();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            final byte[] sse = ("event: response.created\n"
+                            + "data: {\"type\":\"response.created\"}\n\n"
+                            + "event: response.output_text.delta\n"
+                            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"output_index\":0}\n\n"
+                            + "event: response.completed\n"
+                            + "data: {\"type\":\"response.completed\"}\n\n")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("content-type", "text/event-stream");
+            exchange.sendResponseHeaders(200, sse.length);
+            try (final var out = exchange.getResponseBody()) {
+                out.write(sse);
+            }
+        });
+        server.start();
+        // a codex-flavored provider (api=codex routes to the Codex dialect on the /responses route)
+        final var cfg = configuration(Map.of("yca.provider.providers.0.api", "codex"));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        assertEquals("hello", client.chat(request()).message().content());
+        final var body = bodies.getLast();
+        // codex must actually ask for reasoning so the backend streams a thought block
+        assertTrue(
+                body.contains("\"effort\":\"medium\""), "codex must default the reasoning effort to medium: " + body);
+        assertTrue(body.contains("\"summary\":\"auto\""), "codex must request the reasoning summary: " + body);
+    }
+
+    @Test
+    void codexDropsStaleEncryptedReasoningAndRetries() throws Exception {
+        stop();
+        final AtomicInteger codexCalls = new AtomicInteger();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            final var body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            bodies.add(body);
+            if (codexCalls.incrementAndGet() == 1) {
+                // the backend rejects the replayed blob: its encryption keys rotated on the server
+                exchange.getResponseHeaders().set("content-type", "application/json");
+                final byte[] err =
+                        "{\"error\":{\"message\":\"invalid_encrypted_content\"}}".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(400, err.length);
+                try (final var out = exchange.getResponseBody()) {
+                    out.write(err);
+                }
+            } else {
+                final byte[] sse = ("event: response.created\n"
+                                + "data: {\"type\":\"response.created\"}\n\n"
+                                + "event: response.output_text.delta\n"
+                                + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\",\"output_index\":0}\n\n"
+                                + "event: response.completed\n"
+                                + "data: {\"type\":\"response.completed\"}\n\n")
+                        .getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("content-type", "text/event-stream");
+                exchange.sendResponseHeaders(200, sse.length);
+                try (final var out = exchange.getResponseBody()) {
+                    out.write(sse);
+                }
+            }
+        });
+        server.start();
+        final var cfg = configuration(Map.of("yca.provider.providers.0.api", "codex"));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        // a conversation carrying an assistant message with a persisted opaque reasoning blob
+        final var history = List.of(
+                Message.user("hi"),
+                new Message(
+                        "assistant",
+                        "earlier answer",
+                        null,
+                        null,
+                        null,
+                        Map.of(
+                                "reasoningItems",
+                                List.of(Map.of("id", "rs_1", "encrypted_content", "gAAAAStaleBlob")))));
+        final var request =
+                new ChatCompletionRequest("test-model", history, null, null, null, null, null, null, null, null);
+        assertEquals("ok", client.chat(request).message().content());
+
+        // first request carried the stale blob, the retry dropped it and succeeded
+        assertEquals(2, bodies.size(), "the invalid_encrypted_content rejection must retry once");
+        assertTrue(bodies.get(0).contains("gAAAAStaleBlob"), "first attempt must carry the blob: " + bodies.get(0));
+        assertTrue(!bodies.get(1).contains("gAAAAStaleBlob"), "retry must drop the stale blob: " + bodies.get(1));
+    }
+
+    @Test
     void explicitRequestModelWinsOverTheSessionSelection() throws Exception {
         final var cfg = configuration(Map.of(
                 "yca.provider.providers.0.model", "default-model",

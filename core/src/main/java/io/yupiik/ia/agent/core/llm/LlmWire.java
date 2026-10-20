@@ -23,6 +23,7 @@ import io.yupiik.llm.client.model.LlmResponse;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
+import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningItem;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import io.yupiik.llm.client.model.LlmStreamEvent.ToolCallDelta;
 import io.yupiik.llm.client.model.LlmTool;
@@ -114,6 +115,12 @@ final class LlmWire {
 
     /** Reserved {@code others} key on an assistant message holding persisted reasoning for web replay. */
     static final String THINKING_KEY = "thinking";
+
+    /**
+     * Reserved {@code others} key on an assistant message holding the opaque reasoning items to replay as
+     * {@code type:reasoning} input items for multi-turn reasoning continuity (see OpenAIResponsesDialect).
+     */
+    static final String REASONING_ITEMS_KEY = "reasoningItems";
 
     static LlmTool toLlmTool(final Tool tool) {
         final var fn = tool.function();
@@ -242,6 +249,11 @@ final class LlmWire {
                         onDelta.accept(event);
                     } else if (event instanceof ReasoningDelta(final String text) && text != null) {
                         delivered[0] = true;
+                        onDelta.accept(event);
+                    } else if (event instanceof ReasoningItem) {
+                        // a reasoning item carries the opaque encrypted_content blob for multi-turn replay;
+                        // it produces no visible text (the summary deltas do) so it does not mark the stream
+                        // as delivering content, but it must still reach the loop to be persisted
                         onDelta.accept(event);
                     } else if (event instanceof ToolCallDelta(int index, String id, String name, String args)) {
                         delivered[0] = true;

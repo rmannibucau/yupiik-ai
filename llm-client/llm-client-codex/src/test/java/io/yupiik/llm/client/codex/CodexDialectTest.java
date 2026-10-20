@@ -201,6 +201,46 @@ class CodexDialectTest {
     }
 
     @Test
+    void reasoningRequestsEncryptedContentBlobForReplay(final JsonMapper mapper) throws Exception {
+        // codex must ask for the opaque reasoning.encrypted_content blob (so the loop can replay it
+        // across turns for multi-turn reasoning continuity) alongside the displayable summary, and keep
+        // the effort the caller asked for.
+        final AtomicReference<String> reqBody = new AtomicReference<>();
+        server.createContext("/codex/responses", exchange -> {
+            reqBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, "{}");
+        });
+        final var request = new io.yupiik.llm.client.model.LlmRequest(
+                "gpt-6-luna",
+                List.of(new io.yupiik.llm.client.model.LlmMessage("user", "hi", null, null, null, null)),
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                null,
+                null,
+                "medium",
+                true,
+                java.util.Map.of());
+
+        final CodexDialect dialect = new CodexDialect(
+                mapper,
+                client,
+                new ProviderSpec(
+                        base + "/codex/responses", "key", null, null, b -> b.setHeader("authorization", "Bearer t")));
+        dialect.chat(request, () -> false).toCompletableFuture().get(5, java.util.concurrent.TimeUnit.SECONDS);
+
+        final var body = reqBody.get();
+        org.junit.jupiter.api.Assertions.assertNotNull(body, "no request body was sent to /codex/responses");
+        assertTrue(body.contains("\"effort\":\"medium\""), body);
+        assertTrue(body.contains("\"summary\":\"auto\""), body);
+        assertTrue(
+                body.contains("\"include\":[\"reasoning.encrypted_content\"]"),
+                "codex must request the replayable encrypted reasoning blob: " + body);
+    }
+
+    @Test
     void chatCoalescesStreamedSseIntoSingleResponse(final JsonMapper mapper) throws Exception {
         // the codex backend always streams SSE even for single-shot chat; the assembly helper must
         // coalesce text deltas and function_call events into one LlmResponse with tool calls.

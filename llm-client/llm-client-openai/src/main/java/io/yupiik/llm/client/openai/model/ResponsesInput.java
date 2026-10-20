@@ -116,4 +116,31 @@ public record ResponsesInput(
     public static ResponsesInput messageContent(final String role, final Object content) {
         return new ResponsesInput("message", role, content, null, null, null, null, null, null, null);
     }
+
+    /**
+     * Creates a reasoning input item replaying an opaque reasoning blob minted by a previous turn, so
+     * the same model recovers its multi-turn reasoning continuity (used by stateless clients that opt
+     * out of server-side storage). The {@code encryptedContent} is decrypted only server-side; the client
+     * replays it verbatim.
+     *
+     * @param id the reasoning item id to replay.
+     * @param summary the displayable summary parts ({@code {type:summary_text,text}} shapes), may be empty.
+     * @param encryptedContent the opaque encrypted blob to replay.
+     * @param extras any further wire fields to carry (none expected today).
+     * @return the reasoning input item.
+     */
+    public static ResponsesInput reasoning(
+            final String id, final Object summary, final String encryptedContent, final Map<String, Object> extras) {
+        final var others = new java.util.LinkedHashMap<String, Object>();
+        if (summary != null) {
+            others.put("summary", summary);
+        }
+        if (encryptedContent != null && !encryptedContent.isEmpty()) {
+            others.put("encrypted_content", encryptedContent);
+        }
+        if (extras != null) {
+            others.putAll(extras);
+        }
+        return new ResponsesInput("reasoning", null, null, null, null, null, null, id, null, others);
+    }
 }

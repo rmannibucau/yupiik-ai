@@ -61,6 +61,7 @@ import io.yupiik.llm.client.ContextWindowExceededException;
 import io.yupiik.llm.client.model.LlmStreamEvent;
 import io.yupiik.llm.client.model.LlmStreamEvent.End;
 import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningDelta;
+import io.yupiik.llm.client.model.LlmStreamEvent.ReasoningItem;
 import io.yupiik.llm.client.model.LlmStreamEvent.TextDelta;
 import io.yupiik.llm.client.model.Usage;
 import java.io.IOException;
@@ -328,13 +329,30 @@ public class AgentLoop {
      */
     static final String THINKING_KEY = "thinking";
 
+    /**
+     * Reserved {@code others} key on a persisted assistant {@link Message} carrying the opaque reasoning
+     * items ({@code id}, {@code encrypted_content}, {@code summary}) for multi-turn reasoning replay.
+     * The blob is decrypted only server-side; it lives here so it survives the session store round-trip
+     * and is re-emitted as a {@code type:reasoning} input item on the next request. Never sent to the
+     * LLM as visible content, and never displayed - {@code others} is stripped at every wire boundary.
+     */
+    static final String REASONING_ITEMS_KEY = "reasoningItems";
+
     /** Reasoning text accumulated for the current LLM request, attached to the persisted message. */
     private final StringBuilder accumulatedThinking = new StringBuilder();
+
+    /**
+     * Opaque reasoning items ({@code id} + {@code encryptedContent}) emitted for the current LLM request,
+     * captured for multi-turn replay (the blob is decrypted only server-side; it is never displayed).
+     * Reset per request (a fresh generation drops the previous request's blobs).
+     */
+    private final List<ReasoningItem> accumulatedReasoningItems = new ArrayList<>();
 
     /** Resets the inline-reasoning splitter for a fresh stream attempt (a retry is a new generation). */
     private void resetInlineSplitter() {
         inlineSplitter = new ThinkTagSplitter().create();
         accumulatedThinking.setLength(0);
+        accumulatedReasoningItems.clear();
     }
 
     /**
@@ -1513,6 +1531,11 @@ public class AgentLoop {
 
                                 @Override
                                 public void resetText() {
+                                    // a retry is a fresh generation: drop the stale partial reasoning text and
+                                    // opaque blobs streamed by the failed attempt so they never leak into the
+                                    // persisted message's thinking / reasoningItems
+                                    accumulatedThinking.setLength(0);
+                                    accumulatedReasoningItems.clear();
                                     emit(textReset());
                                 }
 
@@ -2199,7 +2222,8 @@ public class AgentLoop {
     private Map<String, Object> identityAndThinking(final String agentName) {
         final var identity = identityOthers(agentName);
         final var thinking = accumulatedThinking.toString().strip();
-        if (identity == null && (thinking.isEmpty() || thinking.isBlank())) {
+        final var reasoningItems = toReasoningItemsPayload(accumulatedReasoningItems);
+        if (identity == null && (thinking.isEmpty() || thinking.isBlank()) && reasoningItems.isEmpty()) {
             return null;
         }
         final var others = new LinkedHashMap<String, Object>();
@@ -2209,7 +2233,38 @@ public class AgentLoop {
         if (thinking != null && !thinking.isEmpty() && !thinking.isBlank()) {
             others.put(THINKING_KEY, thinking);
         }
+        if (!reasoningItems.isEmpty()) {
+            others.put(REASONING_ITEMS_KEY, reasoningItems);
+        }
         return others;
+    }
+
+    /**
+     * Converts the captured reasoning items into a JSON-serializable payload for the session store
+     * (each entry carries {@code id}, {@code summary} and {@code encrypted_content}). Returns an empty
+     * list when none were captured.
+     */
+    private static List<Map<String, Object>> toReasoningItemsPayload(final List<ReasoningItem> items) {
+        if (items == null || items.isEmpty()) {
+            return List.of();
+        }
+        final var out = new ArrayList<Map<String, Object>>(items.size());
+        for (final var item : items) {
+            final var map = new LinkedHashMap<String, Object>();
+            if (item.id() != null && !item.id().isEmpty()) {
+                map.put("id", item.id());
+            }
+            if (item.summary() != null && !item.summary().isEmpty()) {
+                map.put("summary", item.summary());
+            }
+            if (item.encryptedContent() != null && !item.encryptedContent().isEmpty()) {
+                map.put("encrypted_content", item.encryptedContent());
+            }
+            if (!map.isEmpty()) {
+                out.add(map);
+            }
+        }
+        return out;
     }
 
     private void persistContext(final String sessionId, final List<Message> messages) {
@@ -3706,6 +3761,10 @@ public class AgentLoop {
             turnState.lastRequestProducedReasoning = true;
             accumulatedThinking.append(text);
             emit(thinkingDelta(text));
+        } else if (delta instanceof ReasoningItem item) {
+            // capture the opaque encrypted_content blob for multi-turn reasoning replay; it never
+            // produces visible output (the summary deltas did) and is not re-emitted as a delta
+            accumulatedReasoningItems.add(item);
         } else if (delta instanceof End(final String reason, final Usage upper)) {
             // drain whatever the inline splitter still held for this generation (a trailing
             // inline-code backtick, a fence tail or an unclosed think delimiter split across the

@@ -15,6 +15,9 @@
  */
 package io.yupiik.llm.client.model;
 
+import java.util.List;
+import java.util.Map;
+
 /**
  * Typed streaming event. Unlike a flat "delta" blob this sealed hierarchy lets callers switch
  * exhaustively over the distinct event kinds emitted by the various wire dialects.
@@ -23,6 +26,7 @@ public sealed interface LlmStreamEvent
         permits LlmStreamEvent.Start,
                 LlmStreamEvent.TextDelta,
                 LlmStreamEvent.ReasoningDelta,
+                LlmStreamEvent.ReasoningItem,
                 LlmStreamEvent.ToolCallDelta,
                 LlmStreamEvent.End {
 
@@ -48,6 +52,21 @@ public sealed interface LlmStreamEvent
      * @param text the reasoning text fragment.
      */
     record ReasoningDelta(String text) implements LlmStreamEvent {}
+
+    /**
+     * A full completed reasoning item as emitted by the Responses wire. The {@link #encryptedContent}
+     * blob is an opaque, server-side-encrypted chain-of-thought fragment (the backend holds the only key):
+     * it is <em>not</em> for display, but must be <em>replayed verbatim</em> as a {@code type:reasoning}
+     * input item on later turns so the same model recovers its multi-turn reasoning continuity (stateless
+     * clients). The {@link #summary} carries the displayable reasoning summaries that also streamed as
+     * separate {@link #ReasoningDelta} events.
+     *
+     * @param id the provider reasoning item id, replayed unchanged.
+     * @param summary the displayable summary parts ({@code {type:summary_text,text}} shapes), or empty.
+     * @param encryptedContent the opaque replay blob, or empty when the backend streamed plaintext only.
+     */
+    record ReasoningItem(String id, List<Map<String, Object>> summary, String encryptedContent)
+            implements LlmStreamEvent {}
 
     /**
      * A chunk of tool call arguments, indexed so a multi-tool stream can be reassembled.
