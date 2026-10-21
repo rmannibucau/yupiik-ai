@@ -148,6 +148,9 @@ public final class CodingAgentConfigurations {
                 map.put("yca.structuralCodeGraph.docs", String.valueOf(codeGraph.docs()));
                 map.put("yca.structuralCodeGraph.deep", String.valueOf(codeGraph.deep()));
                 map.put("yca.structuralCodeGraph.noRefresh", String.valueOf(codeGraph.noRefresh()));
+                map.put(
+                        "yca.structuralCodeGraph.batchRefreshDebounceMillis",
+                        String.valueOf(codeGraph.batchRefreshDebounceMillis()));
             }
             return new CodingAgentConfiguration$FusionConfigurationFactory(key -> Optional.ofNullable(map.get(key)))
                     .get();

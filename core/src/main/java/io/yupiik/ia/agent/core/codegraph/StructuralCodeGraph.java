@@ -106,6 +106,10 @@ public class StructuralCodeGraph implements AutoCloseable {
 
     private final CodingAgentConfiguration configuration;
     private final List<GraphParser> parsers;
+    /** Extension (lowercased, no dot, e.g. {@code java}) to the parser that owns it; built once from the available
+     * parsers so {@link #parserFor} is an O(1) lookup instead of scanning the parser list on every refresh. */
+    private final Map<String, GraphParser> byExtension;
+
     private final JsonMapper mapper;
     /** Background re-index notices have no session sink and are dropped when no turn is running. */
     private final StatusReporter statusReporter = new StatusReporter();
@@ -122,13 +126,11 @@ public class StructuralCodeGraph implements AutoCloseable {
     private final List<FileIgnore.Rule> ignoreRules;
     private final boolean configNoRefresh;
     private final long refreshAwaitMs;
+    private final long batchRefreshDebounceMs;
     private final ScheduledExecutorService scheduler;
     private final boolean ownsScheduler;
     private final AtomicLong refreshPending = new AtomicLong();
     private volatile long latestRefreshJob;
-    /** Debounced batch refresh (native spawned-JVM parser only): files awaiting a single batched re-index. */
-    private static final long BATCH_REFRESH_DEBOUNCE_MS = 10_000L;
-
     private final Object batchRefreshMonitor = new Object();
     private final Set<Path> pendingBatchRefresh = new LinkedHashSet<>();
     private volatile boolean batchFlushScheduled;
@@ -166,6 +168,13 @@ public class StructuralCodeGraph implements AutoCloseable {
             final ScheduledExecutorService scheduler) {
         this.configuration = configuration;
         this.parsers = parsers.stream().filter(GraphParser::available).toList();
+        final var byExt = new HashMap<String, GraphParser>();
+        for (final var parser : this.parsers) {
+            for (final var ext : parser.extensions()) {
+                byExt.put(ext.toLowerCase(Locale.ROOT), parser);
+            }
+        }
+        this.byExtension = Map.copyOf(byExt);
         this.mapper = mapper;
         this.chatClient = chatClient;
         this.providerManager = providerManager;
@@ -181,6 +190,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         this.ignoreRules = FileIgnore.of(projectDir, scg.effectiveIgnoreGlobs()).rules();
         this.configNoRefresh = scg.noRefresh();
         this.refreshAwaitMs = 3000L; // bound for ensureRefreshedReady() when a background refresh is pending
+        this.batchRefreshDebounceMs = scg.batchRefreshDebounceMillis();
         this.scheduler = scheduler;
         this.ownsScheduler = false;
         this.docWriter = new DocTreeWriter(configuration, storeRoot);
@@ -192,6 +202,7 @@ public class StructuralCodeGraph implements AutoCloseable {
     protected StructuralCodeGraph() {
         this.configuration = null;
         this.parsers = null;
+        this.byExtension = null;
         this.mapper = null;
         this.chatClient = null;
         this.providerManager = null;
@@ -203,6 +214,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         this.ignoreRules = null;
         this.configNoRefresh = true;
         this.refreshAwaitMs = 0;
+        this.batchRefreshDebounceMs = 0L;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             final var t = new Thread(r, "yca-graph-test");
             t.setDaemon(true);
@@ -885,6 +897,12 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (isIgnored(rel, absolute)) {
             return;
         }
+        // Only files owned by a registered parser enter the queue: an unrelated file written by a file tool
+        // (e.g. pom.xml, README, an asset) must not reach the Java batch parsers. Mirrors refreshFileNow's guard so
+        // the immediate and batched paths stay invariant-identical.
+        if (parserFor(absolute) == null) {
+            return;
+        }
         // For a batch-capable parser (the spawned-JVM parser in native) coalesce rapid single-file edits into one
         // re-parse after a short quiet window, so we never pay a JVM spawn per file. The JVM in-process javac parser
         // keeps the existing immediate per-file refresh.
@@ -920,7 +938,7 @@ public class StructuralCodeGraph implements AutoCloseable {
             pendingBatchRefresh.add(absolute);
             if (!batchFlushScheduled) {
                 batchFlushScheduled = true;
-                scheduler.schedule(this::flushBatchRefresh, BATCH_REFRESH_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+                scheduler.schedule(this::flushBatchRefresh, batchRefreshDebounceMs, TimeUnit.MILLISECONDS);
             }
         }
     }
@@ -948,15 +966,23 @@ public class StructuralCodeGraph implements AutoCloseable {
                 refreshPending.addAndGet(-files.size());
                 return;
             }
+            // Defensive: only hand the java parser files it owns. Files belonging to no parser (or a different one)
+            // would otherwise abort the whole batch on the first non-SOURCE unit (e.g. a pom.xml), discarding every
+            // legitimately indexed file. enqueueRefresh already filters these out; this guard self-heals anyway.
+            final List<Path> owned =
+                    files.stream().filter(f -> parserFor(f) == parser).toList();
+            if (owned.size() < files.size()) {
+                refreshPending.addAndGet(owned.size() - files.size());
+            }
             final Map<Path, GraphModel> models;
             try {
-                models = parser.parseBatch(files);
+                models = parser.parseBatch(owned);
             } catch (final RuntimeException e) {
-                LOGGER.warning("Batch re-index failed for " + files.size() + " file(s): " + e.getMessage());
-                refreshPending.addAndGet(-files.size());
+                LOGGER.warning("Batch re-index failed for " + owned.size() + " file(s): " + e.getMessage());
+                refreshPending.addAndGet(-owned.size());
                 return;
             }
-            for (final var file : files) {
+            for (final var file : owned) {
                 final var rel = rel(file);
                 final var model = models.getOrDefault(
                         file, GraphModel.empty(parser.extensions().iterator().next()));
@@ -1331,12 +1357,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 || !configuration.structuralCodeGraph().languageExtensions().contains(ext)) {
             return null;
         }
-        for (final var parser : parsers) {
-            if (parser.extensions().contains(ext)) {
-                return parser;
-            }
-        }
-        return null;
+        return byExtension.get(ext);
     }
 
     /**

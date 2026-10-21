@@ -25,6 +25,8 @@ import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.llm.ChatCompletionRequest;
 import io.yupiik.ia.agent.core.llm.ChatResult;
 import io.yupiik.ia.agent.core.llm.Message;
+import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
+import io.yupiik.ia.agent.core.optimize.BeforeToolExecutionEvent;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.nio.file.Files;
@@ -36,6 +38,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -81,6 +85,11 @@ class StructuralCodeGraphTest {
     }
 
     private StructuralCodeGraph newGraph(final CodingAgentConfiguration config, final JsonMapper mapper) {
+        return newGraph(config, mapper, List.of(new JavaGraphParser()));
+    }
+
+    private StructuralCodeGraph newGraph(
+            final CodingAgentConfiguration config, final JsonMapper mapper, final List<GraphParser> parsers) {
         schedulers.add(Executors.newSingleThreadScheduledExecutor(r -> {
             final var t = new Thread(r, "yca-graph-test");
             t.setDaemon(true);
@@ -88,7 +97,7 @@ class StructuralCodeGraphTest {
         }));
         final var graph = new StructuralCodeGraph(
                 config,
-                List.of(new JavaGraphParser()),
+                parsers,
                 mapper,
                 chatClient(config, mapper),
                 providerManager(config, mapper),
@@ -406,6 +415,80 @@ class StructuralCodeGraphTest {
         assertTrue(
                 graph.graph().symbols().stream().anyMatch(s -> s.fqn().equals("nested.Baz")),
                 "a nested file inside the project dir must be indexed");
+    }
+
+    /**
+     * A non-javac, batch-capable parser stand-in (not {@code instanceof JavaGraphParser}) so {@code useBatchRefresh()}
+     * is true and edits are routed through the debounced batch path. It records every {@code parseBatch} input so a test
+     * can assert non-Java files never reach the java batch.
+     */
+    private static final class CapturingBatchParser implements GraphParser {
+        private final List<Path> batchInputs = new CopyOnWriteArrayList<>();
+
+        @Override
+        public Set<String> extensions() {
+            return Set.of("java");
+        }
+
+        @Override
+        public GraphModel parse(final Path file) {
+            return modelFor(file);
+        }
+
+        @Override
+        public Map<Path, GraphModel> parseBatch(final List<Path> files) {
+            batchInputs.addAll(files);
+            final var out = new HashMap<Path, GraphModel>(files.size());
+            for (final var file : files) {
+                out.put(file, modelFor(file));
+            }
+            return out;
+        }
+
+        /** Deterministic stand-in model: one TYPE symbol per file so the graph build is non-empty. */
+        private static GraphModel modelFor(final Path file) {
+            final var name = file.getFileName().toString();
+            final var className = name.endsWith(".java") ? name.substring(0, name.length() - ".java".length()) : name;
+            return new GraphModel(
+                    "java",
+                    List.of(new GraphModel.Symbol(className, GraphModel.Kind.TYPE, name, 1, 1, className)),
+                    List.of());
+        }
+    }
+
+    @Test
+    void batchRefreshNeverReceivesNonJavaFilesFromFileTools() throws Exception {
+        final var project = Files.createDirectory(temp.resolve("project"));
+        Files.writeString(project.resolve("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
+        final var foo = project.resolve("Foo.java");
+        Files.writeString(foo, "package demo;\npublic class Foo { public void run() {} }\n");
+
+        final var config = config(project, Map.of("yca.structuralCodeGraph.batchRefreshDebounceMillis", "50"));
+        final var batchParser = new CapturingBatchParser();
+        final var graph = newGraph(config, mapper, List.of(batchParser));
+        graph.ensureReady();
+        // sanity: the batch-capable parser owns .java and produced the initial graph through its parseBatch
+        assertEquals(1, graph.graph().symbols().size(), "expected the initial graph to index Foo.java");
+        assertTrue(
+                batchParser.batchInputs.contains(foo),
+                "the initial build should route Foo.java through the batch parser's parseBatch");
+
+        // write_file/edit_file/apply_patch on a non-Java file (pom.xml) must not reach the java batch parse
+        graph.onBeforeTool(new BeforeToolExecutionEvent(
+                "write_file", Map.of("path", project.resolve("pom.xml").toString())));
+        graph.onToolExecuted(new AfterToolExecutionEvent("write_file", true, "ok"));
+        graph.ensureRefreshedReady();
+        assertTrue(
+                batchParser.batchInputs.stream().noneMatch(p -> p.endsWith("pom.xml")),
+                "a pom.xml written by a file tool must never reach the java batch parse");
+
+        // a Java file edit still flows through the batch path
+        graph.onBeforeTool(new BeforeToolExecutionEvent("write_file", Map.of("path", foo.toString())));
+        graph.onToolExecuted(new AfterToolExecutionEvent("write_file", true, "ok"));
+        graph.ensureRefreshedReady();
+        assertTrue(
+                batchParser.batchInputs.stream().anyMatch(foo::equals),
+                "a Java file edit should still be batched for re-indexing");
     }
 
     @Test

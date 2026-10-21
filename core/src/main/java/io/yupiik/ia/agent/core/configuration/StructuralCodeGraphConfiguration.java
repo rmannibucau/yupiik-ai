@@ -106,6 +106,15 @@ public record StructuralCodeGraphConfiguration(
         boolean watch,
 
         @Property(
+                defaultValue = "10000L",
+                documentation =
+                        "Milliseconds to coalesce rapid single-file edits into one batched re-index before parsing, for parsers "
+                                + "that pay a high per-parse startup cost (the spawned-JVM parser in native image). A lower value "
+                                + "makes edits visible sooner at the cost of more parses; the JVM in-process javac parser ignores it "
+                                + "and re-indexes each edit immediately.")
+        long batchRefreshDebounceMillis,
+
+        @Property(
                 defaultValue =
                         "java.util.List.of(\".yca/**\", \"target/**\", \"build/**\", \".git/**\", \".idea/**\", \"node_modules/**\", \"dist/**\", \"generated-sources/**\", \"**/*.class\", \"**/*.jar\")",
                 documentation =
