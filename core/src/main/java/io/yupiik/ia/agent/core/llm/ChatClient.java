@@ -2030,6 +2030,10 @@ public class ChatClient implements AutoCloseable {
                                         strictSchema(schema),
                                         "strict",
                                         true)));
+            // COMPLETIONS and the AUTO fallback use the chat-completions response_format wire, which enforces
+            // OpenAI strict-mode JSON Schemas (every object additionalProperties:false and every property in
+            // required), so the schema is normalized with strictSchema() like RESPONSES/CODEX - otherwise a
+            // strict validator (eg. Azure / litellm) rejects it with a 400 'required is required ... Missing p'.
             case COMPLETIONS ->
                 out.put(
                         "response_format",
@@ -2037,7 +2041,7 @@ public class ChatClient implements AutoCloseable {
                                 "type",
                                 "json_schema",
                                 "json_schema",
-                                Map.of("name", schemaName, "schema", schema, "strict", true)));
+                                Map.of("name", schemaName, "schema", strictSchema(schema), "strict", true)));
             default -> {
                 // AUTO already resolved to a concrete flavor by the caller; treat as completions fallback
                 out.put(
@@ -2046,7 +2050,7 @@ public class ChatClient implements AutoCloseable {
                                 "type",
                                 "json_schema",
                                 "json_schema",
-                                Map.of("name", schemaName, "schema", schema, "strict", true)));
+                                Map.of("name", schemaName, "schema", strictSchema(schema), "strict", true)));
             }
         }
         return out;

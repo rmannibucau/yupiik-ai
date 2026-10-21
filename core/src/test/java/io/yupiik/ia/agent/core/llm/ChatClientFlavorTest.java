@@ -293,6 +293,64 @@ class ChatClientFlavorTest {
     }
 
     @Test
+    void chatStructuredStrictifiesSchemaOnCompletionsWire() throws Exception {
+        // the chat-completions response_format wire enforces OpenAI strict-mode schemas (every property in
+        // required, optional ones widened to a nullable type) - a strict validator (eg. Azure / litellm)
+        // rejects the raw caller schema with a 400 e.g. 'required ... Missing p'. The COMPLETIONS branch
+        // must therefore normalize with strictSchema() like RESPONSES/CODEX.
+        final var schema = Map.<String, Object>of(
+                "type",
+                "object",
+                "properties",
+                Map.of(
+                        "facts",
+                        Map.of(
+                                "type",
+                                "array",
+                                "items",
+                                Map.of(
+                                        "type",
+                                        "object",
+                                        "properties",
+                                        Map.of(
+                                                "text", Map.of("type", "string"),
+                                                "path", Map.of("type", "string")),
+                                        "required",
+                                        List.of("text")))),
+                "required",
+                List.of("facts"));
+        stop();
+        server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            bodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(exchange, 200, """
+                    {"id":"c1","model":"test-model","choices":[{"index":0,"message":{"role":"assistant","content":"{\\"facts\\":[]}"},"finish_reason":"stop"}],"usage":{}}""", "application/json");
+        });
+        server.start();
+        final var cfg = configuration(Map.of("yca.provider.providers.0.api", "completions"));
+        client = new ChatClient(cfg, mapper, new ProviderManager(cfg, mapper), Clock.systemUTC());
+
+        final var result = client.chatStructured(request(), "memory_facts", schema);
+        assertTrue(result.structured(), "completions must produce a structured result");
+        assertEquals(ApiFlavor.COMPLETIONS, client.flavor());
+        final var body = bodies.getLast();
+        // the completions wire carries response_format with an OpenAI-strict schema
+        assertTrue(body.contains("\"response_format\""), "completions must use response_format: " + body);
+        assertTrue(body.contains("\"type\":\"json_schema\""), "completions body: " + body);
+        assertTrue(body.contains("\"strict\":true"), "completions body: " + body);
+        // top object and items normalized: additionalProperties:false + every property required
+        assertTrue(body.contains("\"additionalProperties\":false"), "completions body: " + body);
+        assertTrue(body.contains("\"required\":[\"facts\"]"), "completions top object required: " + body);
+        // the optional 'path' property is widened to a nullable type and listed in the item's required
+        assertTrue(
+                body.contains("\"path\":{\"type\":[\"string\",\"null\"]}"),
+                "completions optional property must widen to a nullable type: " + body);
+        assertTrue(
+                body.contains("\"required\":[\"path\",\"text\"]") || body.contains("\"required\":[\"text\",\"path\"]"),
+                "completions all item properties must be required: " + body);
+    }
+
+    @Test
     void chatStructuredKeepsStrictFieldForAlreadyStrictSchemas() throws Exception {
         // an already-conformant strict schema must be returned unchanged (the normalizer is idempotent)
         final var schema = Map.<String, Object>of(

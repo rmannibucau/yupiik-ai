@@ -36,6 +36,7 @@ import io.yupiik.ia.agent.test.TestJsonMapper;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -269,6 +270,56 @@ class MemoryExtractorTest {
         assertTrue(
                 !secondExcerpt.contains("first message"),
                 "the delta must not re-feed extracted messages: " + secondExcerpt);
+    }
+
+    @Test
+    void structuredFactsParseIntoMetadataEnvelope() throws Exception {
+        // The COMPLETIONS-flavor fix (strictSchema normalization) restores structured extraction on
+        // backends that reject the raw schema (eg. Azure / litellm 'Missing p'). A structured response
+        // with the full field set must parse into a properly-enveloped fact (p|date|path|topic|text)
+        // rather than a single plain snippet.
+        final var config = config(home);
+        final var store = new MemoryStore(config);
+        final var chat = new ChatClient() {
+            @Override
+            public StructuredResult chatStructured(
+                    final ChatCompletionRequest request, final String schemaName, final Map<String, Object> schema)
+                    throws IOException {
+                return new StructuredResult(
+                        new ChatResult(
+                                Message.assistant(
+                                        "{\"facts\":[{\"text\":\"always use tabs\",\"scope\":\"project\",\"p\":3,"
+                                                + "\"path\":\"src/App.java\",\"topic\":\"code style\"}]}",
+                                        null),
+                                new Usage(1, 1, 2)),
+                        true);
+            }
+        };
+        final var extractor = new MemoryExtractor(
+                chat,
+                config,
+                null,
+                store,
+                mapper,
+                EXECUTOR,
+                new Emitter() {
+                    @Override
+                    public <T> void emit(final T event) {
+                        // no-op
+                    }
+                },
+                Clock.systemUTC(),
+                null,
+                "s-meta",
+                null,
+                null, // memory production policy (default: enabled)
+                null);
+        extractor.forceExtractNow(List.of(Message.user("the team decided: always use tabs")), ChatSettings.EMPTY);
+        final var project = store.readProject();
+        // stored as a metadata envelope: <p>|<date>|@<path>|<topic>|<text>
+        assertTrue(
+                project.contains("3|" + LocalDate.now() + "|@src/App.java|code style|always use tabs"),
+                "the structured fact must keep its envelope: " + project);
     }
 
     @Test
