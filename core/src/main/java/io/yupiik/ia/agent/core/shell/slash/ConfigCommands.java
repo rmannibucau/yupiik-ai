@@ -537,9 +537,12 @@ public class ConfigCommands implements SlashCommandSet {
             codexLoginService.signIn(
                     effectiveProvider,
                     false,
-                    url -> env.frontend()
-                            .transcript("Sign in to use the Codex provider '" + effectiveProvider
-                                    + "': authorize at\n\n<" + url + ">\n\nWaiting for authorization..."),
+                    url -> {
+                        env.frontend().openExternalUrl(url);
+                        env.frontend()
+                                .transcript("Sign in to use the Codex provider '" + effectiveProvider
+                                        + "': authorize at\n\n<" + url + ">\n\nWaiting for authorization...");
+                    },
                     _ -> false);
             return ShellOutcome.status("provider: " + effectiveProvider + " (Codex signed in)");
         } catch (final RuntimeException e) {

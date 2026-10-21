@@ -77,6 +77,17 @@ public interface ShellFrontend {
     default void onReplay(final String markdown) {}
 
     /**
+     * Asks the frontend to open {@code url} in an external browser. Console frontends (TUI, CLI)
+     * open the system browser when their {@code autoOpenBrowser} option is enabled; in-browser
+     * frontends (web) keep the default no-op because the URL is already clickable in a tab. This is
+     * the channel used for generated login/authorization URLs, called in addition to
+     * {@link #transcript(String)} which still surfaces the clickable link for reference.
+     *
+     * @param url the URL to open.
+     */
+    default void openExternalUrl(final String url) {}
+
+    /**
      * Renders a streamed agent event. The default routes the generic channels
      * (status, notice, error); richer frontends override to also render
      * streaming text, tool cards, usage, ... Note that shared conversation

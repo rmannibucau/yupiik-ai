@@ -100,7 +100,8 @@ public class CodexLoginCommands implements SlashCommandSet {
                         device,
                         url -> {
                             if (env != null) {
-                                env.frontend().transcript(url + "\n\nWaiting for authorization...");
+                                env.frontend().openExternalUrl(url);
+                                env.frontend().transcript("<" + url + ">\n\nWaiting for authorization...");
                             }
                         },
                         b -> false,
@@ -118,7 +119,8 @@ public class CodexLoginCommands implements SlashCommandSet {
                     device,
                     url -> {
                         if (env != null) {
-                            env.frontend().transcript(url + "\n\nWaiting for authorization...");
+                            env.frontend().openExternalUrl(url);
+                            env.frontend().transcript("<" + url + ">\n\nWaiting for authorization...");
                         }
                     },
                     b -> false);

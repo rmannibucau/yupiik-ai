@@ -583,7 +583,8 @@ class TuiCommandHeadlessTest {
         final var command = newUiCommand(
                 container,
                 deps,
-                new TuiCommand.TuiConf(sessionId, "", KeyBindingPreset.STANDARD, true, "dark", List.of("continue")));
+                new TuiCommand.TuiConf(
+                        sessionId, "", KeyBindingPreset.STANDARD, true, true, "dark", List.of("continue")));
 
         uiThread = new Thread(command::run, "tui-headless-initial-resume");
         uiThread.setDaemon(true);
@@ -617,7 +618,13 @@ class TuiCommandHeadlessTest {
                 container,
                 deps,
                 new TuiCommand.TuiConf(
-                        "", "", KeyBindingPreset.STANDARD, true, "dark", List.of("injected first", "injected second")));
+                        "",
+                        "",
+                        KeyBindingPreset.STANDARD,
+                        true,
+                        true,
+                        "dark",
+                        List.of("injected first", "injected second")));
 
         uiThread = new Thread(command::run, "tui-headless-initial-list");
         uiThread.setDaemon(true);
@@ -657,6 +664,7 @@ class TuiCommandHeadlessTest {
                         "",
                         "",
                         KeyBindingPreset.STANDARD,
+                        true,
                         true,
                         "dark",
                         List.of("/mode build", "hello from the script")));

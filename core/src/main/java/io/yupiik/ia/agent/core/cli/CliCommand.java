@@ -213,6 +213,7 @@ public class CliCommand implements Runnable {
                 conf.showThinking(),
                 showToolOutput,
                 externalOutput);
+        this.frontend.autoOpenBrowser(conf.autoOpenBrowser());
         this.interactionStart = () -> {
             interactionActive.set(true);
             frontend.suspendOutput();
@@ -281,6 +282,13 @@ public class CliCommand implements Runnable {
             boolean showUsage,
 
             @Property(
+                    defaultValue = "true",
+                    documentation = "Automatically open the system browser when a login/authorization URL is generated "
+                            + "(e.g. /codex login). Disable to only surface the link in the transcript, where "
+                            + "it stays clickable (OSC-8 autolink) and fully copyable even when it wraps.")
+            boolean autoOpenBrowser,
+
+            @Property(
                     defaultValue = "java.util.List.of()",
                     documentation =
                             "Prompts submitted at startup, in order, through the same path as a typed line: use it to "
@@ -324,6 +332,7 @@ public class CliCommand implements Runnable {
                     showThinking,
                     showToolOutput,
                     showUsage,
+                    true,
                     List.of());
         }
     }

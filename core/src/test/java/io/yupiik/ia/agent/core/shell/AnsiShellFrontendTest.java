@@ -666,4 +666,14 @@ class AnsiShellFrontendTest {
         assertTrue(stdout.contains("plain answer"), stdout);
         assertTrue(stdout.contains("\u001b[2m"), "tool region must be dimmed: " + stdout);
     }
+
+    @Test
+    void autoOpenBrowserDefaultsToEnabledAndCanBeDisabled() {
+        final var frontend = frontend(false, true);
+        assertTrue(frontend.autoOpenBrowser(), "autoOpenBrowser must default to true");
+        frontend.autoOpenBrowser(false);
+        // disabling must make openExternalUrl a pure no-op (no browser spawn, no output)
+        frontend.openExternalUrl("https://example.com/login");
+        assertEquals("", out.toString());
+    }
 }

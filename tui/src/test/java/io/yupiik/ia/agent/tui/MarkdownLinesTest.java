@@ -458,6 +458,46 @@ class MarkdownLinesTest {
         assertEquals(List.of("para", "indent"), plain(renderer.render(md, 80, Style.EMPTY, MarkdownStyles.DEFAULTS)));
     }
 
+    @Test
+    void markdownLinkAttachesOsc8Hyperlink() {
+        final var dest = "https://example.com/a/b?x=1";
+        final var lines = renderer.render("[docs site](" + dest + ")", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var span = lines.stream()
+                .flatMap(l -> l.spans().stream())
+                .filter(s -> s.style().hyperlink().isPresent())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no span carries an OSC-8 hyperlink in " + lines));
+        assertEquals(dest, span.style().hyperlink().orElseThrow().url());
+    }
+
+    @Test
+    void autolinkAttachesOsc8Hyperlink() {
+        // commonmark 0.28 renders <https://...> as a Link node; the full URI must be the OSC-8 target
+        final var url =
+                "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann";
+        final var lines = renderer.render("<" + url + ">", 80, Style.EMPTY, MarkdownStyles.DEFAULTS);
+        final var text = String.join("", plain(lines));
+        assertTrue(text.contains("oauth/authorize"), text);
+        final var span = lines.stream()
+                .flatMap(l -> l.spans().stream())
+                .filter(s -> s.style().hyperlink().isPresent())
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("no OSC-8 hyperlink span in " + lines));
+        assertEquals(url, span.style().hyperlink().orElseThrow().url());
+    }
+
+    @Test
+    void overwideUrlHardSplitsAndKeepsEveryCharacterCopyable() {
+        // a long URL token wider than the pane must hard-split across rows (not wrap silently at the
+        // terminal edge) so selection/copy captures the whole URL intact
+        final var url = "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_X";
+        final var rendered = String.join("", plain(renderer.render(url, 30, Style.EMPTY, MarkdownStyles.DEFAULTS)));
+        assertEquals(url, rendered);
+        for (final var line : plain(renderer.render(url, 30, Style.EMPTY, MarkdownStyles.DEFAULTS))) {
+            assertTrue(line.length() <= 30, line);
+        }
+    }
+
     private static List<String> plain(final List<Line> lines) {
         return lines.stream().map(Line::rawContent).toList();
     }

@@ -3789,4 +3789,10 @@ class TuiCommandRenderTest {
             return delegate.awaitTermination(timeout, unit);
         }
     }
+
+    @Test
+    void tuiConfDefaultsAutoOpenBrowserToTrue() {
+        final var conf = new TuiCommand.TuiConf("", "", KeyBindingPreset.STANDARD, false, "dark");
+        assertTrue(conf.autoOpenBrowser(), "tui.autoOpenBrowser must default to true");
+    }
 }

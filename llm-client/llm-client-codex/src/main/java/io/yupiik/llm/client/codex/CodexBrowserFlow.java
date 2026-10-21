@@ -199,11 +199,13 @@ final class CodexBrowserFlow {
                 + "&id_token_add_organizations=true"
                 + "&codex_cli_simplified_flow=true"
                 + "&originator=codex_cli_rs";
-        // escape every literal underscore as %5F: the CLI/TUI/web renderers that surface this URL treat
-        // _ as markdown emphasis and strip it (response_type -> responsetype), breaking the request with
-        // missing_required_parameter. %5F is accepted by auth.openai.com (verified live) once the
-        // redirect_uri is the registered 127.0.0.1 loopback, and it round-trips to "_" server-side.
-        return raw.replace("_", "%5F");
+        // Underscores are kept literal in both parameter names and values: it is the standard OAuth/OpenID
+        // request form and auth.openai.com validates the raw parameter names against them (an encoded
+        // "response%5Ftype" still works, but there is no reason to risk a strict proxy/logger that rejects
+        // encoded names). The console frontends surface this URL as a commonmark autolink (<https://...>)
+        // and/or an OSC-8 hyperlink, so the "_" is never interpreted as markdown emphasis and the full URL
+        // stays clickable and copyable even when it wraps across terminal rows.
+        return raw;
     }
 
     /** Parses a raw query string into a key/value map (first value wins). */

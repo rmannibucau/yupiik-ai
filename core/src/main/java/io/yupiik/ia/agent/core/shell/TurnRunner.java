@@ -205,9 +205,12 @@ public class TurnRunner {
                 codexLoginService.signIn(
                         notAuthed.provider(),
                         false,
-                        url -> env.frontend()
-                                .transcript("Sign in to use this Codex provider: authorize at\n\n<" + url
-                                        + ">\n\nWaiting for authorization; you can close the tab when done..."),
+                        url -> {
+                            env.frontend().openExternalUrl(url);
+                            env.frontend()
+                                    .transcript("Sign in to use this Codex provider: authorize at\n\n<" + url
+                                            + ">\n\nWaiting for authorization; you can close the tab when done...");
+                        },
                         _ -> cancelled.getAsBoolean());
                 // login completed: retry the turn body once
             }

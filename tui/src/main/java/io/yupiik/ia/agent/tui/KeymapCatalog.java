@@ -52,6 +52,7 @@ public final class KeymapCatalog {
                 new Binding("Alt+Up/Down", "prev/next tool call", "View", false),
                 new Binding("Alt+K/J", "prev/next tool call (portable)", "View", false),
                 new Binding("Alt+C", "copy last code block", "View", false),
+                new Binding("Alt+O", "open last surfaced link (e.g. login URL)", "View", false),
                 new Binding("PgUp/PgDn", "scroll", "View", false),
                 new Binding("Mouse wheel", "scroll (view and overlays)", "View", false),
                 new Binding("Ctrl+Home/End", "jump top/bottom", "View", false),

@@ -156,16 +156,17 @@ class CodexOAuthClientTest {
                 "challenge",
                 "http://127.0.0.1:1455/auth/callback");
         assertTrue(url.startsWith(issuerUrl + "/oauth/authorize"), url);
-        assertTrue(url.contains("redirect%5Furi=" + urlEncode("http://127.0.0.1:1455/auth/callback")), url);
+        assertTrue(url.contains("redirect_uri=" + urlEncode("http://127.0.0.1:1455/auth/callback")), url);
         assertTrue(url.contains("api.connectors.read"), url);
         assertTrue(url.contains("api.connectors.invoke"), url);
-        // underscores are %5F-escaped so markdown renderers cannot strip them (and the server accepts it)
-        assertTrue(url.contains("codex%5Fcli%5Fsimplified%5Fflow=true"), url);
-        assertTrue(url.contains("id%5Ftoken%5Fadd%5Forganizations=true"), url);
-        assertTrue(url.contains("originator=codex%5Fcli%5Frs"), url);
-        assertTrue(url.contains("code%5Fchallenge=challenge"), url);
-        assertFalse(
-                url.contains("codex_cli_simplified_flow"), "underscores must be escaped to survive renderers: " + url);
+        // underscores stay literal (standard request form): the console frontends wrap the URL in an
+        // autolink/OSC-8 hyperlink so the "_" is never treated as markdown emphasis and never stripped
+        assertTrue(url.contains("codex_cli_simplified_flow=true"), url);
+        assertTrue(url.contains("id_token_add_organizations=true"), url);
+        assertTrue(url.contains("originator=codex_cli_rs"), url);
+        assertTrue(url.contains("code_challenge=challenge"), url);
+        assertFalse(url.contains("%5F"), "underscores must stay literal, not %5F-escaped: " + url);
+        assertFalse(url.contains("codex_cli_simplified_flow=false"), url);
         assertFalse(url.contains("/deviceauth/callback"), "the authorize URL must not use the device callback");
     }
 
@@ -229,7 +230,7 @@ class CodexOAuthClientTest {
     private static int portOf(final String authorizeUrl) {
         final var uri = URI.create(authorizeUrl);
         final var query = uri.getRawQuery();
-        final var m = java.util.regex.Pattern.compile("redirect%5Furi=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*")
+        final var m = java.util.regex.Pattern.compile("redirect_uri=[^&]*127\\.0\\.0\\.1%3A(\\d+)[^&]*")
                 .matcher(query);
         assertTrue(m.find(), "cannot find the port in " + authorizeUrl);
         return Integer.parseInt(m.group(1));
@@ -239,7 +240,7 @@ class CodexOAuthClientTest {
         final var uri = URI.create(authorizeUrl);
         final var m = java.util.regex.Pattern.compile("state=([^&]+)").matcher(uri.getRawQuery());
         assertTrue(m.find(), "cannot find the state in " + authorizeUrl);
-        return java.net.URLDecoder.decode(m.group(1), StandardCharsets.UTF_8).replace("%5F", "_");
+        return java.net.URLDecoder.decode(m.group(1), StandardCharsets.UTF_8);
     }
 
     @Test

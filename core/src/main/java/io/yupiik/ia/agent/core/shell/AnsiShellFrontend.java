@@ -24,6 +24,7 @@ import io.yupiik.ia.agent.core.cli.Symbols;
 import io.yupiik.ia.agent.core.cli.ToolPresenter;
 import io.yupiik.ia.agent.core.cli.prompt.PromptOutput;
 import io.yupiik.ia.agent.core.todo.TodoItem;
+import io.yupiik.ia.agent.core.util.OpenBrowser;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
@@ -165,6 +166,29 @@ public class AnsiShellFrontend implements ShellFrontend {
 
     public MarkdownColorizer colorizer() {
         return colorizer;
+    }
+
+    /**
+     * Whether generated login/authorization URLs should be auto-opened in the system browser.
+     * Defaults to {@code true}; set from the owning command's {@code autoOpenBrowser} option.
+     */
+    private volatile boolean autoOpenBrowser = true;
+
+    /** Sets whether generated URLs are auto-opened in the system browser. */
+    public void autoOpenBrowser(final boolean value) {
+        this.autoOpenBrowser = value;
+    }
+
+    /** Whether generated URLs are auto-opened in the system browser. */
+    public boolean autoOpenBrowser() {
+        return autoOpenBrowser;
+    }
+
+    @Override
+    public void openExternalUrl(final String url) {
+        if (autoOpenBrowser) {
+            OpenBrowser.open(url);
+        }
     }
 
     public Symbols symbols() {

@@ -518,8 +518,15 @@ public final class MarkdownLines {
             }
         } else if (node instanceof Link link) {
             final var style = styles.link() == null ? base : base.patch(styles.link());
+            // attach the destination as an OSC-8 hyperlink so the terminal click opens the full URI
+            // even when the visible text wraps across rows (which otherwise truncates click-through).
+            // The hyperlink is carried on the style and composed through nested markups by Style.patch.
+            final var linkBase =
+                    link.getDestination() == null || link.getDestination().isBlank()
+                            ? style
+                            : style.hyperlink(link.getDestination());
             for (final var child : children(link)) {
-                inline(child, prefix, style, styles, width, content, out);
+                inline(child, prefix, linkBase, styles, width, content, out);
             }
         } else if (node instanceof Image image) {
             for (final var child : children(image)) {
@@ -813,8 +820,8 @@ public final class MarkdownLines {
             final var prefixNow = isFirst ? first : cont;
             final var wordWidth = widthOf(word);
             final var avail = width - widthOf(prefixNow);
-            if (cur.isEmpty() && breakWords && wordWidth > avail) {
-                splitLongWord(prependTo(word, prefixNow), avail, out);
+            if (cur.isEmpty() && (breakWords || isUrl(word)) && wordWidth > avail) {
+                splitLongWord(word, prefixNow, avail, out);
                 isFirst = false;
                 break;
             }
@@ -836,24 +843,60 @@ public final class MarkdownLines {
         }
     }
 
-    private static List<Span> prependTo(final List<Span> word, final List<Span> prefix) {
-        final var all = new ArrayList<Span>(prefix);
-        all.addAll(word);
-        return all;
+    /**
+     * True when the word is a URL (scheme://... or www. prefix): an over-wide URL is split across rows
+     * in prose too (not only in code), so it stays fully selectable/copyable instead of a single
+     * physical line that wraps silently at the terminal edge and truncates click/copy.
+     */
+    private static boolean isUrl(final List<Span> word) {
+        if (word.isEmpty()) {
+            return false;
+        }
+        final var text = new StringBuilder();
+        for (final var s : word) {
+            final var c = s.content();
+            if (c != null) {
+                text.append(c);
+            }
+        }
+        final var t = text.toString();
+        return t.indexOf("://") >= 0 || t.startsWith("www.");
     }
 
-    private static void splitLongWord(final List<Span> combined, final int avail, final List<Line> out) {
-        final var sb = new StringBuilder();
-        for (final var s : combined) {
-            sb.append(s.content());
+    /**
+     * Hard-splits a single over-wide word (URL/code token) into rows so no character is lost on
+     * selection or copy. The first row is {@code prefix} plus up to {@code width - prefixWidth}
+     * characters; further rows are flush-left {@code width}-wide chunks. Each row's spans keep their
+     * original style and any OSC-8 hyperlink, so wrapped long links stay clickable on every row.
+     */
+    private static void splitLongWord(
+            final List<Span> word, final List<Span> prefix, final int width, final List<Line> out) {
+        final var chars = new ArrayList<Span>(); // one styled span per non-space character
+        for (final var s : word) {
+            final var c = s.content();
+            if (c == null || c.isEmpty()) {
+                continue;
+            }
+            for (var i = 0; i < c.length(); i++) {
+                chars.add(Span.styled(String.valueOf(c.charAt(i)), s.style()));
+            }
         }
-        final var text = sb.toString();
-        final var chunk = Math.max(1, avail);
-        var from = 0;
-        while (from < text.length()) {
-            final var to = Math.min(text.length(), from + chunk);
-            out.add(Line.from(List.of(Span.styled(text.substring(from, to), Style.EMPTY))));
-            from = to;
+        if (chars.isEmpty()) {
+            return;
+        }
+        final var firstChunk = Math.max(1, width - widthOf(prefix));
+        final var rowCap = Math.max(1, width);
+        var at = 0;
+        var first = true;
+        while (at < chars.size()) {
+            final var cap = first ? Math.min(firstChunk, chars.size() - at) : Math.min(rowCap, chars.size() - at);
+            final var row = new ArrayList<Span>(first ? prefix : List.of());
+            for (var i = at; i < at + cap; i++) {
+                row.add(chars.get(i));
+            }
+            out.add(Line.from(row));
+            at += cap;
+            first = false;
         }
     }
 

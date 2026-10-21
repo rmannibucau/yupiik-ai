@@ -87,6 +87,12 @@ class CliCommandTest {
                 "streamed output should not be duplicated:\n" + stderr);
     }
 
+    @Test
+    void cliConfDefaultsAutoOpenBrowserToTrue() {
+        final var conf = new CliCommand.CliConf("", "", "", false, false, "compact", false, "collapsed", false);
+        assertTrue(conf.autoOpenBrowser(), "cli.autoOpenBrowser must default to true");
+    }
+
     private static Consumer<AgentEvent> dispatcher(
             final String presentation, final ToolOutputVisibility showToolOutput, final JsonMapper mapper) {
         final var frontend = new AnsiShellFrontend(

@@ -97,6 +97,7 @@ import io.yupiik.ia.agent.core.shell.slash.ArgCompletion;
 import io.yupiik.ia.agent.core.shell.slash.CompletionEngine;
 import io.yupiik.ia.agent.core.shell.slash.SlashRegistry;
 import io.yupiik.ia.agent.core.tools.EmbeddedTool;
+import io.yupiik.ia.agent.core.util.OpenBrowser;
 import io.yupiik.ia.agent.core.wiring.AutoLogConfigurer;
 import io.yupiik.ia.agent.core.wiring.ProviderManager;
 import io.yupiik.maven.knowledge.process.ProcessService;
@@ -456,6 +457,13 @@ public class TuiCommand implements Runnable {
             @Property(defaultValue = "false", documentation = "Show the reasoning/thinking stream by default.")
             boolean showThinking,
 
+            @Property(
+                    defaultValue = "true",
+                    documentation = "Automatically open the system browser when a login/authorization URL is generated "
+                            + "(e.g. /codex login). Disable to only surface the link in the transcript, where "
+                            + "it stays clickable (OSC-8 autolink) and fully copyable even when it wraps.")
+            boolean autoOpenBrowser,
+
             @Property(defaultValue = "\"dark\"", documentation = "UI theme: dark or light.")
             String theme,
 
@@ -485,7 +493,7 @@ public class TuiCommand implements Runnable {
                 final KeyBindingPreset bindings,
                 final boolean showThinking,
                 final String theme) {
-            this(session, context, bindings, showThinking, theme, List.of());
+            this(session, context, bindings, showThinking, true, theme, List.of());
         }
     }
 
@@ -1802,6 +1810,16 @@ public class TuiCommand implements Runnable {
             state.shortcutsScroll = 0;
             return true;
         }
+        if (key.hasAlt() && key.isCharIgnoreCase('o')) {
+            final var url = state.lastExternalUrl;
+            if (url == null || url.isBlank()) {
+                notify(state, "no link to open yet");
+            } else {
+                OpenBrowser.open(url);
+                notify(state, "opening link...");
+            }
+            return true;
+        }
         if (key.hasCtrl() && key.isCharIgnoreCase('p')) {
             if (state.showTodos && !state.showTodosCollapsed) {
                 state.showTodosCollapsed = true;
@@ -2473,6 +2491,17 @@ public class TuiCommand implements Runnable {
             @Override
             public void transcript(final String markdown) {
                 runLater(state, () -> state.model.appendTranscript(markdown));
+            }
+
+            @Override
+            public void openExternalUrl(final String url) {
+                // remember the URL so Alt+O can re-open it even if the auto-open was dismissed
+                state.lastExternalUrl = url;
+                // open the system browser from the IO thread (fast, best-effort); the user-editable
+                // toggle lives on the TUI command options (tui.autoOpenBrowser)
+                if (conf.autoOpenBrowser()) {
+                    OpenBrowser.open(url);
+                }
             }
 
             @Override
@@ -8146,6 +8175,9 @@ public class TuiCommand implements Runnable {
         private volatile boolean showTodos;
         private volatile boolean showTodosCollapsed;
         private volatile boolean interrupted;
+
+        /** Last URL surfaced via the frontend (e.g. a Codex login); opened on-demand by Alt+O. */
+        private volatile String lastExternalUrl;
 
         /** Whether the last turn completed: drives the tab-bar done icon until a new turn starts. */
         private volatile boolean turnCompleted;

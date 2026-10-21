@@ -25,10 +25,8 @@ import io.yupiik.fusion.httpserver.jre.JreHttpServerConfiguration;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.fusion.jsonrpc.JsonRpcEndpoint;
 import io.yupiik.fusion.jsonrpc.JsonRpcHandler;
-import java.awt.*;
-import java.net.URI;
+import io.yupiik.ia.agent.core.util.OpenBrowser;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,22 +116,7 @@ public class WebCommand implements Runnable, AutoCloseable {
     }
 
     private static void openBrowser(final String url) {
-        try {
-            if (System.getProperty("org.graalvm.nativeimage.imagecode") == null && Desktop.isDesktopSupported()) {
-                final var desktop = Desktop.getDesktop();
-                if (desktop.isSupported(Desktop.Action.BROWSE)) {
-                    desktop.browse(URI.create(url));
-                    return;
-                }
-            }
-            final var os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-            final var cmd = os.contains("win")
-                    ? new String[] {"rundll32", "url.dll,FileProtocolHandler", url}
-                    : os.contains("mac") ? new String[] {"open", url} : new String[] {"xdg-open", url};
-            Runtime.getRuntime().exec(cmd);
-        } catch (final Throwable ignored) {
-            // best-effort: never fail the command because the browser could not open
-        }
+        OpenBrowser.open(url);
     }
 
     @Override
