@@ -61,13 +61,14 @@ import javax.net.ssl.X509TrustManager;
 
 @DefaultScoped
 public class HttpClientProducer {
-    private static final String DEFAULT_CHROME_UA =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-
     @Bean
     @ApplicationScoped
     public ExtendedHttpClient httpClient(final CodingAgentConfiguration configuration) {
         final var cfg = configuration.httpClient();
+        if (cfg.disableTlsCheck()
+                && System.getProperty("jdk.internal.httpclient.disableHostnameVerification") == null) {
+            System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
+        }
         final var builder = HttpClient.newBuilder()
                 .version(version(cfg.version()))
                 .connectTimeout(Duration.ofSeconds(cfg.connectTimeoutSeconds() <= 0 ? 30 : cfg.connectTimeoutSeconds()))
@@ -104,7 +105,9 @@ public class HttpClientProducer {
         if (cfg.headers() != null && !cfg.headers().isEmpty()) {
             listeners.add(new SetHeader(cfg.headers()));
         }
-        listeners.add(new SetUserAgent(DEFAULT_CHROME_UA));
+        listeners.add(
+                new SetUserAgent(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"));
         if (cfg.debug()) {
             listeners.add(new CurlLoggerListener(
                     new CurlLoggerListener.Configuration(Logger.getLogger("yca.http")).setLogPayload(true)));
