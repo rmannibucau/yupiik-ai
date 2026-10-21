@@ -118,6 +118,19 @@ class ConfigCommandsTest {
     }
 
     @Test
+    void defaultSurfacesCachedTokensWithTheShareOfPrompt() {
+        final var transcript = new ConversationTranscript();
+        transcript.onEvent(new AgentEvent.TurnMetrics(2, 120, 300, 500, 3, 1500, "session-1"));
+        transcript.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(4000, 800, 4800, 1200, 0), 42000, 55.0, 4000, 1.05, "m", "s1", null, null));
+        final var outcome = run("", session(), transcript);
+        assertEquals(
+                "metrics: showPerTurn=true showSessionTotals=true displayMode=COMPACT\n"
+                        + "2 LLM (120ms think) · 3 tools (300ms/500ms) · cached 1.2k (30%) · 1.5s",
+                ((ShellOutcome.Status) outcome).message());
+    }
+
+    @Test
     void defaultAppendsSessionTotalsWhenRequestsRan() {
         final var usage = new UsageTracker(null, null, null, null);
         usage.record(new Usage(100, 50, 150));

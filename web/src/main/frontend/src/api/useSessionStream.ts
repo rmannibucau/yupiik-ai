@@ -16,6 +16,9 @@ export type SessionStatus = {
   estimatedContext?: number;
   promptTokens?: number;
   completionTokens?: number;
+  // provider-served prompt tokens read from the cache (subset of promptTokens when the provider
+  // publishes cache metrics; absent for providers that do not).
+  cacheReadTokens?: number;
   // turn metrics (last completed turn)
   turnLlmCalls?: number;
   turnThinkingMs?: number;
@@ -415,6 +418,7 @@ export function foldStatus(events: WebEvent[]): SessionStatus {
       s.estimatedContext = num(d.estimatedContextTokens, s.estimatedContext);
       s.promptTokens = num(d.promptTokens, s.promptTokens);
       s.completionTokens = num(d.completionTokens, s.completionTokens);
+      s.cacheReadTokens = num(d.cacheReadTokens, s.cacheReadTokens);
       completionTotal = num(d.completionTokens, completionTotal) ?? completionTotal;
       reasoningTotal = num(d.reasoningTokens, reasoningTotal) ?? reasoningTotal;
       // session totals persist in the log tail; count LLM calls via turn-metrics below.

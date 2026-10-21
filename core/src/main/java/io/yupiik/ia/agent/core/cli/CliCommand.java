@@ -890,8 +890,11 @@ public class CliCommand implements Runnable {
                     usage.contextPercent(),
                     session.runtime().usage().contextWindow()));
             if (usage.usage() != null && usage.usage().cacheReadTokens() > 0) {
-                sb.append(String.format(
-                        Locale.ROOT, " · %,d cache-read tokens", usage.usage().cacheReadTokens()));
+                final var cached = MetricsFormat.cachedTokens(
+                        usage.usage().cacheReadTokens(), usage.usage().promptTokens());
+                if (!cached.isEmpty()) {
+                    sb.append(" · ").append(cached);
+                }
             }
             final var backgroundTokens = session.runtime().usage().auxiliaryPromptTokens()
                     + session.runtime().usage().auxiliaryCompletionTokens();

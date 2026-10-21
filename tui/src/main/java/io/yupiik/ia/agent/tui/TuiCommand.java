@@ -3864,6 +3864,14 @@ public class TuiCommand implements Runnable {
         text.add(Line.empty());
         text.add(Line.from(
                 Span.styled("tokens in  ", label), Span.styled(formatTokens(state.model.promptTokens()), value)));
+        final var cached = state.model.cacheReadTokens();
+        final var promptTokens = state.model.promptTokens();
+        if (cached > 0 && promptTokens > 0) {
+            text.add(Line.from(
+                    Span.styled("cached     ", label),
+                    Span.styled(
+                            formatTokens(cached) + " (" + Math.round(cached * 100.0 / promptTokens) + "%)", value)));
+        }
         text.add(Line.from(
                 Span.styled("tokens out ", label), Span.styled(formatTokens(state.model.completionTokens()), value)));
         text.add(Line.from(
@@ -5646,9 +5654,14 @@ public class TuiCommand implements Runnable {
         // narrow terminals have no sidebar: keep the essential context numbers in the strip
         if (narrow) {
             parts.add(Span.styled("  ctx " + state.model.contextPercent() + "%", muted));
+            final var cached = state.model.cacheReadTokens();
+            final var promptTokens = state.model.promptTokens();
+            final var cachedSuffix = cached > 0 && promptTokens > 0
+                    ? " cached " + formatTokens(cached) + " (" + Math.round(cached * 100.0 / promptTokens) + "%)"
+                    : "";
             parts.add(Span.styled(
                     "  in " + formatTokens(state.model.promptTokens()) + " out "
-                            + formatTokens(state.model.completionTokens()),
+                            + formatTokens(state.model.completionTokens()) + cachedSuffix,
                     muted));
         }
         if (conf.bindings() == KeyBindingPreset.VIM) {

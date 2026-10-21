@@ -58,6 +58,40 @@ public final class MetricsFormat {
     }
 
     /**
+     * Formats the provider-cache read segment for a prompt/token pair: {@code cached N (P%)}
+     * where {@code P} is the share of {@code prompt} served from cache. Empty when there is
+     * nothing meaningful to show ({@code cacheRead <= 0} or {@code prompt <= 0}, so no divide
+     * by zero and nothing to report for a provider that never publishes cache metrics).
+     *
+     * @param cacheRead the cache-read prompt tokens.
+     * @param prompt    the provider-billed prompt tokens.
+     * @return e.g. {@code "cached 1.2k (30%)"} or {@code ""}.
+     */
+    public static String cachedTokens(final long cacheRead, final long prompt) {
+        if (cacheRead <= 0 || prompt <= 0) {
+            return "";
+        }
+        final var percent = (int) Math.round(cacheRead * 100.0 / prompt);
+        return "cached " + humanizeTokens(cacheRead) + " (" + percent + "%)";
+    }
+
+    /**
+     * Compact human form of a token count: {@code M} for millions above 1M, {@code k} for
+     * thousands, at most one decimal place (whole when over 9).
+     */
+    private static String humanizeTokens(final long value) {
+        if (value < 1_000) {
+            return String.valueOf(value);
+        }
+        if (value < 1_000_000) {
+            final var k = value / 1000.0;
+            return (k > 9 ? String.format("%.0fk", k) : String.format("%.1fk", k)).replace(',', '.');
+        }
+        final var m = value / 1_000_000.0;
+        return (m > 9 ? String.format("%.0fM", m) : String.format("%.1fM", m)).replace(',', '.');
+    }
+
+    /**
      * The {@code /metrics} report, always exactly two lines: the current display
      * configuration, then the last turn values (and the session totals when any
      * request ran). The CLI prints it as-is and the TUI shows it through its
@@ -113,6 +147,10 @@ public final class MetricsFormat {
             if (full && throughput != null && throughput.reasoningTokensPerSecond() > 0) {
                 sb.append(" · reasoning ")
                         .append(String.format(Locale.ROOT, "%.1f tok/s", throughput.reasoningTokensPerSecond()));
+            }
+            final var cachedSegment = cachedTokens(transcript.cacheReadTokens(), transcript.promptTokens());
+            if (!cachedSegment.isEmpty()) {
+                sb.append(" · ").append(cachedSegment);
             }
             sb.append(" · ").append(DurationFormat.humanize(transcript.turnDurationMs()));
         } else {

@@ -457,6 +457,19 @@ class ConversationTranscriptTest {
         assertEquals(12, t.contextPercent());
         assertEquals(40, t.lastRealPromptTokens());
         assertEquals(1.25, t.calibrationRatio(), 0.0001);
+        assertEquals(0, t.cacheReadTokens(), "null usage: cache-read must be 0");
+
+        t.onEvent(new AgentEvent.UsageUpdated(
+                new io.yupiik.ia.agent.core.llm.Usage(4000, 1200, 5200, 1500, 0),
+                42,
+                12.4,
+                40,
+                1.25,
+                null,
+                "s1",
+                null,
+                null));
+        assertEquals(1500, t.cacheReadTokens(), "usage cache-read must be captured");
     }
 
     @Test

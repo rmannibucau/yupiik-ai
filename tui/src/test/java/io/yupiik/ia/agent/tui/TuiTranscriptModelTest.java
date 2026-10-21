@@ -344,13 +344,21 @@ class TuiTranscriptModelTest {
 
     @Test
     void usageUpdatedTracksTokens() {
-        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, 40000, 1.05, null, "s1", null, null));
-        assertEquals(0, model.promptTokens());
-        assertEquals(0, model.completionTokens());
+        final var usage = new io.yupiik.ia.agent.core.llm.Usage(4000, 1200, 5200, 1500, 0);
+        model.onEvent(new AgentEvent.UsageUpdated(usage, 42000, 55.44, 40000, 1.05, null, "s1", null, null));
+        assertEquals(4000, model.promptTokens());
+        assertEquals(1200, model.completionTokens());
+        assertEquals(1500, model.cacheReadTokens());
         assertEquals(42000, model.estimatedContext());
         assertEquals(55, model.contextPercent());
         assertEquals(40000, model.lastRealPromptTokens());
         assertEquals(1.05, model.calibrationRatio(), 0.0001);
+    }
+
+    @Test
+    void usageUpdatedWithoutUsageKeepsZeroCacheRead() {
+        model.onEvent(new AgentEvent.UsageUpdated(null, 42000, 55.44, "s1"));
+        assertEquals(0, model.cacheReadTokens(), "no usage: cache-read must be 0");
     }
 
     @Test

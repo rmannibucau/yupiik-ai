@@ -95,6 +95,36 @@ class MetricsFormatTest {
                 report);
     }
 
+    @Test
+    void cachedTokensHelperFormatsTheShareAndPercent() {
+        assertEquals("", MetricsFormat.cachedTokens(0, 4_000), "no cache-read -> empty");
+        assertEquals("", MetricsFormat.cachedTokens(1_500, 0), "no prompt -> empty");
+        assertEquals("cached 1.5k (38%)", MetricsFormat.cachedTokens(1_500, 4_000));
+        assertEquals("cached 1.2k (30%)", MetricsFormat.cachedTokens(1_200, 4_000));
+        assertEquals("cached 10k (100%)", MetricsFormat.cachedTokens(10_000, 10_000));
+        assertEquals("cached 1.5M (75%)", MetricsFormat.cachedTokens(1_500_000, 2_000_000));
+    }
+
+    @Test
+    void fullModeSurfacesCachedTokensInTheTurnLine() {
+        final var transcript = transcriptWithReasoningTurn();
+        transcript.onEvent(new AgentEvent.UsageUpdated(
+                new Usage(4_000, 953, 4_953, 1_200, 0), 42_000, 55.0, 4_000, 1.05, "m", "s1", null, null));
+        final var report =
+                MetricsFormat.report(new MetricsConfiguration(true, true, MetricsDisplayMode.FULL), transcript, null);
+        final var lines = report.split("\n");
+        assertEquals(2, lines.length, "the report contract stays exactly two lines: " + report);
+        assertTrue(lines[1].contains("cached 1.2k (30%)"), lines[1]);
+    }
+
+    @Test
+    void compactModeDoesNotAddCachedWhenNoCacheData() {
+        final var transcript = transcriptWithReasoningTurn();
+        final var report = MetricsFormat.report(
+                new MetricsConfiguration(true, true, MetricsDisplayMode.COMPACT), transcript, null);
+        assertFalse(report.split("\n")[1].contains("cached"), "no cache usage -> no cached segment: " + report);
+    }
+
     private static ConversationTranscript transcriptWithReasoningTurn() {
         final var transcript = new ConversationTranscript();
         transcript.onEvent(new AgentEvent.TurnMetrics(

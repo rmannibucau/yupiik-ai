@@ -73,6 +73,7 @@ public class ConversationTranscript {
     private volatile String status = "";
     private volatile int promptTokens;
     private volatile int completionTokens;
+    private volatile long cacheReadTokens;
     private volatile int estimatedContext;
     private volatile int lastRealPromptTokens;
     private volatile double calibrationRatio;
@@ -466,6 +467,7 @@ public class ConversationTranscript {
                         String subagentName)) {
             promptTokens = usage == null ? 0 : usage.promptTokens();
             completionTokens = usage == null ? 0 : usage.completionTokens();
+            cacheReadTokens = usage == null ? 0 : usage.cacheReadTokens();
             estimatedContext = estimatedContextTokens;
             this.lastRealPromptTokens = lastRealPromptTokens;
             this.calibrationRatio = calibrationRatio;
@@ -1033,6 +1035,7 @@ public class ConversationTranscript {
         appliances.clear();
         promptTokens = 0;
         completionTokens = 0;
+        cacheReadTokens = 0;
         estimatedContext = 0;
         lastRealPromptTokens = 0;
         calibrationRatio = -1;
@@ -1146,6 +1149,11 @@ public class ConversationTranscript {
 
     public int completionTokens() {
         return completionTokens;
+    }
+
+    /** Provider-served prompt tokens that were read from the cache (subset of {@link #promptTokens()}). */
+    public long cacheReadTokens() {
+        return cacheReadTokens;
     }
 
     public int estimatedContext() {

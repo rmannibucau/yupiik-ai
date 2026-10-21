@@ -1150,7 +1150,10 @@ function TurnMetrics({ status }: { status: SessionStatus }) {
     const out = currentOutTokens(status);
     const reas = currentReasoningTokens(status);
     const outTxt = reas > 0 ? `${formatTokens(out)} out + ${formatTokens(reas)} reasoning` : `${formatTokens(out)} out`;
-    const inTxt = status.promptTokens != null ? `in ${formatTokens(status.promptTokens)}` : '';
+    let inTxt = status.promptTokens != null ? `in ${formatTokens(status.promptTokens)}` : '';
+    if (status.cacheReadTokens != null && status.cacheReadTokens > 0 && status.promptTokens != null && status.promptTokens > 0) {
+      inTxt += ` (cached ${formatTokens(status.cacheReadTokens)} (${Math.round((status.cacheReadTokens * 100) / status.promptTokens)}%))`;
+    }
     parts.push(`${inTxt && inTxt + ' · '}${outTxt}`.trim());
   }
   if (status.contextPercent != null)
@@ -1326,6 +1329,15 @@ function Sidebar({
             <span style={{ color: 'var(--yca-muted)' }}>tokens in</span>
             <span className="font-mono">{formatTokens(status.promptTokens)}</span>
           </div>
+          {status.cacheReadTokens != null && status.cacheReadTokens > 0 && status.promptTokens != null && status.promptTokens > 0 && (
+            <div className="flex justify-between">
+              <span style={{ color: 'var(--yca-muted)' }}>cached</span>
+              <span className="font-mono">
+                {formatTokens(status.cacheReadTokens)} (
+                {Math.round((status.cacheReadTokens * 100) / status.promptTokens)}%)
+              </span>
+            </div>
+          )}
           <div className="flex justify-between">
             <span style={{ color: 'var(--yca-muted)' }}>tokens out</span>
             <span className="font-mono">

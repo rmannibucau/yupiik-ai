@@ -208,12 +208,18 @@ describe('foldStatus - live per-turn out/reasoning tokens', () => {
   it('a server-seeded synthetic usage-updated (snapshot seed) yields cumulative in/out immediately', () => {
     // WebSessionManager.snapshotFor now prepends a synthetic usage-updated carrying the session's
     // cumulative totals for reloaded tabs, so the metrics bar shows exact "in N · out N" on load.
-    const s = foldStatus([usageEv({ promptTokens: 4000, completionTokens: 1200, reasoningTokens: 300, contextPercent: 42 })]);
+    const s = foldStatus([usageEv({ promptTokens: 4000, completionTokens: 1200, reasoningTokens: 300, cacheReadTokens: 1200, contextPercent: 42 })]);
     expect(s.promptTokens).toBe(4000);
     expect(s.completionTokens).toBe(1200);
+    expect(s.cacheReadTokens).toBe(1200);
     // no busy baseline yet, so the live out delta is the whole cumulative total
     expect(s.liveOutTokens).toBe(1200);
     expect(s.liveReasoningTokens).toBe(300);
+  });
+
+  it('cacheReadTokens stays absent when the provider publishes none', () => {
+    const s = foldStatus([usageEv({ promptTokens: 4000, completionTokens: 1200 })]);
+    expect(s.cacheReadTokens).toBeUndefined();
   });
 
   it('log-derived out chars start fresh at each new user turn', () => {
