@@ -144,6 +144,22 @@
                 <resource>
                   <pattern>META-INF/resources/.*</pattern>
                 </resource>
+                <!-- parser .class bytes for the spawned-JVM native parse: SpawnedJvmGraphParser assembles these into a
+                     throwaway jar at runtime (no jars embedded). Patterns are component-scoped (.* does not cross /), so
+                     each sub-package needed by ParserClassSet is listed explicitly; ParserClassSet.CLASSES selects the
+                     exact subset assembled into the child jar. -->
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/codegraph/.*\.class</pattern>
+                </resource>
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/codegraph/index/.*\.class</pattern>
+                </resource>
+                <resource>
+                  <pattern>io/yupiik/ia/agent/core/codegraph/helper/.*\.class</pattern>
+                </resource>
+                <resource>
+                  <pattern>io/yupiik/codegraph/index/.*\.class</pattern>
+                </resource>
               </resources>
               <!-- image configuration -->
               <to>${image.name}</to>

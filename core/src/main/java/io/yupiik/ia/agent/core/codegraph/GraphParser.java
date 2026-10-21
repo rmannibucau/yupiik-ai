@@ -16,6 +16,9 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -52,4 +55,19 @@ public interface GraphParser {
      * single file during incremental re-indexing.
      */
     GraphModel parse(Path file);
+
+    /**
+     * Parse several source files into language-neutral models, batched for implementations that can
+     * amortise work across files (eg. a compiler task that warms up once). The default routes to
+     * {@link #parse(Path)} per file; parsers that support true batching (javac's {@code JavacTask},
+     * a spawned-JVM helper) override it. The returned map must key on the exact input {@link Path}
+     * and may omit files it could not parse.
+     */
+    default Map<Path, GraphModel> parseBatch(final List<Path> files) {
+        final var out = new HashMap<Path, GraphModel>(files.size());
+        for (final var file : files) {
+            out.put(file, parse(file));
+        }
+        return out;
+    }
 }

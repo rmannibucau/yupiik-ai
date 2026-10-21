@@ -16,14 +16,13 @@
 package io.yupiik.ia.agent.core.codegraph;
 
 import io.yupiik.codegraph.index.CodeGraphIndexWriter;
-import io.yupiik.codegraph.index.IndexEdge;
 import io.yupiik.codegraph.index.IndexGraph;
-import io.yupiik.codegraph.index.IndexSymbol;
 import io.yupiik.fusion.framework.api.scope.ApplicationScoped;
 import io.yupiik.fusion.framework.build.api.event.OnEvent;
 import io.yupiik.fusion.framework.build.api.lifecycle.Destroy;
 import io.yupiik.fusion.json.JsonMapper;
 import io.yupiik.ia.agent.core.codegraph.index.CodeGraphIndex;
+import io.yupiik.ia.agent.core.codegraph.index.GraphToIndex;
 import io.yupiik.ia.agent.core.configuration.CodingAgentConfiguration;
 import io.yupiik.ia.agent.core.llm.ChatClient;
 import io.yupiik.ia.agent.core.optimize.AfterToolExecutionEvent;
@@ -54,6 +53,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -126,6 +126,12 @@ public class StructuralCodeGraph implements AutoCloseable {
     private final boolean ownsScheduler;
     private final AtomicLong refreshPending = new AtomicLong();
     private volatile long latestRefreshJob;
+    /** Debounced batch refresh (native spawned-JVM parser only): files awaiting a single batched re-index. */
+    private static final long BATCH_REFRESH_DEBOUNCE_MS = 10_000L;
+
+    private final Object batchRefreshMonitor = new Object();
+    private final Set<Path> pendingBatchRefresh = new LinkedHashSet<>();
+    private volatile boolean batchFlushScheduled;
     private volatile GraphStore graph;
     private volatile CodeGraphIndex index;
     private volatile List<String> pendingRefreshPaths = List.of();
@@ -305,7 +311,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 if (Files.isRegularFile(absolute) && absolute.toString().endsWith(".java")) {
                     final var rel = rel(absolute);
                     if (!isIgnored(rel, absolute)) {
-                        scheduler.execute(() -> refreshFile(absolute));
+                        enqueueRefresh(absolute);
                     }
                 }
             }
@@ -603,10 +609,7 @@ public class StructuralCodeGraph implements AutoCloseable {
                 }
             });
             files.sort(Comparator.comparing(Path::toString));
-            final var javaParser = (JavaGraphParser) parsers.stream()
-                    .filter(p -> p instanceof JavaGraphParser)
-                    .findFirst()
-                    .orElse(null);
+            final var javaParser = javaParser();
             if (javaParser != null) {
                 final var batch = javaParser.parseBatch(files);
                 for (final var entry : batch.entrySet()) {
@@ -882,6 +885,13 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (isIgnored(rel, absolute)) {
             return;
         }
+        // For a batch-capable parser (the spawned-JVM parser in native) coalesce rapid single-file edits into one
+        // re-parse after a short quiet window, so we never pay a JVM spawn per file. The JVM in-process javac parser
+        // keeps the existing immediate per-file refresh.
+        if (useBatchRefresh()) {
+            refreshBatchAdd(absolute);
+            return;
+        }
         refreshPending.incrementAndGet();
         final var job = ++latestRefreshJob;
         scheduler.execute(() -> {
@@ -893,11 +903,94 @@ public class StructuralCodeGraph implements AutoCloseable {
         });
     }
 
+    /**
+     * True when a batch-capable parser other than the JVM's in-process javac owns {@code .java}, which is only the
+     * native spawned-JVM case. Such a parser pays a JVM startup per {@code parse}, so refreshes are debounced and
+     * batched instead of re-parsed one file at a time.
+     */
+    private boolean useBatchRefresh() {
+        final var parser = javaParser();
+        return parser != null && !(parser instanceof JavaGraphParser);
+    }
+
+    /** Accumulates a changed file for the debounced batch; a single flush is (re)scheduled after the quiet window. */
+    private void refreshBatchAdd(final Path absolute) {
+        refreshPending.incrementAndGet();
+        synchronized (batchRefreshMonitor) {
+            pendingBatchRefresh.add(absolute);
+            if (!batchFlushScheduled) {
+                batchFlushScheduled = true;
+                scheduler.schedule(this::flushBatchRefresh, BATCH_REFRESH_DEBOUNCE_MS, TimeUnit.MILLISECONDS);
+            }
+        }
+    }
+
+    /**
+     * Parses every accumulated changed file with a single {@code parseBatch} and re-bases the store/persist path for
+     * each. Safe to run from both the scheduler (debounced) and {@link #ensureRefreshedReady} (synchronous flush before
+     * a tool query): the pending set is taken atomically, so a concurrent second invocation sees an empty set. Caller
+     * guarantees {@code refreshPending} was incremented once per file added and never decrements more than it added.
+     */
+    private void flushBatchRefresh() {
+        final List<Path> files = new ArrayList<>();
+        synchronized (batchRefreshMonitor) {
+            files.addAll(pendingBatchRefresh);
+            pendingBatchRefresh.clear();
+            batchFlushScheduled = false;
+        }
+        if (files.isEmpty()) {
+            return;
+        }
+        refreshLock.lock();
+        try {
+            final var parser = javaParser();
+            if (parser == null) {
+                refreshPending.addAndGet(-files.size());
+                return;
+            }
+            final Map<Path, GraphModel> models;
+            try {
+                models = parser.parseBatch(files);
+            } catch (final RuntimeException e) {
+                LOGGER.warning("Batch re-index failed for " + files.size() + " file(s): " + e.getMessage());
+                refreshPending.addAndGet(-files.size());
+                return;
+            }
+            for (final var file : files) {
+                final var rel = rel(file);
+                final var model = models.getOrDefault(
+                        file, GraphModel.empty(parser.extensions().iterator().next()));
+                if (model == null || (model.symbols().isEmpty() && model.edges().isEmpty())) {
+                    refreshPending.decrementAndGet();
+                    continue;
+                }
+                try {
+                    applyRefreshedFile(
+                            rel, fingerprint(file), Map.of(rel, lastModified(file)), relativizeModel(model, rel));
+                } catch (final RuntimeException e) {
+                    LOGGER.warning("Cannot batch re-index " + rel + ": " + e.getMessage());
+                } finally {
+                    refreshPending.decrementAndGet();
+                }
+            }
+        } finally {
+            refreshLock.unlock();
+        }
+    }
+
     /** A5: graph-reading tools call this before queryIndex() so a pending background refresh is seen as authoritative
      * (single-thread FIFO: awaiting the latest enqueued job implies all earlier ones finished too). Bounded by
      * {@link #refreshAwaitMs} so a slow/broken re-index never hangs a tool - on timeout we proceed with the current index. */
     public void ensureRefreshedReady() {
-        if (latestRefreshJob == 0 || configNoRefresh) {
+        if (configNoRefresh) {
+            return;
+        }
+        // For the debounced batch path (native spawned-JVM parser), flush accumulated edits synchronously so a
+        // graph-reading tool never sees a stale store; the keep-alive re-schedules a flush if more edits land.
+        if (useBatchRefresh()) {
+            flushBatchRefresh();
+        }
+        if (latestRefreshJob == 0) {
             return;
         }
         final var deadline =
@@ -966,6 +1059,15 @@ public class StructuralCodeGraph implements AutoCloseable {
             LOGGER.warning("Cannot re-index " + rel + ": " + e.getMessage());
             return;
         }
+        applyRefreshedFile(rel, fp, mtimes, model);
+    }
+
+    /**
+     * Re-base the in-memory store and persist path for a single re-indexed file whose model is already parsed. Caller
+     * holds {@code refreshLock} and re-reads the fingerprint/mtime snapshot before invoking.
+     */
+    private void applyRefreshedFile(
+            final String rel, final String fp, final Map<String, Long> mtimes, final GraphModel model) {
         final var current = graph == null ? loadOrEmpty() : graph;
         final var symbols = new ArrayList<>(current.symbols());
         final var edges = new ArrayList<>(current.edges());
@@ -985,7 +1087,7 @@ public class StructuralCodeGraph implements AutoCloseable {
         if (fp == null) {
             docWriter.delete(rel);
             docEnricher.drop(rel);
-        } else if (parser != null) {
+        } else {
             docWriter.write(rel, model);
             docEnricher.maybeEnrich(rel, model);
         }
@@ -1088,10 +1190,7 @@ public class StructuralCodeGraph implements AutoCloseable {
 
         // Batch parse all changed files
         if (!filesToParse.isEmpty()) {
-            final var javaParser = (JavaGraphParser) parsers.stream()
-                    .filter(p -> p instanceof JavaGraphParser)
-                    .findFirst()
-                    .orElse(null);
+            final var javaParser = javaParser();
             if (javaParser != null) {
                 final var batchResults = javaParser.parseBatch(filesToParse);
                 for (final var entry : batchResults.entrySet()) {
@@ -1183,10 +1282,7 @@ public class StructuralCodeGraph implements AutoCloseable {
 
         // Batch parse all files
         if (!filesToParse.isEmpty()) {
-            final var javaParser = (JavaGraphParser) parsers.stream()
-                    .filter(p -> p instanceof JavaGraphParser)
-                    .findFirst()
-                    .orElse(null);
+            final var javaParser = javaParser();
             if (javaParser != null) {
                 final var batchResults = javaParser.parseBatch(filesToParse);
                 for (final var entry : batchResults.entrySet()) {
@@ -1237,6 +1333,20 @@ public class StructuralCodeGraph implements AutoCloseable {
         }
         for (final var parser : parsers) {
             if (parser.extensions().contains(ext)) {
+                return parser;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * The primary, batch-capable parser for {@code .java} files (javac on a JVM, the spawned-JVM parser in native),
+     * {@code null} when none is available. The batch path uses this so a single compiler/subprocess warms once for
+     * many files instead of re-initialising per file.
+     */
+    private GraphParser javaParser() {
+        for (final var parser : parsers) {
+            if (parser.extensions().contains("java")) {
                 return parser;
             }
         }
@@ -1479,16 +1589,7 @@ public class StructuralCodeGraph implements AutoCloseable {
 
     /** Bridge the core {@link GraphStore} into the shared, framework-free {@link IndexGraph} binary format. */
     private static IndexGraph toIndexGraph(final GraphStore store) {
-        return new IndexGraph(
-                store.symbols().stream()
-                        .map(s -> new IndexSymbol(
-                                s.fqn(), s.kind().ordinal(), s.file(), s.startLine(), s.endLine(), s.signature()))
-                        .toList(),
-                store.edges().stream()
-                        .map(e -> new IndexEdge(e.from(), e.to(), e.type().ordinal()))
-                        .toList(),
-                store.fingerprints(),
-                store.builtAt());
+        return GraphToIndex.toIndex(store);
     }
 
     /**

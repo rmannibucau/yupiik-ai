@@ -64,7 +64,8 @@ public class JavaGraphParser implements GraphParser {
     @Override
     public boolean available() {
         if (!availabilityResolved) {
-            compilerAvailable = ToolProvider.getSystemJavaCompiler() != null;
+            compilerAvailable = System.getProperty("org.graalvm.nativeimage.imagecode") == null
+                    && ToolProvider.getSystemJavaCompiler() != null;
             availabilityResolved = true;
         }
         return compilerAvailable;
