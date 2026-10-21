@@ -46,6 +46,7 @@ import io.yupiik.ia.agent.core.runtime.Cancellations;
 import io.yupiik.ia.agent.core.runtime.StatusReporter;
 import io.yupiik.ia.agent.core.session.SessionEntry;
 import io.yupiik.ia.agent.core.session.SessionStore;
+import io.yupiik.ia.agent.core.shell.ThinkTagSplitter;
 import io.yupiik.ia.agent.core.snapshot.SnapshotStore;
 import io.yupiik.ia.agent.core.todo.TodoItem;
 import io.yupiik.ia.agent.core.todo.TodoStore;
@@ -66,6 +67,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
@@ -124,6 +126,24 @@ class AgentLoopTest {
                 "Unknown tool \"foo\": not in this session's toolset (built-in or enabled MCP)."
                         + " Run /tools to list the valid tools; only exact names from the request's tools field are accepted.",
                 diagnostic("foo"));
+    }
+
+    @Test
+    void inlineSplitterNullSegmentIsSkippedInsteadOfAbortingTheStream() throws Exception {
+        final var loop = loop(scriptedToolClient(new ArrayList<>(), List.of()), null, configuration(true));
+        events.clear();
+        final var method = AgentLoop.class.getDeclaredMethod("emitInlineSegments", List.class);
+        method.setAccessible(true);
+        // a stray null segment (an unexpected splitter edge case) must be skipped, never NPE mid-stream,
+        // so it cannot be misreported as a transport failure and retried pointlessly
+        method.invoke(
+                loop, Arrays.asList(null, new ThinkTagSplitter.Segment(ThinkTagSplitter.Channel.VISIBLE, "hello")));
+        final var textDeltas = events.stream()
+                .filter(e -> e instanceof AgentEvent.TextDelta)
+                .map(AgentEvent.TextDelta.class::cast)
+                .toList();
+        assertEquals(1, textDeltas.size(), "only the non-null segment should emit a TextDelta");
+        assertEquals("hello", textDeltas.get(0).delta());
     }
 
     @Test

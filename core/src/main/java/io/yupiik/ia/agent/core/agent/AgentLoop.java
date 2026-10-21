@@ -371,14 +371,7 @@ public class AgentLoop {
         if (parsed == null || parsed.isEmpty()) {
             return;
         }
-        for (final var segment : parsed) {
-            if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
-                accumulatedThinking.append(segment.text());
-                emit(thinkingDelta(segment.text()));
-            } else {
-                emit(textDelta(segment.text()));
-            }
-        }
+        emitInlineSegments(parsed);
     }
 
     /** Flushes the bounded hold-tail of the inline splitter at stream end so no answer tail is lost. */
@@ -386,7 +379,20 @@ public class AgentLoop {
         if (inlineSplitter == null) {
             return;
         }
-        for (final var segment : inlineSplitter.flush()) {
+        emitInlineSegments(inlineSplitter.flush());
+    }
+
+    /**
+     * Emits the classified segments from the inline-reasoning splitter as {@code ThinkingDelta} /
+     * {@code TextDelta} events, accumulating thinking text. A null element (a defensive guard against an
+     * unexpected splitter edge case) is skipped rather than NPE-ing mid-stream, so it can never be
+     * misdiagnosed as a transport failure and retried pointlessly.
+     */
+    private void emitInlineSegments(final List<ThinkTagSplitter.Segment> segments) {
+        for (final var segment : segments) {
+            if (segment == null) {
+                continue;
+            }
             if (segment.channel() == ThinkTagSplitter.Channel.THINKING) {
                 accumulatedThinking.append(segment.text());
                 emit(thinkingDelta(segment.text()));
